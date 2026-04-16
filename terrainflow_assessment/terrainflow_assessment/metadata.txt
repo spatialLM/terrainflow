@@ -1,0 +1,13 @@
+[general]
+name=TerrainFlow Assessment
+qgisMinimumVersion=3.22
+description=Hydrological assessment and earthwork design tool — baseline analysis, contour swale planning, fill simulation, and before/after reporting.
+version=0.1
+author=TerrainFlow
+email=
+repository=
+tags=hydrology,terrain,earthworks,swale,assessment,catchment,runoff
+category=Raster
+experimental=True
+deprecated=False
+hasProcessingProvider=no
