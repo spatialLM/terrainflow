@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artefacts — keep data/*.zip out of this rule if needed by adding !data/*.zip
+plugin.zip
+terrainflow_assessment.zip
+
+# Editor / OS artefacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Nested-plugin guard (should never exist)
+terrainflow_assessment/terrainflow_assessment/
+plugin/plugin/
