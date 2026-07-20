@@ -57,7 +57,7 @@ class PondingQueryTool(QgsMapTool):
             self.rows, self.cols = self.ponding_array.shape
 
     def canvasPressEvent(self, event):
-        if event.button() != Qt.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton:
             return
 
         map_pt = self.toMapCoordinates(event.pos())
@@ -95,7 +95,7 @@ class PondingQueryTool(QgsMapTool):
         )
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
             self.canvas.unsetMapTool(self)
 

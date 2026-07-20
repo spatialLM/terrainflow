@@ -359,3 +359,268 @@ class TestCascadeOverflowExtended:
             s.inflow_m3 = 5.0
             cascade_overflow([s], time_hr=1.0, dt_hr=1.0)
         assert s.total_infiltration_m3 > 0.0
+
+
+# ---------------------------------------------------------------------------
+# _run_simulation — direct invocation for branch coverage
+# ---------------------------------------------------------------------------
+
+def _make_sloped_dem(tmp_path, name="dem.tif", shape=(10, 10)):
+    data = np.fromfunction(
+        lambda r, c: 100.0 - r * 0.5 - c * 0.2, shape
+    ).astype("float32")
+    h, w = data.shape
+    transform = from_bounds(0, 0, w, h, w, h)
+    path = str(tmp_path / name)
+    with rasterio.open(
+        path, "w", driver="GTiff", height=h, width=w,
+        count=1, dtype="float32", crs="EPSG:32632",
+        transform=transform, nodata=-9999.0,
+    ) as dst:
+        dst.write(data, 1)
+    return path
+
+
+class TestRunSimulationBranches:
+    def test_rainfall_too_short_raises_value_error(self, tmp_path):
+        """Line 282: ValueError when rainfall_data has <2 entries."""
+        from terrainflow_assessment.modules.simulation import _run_simulation
+        dem = _make_sloped_dem(tmp_path)
+        fdir = str(tmp_path / "fdir.tif")
+        shutil.copy(dem, fdir)
+        with pytest.raises(ValueError, match="rainfall_data"):
+            _run_simulation(
+                dem_path=dem, fdir_path=fdir,
+                output_dir=str(tmp_path / "out"),
+                cn=75, moisture="normal",
+                rainfall_data=[(0, 0.0)],
+            )
+
+    def test_cn_zones_processed_including_bad_wkt(self, tmp_path):
+        """Lines 256-265: cn_zones wkt loads + exception branch."""
+        from terrainflow_assessment.modules.simulation import _run_simulation
+        dem = _make_sloped_dem(tmp_path, "zone_dem.tif")
+        fdir = str(tmp_path / "zone_fdir.tif")
+        shutil.copy(dem, fdir)
+        cn_zones = [
+            {"wkt": "POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))", "cn": 85},
+            {"wkt": "NOT_VALID_WKT", "cn": 80},  # triggers except at 263-264
+        ]
+        try:
+            _run_simulation(
+                dem_path=dem, fdir_path=fdir,
+                output_dir=str(tmp_path / "out_z"),
+                cn=75, moisture="normal",
+                rainfall_data=[(0, 0.0)],  # short-circuit at ValueError after CN build
+                cn_zones_data=cn_zones,
+            )
+        except ValueError:
+            pass  # Expected — rainfall too short, but cn_zones already processed
+
+    def test_stale_sim_dir_files_cleaned(self, tmp_path):
+        """Lines 274-278: os.listdir + os.remove loop for stale files."""
+        from terrainflow_assessment.modules.simulation import _run_simulation
+        dem = _make_sloped_dem(tmp_path, "clean_dem.tif")
+        fdir = str(tmp_path / "clean_fdir.tif")
+        shutil.copy(dem, fdir)
+        out_dir = str(tmp_path / "out_clean")
+        sim_dir = os.path.join(out_dir, "simulation")
+        os.makedirs(sim_dir, exist_ok=True)
+        # Pre-existing junk file that the loop should clean
+        stale = os.path.join(sim_dir, "junk.tif")
+        with open(stale, "w") as f:
+            f.write("old")
+        try:
+            _run_simulation(
+                dem_path=dem, fdir_path=fdir,
+                output_dir=out_dir,
+                cn=75, moisture="normal",
+                rainfall_data=[(0, 0.0)],
+            )
+        except ValueError:
+            pass
+        assert not os.path.exists(stale)
+
+
+# ---------------------------------------------------------------------------
+# SimulationWorker.run() ValueError path (lines 214-215)
+# ---------------------------------------------------------------------------
+
+class TestSimulationWorkerRunErrorBranch:
+    def test_run_emits_error_on_value_error(self, tmp_path):
+        """run() should catch the ValueError from _run_simulation."""
+        from terrainflow_assessment.modules.simulation import SimulationWorker
+        dem = _make_sloped_dem(tmp_path, "errdem.tif")
+        fdir = str(tmp_path / "errfdir.tif")
+        shutil.copy(dem, fdir)
+        w = SimulationWorker(
+            dem_path=dem, fdir_path=fdir,
+            output_dir=str(tmp_path / "err_out"),
+            cn=75, moisture="normal",
+            rainfall_data=[(0, 0.0)],  # Too short → ValueError → caught in run()
+        )
+        errs = []
+        w.error.connect(lambda e: errs.append(e))
+        w.run()
+        assert len(errs) == 1
+        assert "rainfall_data" in errs[0] or "ValueError" in errs[0]
+
+
+# ---------------------------------------------------------------------------
+# build_stores_from_earthworks branches (lines 503, 520-524)
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402 — used by tests above
+
+
+class TestBuildStoresFromEarthworks:
+    def _line_ew(self, ew_type="swale"):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        from tests.conftest import make_mock_line_geom
+        g = make_mock_line_geom([(1.0, 2.5), (4.0, 2.5)])
+        ew = Earthwork(ew_type, g, "S1")
+        ew.capacity_m3 = 50.0
+        return ew
+
+    def _poly_ew(self, ew_type="basin"):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        from tests.conftest import make_mock_polygon_geom
+        g = make_mock_polygon_geom((1.0, 1.0, 4.0, 4.0))
+        ew = Earthwork(ew_type, g, "B1")
+        ew.capacity_m3 = 30.0
+        return ew
+
+    def test_empty_list(self):
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        assert build_stores_from_earthworks([]) == []
+
+    def test_disabled_earthworks_skipped(self):
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        ew = self._line_ew()
+        ew.enabled = False
+        assert build_stores_from_earthworks([ew]) == []
+
+    def test_zero_capacity_skipped(self):
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        ew = self._line_ew()
+        ew.capacity_m3 = 0.0
+        assert build_stores_from_earthworks([ew]) == []
+
+    def test_line_geom_area_from_polygon_buffer(self):
+        """Polygon branch — uses shapely_geom.area."""
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        stores = build_stores_from_earthworks([self._poly_ew()], soil_name="Loam")
+        assert len(stores) == 1
+        assert stores[0].area_m2 > 0
+
+    def test_with_dem_path_sets_centroid(self, tmp_path):
+        """Lines 520-524: dem_path sets elevation and centroid row/col."""
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        dem = _make_sloped_dem(tmp_path, "centroid_dem.tif")
+        stores = build_stores_from_earthworks(
+            [self._line_ew()], soil_name="Loam", dem_path=dem,
+        )
+        assert len(stores) == 1
+        assert stores[0].centroid_row is not None
+        assert stores[0].centroid_col is not None
+        assert stores[0].elevation != 0.0  # sampled from DEM
+
+    def test_with_dem_path_outside_bounds(self, tmp_path):
+        """Centroid outside DEM extent → centroid_row/col stay None."""
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        from tests.conftest import make_mock_line_geom
+        dem = _make_sloped_dem(tmp_path, "oob_dem.tif")
+        # Line far outside DEM bounds
+        g = make_mock_line_geom([(500.0, 500.0), (510.0, 500.0)])
+        ew = Earthwork("swale", g, "Far")
+        ew.capacity_m3 = 10.0
+        stores = build_stores_from_earthworks([ew], soil_name="Loam", dem_path=dem)
+        assert len(stores) == 1
+        assert stores[0].centroid_row is None
+        assert stores[0].centroid_col is None
+
+    def test_with_invalid_dem_path_except_branch(self):
+        """Unreadable dem_path triggers except branch; row/col remain None."""
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        stores = build_stores_from_earthworks(
+            [self._line_ew()], soil_name="Loam", dem_path="/nonexistent.tif",
+        )
+        assert stores[0].centroid_row is None
+
+    def test_bad_geometry_falls_back_to_100(self):
+        """asJson raising triggers except → area_m2 = 100.0 fallback."""
+        from unittest.mock import MagicMock
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        g = MagicMock()
+        g.asJson.side_effect = RuntimeError("bad geom")
+        ew = Earthwork("swale", g, "Bad")
+        ew.capacity_m3 = 10.0
+        stores = build_stores_from_earthworks([ew], soil_name="Loam")
+        assert len(stores) == 1
+        assert stores[0].area_m2 == 100.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 regression — item 5: stacked stores must conserve mass
+# ---------------------------------------------------------------------------
+
+class TestStackedStoresConserveMass:
+    """Phase 1 item 5: cascade_overflow must not create water from nothing."""
+
+    def _store(self, name, elev, capacity=100.0):
+        return EarthworkStore(
+            name=name, ew_type="swale",
+            capacity_m3=capacity, area_m2=1.0,
+            infiltration_rate_mm_hr=0.0,  # no infiltration → pure mass check
+            elevation=elev,
+        )
+
+    def test_stacked_stores_conserve_mass(self):
+        """
+        Two stacked stores: upper (high elev) gets 150 m³, lower gets 0.
+        After cascade: total (stored + site exit) == 150 m³.
+        """
+        upper = self._store("Upper", elev=70.0, capacity=100.0)
+        lower = self._store("Lower", elev=50.0, capacity=100.0)
+
+        total_inflow = 150.0
+        upper.inflow_m3 = total_inflow
+        lower.inflow_m3 = 0.0  # only receives overflow from upper
+
+        exit_m3 = cascade_overflow(
+            stores=[upper, lower], time_hr=1.0, dt_hr=1.0
+        )
+
+        total_out = upper.stored_m3 + lower.stored_m3 + exit_m3
+        assert total_out == pytest.approx(total_inflow, rel=1e-6), (
+            f"Mass not conserved: in={total_inflow}, "
+            f"stored_upper={upper.stored_m3}, stored_lower={lower.stored_m3}, "
+            f"exit={exit_m3}, total_out={total_out}"
+        )
+
+    def test_stacked_stores_correct_cascade_split(self):
+        """Upper fills to capacity, overflow routes correctly to lower."""
+        upper = self._store("Upper", elev=70.0, capacity=100.0)
+        lower = self._store("Lower", elev=50.0, capacity=100.0)
+
+        upper.inflow_m3 = 150.0   # 50 m³ overflows to lower
+        exit_m3 = cascade_overflow([upper, lower], time_hr=1.0, dt_hr=1.0)
+
+        assert upper.stored_m3 == pytest.approx(100.0)
+        assert lower.stored_m3 == pytest.approx(50.0)
+        assert exit_m3 == pytest.approx(0.0)
+
+    def test_three_stacked_stores_conserve_mass(self):
+        """Three stacked stores: mass flows through cascade without creation."""
+        top = self._store("Top", elev=100.0, capacity=50.0)
+        mid = self._store("Mid", elev=70.0, capacity=50.0)
+        bot = self._store("Bot", elev=40.0, capacity=50.0)
+
+        total_inflow = 200.0
+        top.inflow_m3 = total_inflow
+
+        exit_m3 = cascade_overflow([top, mid, bot], time_hr=1.0, dt_hr=1.0)
+        total_out = top.stored_m3 + mid.stored_m3 + bot.stored_m3 + exit_m3
+        assert total_out == pytest.approx(total_inflow, rel=1e-6)

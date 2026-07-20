@@ -56,11 +56,11 @@ class DrawLineTool(QgsMapTool):
         if self._double_click_pending:
             self._double_click_pending = False
             return
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             pt = self.toMapCoordinates(event.pos())
             self.points.append(QgsPointXY(pt))
             self.rubber_band.addPoint(pt, True)
-        elif event.button() == Qt.RightButton:
+        elif event.button() == Qt.MouseButton.RightButton:
             self._finish()
 
     def canvasDoubleClickEvent(self, event):
@@ -102,7 +102,7 @@ class DrawLineTool(QgsMapTool):
         return f"Slope: {slope:.1f}°  {label}"
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self._cancel()
 
     def _finish(self):

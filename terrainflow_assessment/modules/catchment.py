@@ -28,9 +28,13 @@ _MAX_PREVIEW_CELLS = 500_000   # ~700 × 700 — keep preview under ~5 s
 
 def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     """
-    Delineate the contributing catchment from a site boundary using an uphill
-    BFS flood-fill.  Any cell connected to the boundary via a monotonically
-    non-decreasing elevation path contributes surface runoff to the site.
+    Delineate the contributing catchment from a site boundary using D8 reverse
+    traversal via pysheds.
+
+    Walks the D8 flow-direction network *backwards* from the highest-accumulation
+    pour point on the site boundary — the faithful "find all cells that drain into
+    the site" operation.  The previous BFS implementation incorrectly crossed
+    saddles and included knolls whose water flows away from the site.
 
     Parameters
     ----------
@@ -50,10 +54,12 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
         coverage_pct      : float
         scale             : float
     """
-    import heapq
+    import os
+    import tempfile
     import geopandas as gpd
     from shapely.geometry import shape as shapely_shape, box
     from shapely.ops import unary_union
+    from pysheds.grid import Grid
 
     def _p(pct, msg):
         if progress_callback:
@@ -129,31 +135,68 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
             "Check that both layers use the same CRS."
         )
 
-    _p(35, "Tracing contributing catchment from slope...")
-    NBRS = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    _p(35, "Computing D8 flow direction for catchment delineation...")
 
-    visited = inside_mask & ~boundary_line_mask
-    contributing = inside_mask.copy()
+    # Write working DEM to a temp file for pysheds
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tif")
+    os.close(tmp_fd)
+    try:
+        work_nodata = -9999.0
+        with rasterio.open(
+            tmp_path, "w", driver="GTiff", dtype="float32",
+            crs=crs, transform=work_transform,
+            width=ncols, height=nrows, count=1, nodata=work_nodata,
+        ) as dst:
+            out_arr = np.where(np.isnan(work_dem), work_nodata, work_dem)
+            dst.write(out_arr.astype("float32"), 1)
 
-    heap = []
-    for r, c in zip(seed_rows.tolist(), seed_cols.tolist()):
-        if not visited[r, c]:
-            elev = float(work_dem[r, c])
-            if np.isfinite(elev):
-                visited[r, c] = True
-                heapq.heappush(heap, (elev, r, c))
+        grid = Grid.from_raster(tmp_path)
+        dem_r = grid.read_raster(tmp_path)
+        pit_filled = grid.fill_pits(dem_r)
+        try:
+            breached = grid.breach_depressions(pit_filled)
+        except AttributeError:
+            breached = grid.fill_depressions(pit_filled)
+        inflated = grid.resolve_flats(breached)
+        # Use dinf routing — avoids np.in1d which was removed in NumPy 2.x
+        try:
+            fdir = grid.flowdir(inflated, routing="dinf")
+            _routing = "dinf"
+        except TypeError:
+            fdir = grid.flowdir(inflated)
+            _routing = None
+        try:
+            acc = grid.accumulation(fdir, routing=_routing) if _routing else grid.accumulation(fdir)
+        except (TypeError, AttributeError):
+            acc = grid.accumulation(fdir)
 
-    _p(50, "Expanding uphill watershed...")
-    while heap:
-        elev, r, c = heapq.heappop(heap)
-        contributing[r, c] = True
-        for dr, dc in NBRS:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < nrows and 0 <= nc < ncols and not visited[nr, nc]:
-                next_elev = float(work_dem[nr, nc])
-                if np.isfinite(next_elev) and next_elev >= elev:
-                    visited[nr, nc] = True
-                    heapq.heappush(heap, (next_elev, nr, nc))
+        acc_arr = np.array(acc, dtype="float32")
+
+        _p(50, "Finding pour point on boundary...")
+        bnd_rows, bnd_cols = np.where(boundary_line_mask)
+        bnd_accs = acc_arr[bnd_rows, bnd_cols]
+        best_idx = int(np.argmax(bnd_accs))
+        pour_r = int(bnd_rows[best_idx])
+        pour_c = int(bnd_cols[best_idx])
+
+        # Convert raster cell centre to map coordinates
+        px = work_transform.c + (pour_c + 0.5) * work_transform.a
+        py = work_transform.f + (pour_r + 0.5) * work_transform.e  # e is negative
+
+        _p(65, "Delineating catchment via reverse traversal...")
+        try:
+            catch_mask = grid.catchment(
+                x=px, y=py, fdir=fdir,
+                xytype="coordinate", routing=_routing,
+            ) if _routing else grid.catchment(x=px, y=py, fdir=fdir, xytype="coordinate")
+        except (TypeError, AttributeError):
+            catch_mask = grid.catchment(x=px, y=py, fdir=fdir, xytype="coordinate")
+
+        contributing = np.array(catch_mask, dtype=bool)
+        contributing |= inside_mask  # always include the declared site
+
+    finally:
+        os.unlink(tmp_path)
 
     _p(85, "Building catchment polygon...")
     polys = [

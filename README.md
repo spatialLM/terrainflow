@@ -6,7 +6,7 @@ TerrainFlow enables engineers and land managers to model how water moves across 
 
 The core workflow is a **before-and-after comparison**: run a baseline flow analysis on the existing terrain, draw proposed earthworks (swales, dams, basins, diversion drains) onto the map, and immediately re-run the analysis on the modified DEM to quantify the effect on flow paths, catchment boundaries, and water retention.
 
-> **Status:** Active development. The core pipeline runs end-to-end — DEM in, hydrological outputs out, earthworks designed and compared. Current focus is on refining output accuracy and adding test coverage. Contributions and feedback welcome.
+> **Status:** Active development. The core pipeline runs end-to-end — DEM in, hydrological outputs out, earthworks designed and compared. The codebase has a modular `core/` + `qgis/` architecture, 95%+ test coverage on the pure-Python layer, and targets QGIS 3.22+ LTR. Contributions and feedback welcome.
 
 ---
 
@@ -98,9 +98,9 @@ pip install pysheds rasterio numpy scipy shapely geopandas
 
 **Install the plugin:**
 
-Clone or download this repository and copy the `plugin/` folder into your QGIS plugins directory:
-- **Linux/Mac:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/terrainflow/`
-- **Windows:** `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\terrainflow\`
+Clone or download this repository and copy the `terrainflow_assessment/` folder into your QGIS plugins directory:
+- **Linux/Mac:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/terrainflow_assessment/`
+- **Windows:** `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\terrainflow_assessment\`
 
 Then enable TerrainFlow in QGIS via *Plugins → Manage and Install Plugins*.
 
@@ -143,8 +143,10 @@ TerrainFlow is designed to work with freely available DEM data. For New Zealand:
 - [x] Keyline design (keypoints, ridgelines, pond sites, cultivation lines)
 - [x] Time-stepped storm simulation with animated playback
 - [x] Session save/load (.tflow files)
+- [x] QGIS 3.22+ LTR API longevity (QMetaType, writeAsVectorFormatV3, scoped Qt enums)
+- [x] Modular `core/` + `qgis/` architecture — registry, adapters, controllers, workers
+- [x] 95%+ test coverage on pure-Python modules (pytest, branch coverage gate)
 - [ ] Refine output accuracy and edge case handling
-- [ ] Test suite and validation against benchmark catchments
 - [ ] QGIS Plugin Manager installation support
 - [ ] Full usage documentation
 
@@ -168,4 +170,4 @@ liamurphynz@gmail.com
 
 ## Licence
 
-GNU General Public Licence v3. See [LICENSE](LICENSE) for details.
+GNU Affero General Public Licence v3 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) for details.

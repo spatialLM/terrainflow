@@ -76,7 +76,7 @@ class AssessmentPanel(QDockWidget):
 
     def __init__(self, parent=None):
         super().__init__("TerrainFlow Assessment", parent)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.setMinimumWidth(340)
 
         scroll = QScrollArea()

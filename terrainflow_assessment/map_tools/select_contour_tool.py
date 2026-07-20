@@ -19,10 +19,10 @@ class SelectContourTool(QgsMapTool):
         super().__init__(canvas)
         self._canvas = canvas
         self._layer = contour_layer
-        self.setCursor(QCursor(Qt.CrossCursor))
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
     def canvasPressEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.cancelled.emit()
             return
 
@@ -59,5 +59,5 @@ class SelectContourTool(QgsMapTool):
         self.contour_selected.emit(geom, elev)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.cancelled.emit()

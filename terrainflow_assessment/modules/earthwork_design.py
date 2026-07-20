@@ -24,6 +24,9 @@ import rasterio
 from rasterio.features import rasterize
 from shapely.geometry import shape as shapely_shape
 
+from terrainflow_assessment.core.registry.earthwork_types import get_type
+from terrainflow_assessment.qgis.adapters.geom import shapely_length, shapely_area
+
 _log = logging.getLogger(__name__)
 
 _MAX_PONDING_CELLS = 4_000_000  # ~2000 × 2000
@@ -47,7 +50,7 @@ class Earthwork:
         self.geometry = geometry     # QgsGeometry
         self.name = name
         self.depth = 0.5             # metres cut/raised (not used for dam)
-        self.width = 2.0             # metres cross-section
+        self.top_width_m = 2.0       # declared top width of cross-section (metres)
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
         self.gradient_pct = 1.0      # diversion only: channel gradient (%)
@@ -57,9 +60,34 @@ class Earthwork:
         self.capacity_m3 = 0.0
         self.capacity_l = 0.0
 
+    # ------------------------------------------------------------------
+    # Derived geometry fields (computed from top_width_m + depth)
+    # ------------------------------------------------------------------
+
+    @property
+    def bottom_width_m(self):
+        """Bottom width for 1:1 side slopes: top_width_m − 2×depth."""
+        return max(0.1, self.top_width_m - 2 * self.depth)
+
+    @property
+    def buffer_radius_m(self):
+        """Raster-burn buffer radius = top_width_m / 2."""
+        return self.top_width_m / 2.0
+
+    # backward-compat alias so existing code using ew.width keeps working
+    @property
+    def width(self):
+        return self.top_width_m
+
+    @width.setter
+    def width(self, value):
+        self.top_width_m = value
+
     def type_label(self):
-        labels = {"diversion": "Diversion Drain"}
-        return labels.get(self.type, self.type.capitalize())
+        try:
+            return get_type(self.type).label
+        except KeyError:
+            return self.type.capitalize()
 
     def summary(self):
         status = "" if self.enabled else " [OFF]"
@@ -119,13 +147,17 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
 
     Returns (volume_m3, volume_l).
     """
-    if ew_type in ("berm", "dam", "diversion"):
+    try:
+        if not get_type(ew_type).has_capacity:
+            return 0.0, 0.0
+    except KeyError:
         return 0.0, 0.0
 
     if ew_type == "swale":
-        length = geometry.length()
-        bottom_width = max(0.1, width - 2 * depth)
-        top_width = width + 2 * depth
+        length = shapely_length(geometry)
+        # width parameter is the declared top width; derive bottom from 1:1 slopes
+        top_width = width
+        bottom_width = max(0.1, top_width - 2 * depth)
         cross_section = ((bottom_width + top_width) / 2) * depth
 
         if companion_berm and cross_section > 0:
@@ -136,7 +168,7 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
         volume_m3 = cross_section * length * 0.8
 
     elif ew_type == "basin":
-        area_m2 = geometry.area()
+        area_m2 = shapely_area(geometry)
         volume_m3 = area_m2 * depth * 0.8
     else:
         return 0.0, 0.0
@@ -154,22 +186,25 @@ def calculate_cut_volume(ew_type, geometry, depth, width):
 
     Returns cut volume in m³.
     """
-    if ew_type in ("berm", "dam"):
+    try:
+        if not get_type(ew_type).has_cut:
+            return 0.0
+    except KeyError:
         return 0.0
 
     if ew_type == "swale":
-        length = geometry.length()
-        bottom_width = max(0.1, width - 2 * depth)
-        top_width = width + 2 * depth
+        length = shapely_length(geometry)
+        top_width = width
+        bottom_width = max(0.1, top_width - 2 * depth)
         cross_section = ((bottom_width + top_width) / 2) * depth
         return round(cross_section * length, 2)
 
     if ew_type == "basin":
-        area_m2 = geometry.area()
+        area_m2 = shapely_area(geometry)
         return round(area_m2 * depth, 2)
 
     if ew_type == "diversion":
-        length = geometry.length()
+        length = shapely_length(geometry)
         bottom_width = max(0.05, width - 2 * depth)
         top_width = width + 2 * depth
         cross_section = ((bottom_width + top_width) / 2) * depth
@@ -190,30 +225,33 @@ def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False)
     Returns fill volume in m³.
     """
     if ew_type == "berm":
-        length = geometry.length()
+        length = shapely_length(geometry)
         cross_section = depth * depth  # triangular: base=2*depth, height=depth → area=depth²
         return round(cross_section * length, 2)
 
     if ew_type == "swale" and companion_berm:
-        length = geometry.length()
-        bottom_width = max(0.1, width - 2 * depth)
-        top_width = width + 2 * depth
+        length = shapely_length(geometry)
+        top_width = width
+        bottom_width = max(0.1, top_width - 2 * depth)
         swale_cs = ((bottom_width + top_width) / 2) * depth
         berm_height = (swale_cs * 0.75) ** 0.5
         berm_cs = berm_height * berm_height  # triangular
         return round(berm_cs * length, 2)
 
     if ew_type == "dam":
-        length = geometry.length()
+        length = shapely_length(geometry)
         return round(width * depth * length, 2) if depth and width else 0.0
 
     return 0.0
 
 
 def berm_height_estimate(depth, width):
-    """Estimate companion berm height from swale excavation (75% compaction)."""
-    bottom_width = max(0.1, width - 2 * depth)
-    top_width = width + 2 * depth
+    """Estimate companion berm height from swale excavation (75% compaction).
+
+    ``width`` is the declared top width of the swale (metres).
+    """
+    top_width = width
+    bottom_width = max(0.1, top_width - 2 * depth)
     cross_section = ((bottom_width + top_width) / 2) * depth
     return round((cross_section * 0.75) ** 0.5, 2)
 
@@ -286,22 +324,23 @@ class DEMBurner:
         Returns modified DEM as float32 numpy array.
         """
         modified = self.original.copy()
+        _dispatch = {
+            "swale":     self._burn_swale,
+            "berm":      self._burn_berm,
+            "basin":     self._burn_basin,
+            "dam":       self._burn_dam,
+            "diversion": self._burn_diversion,
+        }
         for ew in earthworks:
             if not ew.enabled:
                 continue
             shapely_geom = self._to_shapely(ew.geometry)
             if shapely_geom is None:
                 continue
-            if ew.type == "swale":
-                modified = self._burn_swale(modified, shapely_geom, ew)
-            elif ew.type == "berm":
-                modified = self._burn_berm(modified, shapely_geom, ew)
-            elif ew.type == "basin":
-                modified = self._burn_basin(modified, shapely_geom, ew)
-            elif ew.type == "dam":
-                modified = self._burn_dam(modified, shapely_geom, ew)
-            elif ew.type == "diversion":
-                modified = self._burn_diversion(modified, shapely_geom, ew)
+            burn_fn = _dispatch.get(ew.type)
+            if burn_fn is None:
+                continue
+            modified = burn_fn(modified, shapely_geom, ew)
         return modified
 
     def save(self, array, output_path):
@@ -334,7 +373,7 @@ class DEMBurner:
     # ---------------------------------------------------------------- earthwork types
 
     def _burn_swale(self, dem, line, ew):
-        footprint = line.buffer(ew.width / 2)
+        footprint = line.buffer(ew.buffer_radius_m)  # radius = top_width_m / 2
         mask = self._rasterize(footprint)
         dem = dem.copy()
         dem[mask] -= ew.depth
@@ -343,10 +382,10 @@ class DEMBurner:
         return dem
 
     def _add_companion_berm(self, dem, line, swale_mask, ew):
-        berm_width = ew.width
+        berm_width = ew.top_width_m
         try:
-            left_line = line.parallel_offset(ew.width / 2 + berm_width / 2, "left")
-            right_line = line.parallel_offset(ew.width / 2 + berm_width / 2, "right")
+            left_line = line.parallel_offset(ew.buffer_radius_m + berm_width / 2, "left")
+            right_line = line.parallel_offset(ew.buffer_radius_m + berm_width / 2, "right")
             left_zone = left_line.buffer(berm_width / 2)
             right_zone = right_line.buffer(berm_width / 2)
         except Exception:

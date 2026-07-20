@@ -9,6 +9,7 @@ from shapely.geometry import box
 
 from terrainflow_assessment.modules.dem_loader import (
     DEMInfo,
+    DEMValidationError,
     clip_dem_to_polygon,
     compute_slope_raster,
     load_dem,
@@ -184,3 +185,35 @@ class TestComputeSlopeRaster:
         out = str(tmp_path / "slope_nodata.tif")
         compute_slope_raster(patched, out)  # should not raise
         assert os.path.exists(out)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 regression — item 2: projected CRS guard
+# ---------------------------------------------------------------------------
+
+class TestProjectedCRSGuard:
+    def _write_dem(self, path, crs):
+        from rasterio.transform import from_bounds
+        data = np.full((10, 10), 50.0, dtype="float32")
+        transform = from_bounds(0, 0, 10, 10, 10, 10)
+        with rasterio.open(path, "w", driver="GTiff", height=10, width=10,
+                           count=1, dtype="float32", crs=crs,
+                           transform=transform, nodata=-9999.0) as dst:
+            dst.write(data, 1)
+        return path
+
+    def test_rejects_geographic_crs(self, tmp_path):
+        """Phase 1 item 2: geographic CRS raises DEMValidationError."""
+        path = self._write_dem(str(tmp_path / "geo.tif"), "EPSG:4326")
+        with pytest.raises(DEMValidationError, match="geographic"):
+            load_dem(path)
+
+    def test_accepts_projected_crs(self, tmp_path):
+        """NZTM2000 (projected) must load without error."""
+        path = self._write_dem(str(tmp_path / "proj.tif"), "EPSG:2193")
+        info = load_dem(path)
+        assert info.crs is not None
+
+    def test_dem_validation_error_is_value_error(self):
+        """DEMValidationError must be a ValueError subclass."""
+        assert issubclass(DEMValidationError, ValueError)

@@ -113,9 +113,10 @@ class TestCalculateCapacity:
     def test_swale_basic(self):
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
+        # top_width=2.0, depth=0.5 → bottom=1.0, cs=(1+2)/2*0.5=0.75, vol=0.75*100*0.8=60
         vol_m3, vol_l = calculate_capacity("swale", geom, 0.5, 2.0)
-        assert vol_m3 == pytest.approx(80.0, rel=1e-3)
-        assert vol_l == pytest.approx(80_000.0, rel=1e-3)
+        assert vol_m3 == pytest.approx(60.0, rel=1e-3)
+        assert vol_l == pytest.approx(60_000.0, rel=1e-3)
 
     def test_swale_companion_berm_increases_capacity(self):
         geom = make_mock_line_geom()
@@ -151,9 +152,9 @@ class TestCalculateCutVolume:
     def test_swale_cut(self):
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
-        # bottom=1.0, top=3.0, cs=1.0, vol=100
+        # top_width=2.0, depth=0.5 → bottom=1.0, cs=(1+2)/2*0.5=0.75, vol=75
         cut = calculate_cut_volume("swale", geom, 0.5, 2.0)
-        assert cut == pytest.approx(100.0, rel=1e-3)
+        assert cut == pytest.approx(75.0, rel=1e-3)
 
     def test_basin_cut(self):
         geom = make_mock_polygon_geom()
@@ -424,3 +425,319 @@ class TestDEMBurner:
         # Should not raise — result may be unchanged or slightly modified
         result = b.burn_earthworks([ew])
         assert result.shape == (20, 20)
+
+
+# ---------------------------------------------------------------------------
+# EarthworkManager.toggle branch coverage
+# ---------------------------------------------------------------------------
+
+class TestEarthworkManagerToggleOutOfRange:
+    def test_toggle_out_of_range_noop(self):
+        m = EarthworkManager()
+        m.add(Earthwork("swale", make_mock_line_geom(), "X"))
+        # Covers the false branch of the index check at line 89
+        m.toggle(99)
+        assert m.get(0).enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Unknown earthwork type skipped in burn_earthworks (branch 303->289)
+# ---------------------------------------------------------------------------
+
+class TestBurnEarthworksUnknownType:
+    def test_unknown_type_skipped(self, tmp_path):
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("unknown_type_xyz", geom, depth=1.0, width=2.0)
+        result = b.burn_earthworks([ew])
+        assert np.allclose(result, 50.0)
+
+
+# ---------------------------------------------------------------------------
+# _burn_diversion: Point geometry triggers len(coords) < 2 branch (line 403)
+# ---------------------------------------------------------------------------
+
+class TestBurnDiversionPointGeom:
+    def test_point_geometry_noop(self, tmp_path):
+        """Point JSON → shapely Point has 1 coord → line 403 early return."""
+        from unittest.mock import MagicMock
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        g = MagicMock()
+        g.asJson.return_value = json.dumps({
+            "type": "Point", "coordinates": [10.0, 10.0]
+        })
+        ew = _mock_ew("diversion", g, depth=0.3, width=1.5, gradient_pct=1.0)
+        result = b.burn_earthworks([ew])
+        assert result.shape == (20, 20)
+
+
+# ---------------------------------------------------------------------------
+# _burn_diversion with duplicate consecutive points (line 428 seg_dist==0)
+# ---------------------------------------------------------------------------
+
+class TestBurnDiversionDuplicateCoords:
+    def test_duplicate_consecutive_coords_segment_skipped(self, tmp_path):
+        from unittest.mock import MagicMock
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        # 3-point line with a duplicated middle point → one seg_dist == 0
+        g = MagicMock()
+        g.asJson.return_value = json.dumps({
+            "type": "LineString",
+            "coordinates": [[2.0, 10.0], [2.0, 10.0], [18.0, 10.0]],
+        })
+        ew = _mock_ew("diversion", g, depth=0.3, width=1.5, gradient_pct=1.0)
+        result = b.burn_earthworks([ew])
+        assert result.shape == (20, 20)
+        assert result.min() < 50.0  # second segment still burns
+
+
+# ---------------------------------------------------------------------------
+# _burn_diversion where a sampled point lies outside the DEM extent (line 441)
+# ---------------------------------------------------------------------------
+
+class TestBurnDiversionCellOutside:
+    def test_cell_outside_raster_skipped(self, tmp_path):
+        """Line with coords outside the raster extent → cell_mask empty → continue."""
+        from unittest.mock import MagicMock
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        # Line entirely outside the DEM bounds (DEM is 0..20 in both dims)
+        g = MagicMock()
+        g.asJson.return_value = json.dumps({
+            "type": "LineString",
+            "coordinates": [[100.0, 100.0], [120.0, 100.0]],
+        })
+        ew = _mock_ew("diversion", g, depth=0.3, width=0.5, gradient_pct=1.0)
+        result = b.burn_earthworks([ew])
+        # Nothing should burn because all sample points fall outside
+        assert np.allclose(result, 50.0)
+
+
+# ---------------------------------------------------------------------------
+# Companion berm: parallel_offset exception (lines 352-353)
+# ---------------------------------------------------------------------------
+
+class TestCompanionBermParallelOffsetFailure:
+    def test_parallel_offset_exception_returns_dem(self, tmp_path, monkeypatch):
+        """If parallel_offset raises, the except branch returns dem unchanged."""
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        # Patch shapely LineString.parallel_offset to raise for this test
+        from shapely.geometry import LineString as _LS
+
+        def _raise(*a, **kw):
+            raise ValueError("mock parallel_offset failure")
+
+        monkeypatch.setattr(_LS, "parallel_offset", _raise, raising=False)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        result = b.burn_earthworks([ew])
+        # Swale still burned, but no companion berm raised — some cells lower, none raised
+        assert result.min() < 50.0
+        assert result.max() <= 50.0
+
+
+# ---------------------------------------------------------------------------
+# Companion berm: only one side has mask (lines 363 / 365)
+# ---------------------------------------------------------------------------
+
+class TestCompanionBermSingleSide:
+    def test_only_left_side_in_raster(self, tmp_path, monkeypatch):
+        """If right_mask is empty and left_mask.any() → line 363 branch."""
+        data = np.fromfunction(lambda r, c: 50.0 - r * 0.1, (20, 20)).astype("float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        # Force _rasterize to return empty for one of the berm rasterizations.
+        orig = b._rasterize
+        call_state = {"n": 0}
+
+        def fake_rasterize(geom):
+            call_state["n"] += 1
+            # Calls: 1=swale footprint, 2=left berm, 3=right berm (or vice versa)
+            if call_state["n"] == 3:
+                return np.zeros(b.shape, dtype=bool)
+            return orig(geom)
+
+        monkeypatch.setattr(b, "_rasterize", fake_rasterize)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        result = b.burn_earthworks([ew])
+        assert result.max() >= 50.0  # berm was raised on the single remaining side
+
+    def test_only_right_side_in_raster(self, tmp_path, monkeypatch):
+        """If left_mask is empty and right_mask.any() → line 365 branch."""
+        data = np.fromfunction(lambda r, c: 50.0 - r * 0.1, (20, 20)).astype("float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        orig = b._rasterize
+        call_state = {"n": 0}
+
+        def fake_rasterize(geom):
+            call_state["n"] += 1
+            if call_state["n"] == 2:  # left side empty
+                return np.zeros(b.shape, dtype=bool)
+            return orig(geom)
+
+        monkeypatch.setattr(b, "_rasterize", fake_rasterize)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        result = b.burn_earthworks([ew])
+        assert result.max() >= 50.0
+
+    def test_both_sides_empty_returns_dem(self, tmp_path, monkeypatch):
+        """Both parallel berm masks empty → else branch returns dem unchanged."""
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        orig = b._rasterize
+        call_state = {"n": 0}
+
+        def fake_rasterize(geom):
+            call_state["n"] += 1
+            if call_state["n"] >= 2:  # both berm rasterizations empty
+                return np.zeros(b.shape, dtype=bool)
+            return orig(geom)
+
+        monkeypatch.setattr(b, "_rasterize", fake_rasterize)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        result = b.burn_earthworks([ew])
+        # Swale cells were lowered, but no berm was raised anywhere
+        assert result.min() < 50.0
+        assert result.max() <= 50.0
+
+
+# ---------------------------------------------------------------------------
+# get_ponding_layer — downsampling + upsampling + MemoryError paths
+# ---------------------------------------------------------------------------
+
+class TestGetPondingLayerBranches:
+    def test_ponding_small_dem(self, tmp_path):
+        """Small DEM: no downsampling, normal path."""
+        data = np.full((10, 10), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+        result = b.get_ponding_layer(data)
+        assert result.shape == (10, 10)
+
+    def test_ponding_downsampled_and_upsampled(self, tmp_path, monkeypatch):
+        """Force the downsampling branch by lowering _MAX_PONDING_CELLS."""
+        import terrainflow_assessment.modules.earthwork_design as mod
+        monkeypatch.setattr(mod, "_MAX_PONDING_CELLS", 25)  # 5x5
+
+        data = np.full((20, 20), 50.0, dtype="float32")
+        # Introduce a small depression so depression-filling does something
+        data[9:12, 9:12] = 48.0
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+        result = b.get_ponding_layer(data)
+        assert result.shape == (20, 20)  # upsampled back
+        assert result.dtype == np.dtype("float32")
+        assert (result >= 0).all()
+
+    def test_ponding_fill_depressions_memory_error_returns_zeros(
+        self, tmp_path, monkeypatch
+    ):
+        """fill_depressions raising MemoryError returns zeros array (lines 495-497)."""
+        data = np.full((10, 10), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        from pysheds.grid import Grid as _Grid
+
+        def _boom(self, *a, **kw):
+            raise MemoryError("mock OOM")
+
+        monkeypatch.setattr(_Grid, "fill_depressions", _boom)
+        result = b.get_ponding_layer(data)
+        assert result.shape == (10, 10)
+        assert np.all(result == 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 regression — Phase 1 item 3: swale burn footprint == declared top width
+# ---------------------------------------------------------------------------
+
+class TestSwaleWidthSplit:
+    """Verify top_width_m / width property and correct burn footprint."""
+
+    def test_top_width_m_default(self):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        ew = Earthwork("swale", make_mock_line_geom(), "S")
+        assert ew.top_width_m == 2.0
+
+    def test_width_alias_reads_top_width_m(self):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        ew = Earthwork("swale", make_mock_line_geom(), "S")
+        assert ew.width == ew.top_width_m
+
+    def test_width_alias_writes_top_width_m(self):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        ew = Earthwork("swale", make_mock_line_geom(), "S")
+        ew.width = 3.0
+        assert ew.top_width_m == 3.0
+
+    def test_buffer_radius_m_is_half_top_width(self):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        ew = Earthwork("swale", make_mock_line_geom(), "S")
+        ew.top_width_m = 4.0
+        assert ew.buffer_radius_m == pytest.approx(2.0)
+
+    def test_swale_burn_footprint_matches_declared_top_width(self, tmp_path):
+        """Phase 1 correctness: a 2m-wide swale burns a 2m-wide footprint."""
+        import rasterio
+        from rasterio.transform import from_bounds
+        from shapely.geometry import LineString, mapping
+        import json
+        from unittest.mock import MagicMock
+
+        declared_width = 2.0
+
+        # Build a 20×20 1m-res DEM
+        data = np.full((20, 20), 50.0, dtype="float32")
+        dem_path = str(tmp_path / "dem.tif")
+        transform = from_bounds(0, 0, 20, 20, 20, 20)
+        with rasterio.open(dem_path, "w", driver="GTiff", height=20, width=20,
+                           count=1, dtype="float32", crs="EPSG:32632",
+                           transform=transform, nodata=-9999.0) as dst:
+            dst.write(data, 1)
+
+        # Swale line running through the centre row
+        line = LineString([(0.0, 10.0), (20.0, 10.0)])
+        g = MagicMock()
+        g.asJson.return_value = json.dumps(mapping(line))
+        g.length.return_value = line.length
+
+        ew = Earthwork("swale", g, "test_swale")
+        ew.top_width_m = declared_width
+        ew.depth = 0.3
+
+        burner = DEMBurner(dem_path)
+        modified = burner.burn_earthworks([ew])
+
+        # Cells that were lowered by the swale
+        burned = modified < data
+        burned_rows = np.where(burned.any(axis=1))[0]
+        footprint_width_cells = len(burned_rows)
+        footprint_width_m = footprint_width_cells * 1.0  # 1m cell size
+
+        assert footprint_width_m == pytest.approx(declared_width, abs=1.0)

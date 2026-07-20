@@ -1,0 +1,52 @@
+[project]
+name = "terrainflow-assessment"
+version = "0.2.0"
+description = "Hydrological assessment and earthwork design QGIS plugin"
+authors = [{ name = "spatialLM", email = "liam.murphy1994@gmail.com" }]
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.9"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=terrainflow_assessment --cov-report=term-missing --cov-branch"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Coverage: omit Qt/QGIS UI layer — these require a live QGIS runtime and are
+# untestable outside it.  Pure-Python modules/ are the coverage gate target.
+[tool.coverage.run]
+branch = true
+omit = [
+    "terrainflow_assessment/__init__.py",      # QGIS classFactory entry point
+    "terrainflow_assessment/plugin.py",        # legacy god-class (re-export shim)
+    "terrainflow_assessment/panel.py",         # QDockWidget UI
+    "terrainflow_assessment/earthwork_properties_dialog.py",
+    "terrainflow_assessment/map_tools/*",      # Qt map-canvas interaction
+    "terrainflow_assessment/qgis/*",           # Qt/QGIS adapter + controller layer
+    "terrainflow_assessment/terrainflow_assessment/*",  # old nested duplicate (pending deletion)
+]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",   # line too long — reported by formatter, not lint
+    "UP007",  # X | Y union syntax requires Python 3.10+
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F811"]   # redefined-from-star in conftest is intentional

@@ -46,7 +46,7 @@ class ContourSegmentTool(QgsMapTool):
         self._canvas = canvas
         self._layer = contour_layer
         self._status_bar = status_bar   # optional QStatusBar for hints
-        self.setCursor(QCursor(Qt.CrossCursor))
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
         # State
         self._phase = 0
@@ -77,7 +77,7 @@ class ContourSegmentTool(QgsMapTool):
     # ---------------------------------------------------------------- events
 
     def canvasPressEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self._cleanup()
             self.cancelled.emit()
             return
@@ -99,7 +99,7 @@ class ContourSegmentTool(QgsMapTool):
         self._update_segment_preview(self._start_dist, end_dist)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self._cleanup()
             self.cancelled.emit()
 

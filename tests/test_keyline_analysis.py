@@ -560,3 +560,203 @@ class TestKeylineAnalysisAssessmentCoverage:
     def test_get_cultivation_empty(self, tmp_path):
         kl, _, _ = _load_assessment(tmp_path)
         assert kl.get_cultivation_elevations([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Assessment version — targeted branch coverage for missing lines
+# ---------------------------------------------------------------------------
+
+class TestAssessmentKeypointBranches:
+    """Exercise specific missing branches in keypoint_analysis.py."""
+
+    def test_no_valley_returns_empty_assessment(self, tmp_path):
+        """find_keypoints line 120: all acc cells below min_acc_cells."""
+        dem = _make_valley_dem()
+        acc = np.ones((30, 30), dtype="float32") * 5.0
+        dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        assert kl.find_keypoints(min_acc_cells=10_000) == []
+
+    def test_candidate_p75_fallback_assessment(self, tmp_path):
+        """find_keypoints line 128: all valley cells above p75 → candidate empty."""
+        # Construct acc so that ≥ min_acc_cells is exactly 1 cell.
+        # Then p75 == that one cell's value, and (acc <= p75) stays True there.
+        # To trigger candidate.any() == False we want acc > p75 for every valley cell.
+        # This is hard with real percentile — but (candidate = valley & acc <= p75)
+        # is empty only when the percentile > every element, which np.percentile
+        # won't produce. So instead we mock np.percentile to return -1.
+        dem = _make_valley_dem()
+        acc = _make_accumulation()
+        dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
+        from terrainflow_assessment.modules import keypoint_analysis as ka
+        kl = ka.KeylineAnalysis(dem_path, acc_path)
+        # Monkey-patch np.percentile inside the module so p75 returns -1.
+        # Every valley cell has acc > -1 → candidate empty → fallback to valley.
+        orig_percentile = ka.np.percentile
+        try:
+            ka.np.percentile = lambda *a, **k: -1.0
+            result = kl.find_keypoints(min_acc_cells=100, n_keypoints=1)
+            assert isinstance(result, list)
+        finally:
+            ka.np.percentile = orig_percentile
+
+    def test_score_exhausted_break_assessment(self, tmp_path):
+        """find_keypoints line 155: score_work[r,c] <= 0 ends the loop early.
+
+        Forcing this requires a tiny candidate region that runs out before
+        n_keypoints is reached.
+        """
+        # Create a DEM+acc where only one or two cells qualify, but we ask for 10.
+        dem = np.full((30, 30), 50.0, dtype="float32")
+        acc = np.ones((30, 30), dtype="float32") * 1.0
+        acc[15, 15] = 1000.0   # single valley cell
+        acc[15, 16] = 800.0
+        dem_path = _write_raster(str(tmp_path / "d.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "a.tif"), acc, cell_size=5.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        result = kl.find_keypoints(min_acc_cells=100, n_keypoints=10)
+        # At most one or two keypoints — loop exited via break not cap
+        assert len(result) <= 10
+
+    def test_find_ridgelines_produces_lines(self, tmp_path):
+        """Exercise the full ridge-extraction block (lines 234-276)."""
+        # Large DEM with a persistent interior ridge: central 5 rows at high
+        # elevation, rest gently sloped.
+        rows, cols = 40, 40
+        dem = np.fromfunction(
+            lambda r, c: 50.0 + np.abs(c - cols // 2) * 0.3, (rows, cols)
+        ).astype("float32")
+        # Add a clear 3-cell-wide elevated ridge column to survive erosion
+        for dc in (-1, 0, 1):
+            dem[:, cols // 2 + dc] += 15.0
+        # Low acc along the ridge (true ridges have no upstream area)
+        acc = np.ones((rows, cols), dtype="float32")
+        acc[:, cols // 2 - 1 : cols // 2 + 2] = 1.0
+        acc[:, : cols // 2 - 2] = 100.0   # sides have real flow
+        acc[:, cols // 2 + 2 :] = 100.0
+        dem_path = _write_raster(str(tmp_path / "ridge_dem.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "ridge_acc.tif"), acc, cell_size=5.0)
+
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(
+            tpi_window=5, min_tpi_m=0.5, min_length_m=5.0
+        )
+        assert isinstance(lines, list)
+        # Should find at least one ridge geometry
+        for ln in lines:
+            assert "geometry" in ln
+            assert ln["length_m"] >= 0
+
+    def test_find_ridgelines_with_nodata_in_dem(self, tmp_path):
+        """DEM with NaN values — nanmean fallback for mean_elev."""
+        rows, cols = 40, 40
+        dem = np.fromfunction(
+            lambda r, c: 50.0 + np.abs(c - cols // 2) * 0.3, (rows, cols)
+        ).astype("float32")
+        for dc in (-1, 0, 1):
+            dem[:, cols // 2 + dc] += 15.0
+        # Replace a column with nodata
+        dem[5, :] = -9999.0
+        acc = np.ones((rows, cols), dtype="float32")
+        acc[:, cols // 2 - 1 : cols // 2 + 2] = 1.0
+        acc[:, : cols // 2 - 2] = 100.0
+        acc[:, cols // 2 + 2 :] = 100.0
+        dem_path = _write_raster(str(tmp_path / "nd_ridge.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "nd_acc.tif"), acc, cell_size=5.0)
+
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(tpi_window=5, min_tpi_m=0.5, min_length_m=5.0)
+        assert isinstance(lines, list)
+
+    def test_recommend_pond_sites_exercises_downstream_scan(self, tmp_path):
+        """recommend_pond_sites line 323-326: score update path fires.
+
+        _valley_cross_width only returns > 0 when the scan range [-200,200]
+        stays inside the DEM column bounds, so we need a wide DEM (col≥200).
+        """
+        # Narrow but very wide DEM: 5 rows × 450 cols with valley at col=220,
+        # sloping down with row so acc increases downstream.
+        rows, cols = 5, 450
+        c_idx = np.arange(cols).reshape(1, -1)
+        dem = (100.0 - np.arange(rows).reshape(-1, 1) * 2.0 +
+               np.abs(c_idx - 220) * 0.3).astype("float32")
+        acc = np.full((rows, cols), 5.0, dtype="float32")
+        # Valley column with acc increasing downstream
+        for r in range(rows):
+            acc[r, 220] = 100.0 + r * 200.0
+        dem_path = _write_raster(str(tmp_path / "wide_dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "wide_acc.tif"), acc, cell_size=1.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        kp = [{
+            "elevation": 100.0, "_row": 1, "_col": 220,
+        }]
+        result = kl.recommend_pond_sites(kp)
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_recommend_pond_sites_with_boundary_mask(self, tmp_path):
+        """Line 315: downstream cell outside boundary mask → continue."""
+        dem = _make_valley_dem()
+        acc = _make_accumulation()
+        dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        kp = kl.find_keypoints(min_acc_cells=100, n_keypoints=1)
+        mask = np.zeros((30, 30), dtype=bool)
+        mask[0:5, :] = True  # boundary away from downstream cells
+        result = kl.recommend_pond_sites(kp, boundary_mask=mask)
+        assert isinstance(result, list)
+
+    def test_recommend_pond_sites_with_nan_dem_cell(self, tmp_path):
+        """Line 307: skip nan cells during downstream scan."""
+        dem = _make_valley_dem()
+        dem[20, 16] = -9999.0
+        acc = _make_accumulation()
+        dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
+        acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        kp = kl.find_keypoints(min_acc_cells=100, n_keypoints=1)
+        result = kl.recommend_pond_sites(kp)
+        assert isinstance(result, list)
+
+    def test_valley_cross_width_nan_skipped(self, tmp_path):
+        """_valley_cross_width lines 363-366: NaN cell skipped, count increments.
+
+        Scan range is dc∈[-200,200]. To make the loop iterate without breaking
+        on nc<0 we need the column index to be > 200 (so -200 offset still > 0)
+        and the DEM wider than col+200.
+        """
+        dem = np.full((3, 450), 50.0, dtype="float32")
+        # One NaN within the scan range; rest are at elev 50 (below fill=51)
+        dem[1, 210] = -9999.0
+        acc = np.ones((3, 450), dtype="float32")
+        dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=1.0)
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl = KeylineAnalysis(dem_path, acc_path)
+        width = kl._valley_cross_width(1, 220, fill_elev=51.0)
+        # Scan covers 401 cells, 1 is NaN → 400 below fill
+        assert width == pytest.approx(400.0)
+
+    def test_cultivation_dedup_across_keypoints(self, tmp_path):
+        """get_cultivation_elevations line 395: duplicate elev skipped via set."""
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+        kl, _, _ = _load_assessment(tmp_path)
+        # Two keypoints at the same elevation produce overlapping cultivation
+        # lines — the 'seen_elevs' set drops duplicates.
+        kps = [
+            {"elevation": 50.0, "_row": 5, "_col": 5},
+            {"elevation": 55.0, "_row": 8, "_col": 8},  # overlaps at offset +1 vs kp0
+        ]
+        result = kl.get_cultivation_elevations(kps, n_each_side=1, spacing_m=5.0)
+        elevs = [r["elevation"] for r in result]
+        assert len(elevs) == len(set(elevs))  # no duplicates

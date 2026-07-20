@@ -23,8 +23,6 @@ from typing import List, Optional
 import numpy as np
 import rasterio
 
-from qgis.PyQt.QtCore import QThread, pyqtSignal
-
 _log = logging.getLogger(__name__)
 
 
@@ -145,74 +143,12 @@ def cascade_overflow(stores: List[EarthworkStore], time_hr: float,
 
 
 # ---------------------------------------------------------------------------
-# QThread worker
+# QThread worker — re-exported from qgis/workers/ for backward compatibility
 # ---------------------------------------------------------------------------
 
-class SimulationWorker(QThread):
-    """
-    Background worker for time-stepped fill simulation.
-
-    Extends the base plugin's SimulationWorker with per-earthwork fill
-    tracking and cascading overflow logic.
-
-    Parameters
-    ----------
-    dem_path : str
-    fdir_path : str — pre-computed flow direction raster
-    output_dir : str
-    cn : int — default Curve Number
-    moisture : str — 'dry', 'normal', or 'wet'
-    rainfall_data : list of (time_min, cum_rainfall_mm)
-    routing : str — 'dinf' or 'd8'
-    cn_zones_data : list of dict (optional)
-    earthwork_stores : list of EarthworkStore (optional)
-        Pre-configured fill stores for cascade simulation.
-        If None, only the raster-based flow simulation is run.
-    soil_name : str — default soil type for infiltration rate lookup
-
-    Signals
-    -------
-    progress(int, str)
-    finished(dict)
-    error(str)
-    """
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, dem_path, fdir_path, output_dir, cn, moisture,
-                 rainfall_data, routing='dinf', cn_zones_data=None,
-                 earthwork_stores=None, soil_name="Loam"):
-        super().__init__()
-        self.dem_path = dem_path
-        self.fdir_path = fdir_path
-        self.output_dir = output_dir
-        self.cn = cn
-        self.moisture = moisture
-        self.rainfall_data = rainfall_data
-        self.routing = routing
-        self.cn_zones_data = cn_zones_data or []
-        self.earthwork_stores = earthwork_stores or []
-        self.soil_name = soil_name
-
-    def run(self):
-        import traceback
-        try:
-            result = _run_simulation(
-                dem_path=self.dem_path,
-                fdir_path=self.fdir_path,
-                output_dir=self.output_dir,
-                cn=self.cn,
-                moisture=self.moisture,
-                rainfall_data=self.rainfall_data,
-                routing=self.routing,
-                cn_zones_data=self.cn_zones_data,
-                earthwork_stores=self.earthwork_stores,
-                progress_callback=self.progress.emit,
-            )
-            self.finished.emit(result)
-        except Exception:
-            self.error.emit(traceback.format_exc())
+# SimulationWorker has moved to terrainflow_assessment.qgis.workers.simulation_worker.
+# This re-export keeps existing imports working without changes.
+from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker  # noqa: F401, E402
 
 
 # ---------------------------------------------------------------------------
@@ -340,16 +276,41 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
 
         if earthwork_stores:
             # Sample the weighted accumulation raster at each earthwork's
-            # centroid to get the actual m³ of runoff flowing to that location.
-            # inc_acc is already in m³ (weighted by dq_m3 per cell), so the
-            # value at an earthwork's position is the total upstream inflow.
-            for store in earthwork_stores:
+            # centroid to get the raw m³ of runoff flowing to that location.
+            # inc_acc[r,c] is the *cumulative* upstream runoff, so a downstream
+            # store would double-count water already intercepted by upstream stores.
+            # Fix: process highest-elevation stores first and subtract their
+            # captured volume from every downstream store's raw accumulation.
+            sorted_by_elev = sorted(
+                earthwork_stores, key=lambda s: s.elevation, reverse=True
+            )
+            # Map name → (raw_acc, captured_this_step) for upstream subtraction
+            captured_this_step: dict = {}
+
+            for store in sorted_by_elev:
                 r, c = store.centroid_row, store.centroid_col
                 if r is not None and c is not None:
                     r = max(0, min(r, inc_acc.shape[0] - 1))
                     c = max(0, min(c, inc_acc.shape[1] - 1))
-                    inflow_m3 = float(inc_acc[r, c])
-                    store.inflow_m3 += max(0.0, inflow_m3)
+                    raw_inflow = max(0.0, float(inc_acc[r, c]))
+
+                    # Subtract volumes captured by all upstream (higher) stores
+                    upstream_captured = sum(
+                        captured_this_step.get(s.name, 0.0)
+                        for s in earthwork_stores
+                        if s is not store and s.elevation > store.elevation
+                    )
+                    actual_inflow = max(0.0, raw_inflow - upstream_captured)
+                    store.inflow_m3 += actual_inflow
+
+                    # Estimate this store's capture for downstream correction:
+                    # it can store at most (capacity - current stored) m³.
+                    available_space = max(
+                        0.0, store.capacity_m3 - store.stored_m3
+                    )
+                    captured_this_step[store.name] = min(
+                        actual_inflow, available_space
+                    )
                 # else: no raster position — store gets no inflow (centroid outside DEM)
 
             step_exit = cascade_overflow(

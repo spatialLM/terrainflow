@@ -9,6 +9,11 @@ import rasterio
 import numpy as np
 
 
+class DEMValidationError(ValueError):
+    """Raised when a loaded DEM fails a validation check (e.g. geographic CRS)."""
+    pass
+
+
 class DEMInfo:
     """Container for DEM spatial metadata."""
 
@@ -57,6 +62,16 @@ def load_dem(dem_path):
             info = DEMInfo(dem_path)
             info.crs = src.crs
             info.crs_wkt = src.crs.to_wkt() if src.crs else None
+
+            # Require a projected CRS so distances and areas are in metres.
+            if not src.crs or not src.crs.is_projected:
+                raise DEMValidationError(
+                    f"DEM '{dem_path}' has a geographic (non-projected) CRS "
+                    f"({src.crs}).  TerrainFlow requires a projected CRS such as "
+                    "NZTM2000 (EPSG:2193) so that all distance and area calculations "
+                    "are in metres.  Reproject the DEM before loading."
+                )
+
             info.transform = src.transform
             info.width = src.width
             info.height = src.height
@@ -71,6 +86,8 @@ def load_dem(dem_path):
 
         return info
 
+    except DEMValidationError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"Cannot load DEM '{dem_path}': {exc}") from exc
 

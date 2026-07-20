@@ -1,0 +1,16 @@
+# Dev/test dependencies — pinned to versions compatible with QGIS 3.22 LTR (Python 3.9)
+# Install with: pip install -r requirements-dev.txt
+
+pytest==9.0.3
+pytest-cov==7.1.0
+pytest-qt>=4.2.0          # requires PyQt5/PyQt6 from QGIS install — install QGIS first
+
+# Geospatial analysis (match QGIS 3.22 bundled where possible)
+rasterio==1.5.0
+numpy>=1.26,<3             # numpy 2.x OK; QGIS 3.22 ships 1.x but tests run outside QGIS
+shapely==2.1.2
+pysheds==0.5
+scipy>=1.7,<2
+
+# Linting / formatting
+ruff>=0.4.0

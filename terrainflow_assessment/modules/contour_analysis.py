@@ -215,8 +215,22 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
     if nodata is not None:
         dem = np.where(dem == nodata, np.nan, dem)
 
-    dz_dy, dz_dx = np.gradient(np.nan_to_num(dem, nan=0.0), cell_h, cell_w)
-    slope_deg = np.degrees(np.arctan(np.sqrt(dz_dx**2 + dz_dy**2))).astype("float32")
+    # Use a masked array so NaN border cells do not fabricate edge gradients.
+    dem_masked = np.ma.masked_invalid(dem)
+    # np.gradient handles masked arrays from NumPy 1.16+; fall back to
+    # nan_to_num if the installed NumPy is older.
+    try:
+        dz_dy, dz_dx = np.gradient(dem_masked, cell_h, cell_w)
+    except TypeError:
+        dz_dy, dz_dx = np.gradient(np.nan_to_num(dem, nan=0.0), cell_h, cell_w)
+    # Convert to a plain float32 array with NaN for masked/invalid cells so
+    # that indexing never returns a masked scalar (which converts to nan with
+    # a warning and then poisons the mean).
+    _raw = np.degrees(np.arctan(np.sqrt(dz_dx**2 + dz_dy**2)))
+    if isinstance(_raw, np.ma.MaskedArray):
+        slope_deg = np.ma.filled(_raw, fill_value=np.nan).astype("float32")
+    else:
+        slope_deg = _raw.astype("float32")
 
     def _sample_slope(geom):
         """Sample slope at N evenly-spaced points along a line."""
@@ -230,7 +244,9 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
             col = int((pt.x - transform.c) / transform.a)
             row = int((pt.y - transform.f) / transform.e)
             if 0 <= row < slope_deg.shape[0] and 0 <= col < slope_deg.shape[1]:
-                values.append(float(slope_deg[row, col]))
+                val = float(slope_deg[row, col])
+                if not np.isnan(val):
+                    values.append(val)
         return float(np.mean(values)) if values else 0.0
 
     valid = []

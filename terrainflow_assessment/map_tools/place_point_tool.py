@@ -16,15 +16,15 @@ class PlacePointTool(QgsMapTool):
         self.canvas = canvas
 
     def canvasPressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             pt = QgsPointXY(self.toMapCoordinates(event.pos()))
             self.point_placed.emit(pt)
             self.canvas.unsetMapTool(self)
-        elif event.button() == Qt.RightButton:
+        elif event.button() == Qt.MouseButton.RightButton:
             self.cancelled.emit()
             self.canvas.unsetMapTool(self)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.cancelled.emit()
             self.canvas.unsetMapTool(self)

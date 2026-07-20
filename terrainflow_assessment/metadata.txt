@@ -2,10 +2,13 @@
 name=TerrainFlow Assessment
 qgisMinimumVersion=3.22
 description=Hydrological assessment and earthwork design tool — baseline analysis, contour swale planning, fill simulation, and before/after reporting.
-version=0.1
-author=TerrainFlow
-email=
-repository=
+about=TerrainFlow enables land managers and permaculturists to model how water moves across a landscape and how proposed earthworks change that movement, directly inside QGIS. Core workflow: load a DEM, run baseline flow analysis, draw earthworks (swales, dams, basins, diversion drains), re-run analysis on the modified DEM, compare before/after flow paths and water retention.
+version=0.2.0
+author=spatialLM
+email=liam.murphy1994@gmail.com
+repository=https://github.com/spatialLM/TerrainFlow
+homepage=https://github.com/spatialLM/TerrainFlow
+tracker=https://github.com/spatialLM/TerrainFlow/issues
 tags=hydrology,terrain,earthworks,swale,assessment,catchment,runoff
 category=Raster
 experimental=True

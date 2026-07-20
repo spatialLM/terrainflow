@@ -9,7 +9,7 @@ import os
 import tempfile
 import traceback
 
-from qgis.PyQt.QtCore import Qt, QTimer, QObject
+from qgis.PyQt.QtCore import Qt, QTimer, QObject, QMetaType
 from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox, QDockWidget
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.core import (
@@ -41,6 +41,7 @@ from .map_tools.place_point_tool import PlacePointTool
 from .map_tools.ponding_query_tool import PondingQueryTool
 from .map_tools.select_contour_tool import SelectContourTool
 from .map_tools.contour_segment_tool import ContourSegmentTool
+from .qgis.adapters.project import ProjectAdapter
 
 
 def _crs_label(crs):
@@ -73,6 +74,7 @@ class TerrainFlowAssessment:
         self.canvas = iface.mapCanvas()
         self.panel = None
         self._action = None
+        self._project = ProjectAdapter()
 
         # Analysis state
         self._dem_path = None
@@ -159,7 +161,7 @@ class TerrainFlowAssessment:
 
     def _create_panel(self):
         self.panel = AssessmentPanel(self.iface.mainWindow())
-        self.iface.addDockWidget(Qt.RightDockWidgetArea, self.panel)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.panel)
 
         # Wire signals
         self.panel.dem_changed.connect(self._on_dem_changed)
@@ -241,8 +243,15 @@ class TerrainFlowAssessment:
         # Memory layer — write to temp file
         import tempfile
         path = tempfile.mktemp(suffix=".gpkg")
-        from qgis.core import QgsVectorFileWriter
-        QgsVectorFileWriter.writeAsVectorFormat(layer, path, "UTF-8")
+        from qgis.core import QgsVectorFileWriter, QgsProject
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GPKG"
+        save_options.fileEncoding = "UTF-8"
+        QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path,
+            self._project.instance().transformContext(),
+            save_options,
+        )
         return path
 
     # ---------------------------------------------------------------- Baseline analysis
@@ -325,7 +334,7 @@ class TerrainFlowAssessment:
             layer = QgsRasterLayer(stream_path, f"{label} — Streams")
             if layer.isValid():
                 self._apply_stream_ramp(layer, result.get("stream_acc_max", 1))
-                QgsProject.instance().addMapLayer(layer)
+                self._project.instance().addMapLayer(layer)
                 layer_ids.append(layer.id())
 
         # Ponding raster
@@ -335,7 +344,7 @@ class TerrainFlowAssessment:
             layer = QgsRasterLayer(ponding_path, f"{label} — Water Captured")
             if layer.isValid():
                 self._apply_ponding_ramp(layer)
-                QgsProject.instance().addMapLayer(layer)
+                self._project.instance().addMapLayer(layer)
                 layer_ids.append(layer.id())
 
         # Exit points vector
@@ -343,7 +352,7 @@ class TerrainFlowAssessment:
         if exit_points:
             ep_layer = self._create_exit_points_layer(exit_points, label)
             if ep_layer:
-                QgsProject.instance().addMapLayer(ep_layer)
+                self._project.instance().addMapLayer(ep_layer)
                 layer_ids.append(ep_layer.id())
 
         if is_earthworks:
@@ -352,15 +361,14 @@ class TerrainFlowAssessment:
             self._baseline_layer_ids = layer_ids
 
     def _create_exit_points_layer(self, exit_points, label):
-        from qgis.PyQt.QtCore import QVariant
 
         layer = QgsVectorLayer("Point?crs=" + (self._dem_info.crs_wkt or "EPSG:4326"),
                                f"{label} — Exit Points", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("label", QVariant.String),
-            QgsField("volume_m3", QVariant.Double),
-            QgsField("flow_ls", QVariant.Double),
+            QgsField("label", QMetaType.QString),
+            QgsField("volume_m3", QMetaType.Double),
+            QgsField("flow_ls", QMetaType.Double),
         ])
         layer.updateFields()
 
@@ -456,7 +464,6 @@ class TerrainFlowAssessment:
 
     def _display_contour_layer(self, contours):
         from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry
-        from qgis.PyQt.QtCore import QVariant
         from qgis.core import QgsField
 
         crs_str = self._dem_info.crs_wkt if self._dem_info else "EPSG:4326"
@@ -464,10 +471,10 @@ class TerrainFlowAssessment:
                                "Candidate Contour Swales", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("elevation", QVariant.Double),
-            QgsField("rank", QVariant.Int),
-            QgsField("peak_acc", QVariant.Double),
-            QgsField("mean_slope", QVariant.Double),
+            QgsField("elevation", QMetaType.Double),
+            QgsField("rank", QMetaType.Int),
+            QgsField("peak_acc", QMetaType.Double),
+            QgsField("mean_slope", QMetaType.Double),
         ])
         layer.updateFields()
 
@@ -484,10 +491,10 @@ class TerrainFlowAssessment:
         self._apply_rank_style(layer, max_acc=max_acc)
         if self._contour_layer:
             try:
-                QgsProject.instance().removeMapLayer(self._contour_layer)
+                self._project.instance().removeMapLayer(self._contour_layer)
             except Exception:
                 pass
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
         self._contour_layer = layer
 
     def _apply_rank_style(self, layer, max_acc=None):
@@ -536,7 +543,6 @@ class TerrainFlowAssessment:
             return
 
         from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry, QgsField
-        from qgis.PyQt.QtCore import QVariant
 
         ranked = sorted(
             self._contour_features,
@@ -549,7 +555,7 @@ class TerrainFlowAssessment:
         # Remove previous top-5 layer if it exists
         if hasattr(self, "_top5_layer") and self._top5_layer:
             try:
-                QgsProject.instance().removeMapLayer(self._top5_layer)
+                self._project.instance().removeMapLayer(self._top5_layer)
             except Exception:
                 pass
 
@@ -557,10 +563,10 @@ class TerrainFlowAssessment:
                                "Top 5 Swale Contours", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("elevation", QVariant.Double),
-            QgsField("rank", QVariant.Int),
-            QgsField("peak_acc", QVariant.Double),
-            QgsField("mean_slope", QVariant.Double),
+            QgsField("elevation", QMetaType.Double),
+            QgsField("rank", QMetaType.Int),
+            QgsField("peak_acc", QMetaType.Double),
+            QgsField("mean_slope", QMetaType.Double),
         ])
         layer.updateFields()
 
@@ -579,7 +585,7 @@ class TerrainFlowAssessment:
         })
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
         self._top5_layer = layer
 
     def _run_segment_analysis(self):
@@ -621,7 +627,6 @@ class TerrainFlowAssessment:
 
     def _display_swale_segments(self, segments):
         from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry, QgsField, QgsLineSymbol
-        from qgis.PyQt.QtCore import QVariant
 
         if not segments:
             self.iface.messageBar().pushInfo(
@@ -634,7 +639,7 @@ class TerrainFlowAssessment:
         # Remove previous layer
         if self._segment_layer:
             try:
-                QgsProject.instance().removeMapLayer(self._segment_layer)
+                self._project.instance().removeMapLayer(self._segment_layer)
             except Exception:
                 pass
 
@@ -643,12 +648,12 @@ class TerrainFlowAssessment:
                                "Recommended Swale Segments", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("label",             QVariant.String),
-            QgsField("elevation",         QVariant.Double),
-            QgsField("contributing_ha",   QVariant.Double),
-            QgsField("inflow_m3",         QVariant.Double),
-            QgsField("required_length_m", QVariant.Double),
-            QgsField("rank",              QVariant.Int),
+            QgsField("label",             QMetaType.QString),
+            QgsField("elevation",         QMetaType.Double),
+            QgsField("contributing_ha",   QMetaType.Double),
+            QgsField("inflow_m3",         QMetaType.Double),
+            QgsField("required_length_m", QMetaType.Double),
+            QgsField("rank",              QMetaType.Int),
         ])
         layer.updateFields()
 
@@ -714,7 +719,7 @@ class TerrainFlowAssessment:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
 
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
         self._segment_layer = layer
 
         self.iface.messageBar().pushSuccess(
@@ -746,7 +751,7 @@ class TerrainFlowAssessment:
             # Remove previous simple contour layer if present
             if hasattr(self, "_simple_contour_layer") and self._simple_contour_layer:
                 try:
-                    QgsProject.instance().removeMapLayer(self._simple_contour_layer)
+                    self._project.instance().removeMapLayer(self._simple_contour_layer)
                 except Exception:
                     pass
 
@@ -764,7 +769,7 @@ class TerrainFlowAssessment:
             })
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
-            QgsProject.instance().addMapLayer(layer)
+            self._project.instance().addMapLayer(layer)
             self._simple_contour_layer = layer
 
         except Exception as exc:
@@ -929,18 +934,17 @@ class TerrainFlowAssessment:
                                  traceback.format_exc())
 
     def _display_keypoints(self, keypoints):
-        from qgis.PyQt.QtCore import QVariant
-        for lyr in QgsProject.instance().mapLayersByName("Keypoints"):
-            QgsProject.instance().removeMapLayer(lyr)
+        for lyr in self._project.instance().mapLayersByName("Keypoints"):
+            self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("Point", "Keypoints", "memory")
-        layer.setCrs(QgsProject.instance().crs())
+        layer.setCrs(self._project.instance().crs())
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("label",        QVariant.String),
-            QgsField("elevation",    QVariant.Double),
-            QgsField("slope_deg",    QVariant.Double),
-            QgsField("catchment_ha", QVariant.Double),
+            QgsField("label",        QMetaType.QString),
+            QgsField("elevation",    QMetaType.Double),
+            QgsField("slope_deg",    QMetaType.Double),
+            QgsField("catchment_ha", QMetaType.Double),
         ])
         layer.updateFields()
         feats = []
@@ -967,21 +971,20 @@ class TerrainFlowAssessment:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
         layer.updateExtents()
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
 
     def _display_ridgelines(self, ridgelines):
         from qgis.core import QgsLineSymbol
-        from qgis.PyQt.QtCore import QVariant
-        for lyr in QgsProject.instance().mapLayersByName("Ridgelines (Water Divides)"):
-            QgsProject.instance().removeMapLayer(lyr)
+        for lyr in self._project.instance().mapLayersByName("Ridgelines (Water Divides)"):
+            self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("LineString", "Ridgelines (Water Divides)", "memory")
-        layer.setCrs(QgsProject.instance().crs())
+        layer.setCrs(self._project.instance().crs())
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("label",          QVariant.String),
-            QgsField("length_m",       QVariant.Double),
-            QgsField("mean_elevation", QVariant.Double),
+            QgsField("label",          QMetaType.QString),
+            QgsField("length_m",       QMetaType.Double),
+            QgsField("mean_elevation", QMetaType.Double),
         ])
         layer.updateFields()
         feats = []
@@ -997,22 +1000,21 @@ class TerrainFlowAssessment:
         })
         layer.setRenderer(QgsSingleSymbolRenderer(sym))
         layer.updateExtents()
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
 
     def _display_pond_sites(self, sites):
-        from qgis.PyQt.QtCore import QVariant
-        for lyr in QgsProject.instance().mapLayersByName("Recommended Pond Sites"):
-            QgsProject.instance().removeMapLayer(lyr)
+        for lyr in self._project.instance().mapLayersByName("Recommended Pond Sites"):
+            self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("Point", "Recommended Pond Sites", "memory")
-        layer.setCrs(QgsProject.instance().crs())
+        layer.setCrs(self._project.instance().crs())
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("label",        QVariant.String),
-            QgsField("elevation",    QVariant.Double),
-            QgsField("catchment_ha", QVariant.Double),
-            QgsField("dam_width_m",  QVariant.Double),
-            QgsField("keypoint",     QVariant.Int),
+            QgsField("label",        QMetaType.QString),
+            QgsField("elevation",    QMetaType.Double),
+            QgsField("catchment_ha", QMetaType.Double),
+            QgsField("dam_width_m",  QMetaType.Double),
+            QgsField("keypoint",     QMetaType.Int),
         ])
         layer.updateFields()
         feats = []
@@ -1039,7 +1041,7 @@ class TerrainFlowAssessment:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
         layer.updateExtents()
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
 
     # ---------------------------------------------------------------- Earthwork drawing
 
@@ -1186,7 +1188,7 @@ class TerrainFlowAssessment:
             dem_path=self._dem_path if ew_type == "dam" else None,
         )
 
-        if dlg.exec_():
+        if dlg.exec():
             ew.name = dlg.get_name()
             ew.depth = dlg.get_depth()
             ew.width = getattr(dlg, "get_width", lambda: ew.width)()
@@ -1223,7 +1225,7 @@ class TerrainFlowAssessment:
             duration_hours=self.panel.duration_hr,
             dem_path=self._dem_path if ew.type == "dam" else None,
         )
-        if dlg.exec_():
+        if dlg.exec():
             ew.name = dlg.get_name()
             ew.depth = dlg.get_depth()
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
@@ -1261,27 +1263,26 @@ class TerrainFlowAssessment:
         """Create (or re-create) the Earthworks layer group and per-type layers."""
         from qgis.core import (QgsVectorLayer, QgsField, QgsLineSymbol,
                                 QgsFillSymbol, QgsLayerTreeGroup)
-        from qgis.PyQt.QtCore import QVariant
         from qgis.PyQt.QtGui import QColor, QFont
 
         crs_str = self._dem_info.crs_wkt if self._dem_info else "EPSG:4326"
-        root = QgsProject.instance().layerTreeRoot()
+        root = self._project.instance().layerTreeRoot()
 
         # Re-use existing group by name, or insert a new one at the top
         self._ew_group = root.findGroup("Earthworks") or root.insertGroup(0, "Earthworks")
 
         for ew_type, (geom_type, display_name, color_hex, fill_hex, width) in self._EW_STYLES.items():
             existing = self._ew_layers.get(ew_type)
-            if existing and QgsProject.instance().mapLayer(existing.id()):
+            if existing and self._project.instance().mapLayer(existing.id()):
                 continue  # still valid — leave it
 
             layer = QgsVectorLayer(f"{geom_type}?crs={crs_str}", display_name, "memory")
             pr = layer.dataProvider()
             pr.addAttributes([
-                QgsField("name",        QVariant.String),
-                QgsField("type",        QVariant.String),
-                QgsField("capacity_m3", QVariant.Double),
-                QgsField("enabled",     QVariant.Int),
+                QgsField("name",        QMetaType.QString),
+                QgsField("type",        QMetaType.QString),
+                QgsField("capacity_m3", QMetaType.Double),
+                QgsField("enabled",     QMetaType.Int),
             ])
             layer.updateFields()
 
@@ -1323,7 +1324,7 @@ class TerrainFlowAssessment:
             layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
             layer.setLabelsEnabled(True)
 
-            QgsProject.instance().addMapLayer(layer, False)  # don't auto-add to root
+            self._project.instance().addMapLayer(layer, False)  # don't auto-add to root
             self._ew_group.addLayer(layer)
             self._ew_layers[ew_type] = layer
 
@@ -1332,13 +1333,13 @@ class TerrainFlowAssessment:
 
         # Clear all layers
         for layer in self._ew_layers.values():
-            if layer and QgsProject.instance().mapLayer(layer.id()):
+            if layer and self._project.instance().mapLayer(layer.id()):
                 layer.dataProvider().truncate()
 
         # Repopulate per type
         for ew in self._earthwork_manager.get_all():
             layer = self._ew_layers.get(ew.type)
-            if not layer or not QgsProject.instance().mapLayer(layer.id()):
+            if not layer or not self._project.instance().mapLayer(layer.id()):
                 continue
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromWkt(ew.geometry.asWkt()))
@@ -1347,7 +1348,7 @@ class TerrainFlowAssessment:
             layer.dataProvider().addFeature(f)
 
         for layer in self._ew_layers.values():
-            if layer and QgsProject.instance().mapLayer(layer.id()):
+            if layer and self._project.instance().mapLayer(layer.id()):
                 layer.triggerRepaint()
 
     # ---------------------------------------------------------------- Earthworks analysis
@@ -1473,7 +1474,7 @@ class TerrainFlowAssessment:
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.accepted.connect(dlg.accept)
         layout.addWidget(buttons)
-        dlg.exec_()
+        dlg.exec()
 
     def _on_no_ponding(self):
         self.iface.messageBar().pushInfo(
@@ -1486,7 +1487,7 @@ class TerrainFlowAssessment:
             return
         lid = self._slope_class_layer_id
         if lid:
-            node = QgsProject.instance().layerTreeRoot().findLayer(lid)
+            node = self._project.instance().layerTreeRoot().findLayer(lid)
             if node:
                 node.setItemVisibilityChecked(checked)
                 self.canvas.refresh()
@@ -1495,9 +1496,9 @@ class TerrainFlowAssessment:
         if layer.isValid():
             self._apply_slope_class_ramp(layer)
             layer.setOpacity(0.6)
-            QgsProject.instance().addMapLayer(layer)
+            self._project.instance().addMapLayer(layer)
             self._slope_class_layer_id = layer.id()
-            node = QgsProject.instance().layerTreeRoot().findLayer(layer)
+            node = self._project.instance().layerTreeRoot().findLayer(layer)
             if node:
                 node.setItemVisibilityChecked(checked)
             self.canvas.refresh()
@@ -1521,16 +1522,16 @@ class TerrainFlowAssessment:
     def _toggle_slope_arrows(self, checked):
         if checked:
             existing = (self._slope_arrows_layer_id and
-                        QgsProject.instance().mapLayer(self._slope_arrows_layer_id))
+                        self._project.instance().mapLayer(self._slope_arrows_layer_id))
             if existing:
-                node = QgsProject.instance().layerTreeRoot().findLayer(self._slope_arrows_layer_id)
+                node = self._project.instance().layerTreeRoot().findLayer(self._slope_arrows_layer_id)
                 if node:
                     node.setItemVisibilityChecked(True)
             else:
                 self._generate_slope_arrows()
         else:
             if self._slope_arrows_layer_id:
-                node = QgsProject.instance().layerTreeRoot().findLayer(self._slope_arrows_layer_id)
+                node = self._project.instance().layerTreeRoot().findLayer(self._slope_arrows_layer_id)
                 if node:
                     node.setItemVisibilityChecked(False)
             self.canvas.refresh()
@@ -1569,10 +1570,9 @@ class TerrainFlowAssessment:
             step = max(1, int(50.0 / cell_size))
 
             layer = QgsVectorLayer("Point", "Slope Direction", "memory")
-            layer.setCrs(QgsProject.instance().crs())
-            from qgis.PyQt.QtCore import QVariant
+            layer.setCrs(self._project.instance().crs())
             pr = layer.dataProvider()
-            pr.addAttributes([QgsField("angle", QVariant.Double)])
+            pr.addAttributes([QgsField("angle", QMetaType.Double)])
             layer.updateFields()
 
             features = []
@@ -1605,7 +1605,7 @@ class TerrainFlowAssessment:
             )
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
-            QgsProject.instance().addMapLayer(layer)
+            self._project.instance().addMapLayer(layer)
             self._slope_arrows_layer_id = layer.id()
             self.canvas.refresh()
 
@@ -1616,11 +1616,11 @@ class TerrainFlowAssessment:
 
     def _toggle_before_after(self, show_earthworks):
         for lid in self._baseline_layer_ids:
-            node = QgsProject.instance().layerTreeRoot().findLayer(lid)
+            node = self._project.instance().layerTreeRoot().findLayer(lid)
             if node:
                 node.setItemVisibilityChecked(not show_earthworks)
         for lid in self._earthworks_layer_ids:
-            node = QgsProject.instance().layerTreeRoot().findLayer(lid)
+            node = self._project.instance().layerTreeRoot().findLayer(lid)
             if node:
                 node.setItemVisibilityChecked(show_earthworks)
         self.canvas.refresh()
@@ -1836,7 +1836,7 @@ class TerrainFlowAssessment:
             lyr = getattr(self, attr, None)
             if lyr:
                 try:
-                    QgsProject.instance().removeMapLayer(lyr)
+                    self._project.instance().removeMapLayer(lyr)
                 except Exception:
                     pass
             setattr(self, attr, None)
@@ -1867,7 +1867,7 @@ class TerrainFlowAssessment:
                 renderer = QgsSingleBandPseudoColorRenderer(
                     outline_layer.dataProvider(), 1, shader)
                 outline_layer.setRenderer(renderer)
-                QgsProject.instance().addMapLayer(outline_layer)
+                self._project.instance().addMapLayer(outline_layer)
                 self._sim_ponding_outline_layer = outline_layer
         except Exception:
             pass
@@ -1914,7 +1914,7 @@ class TerrainFlowAssessment:
         # Remove old frame layer and add fresh one
         if self._sim_ponding_frame_layer:
             try:
-                QgsProject.instance().removeMapLayer(self._sim_ponding_frame_layer)
+                self._project.instance().removeMapLayer(self._sim_ponding_frame_layer)
             except Exception:
                 pass
             self._sim_ponding_frame_layer = None
@@ -1922,18 +1922,17 @@ class TerrainFlowAssessment:
         layer = QgsRasterLayer(frame_path, "Ponding Fill")
         if layer.isValid():
             self._apply_ponding_ramp(layer)
-            QgsProject.instance().addMapLayer(layer)
+            self._project.instance().addMapLayer(layer)
             self._sim_ponding_frame_layer = layer
 
     def _create_sim_fill_layer(self, result):
         """Create the live earthwork fill-status point layer."""
         from qgis.core import QgsVectorLayer, QgsField, QgsMarkerSymbol
-        from qgis.PyQt.QtCore import QVariant
 
         # Remove any previous fill layer
         if self._sim_fill_layer:
             try:
-                QgsProject.instance().removeMapLayer(self._sim_fill_layer)
+                self._project.instance().removeMapLayer(self._sim_fill_layer)
             except Exception:
                 pass
             self._sim_fill_layer = None
@@ -1945,9 +1944,9 @@ class TerrainFlowAssessment:
         layer = QgsVectorLayer(f"Point?crs={crs_str}", "Earthwork Fill Status", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("name",      QVariant.String),
-            QgsField("fill_pct",  QVariant.Double),
-            QgsField("overflowed", QVariant.Int),
+            QgsField("name",      QMetaType.QString),
+            QgsField("fill_pct",  QMetaType.Double),
+            QgsField("overflowed", QMetaType.Int),
         ])
         layer.updateFields()
 
@@ -2006,7 +2005,7 @@ class TerrainFlowAssessment:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
 
-        QgsProject.instance().addMapLayer(layer)
+        self._project.instance().addMapLayer(layer)
         self._sim_fill_layer = layer
 
     def _show_sim_frame(self, idx):
@@ -2021,9 +2020,9 @@ class TerrainFlowAssessment:
         # --- Raster frame ---
         path = frame.get("inc" if mode == "inc" else "cum")
         if path and os.path.exists(path):
-            existing = QgsProject.instance().mapLayersByName("Simulation Frame")
+            existing = self._project.instance().mapLayersByName("Simulation Frame")
             for lyr in existing:
-                QgsProject.instance().removeMapLayer(lyr)
+                self._project.instance().removeMapLayer(lyr)
             layer = QgsRasterLayer(path, "Simulation Frame")
             if layer.isValid():
                 global_max = (
@@ -2032,7 +2031,7 @@ class TerrainFlowAssessment:
                     else getattr(self, "_sim_global_max_cum", None)
                 )
                 self._apply_stream_ramp(layer, global_max)
-                QgsProject.instance().addMapLayer(layer)
+                self._project.instance().addMapLayer(layer)
 
         # --- Time label + overflow annotation ---
         time_labels = self._sim_result.get("time_labels", [])
@@ -2049,7 +2048,7 @@ class TerrainFlowAssessment:
         # --- Update fill-status layer ---
         fill_layer = getattr(self, "_sim_fill_layer", None)
         centroids = getattr(self, "_sim_ew_centroids", {})
-        if fill_layer and QgsProject.instance().mapLayer(fill_layer.id()) and centroids:
+        if fill_layer and self._project.instance().mapLayer(fill_layer.id()) and centroids:
             pr = fill_layer.dataProvider()
             pr.truncate()
             feats = []
