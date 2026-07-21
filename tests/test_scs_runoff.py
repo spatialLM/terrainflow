@@ -1,13 +1,11 @@
 """Tests for plugin/processing/scs_runoff.py"""
 import csv
-import os
 
 import numpy as np
 import pytest
 from rasterio.transform import from_bounds
 
-from plugin.processing.scs_runoff import SCSRunoff
-
+from terrainflow_assessment.modules.catchment import SCSRunoff
 
 # ---------------------------------------------------------------------------
 # adjust_cn

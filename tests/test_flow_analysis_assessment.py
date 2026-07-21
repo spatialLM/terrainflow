@@ -6,15 +6,13 @@ Covers FlowAnalysis (all public methods + private helpers) and AnalysisWorker
 a real Qt event loop because the conftest stubs out QThread).
 """
 import os
-from unittest.mock import patch, MagicMock
 
 import geopandas as gpd
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_bounds
-from shapely.geometry import Polygon, mapping
-
+from shapely.geometry import Polygon
 
 # ---------------------------------------------------------------------------
 # Raster + boundary fixtures
@@ -333,6 +331,7 @@ class TestBoundaryExitPoints:
     def test_no_polygon_boundary_returns_empty(self, sloped_dem, tmp_path):
         """Boundary file with only a linestring (no exterior) → empty."""
         from shapely.geometry import LineString
+
         from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
 
         line_gdf = gpd.GeoDataFrame(

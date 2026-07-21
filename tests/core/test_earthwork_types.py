@@ -3,8 +3,8 @@ import pytest
 
 from terrainflow_assessment.core.registry.earthwork_types import (
     EarthworkTypeConfig,
-    get_type,
     all_types,
+    get_type,
     register_type,
 )
 

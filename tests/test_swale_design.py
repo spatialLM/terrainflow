@@ -1,6 +1,7 @@
 """Tests for terrainflow_assessment/modules/swale_design.py"""
 import pytest
 
+from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.modules.swale_design import (
     INFILTRATION_RATE_MM_HR,
     SOIL_REFERENCE,
@@ -9,8 +10,6 @@ from terrainflow_assessment.modules.swale_design import (
     recommend_swale_length,
     snap_point_to_contour_elevation,
 )
-from plugin.processing.scs_runoff import SCSRunoff
-
 
 # ---------------------------------------------------------------------------
 # SOIL_REFERENCE

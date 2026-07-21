@@ -7,32 +7,32 @@ import pytest
 
 class TestPluginFlowAnalysisInit:
     def test_init_grid_none(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         assert fa.grid is None
 
     def test_init_dem_none(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         assert fa.dem is None
 
     def test_init_fdir_none(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         assert fa.fdir is None
 
     def test_init_acc_none(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         assert fa.acc is None
 
     def test_init_routing(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         assert fa.routing == "dinf"
 
     def test_run_raises_without_dem(self):
-        from plugin.processing.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         with pytest.raises(RuntimeError, match="DEM not loaded"):
             fa.run()

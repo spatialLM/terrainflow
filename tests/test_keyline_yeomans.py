@@ -20,7 +20,6 @@ from terrainflow_assessment.modules.keypoint_analysis import (
     YeomansKeylineAnalysis,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ numpy>=1.26,<3             # numpy 2.x OK; QGIS 3.22 ships 1.x but tests run out
 shapely==2.1.2
 pysheds==0.5
 scipy>=1.7,<2
+geopandas>=0.14           # used by several tests for vector fixtures/assertions
 
 # Linting / formatting
 ruff>=0.4.0

@@ -4,7 +4,6 @@ import os
 import numpy as np
 import pytest
 import rasterio
-from rasterio.transform import from_bounds
 from shapely.geometry import box
 
 from terrainflow_assessment.modules.dem_loader import (
@@ -14,7 +13,6 @@ from terrainflow_assessment.modules.dem_loader import (
     compute_slope_raster,
     load_dem,
 )
-
 
 # ---------------------------------------------------------------------------
 # load_dem

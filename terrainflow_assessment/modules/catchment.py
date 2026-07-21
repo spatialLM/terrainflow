@@ -385,6 +385,10 @@ class SCSRunoff:
         Returns list of (time_min: int, cum_rainfall_mm: float).
         """
         import csv
+        import os
+
+        if not os.path.exists(path):
+            raise ValueError(f"Cannot open hyetograph CSV: {path}")
 
         rows = []
         with open(path, newline="", encoding="utf-8-sig") as f:

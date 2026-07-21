@@ -3,6 +3,7 @@ Conftest for tests/core/ — enforces that no QGIS modules are imported.
 These tests must run on plain pytest with no QGIS runtime.
 """
 import sys
+
 import pytest
 
 

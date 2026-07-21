@@ -6,17 +6,13 @@ Targeted tests for remaining coverage gaps:
   - earthwork_design line 93 (Earthwork.summary swale/basin branch)
   - earthwork_design lines 362-367 (companion berm edge cases)
 """
-import json
-import os
 
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_bounds
-from shapely.geometry import LineString, mapping
 
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,7 +107,7 @@ class TestGetPondingLayer:
 class TestPluginGetPondingLayer:
     @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_returns_array(self, tmp_path):
-        from plugin.processing.dem_burner import DEMBurner
+        from terrainflow_assessment.modules.earthwork_design import DEMBurner
 
         data = np.full((20, 20), 50.0, dtype="float32")
         path = _write_dem(str(tmp_path / "flat.tif"), data)
@@ -219,6 +215,7 @@ class TestBuildStoresFromEarthworks:
     def test_invalid_geom_json_still_builds_store(self):
         """Bad geometry JSON falls back to area=100 but still creates the store."""
         from unittest.mock import MagicMock
+
         from terrainflow_assessment.modules.earthwork_design import Earthwork
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
 
@@ -261,6 +258,7 @@ class TestSamplePeakInflow:
 
     def test_invalid_geometry_returns_zero(self, tmp_path):
         from unittest.mock import MagicMock
+
         from terrainflow_assessment.modules.swale_design import sample_peak_inflow
 
         acc = self._acc_raster(tmp_path)
@@ -335,10 +333,9 @@ class TestSimulationRunIntegration:
 
     def _make_fdir(self, dem_path, output_path):
         """Run pysheds to produce a real flow-direction raster."""
-        from pysheds.grid import Grid
-        import rasterio
-        from rasterio.transform import from_bounds
         import numpy as np
+        import rasterio
+        from pysheds.grid import Grid
 
         grid = Grid.from_raster(dem_path)
         dem = grid.read_raster(dem_path)
@@ -362,10 +359,11 @@ class TestSimulationRunIntegration:
 
     @_PYSHEDS_NUMPY2_COMPAT
     def test_run_simulation_basic(self, tmp_path):
-        from terrainflow_assessment.modules.simulation import _run_simulation
         import numpy as np
         import rasterio
         from rasterio.transform import from_bounds
+
+        from terrainflow_assessment.modules.simulation import _run_simulation
 
         # 12×12 sloped DEM
         data = np.fromfunction(
@@ -403,13 +401,14 @@ class TestSimulationRunIntegration:
     @_PYSHEDS_NUMPY2_COMPAT
     def test_run_simulation_with_stores(self, tmp_path):
         """Run simulation with EarthworkStores to exercise cascade loop."""
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_bounds
+
         from terrainflow_assessment.modules.simulation import (
             EarthworkStore,
             _run_simulation,
         )
-        import numpy as np
-        import rasterio
-        from rasterio.transform import from_bounds
 
         data = np.fromfunction(
             lambda r, c: 100.0 - r * 5.0, (12, 12), dtype=float

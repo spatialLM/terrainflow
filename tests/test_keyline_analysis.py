@@ -5,7 +5,6 @@ import pytest
 import rasterio
 from rasterio.transform import from_bounds
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -55,7 +54,7 @@ def _make_pair(tmp_path, cell_size=5.0):
 
 
 def _load_plugin(tmp_path):
-    from plugin.processing.keyline_analysis import KeylineAnalysis
+    from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
     dem_path, acc_path = _make_pair(tmp_path)
     return KeylineAnalysis(dem_path, acc_path), dem_path, acc_path
 
@@ -90,7 +89,7 @@ class TestKeylineAnalysisInit:
         acc = _make_accumulation()
         dem_path = _write_raster(str(tmp_path / "dem_nd.tif"), dem, cell_size=5.0)
         acc_path = _write_raster(str(tmp_path / "acc_nd.tif"), acc, cell_size=5.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         assert np.isnan(kl.dem[0, 0])
 
@@ -152,7 +151,7 @@ class TestComputeSlopeDeg:
         acc = np.ones((10, 10), dtype="float32")
         dem_path = _write_raster(str(tmp_path / "flat.tif"), dem, cell_size=1.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=1.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         slope = kl._compute_slope_deg()
         assert slope.max() < 1.0
@@ -222,7 +221,7 @@ class TestFindKeypoints:
         acc = np.ones((30, 30), dtype="float32") * 5.0  # all low acc
         dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         assert kl.find_keypoints(min_acc_cells=10_000) == []
 
@@ -267,7 +266,7 @@ class TestFindRidgelines:
         acc[:, -1] = 1.0
         dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=5.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=5.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         result = kl.find_ridgelines(min_tpi_m=3.0, min_length_m=1.0)
         for r in result:
@@ -279,7 +278,7 @@ class TestFindRidgelines:
         acc = np.ones((20, 20), dtype="float32")
         dem_path = _write_raster(str(tmp_path / "flat.tif"), dem)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         result = kl.find_ridgelines()
         assert result == []
@@ -302,7 +301,7 @@ class TestValleyCrossWidth:
         acc = np.ones((30, 30), dtype="float32")
         dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=1.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=1.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         width = kl._valley_cross_width(15, 15, fill_elev=51.0)
         assert width >= 0.0
@@ -313,7 +312,7 @@ class TestValleyCrossWidth:
         acc = np.ones((10, 450), dtype="float32")
         dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=1.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=1.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         # col=200: first iteration dc=-200 gives nc=0 (valid), scan proceeds
         width = kl._valley_cross_width(5, 200, fill_elev=51.0)
@@ -325,7 +324,7 @@ class TestValleyCrossWidth:
         acc = np.ones((30, 30), dtype="float32")
         dem_path = _write_raster(str(tmp_path / "dem.tif"), dem, cell_size=1.0)
         acc_path = _write_raster(str(tmp_path / "acc.tif"), acc, cell_size=1.0)
-        from plugin.processing.keyline_analysis import KeylineAnalysis
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         width = kl._valley_cross_width(15, 15, fill_elev=50.0)
         assert width == pytest.approx(0.0)
@@ -749,7 +748,6 @@ class TestAssessmentKeypointBranches:
 
     def test_cultivation_dedup_across_keypoints(self, tmp_path):
         """get_cultivation_elevations line 395: duplicate elev skipped via set."""
-        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl, _, _ = _load_assessment(tmp_path)
         # Two keypoints at the same elevation produce overlapping cultivation
         # lines — the 'seen_elevs' set drops duplicates.

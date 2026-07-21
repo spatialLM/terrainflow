@@ -1,15 +1,12 @@
 """Tests for plugin/processing/dem_burner.py"""
-import json
 
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_bounds
-from shapely.geometry import LineString, box, mapping
 
-from plugin.processing.dem_burner import DEMBurner
+from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,6 +34,10 @@ def _mock_ew(ew_type, geom, **kwargs):
     ew.enabled = True
     ew.depth = kwargs.get("depth", 0.5)
     ew.width = kwargs.get("width", 2.0)
+    # DEMBurner uses the active Earthwork interface (top_width_m + buffer_radius_m),
+    # not the legacy `.width`; provide them so shapely buffering gets real numbers.
+    ew.top_width_m = kwargs.get("width", 2.0)
+    ew.buffer_radius_m = kwargs.get("width", 2.0) / 2.0
     ew.companion_berm = kwargs.get("companion_berm", False)
     ew.crest_elevation = kwargs.get("crest_elevation", None)
     ew.gradient_pct = kwargs.get("gradient_pct", 1.0)

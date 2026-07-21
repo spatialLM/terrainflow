@@ -19,7 +19,6 @@ from terrainflow_assessment.modules.catchment import (
     fast_contributing_area,
 )
 
-
 # ---------------------------------------------------------------------------
 # SCSRunoff — assessment package version
 # ---------------------------------------------------------------------------

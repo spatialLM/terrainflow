@@ -1,7 +1,7 @@
 """Tests for plugin/processing/earthwork.py"""
 import pytest
 
-from plugin.processing.earthwork import (
+from terrainflow_assessment.modules.earthwork_design import (
     Earthwork,
     EarthworkManager,
     berm_height_estimate,
@@ -10,7 +10,6 @@ from plugin.processing.earthwork import (
     calculate_spillway_width,
 )
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
-
 
 # ---------------------------------------------------------------------------
 # Earthwork data class
@@ -174,15 +173,15 @@ class TestCalculateCapacity:
         assert vol_l == pytest.approx(vol_m3 * 1000, rel=1e-6)
 
     def test_swale_known_value(self):
+        # `width` is the declared TOP width (top_width = 2.0)
         # depth=0.5, width=2.0, length=100
         # bottom_width = max(0.1, 2.0 - 2*0.5) = 1.0
-        # top_width = 2.0 + 2*0.5 = 3.0
-        # cross_section = (1.0+3.0)/2 * 0.5 = 1.0
-        # volume = 1.0 * 100 * 0.8 = 80.0 m³
+        # cross_section = (1.0+2.0)/2 * 0.5 = 0.75
+        # volume = 0.75 * 100 * 0.8 = 60.0 m³
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
         vol, _ = calculate_capacity("swale", geom, depth=0.5, width=2.0)
-        assert vol == pytest.approx(80.0, rel=1e-3)
+        assert vol == pytest.approx(60.0, rel=1e-3)
 
     def test_swale_with_companion_berm_larger(self):
         geom = make_mock_line_geom()
@@ -347,10 +346,10 @@ class TestBermHeightEstimate:
         assert h == round(h, 2)
 
     def test_consistent_with_capacity_formula(self):
-        # berm_height = sqrt(cross_section * 0.75)
+        # berm_height = sqrt(cross_section * 0.75); `width` is the declared TOP width
         depth, width = 0.5, 2.0
-        bottom_width = max(0.1, width - 2 * depth)
-        top_width = width + 2 * depth
+        top_width = width
+        bottom_width = max(0.1, top_width - 2 * depth)
         cs = ((bottom_width + top_width) / 2) * depth
         expected = round((cs * 0.75) ** 0.5, 2)
         assert berm_height_estimate(depth, width) == pytest.approx(expected)

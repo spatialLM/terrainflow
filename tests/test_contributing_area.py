@@ -1,5 +1,4 @@
 """Tests for plugin/processing/contributing_area.py"""
-import os
 
 import geopandas as gpd
 import numpy as np
@@ -8,8 +7,7 @@ import rasterio
 from rasterio.transform import from_bounds
 from shapely.geometry import box
 
-from plugin.processing.contributing_area import fast_contributing_area
-
+from terrainflow_assessment.modules.catchment import fast_contributing_area
 
 # ---------------------------------------------------------------------------
 # Helpers

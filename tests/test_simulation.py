@@ -16,7 +16,6 @@ from terrainflow_assessment.modules.simulation import (
     cascade_overflow,
 )
 
-
 # ---------------------------------------------------------------------------
 # EarthworkStore
 # ---------------------------------------------------------------------------
@@ -551,6 +550,7 @@ class TestBuildStoresFromEarthworks:
     def test_bad_geometry_falls_back_to_100(self):
         """asJson raising triggers except → area_m2 = 100.0 fallback."""
         from unittest.mock import MagicMock
+
         from terrainflow_assessment.modules.earthwork_design import Earthwork
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
         g = MagicMock()

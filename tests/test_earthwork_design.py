@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_bounds
-from shapely.geometry import LineString, box, mapping
 
 from terrainflow_assessment.modules.earthwork_design import (
     DEMBurner,
@@ -19,7 +18,6 @@ from terrainflow_assessment.modules.earthwork_design import (
     calculate_spillway_width,
 )
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
-
 
 # ---------------------------------------------------------------------------
 # Earthwork data class (assessment version)
@@ -704,11 +702,12 @@ class TestSwaleWidthSplit:
 
     def test_swale_burn_footprint_matches_declared_top_width(self, tmp_path):
         """Phase 1 correctness: a 2m-wide swale burns a 2m-wide footprint."""
+        import json
+        from unittest.mock import MagicMock
+
         import rasterio
         from rasterio.transform import from_bounds
         from shapely.geometry import LineString, mapping
-        import json
-        from unittest.mock import MagicMock
 
         declared_width = 2.0
 

@@ -14,7 +14,6 @@ from terrainflow_assessment.modules.reporting import (
     export_html,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -237,6 +236,7 @@ class TestFigToBase64:
 
     def test_result_is_valid_base64(self):
         import base64
+
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt

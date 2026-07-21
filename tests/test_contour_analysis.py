@@ -8,12 +8,11 @@ from shapely.geometry import LineString, box
 from terrainflow_assessment.modules.contour_analysis import (
     ContourFeature,
     _extract_contours_scipy,
+    analyse_contours,
+    clip_to_usable_area,
     filter_by_slope,
     rank_by_flow_crossing,
-    clip_to_usable_area,
-    analyse_contours,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -377,8 +376,10 @@ class TestExtractContoursWithMockedGdal:
     def test_subprocess_success_path(self, tmp_path, monkeypatch):
         """When gdal_contour exits 0, the gpkg is read and parsed."""
         import subprocess
-        from shapely.geometry import LineString
+
         import geopandas as gpd
+        from shapely.geometry import LineString
+
         from terrainflow_assessment.modules import contour_analysis as ca
 
         dem_path = _make_dem(tmp_path)
@@ -408,6 +409,7 @@ class TestExtractContoursWithMockedGdal:
     def test_subprocess_nonzero_returncode(self, tmp_path, monkeypatch):
         """gdal_contour returning non-zero → RuntimeError."""
         import subprocess
+
         from terrainflow_assessment.modules import contour_analysis as ca
 
         dem_path = _make_dem(tmp_path)
@@ -425,6 +427,7 @@ class TestExtractContoursWithMockedGdal:
     def test_subprocess_success_but_bad_output(self, tmp_path, monkeypatch):
         """gdal_contour reports success but output gpkg isn't readable."""
         import subprocess
+
         from terrainflow_assessment.modules import contour_analysis as ca
 
         dem_path = _make_dem(tmp_path)
@@ -443,8 +446,10 @@ class TestExtractContoursWithMockedGdal:
     def test_subprocess_success_skips_empty_geoms(self, tmp_path, monkeypatch):
         """Empty/None geometries are skipped; ELEV missing → 0.0."""
         import subprocess
-        from shapely.geometry import LineString
+
         import geopandas as gpd
+        from shapely.geometry import LineString
+
         from terrainflow_assessment.modules import contour_analysis as ca
 
         dem_path = _make_dem(tmp_path)
@@ -474,6 +479,7 @@ class TestClipToUsableAreaBranches:
     def test_multilinestring_keeps_longest_segment(self):
         """Polygon with a hole forces intersection to be MultiLineString."""
         from shapely.geometry import Polygon
+
         from terrainflow_assessment.modules.contour_analysis import clip_to_usable_area
 
         # Ring polygon: outer 100×100, hole 40×40 in the middle
