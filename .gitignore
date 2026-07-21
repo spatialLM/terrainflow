@@ -19,3 +19,14 @@ Thumbs.db
 # Nested-plugin guard (should never exist)
 terrainflow_assessment/terrainflow_assessment/
 plugin/plugin/
+
+# Stray shapefiles saved to the repo ROOT (QGIS scratch layers) — root-anchored
+# so real shapefiles under data/ etc. are still tracked.
+/*.shp
+/*.shx
+/*.dbf
+/*.prj
+/*.cpg
+/*.qpj
+/*.sbn
+/*.sbx
