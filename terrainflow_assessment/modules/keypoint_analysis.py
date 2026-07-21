@@ -16,7 +16,7 @@ import warnings
 
 import numpy as np
 import rasterio
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString
 
 
 class DrainageLineAnalysis:
@@ -211,7 +211,8 @@ class DrainageLineAnalysis:
 
         Returns list of dicts: {geometry (LineString), length_m, mean_elevation, label}
         """
-        from scipy.ndimage import uniform_filter, label as nd_label, binary_erosion
+        from scipy.ndimage import binary_erosion, uniform_filter
+        from scipy.ndimage import label as nd_label
 
         dem_safe = np.where(np.isnan(self.dem), float(np.nanmean(self.dem)), self.dem)
 
@@ -275,7 +276,7 @@ class DrainageLineAnalysis:
                 "label": f"Ridge — {geom.length:.0f} m",
             })
 
-        lines.sort(key=lambda l: l["length_m"], reverse=True)
+        lines.sort(key=lambda ln: ln["length_m"], reverse=True)
         return lines[:30]  # cap: keep only the 30 longest segments
 
     # ---------------------------------------------------------------------- pond sites
@@ -661,6 +662,7 @@ class YeomansKeylineAnalysis:
 
         import os
         import tempfile
+
         from pysheds.grid import Grid
 
         if self._fdir_path and self._acc_path:

@@ -25,7 +25,7 @@ from rasterio.features import rasterize
 from shapely.geometry import shape as shapely_shape
 
 from terrainflow_assessment.core.registry.earthwork_types import get_type
-from terrainflow_assessment.qgis.adapters.geom import shapely_length, shapely_area
+from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_length
 
 _log = logging.getLogger(__name__)
 
@@ -491,9 +491,11 @@ class DEMBurner:
         Returns float32 array of ponding depth in metres (0 = no ponding).
         Auto-downsamples large DEMs to stay within memory limits.
         """
+        import os
+        import tempfile
+
         from pysheds.grid import Grid
         from rasterio.transform import Affine
-        import tempfile, os
 
         rows, cols = modified_dem.shape
         n_cells = rows * cols

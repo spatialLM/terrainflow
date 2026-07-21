@@ -7,7 +7,6 @@ can be imported and tested without a live QGIS runtime.
 
 import numpy as np
 import rasterio
-
 from qgis.PyQt.QtCore import QThread, pyqtSignal
 
 
@@ -54,6 +53,7 @@ class AnalysisWorker(QThread):
 
     def _do_analysis(self):
         import os
+
         from terrainflow_assessment.modules.catchment import SCSRunoff
         from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
 

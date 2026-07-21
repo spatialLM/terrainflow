@@ -13,15 +13,13 @@ Usage in plugin.py::
 
 from __future__ import annotations
 
-from typing import Optional
-
 from qgis.core import QgsProject
 
 
 class ProjectAdapter:
     """Wraps QgsProject.instance() with a stable, injectable interface."""
 
-    def __init__(self, project: Optional[QgsProject] = None):
+    def __init__(self, project: QgsProject | None = None):
         # None → always call QgsProject.instance() at method-call time (correct
         # for live QGIS where the project singleton may not exist at __init__).
         self._project = project

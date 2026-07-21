@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAction
-from qgis.PyQt.QtGui import QIcon
 
 from terrainflow_assessment.modules.earthwork_design import EarthworkManager
 from terrainflow_assessment.panel import AssessmentPanel
@@ -18,8 +17,8 @@ from terrainflow_assessment.qgis.controllers._state import PluginState
 from terrainflow_assessment.qgis.controllers.baseline import BaselineController
 from terrainflow_assessment.qgis.controllers.contour import ContourController
 from terrainflow_assessment.qgis.controllers.earthworks import EarthworksController
-from terrainflow_assessment.qgis.controllers.simulation import SimulationController
 from terrainflow_assessment.qgis.controllers.reporting import ReportingController
+from terrainflow_assessment.qgis.controllers.simulation import SimulationController
 
 
 class TerrainFlowAssessmentPlugin:

@@ -1,7 +1,7 @@
-from qgis.PyQt.QtCore import pyqtSignal, Qt
-from qgis.PyQt.QtGui import QCursor
+from qgis.core import QgsFeatureRequest, QgsGeometry, QgsRectangle
 from qgis.gui import QgsMapTool
-from qgis.core import QgsFeatureRequest, QgsRectangle, QgsGeometry
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QCursor
 
 
 class SelectContourTool(QgsMapTool):

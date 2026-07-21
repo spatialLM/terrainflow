@@ -10,17 +10,25 @@ from __future__ import annotations
 import os
 
 from qgis.core import (
-    QgsRasterLayer, QgsVectorLayer, QgsFeature, QgsGeometry,
-    QgsPointXY, QgsField,
-    QgsColorRampShader, QgsRasterShader, QgsSingleBandPseudoColorRenderer,
-    QgsRasterBandStats, QgsMarkerSymbol,
-    QgsPalLayerSettings, QgsVectorLayerSimpleLabeling, QgsTextFormat,
+    QgsColorRampShader,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsMarkerSymbol,
+    QgsPalLayerSettings,
+    QgsPointXY,
+    QgsRasterLayer,
+    QgsRasterShader,
+    QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
+    QgsTextFormat,
+    QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 
-from terrainflow_assessment.modules.dem_loader import load_dem, compute_slope_raster
+from terrainflow_assessment.modules.dem_loader import compute_slope_raster, load_dem
 from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from terrainflow_assessment.modules.reporting import BaselineReport
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
@@ -238,7 +246,6 @@ class BaselineController:
         font.setPointSize(9)
         text_fmt.setFont(font)
 
-        from qgis.core import QgsTextBufferSettings
         buf = QgsTextBufferSettings()
         buf.setEnabled(True)
         buf.setColor(QColor(255, 255, 255))

@@ -10,19 +10,35 @@ AssessmentPanel is a QDockWidget with six collapsible sections:
   6. Report (before/after stats + HTML export)
 """
 
-from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QCheckBox, QLineEdit, QSlider, QProgressBar,
-    QListWidget, QListWidgetItem, QFileDialog, QTableWidget,
-    QTableWidgetItem, QSizePolicy, QFrame, QScrollArea, QTabWidget,
-    QAbstractItemView, QHeaderView,
-)
-from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QFont, QColor
-
 from qgis.core import QgsMapLayerProxyModel
 from qgis.gui import QgsMapLayerComboBox
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDockWidget,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class AssessmentPanel(QDockWidget):

@@ -1,13 +1,21 @@
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
-    QLabel, QPushButton, QDialogButtonBox, QGroupBox
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
 )
-from qgis.PyQt.QtCore import Qt
 
 from .modules.earthwork_design import (
-    calculate_capacity, berm_height_estimate,
-    calculate_diversion_discharge, calculate_spillway_width,
+    berm_height_estimate,
+    calculate_capacity,
+    calculate_diversion_discharge,
+    calculate_spillway_width,
 )
 
 
@@ -358,9 +366,9 @@ class EarthworkPropertiesDialog(QDialog):
         depth = self.spin_depth.value()
         width = self.spin_width.value()
         companion = self.chk_companion.isChecked() if self.ew_type == "swale" else False
-        m3, l = calculate_capacity(self.ew_type, self.geometry, depth, width, companion)
+        m3, litres = calculate_capacity(self.ew_type, self.geometry, depth, width, companion)
         self.lbl_capacity_m3.setText(f"{m3:,.2f}")
-        self.lbl_capacity_l.setText(f"{l:,.0f}")
+        self.lbl_capacity_l.setText(f"{litres:,.0f}")
 
         if self.lbl_berm_height is not None:
             if companion:
@@ -428,7 +436,7 @@ class EarthworkPropertiesDialog(QDialog):
         """
         try:
             import json
-            import numpy as np
+
             import rasterio
             from shapely.geometry import shape as shapely_shape
 

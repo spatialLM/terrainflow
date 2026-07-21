@@ -5,8 +5,8 @@ Reads a GeoTIFF DEM and exposes cell size, CRS, extent, and a path suitable
 for passing into other analysis modules.
 """
 
-import rasterio
 import numpy as np
+import rasterio
 
 
 class DEMValidationError(ValueError):
@@ -145,7 +145,6 @@ def compute_slope_raster(dem_path, output_path):
     -------
     str — output_path
     """
-    import scipy.ndimage as ndi
 
     with rasterio.open(dem_path) as src:
         dem = src.read(1).astype("float32")

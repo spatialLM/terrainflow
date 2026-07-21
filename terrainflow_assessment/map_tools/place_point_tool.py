@@ -1,6 +1,6 @@
-from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.gui import QgsMapTool
 from qgis.core import QgsPointXY
+from qgis.gui import QgsMapTool
+from qgis.PyQt.QtCore import Qt, pyqtSignal
 
 
 class PlacePointTool(QgsMapTool):

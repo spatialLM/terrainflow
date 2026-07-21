@@ -10,29 +10,39 @@ from __future__ import annotations
 import os
 
 from qgis.core import (
-    QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY, QgsField,
-    QgsPalLayerSettings, QgsVectorLayerSimpleLabeling, QgsTextFormat,
-    QgsRasterLayer, QgsSingleSymbolRenderer,
-    QgsColorRampShader, QgsRasterShader, QgsSingleBandPseudoColorRenderer,
-    QgsMarkerSymbol, QgsSymbolLayer, QgsProperty,
+    QgsColorRampShader,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsMarkerSymbol,
+    QgsPalLayerSettings,
+    QgsProperty,
+    QgsRasterLayer,
+    QgsRasterShader,
+    QgsSingleBandPseudoColorRenderer,
+    QgsSingleSymbolRenderer,
+    QgsSymbolLayer,
+    QgsTextFormat,
+    QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 
-from terrainflow_assessment.modules.earthwork_design import (
-    Earthwork, calculate_capacity,
-)
-from terrainflow_assessment.modules.swale_design import (
-    sample_peak_inflow, contour_to_swale_geometry,
-)
-from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
+from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
 from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
 from terrainflow_assessment.map_tools.draw_polygon_tool import DrawPolygonTool
-from terrainflow_assessment.map_tools.place_point_tool import PlacePointTool
 from terrainflow_assessment.map_tools.ponding_query_tool import PondingQueryTool
 from terrainflow_assessment.map_tools.select_contour_tool import SelectContourTool
-from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
-
+from terrainflow_assessment.modules.earthwork_design import (
+    Earthwork,
+    calculate_capacity,
+)
+from terrainflow_assessment.modules.swale_design import (
+    contour_to_swale_geometry,
+    sample_peak_inflow,
+)
+from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 # Per-type styles: (geometry_type, display_name, colour, fill or None, line width)
 _EW_STYLES = {
@@ -111,6 +121,7 @@ class EarthworksController:
 
     def on_usable_area_source_changed(self, source):
         import json
+
         from shapely.geometry import shape as shapely_shape
         from shapely.ops import unary_union
 
@@ -166,7 +177,9 @@ class EarthworksController:
         crest_elev = None
         if ew_type == "dam" and self._state.dem_path:
             try:
-                import json, rasterio
+                import json
+
+                import rasterio
                 from shapely.geometry import shape as shapely_shape
                 shp = shapely_shape(json.loads(geometry.asJson()))
                 centroid = shp.centroid
@@ -259,9 +272,8 @@ class EarthworksController:
     # ---------------------------------------------------------------- Earthwork layers
 
     def _ensure_ew_layers(self):
-        from qgis.core import QgsLineSymbol, QgsFillSymbol
+        from qgis.core import QgsFillSymbol, QgsLineSymbol, QgsTextBufferSettings
         from qgis.PyQt.QtGui import QFont
-        from qgis.core import QgsTextBufferSettings
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
         root = self._project.instance().layerTreeRoot()
@@ -419,8 +431,7 @@ class EarthworksController:
 
     def _on_ponding_selected(self, volume_m3, volume_l, cell_count, area_m2,
                               outline_geom, inflow_m3, fill_fraction):
-        from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
-        from qgis.PyQt.QtGui import QFont
+        from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
         dlg = QDialog(self._iface.mainWindow())
         dlg.setWindowTitle("Depression / Ponding Results")
@@ -539,7 +550,6 @@ class EarthworksController:
         try:
             import processing
             import rasterio
-            import numpy as np
 
             result = processing.run("gdal:aspect", {
                 "INPUT": self._state.dem_path,

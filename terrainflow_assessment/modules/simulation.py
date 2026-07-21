@@ -15,10 +15,10 @@ SimulationWorker      — QThread worker
 run_simulation()      — standalone function (for testing / non-GUI use)
 """
 
-import os
 import logging
-from dataclasses import dataclass, field
-from typing import List, Optional
+import os
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import rasterio
@@ -86,7 +86,7 @@ def _find_downslope_store(store, all_stores):
     return max(candidates, key=lambda s: s.elevation)
 
 
-def cascade_overflow(stores: List[EarthworkStore], time_hr: float,
+def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
                      dt_hr: float) -> float:
     """
     Process one simulation timestep for all earthwork stores.
@@ -148,8 +148,9 @@ def cascade_overflow(stores: List[EarthworkStore], time_hr: float,
 
 # SimulationWorker has moved to terrainflow_assessment.qgis.workers.simulation_worker.
 # This re-export keeps existing imports working without changes.
-from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker  # noqa: F401, E402
-
+from terrainflow_assessment.qgis.workers.simulation_worker import (  # noqa: E402
+    SimulationWorker,  # noqa: F401
+)
 
 # ---------------------------------------------------------------------------
 # Core simulation logic
@@ -165,6 +166,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     Can also be called directly (without QThread) for testing.
     """
     from pysheds.grid import Grid
+
     from .catchment import SCSRunoff
 
     def _p(pct, msg):
@@ -443,9 +445,11 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
     list of EarthworkStore
     """
     import json
+
     from shapely.geometry import shape as shapely_shape
-    from .swale_design import get_infiltration_rate
+
     from .earthwork_design import calculate_cut_volume, calculate_fill_volume
+    from .swale_design import get_infiltration_rate
 
     infil_rate = get_infiltration_rate(soil_name)
     stores = []

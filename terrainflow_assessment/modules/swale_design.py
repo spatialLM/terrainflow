@@ -10,7 +10,6 @@ Provides:
 
 from .catchment import SCSRunoff
 
-
 # ---------------------------------------------------------------------------
 # Soil reference (shared with SCS runoff model)
 # ---------------------------------------------------------------------------
@@ -106,8 +105,8 @@ def snap_point_to_contour_elevation(point_xy, dem_path):
     -------
     float — elevation in metres, or None if outside the raster extent.
     """
-    import rasterio
     import numpy as np
+    import rasterio
 
     x, y = point_xy
     try:
@@ -139,8 +138,10 @@ def sample_peak_inflow(qgs_geom, acc_path, n_samples=30):
     -------
     float — peak accumulation cell count crossing this geometry.
     """
-    import rasterio, json
+    import json
+
     import numpy as np
+    import rasterio
     from shapely.geometry import shape as shapely_shape
 
     try:

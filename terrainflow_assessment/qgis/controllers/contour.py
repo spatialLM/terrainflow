@@ -10,10 +10,18 @@ from __future__ import annotations
 import os
 
 from qgis.core import (
-    QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY, QgsField,
-    QgsPalLayerSettings, QgsVectorLayerSimpleLabeling, QgsTextFormat,
-    QgsMarkerSymbol, QgsSingleSymbolRenderer,
-    QgsSymbolLayer, QgsProperty,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsMarkerSymbol,
+    QgsPalLayerSettings,
+    QgsPointXY,
+    QgsProperty,
+    QgsSingleSymbolRenderer,
+    QgsSymbolLayer,
+    QgsTextFormat,
+    QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
@@ -214,8 +222,7 @@ class ContourController:
             )
 
     def _display_swale_segments(self, segments):
-        from qgis.core import QgsLineSymbol
-        from qgis.core import QgsTextBufferSettings
+        from qgis.core import QgsLineSymbol, QgsTextBufferSettings
         from qgis.PyQt.QtGui import QFont
 
         if not segments:
@@ -352,8 +359,6 @@ class ContourController:
     # ---------------------------------------------------------------- Keypoint analysis
 
     def _get_keypoint_boundary_mask(self, dem_path):
-        import json
-        import numpy as np
         import rasterio
         from rasterio.features import rasterize as _rasterize
 

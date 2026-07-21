@@ -10,6 +10,7 @@ Provides:
 """
 
 import logging
+
 import numpy as np
 
 _log = logging.getLogger(__name__)
@@ -83,8 +84,9 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
     -------
     list of ContourFeature (geometry in DEM CRS, elevation from GDAL output)
     """
-    import tempfile, os, subprocess
-    import rasterio
+    import subprocess
+    import tempfile
+
     import geopandas as gpd
 
     if output_path is None:
@@ -130,8 +132,7 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
 def _extract_contours_scipy(dem_path, interval_m):
     """Fallback contour extraction using scipy.ndimage (no external GDAL)."""
     import rasterio
-    from rasterio.transform import xy as rasterio_xy
-    from shapely.geometry import LineString, MultiLineString
+    from shapely.geometry import LineString
     from skimage import measure
 
     with rasterio.open(dem_path) as src:
@@ -155,7 +156,7 @@ def _extract_contours_scipy(dem_path, interval_m):
     )
 
     cell_w = abs(transform.a)
-    cell_h = abs(transform.e)
+    abs(transform.e)
     features = []
 
     for elev in levels:
@@ -203,7 +204,6 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
     with ``mean_slope_deg`` populated on each feature.
     """
     import rasterio
-    import scipy.ndimage as ndi
 
     with rasterio.open(dem_path) as src:
         dem = src.read(1).astype("float32")
@@ -339,7 +339,7 @@ def clip_to_usable_area(contours, usable_polygon):
     list of ContourFeature — trimmed, geometry replaced with clipped version.
     Rank order is preserved.
     """
-    from shapely.geometry import MultiLineString, LineString
+    from shapely.geometry import LineString, MultiLineString
 
     clipped = []
     for feat in contours:
@@ -630,7 +630,7 @@ def find_swale_segments(contours, acc_path,
                     else:
                         seg_start = max(0.0, seg_start - shortfall)
 
-                capped = seg_end - seg_start < required_length - 0.5
+                seg_end - seg_start < required_length - 0.5
             else:
                 # Fallback: landscape-walk extent
                 threshold = peak_acc_val * drop_fraction
@@ -643,7 +643,6 @@ def find_swale_segments(contours, acc_path,
                 seg_start = profile[left][0]
                 seg_end = profile[right][0]
                 required_length = seg_end - seg_start
-                capped = False
 
             if seg_end - seg_start < 1.0:
                 continue  # degenerate — skip

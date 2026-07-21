@@ -12,13 +12,16 @@ Right-click or Escape cancels at any phase.
 
 import json
 
-from qgis.PyQt.QtCore import pyqtSignal, Qt
-from qgis.PyQt.QtGui import QCursor, QColor
-from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
 from qgis.core import (
-    QgsFeatureRequest, QgsRectangle, QgsWkbTypes,
-    QgsGeometry, QgsPointXY,
+    QgsFeatureRequest,
+    QgsGeometry,
+    QgsPointXY,
+    QgsRectangle,
+    QgsWkbTypes,
 )
+from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QCursor
 
 
 class ContourSegmentTool(QgsMapTool):
@@ -141,7 +144,7 @@ class ContourSegmentTool(QgsMapTool):
 
         # Convert to shapely — handle multi-geometry by taking longest part
         try:
-            from shapely.geometry import shape as _shape, MultiLineString
+            from shapely.geometry import shape as _shape
             shp = _shape(json.loads(geom.asJson()))
             if shp.geom_type == "MultiLineString":
                 shp = max(shp.geoms, key=lambda g: g.length)

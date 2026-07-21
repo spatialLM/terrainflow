@@ -13,7 +13,7 @@ import base64
 import io
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import Optional
 
 _log = logging.getLogger(__name__)
 
@@ -38,9 +38,9 @@ class BaselineReport:
     exit_volume_m3: float = 0.0          # total volume exiting the site
     peak_outflow_ls: float = 0.0         # peak flow rate at exit (L/s)
     peak_outflow_time_hr: float = 0.0    # time of peak (hr from storm start)
-    exit_points: List[Dict] = field(default_factory=list)
+    exit_points: list[dict] = field(default_factory=list)
     # Timestep series for hydrograph
-    timestep_table: List[Dict] = field(default_factory=list)
+    timestep_table: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -50,9 +50,9 @@ class PostInterventionReport:
     peak_outflow_ls: float = 0.0
     peak_outflow_time_hr: float = 0.0
     total_infiltrated_m3: float = 0.0
-    earthwork_summary: List[Dict] = field(default_factory=list)
-    timestep_table: List[Dict] = field(default_factory=list)
-    exit_points: List[Dict] = field(default_factory=list)
+    earthwork_summary: list[dict] = field(default_factory=list)
+    timestep_table: list[dict] = field(default_factory=list)
+    exit_points: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -183,8 +183,8 @@ def _build_fill_timeline_chart(post: PostInterventionReport):
     try:
         import matplotlib
         matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         import matplotlib.cm as cm
+        import matplotlib.pyplot as plt
     except ImportError:
         return None
 

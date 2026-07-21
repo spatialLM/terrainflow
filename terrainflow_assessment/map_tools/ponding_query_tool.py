@@ -2,14 +2,13 @@ from collections import deque
 
 import numpy as np
 import rasterio
+from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
+from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor
 from rasterio.features import shapes as rasterio_shapes
 from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
-
-from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor
-from qgis.gui import QgsMapTool, QgsRubberBand
-from qgis.core import QgsWkbTypes, QgsGeometry, QgsPointXY
 
 
 class PondingQueryTool(QgsMapTool):

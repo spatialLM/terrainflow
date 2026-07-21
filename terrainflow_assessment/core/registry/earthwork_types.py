@@ -20,7 +20,6 @@ style        : tuple[str, str, str] — (symbol_type, hex_colour, line_width_or_
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 
 @dataclass(frozen=True)
@@ -33,14 +32,14 @@ class EarthworkTypeConfig:
     has_cut: bool
     has_fill: bool
     burn_method: str
-    style: Tuple[str, str, str]  # (symbol_type, hex_colour, line_width)
+    style: tuple[str, str, str]  # (symbol_type, hex_colour, line_width)
 
 
 # ---------------------------------------------------------------------------
 # Built-in types
 # ---------------------------------------------------------------------------
 
-_REGISTRY: Dict[str, EarthworkTypeConfig] = {}
+_REGISTRY: dict[str, EarthworkTypeConfig] = {}
 
 
 def _add(cfg: EarthworkTypeConfig) -> None:
@@ -117,7 +116,7 @@ def get_type(key: str) -> EarthworkTypeConfig:
     return _REGISTRY[key]
 
 
-def all_types() -> Dict[str, EarthworkTypeConfig]:
+def all_types() -> dict[str, EarthworkTypeConfig]:
     """Return a snapshot of the full registry."""
     return dict(_REGISTRY)
 

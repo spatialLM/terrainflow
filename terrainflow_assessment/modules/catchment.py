@@ -13,8 +13,9 @@ import logging
 
 import numpy as np
 import rasterio
+from rasterio.features import rasterize
+from rasterio.features import shapes as rasterio_shapes
 from rasterio.transform import Affine
-from rasterio.features import rasterize, shapes as rasterio_shapes
 from scipy.ndimage import zoom as _zoom
 
 _log = logging.getLogger(__name__)
@@ -56,10 +57,12 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     """
     import os
     import tempfile
+
     import geopandas as gpd
-    from shapely.geometry import shape as shapely_shape, box
-    from shapely.ops import unary_union
     from pysheds.grid import Grid
+    from shapely.geometry import box
+    from shapely.geometry import shape as shapely_shape
+    from shapely.ops import unary_union
 
     def _p(pct, msg):
         if progress_callback:

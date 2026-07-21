@@ -9,16 +9,26 @@ from __future__ import annotations
 
 import os
 
-from qgis.PyQt.QtCore import QTimer, QMetaType
-from qgis.PyQt.QtGui import QColor
 from qgis.core import (
-    QgsRasterLayer, QgsVectorLayer, QgsFeature, QgsGeometry,
-    QgsPointXY, QgsField,
-    QgsColorRampShader, QgsRasterShader, QgsSingleBandPseudoColorRenderer,
-    QgsMarkerSymbol, QgsSingleSymbolRenderer,
-    QgsSymbolLayer, QgsProperty,
-    QgsPalLayerSettings, QgsVectorLayerSimpleLabeling, QgsTextFormat,
+    QgsColorRampShader,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsMarkerSymbol,
+    QgsPalLayerSettings,
+    QgsPointXY,
+    QgsProperty,
+    QgsRasterLayer,
+    QgsRasterShader,
+    QgsSingleBandPseudoColorRenderer,
+    QgsSingleSymbolRenderer,
+    QgsSymbolLayer,
+    QgsTextFormat,
+    QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
+from qgis.PyQt.QtCore import QMetaType, QTimer
+from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.modules.swale_design import SOIL_REFERENCE
@@ -144,6 +154,7 @@ class SimulationController:
         self._state.sim_ew_centroids = {}
         try:
             import json
+
             from shapely.geometry import shape as _shp
             for ew in self._state.earthwork_manager.get_enabled():
                 shp = _shp(json.loads(ew.geometry.asJson()))
@@ -188,11 +199,12 @@ class SimulationController:
     # ---------------------------------------------------------------- Ponding
 
     def _setup_sim_ponding(self):
+        import json
+
         import numpy as np
         import rasterio
-        import json
-        from shapely.geometry import shape as _shp
         from rasterio.features import rasterize as _rasterize
+        from shapely.geometry import shape as _shp
 
         ponding_path = self._state.ponding_raster_path
         if not ponding_path or not os.path.exists(ponding_path):
@@ -382,8 +394,8 @@ class SimulationController:
             QgsSymbolLayer.PropertyStrokeWidth, QgsProperty.fromExpression(outline_width_expr))
         layer.setRenderer(QgsSingleSymbolRenderer(sym))
 
-        from qgis.PyQt.QtGui import QFont
         from qgis.core import QgsTextBufferSettings
+        from qgis.PyQt.QtGui import QFont
         text_fmt = QgsTextFormat()
         font = QFont()
         font.setBold(True)
