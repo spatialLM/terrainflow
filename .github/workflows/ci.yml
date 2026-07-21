@@ -31,17 +31,26 @@ jobs:
         run: python3 -c "import qgis; from qgis.PyQt.QtCore import QThread; print('QGIS import OK')"
 
       - name: Install dev/test dependencies
+        # Use a venv with --system-site-packages: it can see the image's system
+        # `qgis` package, but pip manages test deps in its own writable space —
+        # avoiding the "cannot uninstall a Debian-managed package" wall. Persist
+        # the venv onto PATH so later steps use it (and still see qgis).
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-dev.txt
+          python3 -m venv --system-site-packages /tmp/venv
+          /tmp/venv/bin/python -m pip install -r requirements-dev.txt
+          echo "/tmp/venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=/tmp/venv" >> "$GITHUB_ENV"
+
+      - name: Re-confirm QGIS importable from the venv
+        run: python -c "import qgis; import rasterio, numpy; print('venv sees qgis + deps OK')"
 
       - name: Lint with ruff
-        run: python3 -m ruff check terrainflow_assessment/
+        run: python -m ruff check terrainflow_assessment/
 
       - name: Run tests with coverage
         # fail_under=95 is set in pyproject.toml [tool.coverage.report]; Qt/QGIS UI
         # files are omitted there — only pure-Python modules/ are gated.
-        run: python3 -m pytest tests/ --cov=terrainflow_assessment --cov-report=term-missing
+        run: python -m pytest tests/ --cov=terrainflow_assessment --cov-report=term-missing
 
       - name: Grep-gate — forbidden deprecated APIs
         run: |
