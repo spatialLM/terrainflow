@@ -20,7 +20,6 @@ python_functions = ["test_*"]
 branch = true
 omit = [
     "terrainflow_assessment/__init__.py",      # QGIS classFactory entry point
-    "terrainflow_assessment/plugin.py",        # legacy god-class (re-export shim)
     "terrainflow_assessment/panel.py",         # QDockWidget UI
     "terrainflow_assessment/earthwork_properties_dialog.py",
     "terrainflow_assessment/map_tools/*",      # Qt map-canvas interaction
