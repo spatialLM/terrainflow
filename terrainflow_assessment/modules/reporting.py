@@ -56,6 +56,18 @@ class PostInterventionReport:
 
 
 @dataclass
+class VerificationResult:
+    """Non-circular check: terrain-derived ponding vs analytic capacity (spec §4)."""
+    analytic_total_m3: float = 0.0       # Σ analytic capacity over storage features
+    terrain_total_m3: float = 0.0        # Σ(earthworks ponding − baseline ponding), floored ≥0
+    delta_m3: float = 0.0                # terrain − analytic
+    delta_pct: float = 0.0               # delta as % of analytic (0 when analytic == 0)
+    unattributed_m3: float = 0.0         # terrain ponding not tied to any feature footprint
+    per_feature: list[dict] = field(default_factory=list)  # {name, analytic_m3, terrain_m3|None, delta_pct|None, routing_only}
+    caveats: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ComparisonResult:
     """Computed before/after metrics."""
     captured_pct: float = 0.0           # % of runoff now retained on-site
@@ -67,6 +79,121 @@ class ComparisonResult:
     net_cut_m3: float = 0.0             # total soil excavated
     net_fill_m3: float = 0.0            # total material placed
     net_cut_fill_m3: float = 0.0        # cut - fill (positive = net cut)
+    verification: Optional[VerificationResult] = None  # terrain-vs-analytic (§4)
+
+
+# ---------------------------------------------------------------------------
+# Non-circular verification — terrain-derived ponding vs analytic capacity (§4)
+# ---------------------------------------------------------------------------
+
+def raster_ponding_volume(ponding, cell_area_m2, min_depth=0.001):
+    """Total ponded volume (m³) from a depth raster = Σ depth·cell_area over ponded cells."""
+    import numpy as np
+    arr = np.asarray(ponding, dtype="float64")
+    ponded = np.where(arr >= min_depth, arr, 0.0)
+    return float(ponded.sum() * cell_area_m2)
+
+
+def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001):
+    """Attribute a ponding-difference raster to earthwork footprints, one region each.
+
+    Connected ponded regions (``>= min_depth``) are labelled; each region's volume is
+    attributed **once** to the footprint it overlaps most (so a pool upstream of a dam
+    is captured via the dam's footprint, and adjacent features don't double-count).
+    Regions overlapping no footprint accrue to ``unattributed_m3``.
+
+    Parameters
+    ----------
+    ponding_diff : 2-D array — terrain ponding depth (typically earthworks − baseline)
+    cell_area_m2 : float
+    footprints   : list of (name, bool_mask) — one boolean footprint per feature
+
+    Returns
+    -------
+    (per_name, unattributed_m3) — dict{name: m³}, float
+    """
+    import numpy as np
+    from scipy.ndimage import label
+
+    arr = np.asarray(ponding_diff, dtype="float64")
+    ponded = arr >= min_depth
+    per_name = {name: 0.0 for name, _ in footprints}
+    unattributed = 0.0
+
+    labels, n_regions = label(ponded)
+    for region_id in range(1, n_regions + 1):
+        region = labels == region_id
+        volume = float(arr[region].sum() * cell_area_m2)
+
+        best_name = None
+        best_overlap = 0
+        for name, mask in footprints:
+            overlap = int(np.logical_and(region, mask).sum())
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_name = name
+
+        if best_name is None:
+            unattributed += volume
+        else:
+            per_name[best_name] += volume
+
+    return per_name, unattributed
+
+
+def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
+                       earthworks_total_m3, min_dims, cell_size):
+    """Assemble the terrain-vs-analytic verification (site headline + per-feature).
+
+    Site terrain-derived storage = ``earthworks_total − baseline_total`` (floored ≥0) —
+    isolates the earthwork effect (step-5 before/after integrity). Per feature, a
+    ``min_dimension`` below ``cell_size`` is flagged ``routing_only`` and gets no
+    independent volume claim (spec §4): sub-cell features validate placement/routing
+    only, not storage.
+    """
+    analytic_total = float(sum(analytic_by_name.values()))
+    terrain_total = max(0.0, earthworks_total_m3 - baseline_total_m3)
+    delta_m3 = terrain_total - analytic_total
+    delta_pct = (delta_m3 / analytic_total * 100.0) if analytic_total > 0 else 0.0
+
+    per_feature = []
+    for name, analytic_m3 in analytic_by_name.items():
+        min_dim = min_dims.get(name)
+        routing_only = min_dim is not None and cell_size > 0 and min_dim < cell_size
+        if routing_only:
+            terrain_m3 = None
+            feat_delta_pct = None
+        else:
+            terrain_m3 = float(terrain_by_name.get(name, 0.0))
+            feat_delta_pct = (
+                (terrain_m3 - analytic_m3) / analytic_m3 * 100.0 if analytic_m3 > 0 else None
+            )
+        per_feature.append({
+            "name": name,
+            "analytic_m3": float(analytic_m3),
+            "terrain_m3": terrain_m3,
+            "delta_pct": feat_delta_pct,
+            "routing_only": routing_only,
+        })
+
+    caveats = [
+        "Terrain volume is attributed by connected depression ∩ footprint — the site "
+        "total is robust; per-feature figures are indicative for adjacent features.",
+        "Terrain total includes barrier-impounded storage (e.g. dams) that has no "
+        "analytic counterpart.",
+        "Sub-cell features (narrower than one DEM cell) are validated for placement and "
+        "routing only, not independent storage volume.",
+    ]
+
+    return VerificationResult(
+        analytic_total_m3=analytic_total,
+        terrain_total_m3=terrain_total,
+        delta_m3=delta_m3,
+        delta_pct=delta_pct,
+        unattributed_m3=0.0,
+        per_feature=per_feature,
+        caveats=caveats,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +392,24 @@ def export_html(comparison: ComparisonResult, output_path: str,
                 f'<span style="color:#e74c3c;">Yes — {s["first_overflow_hr"]} hr</span>'
                 if s.get("overflowed") else '<span style="color:#27ae60;">No</span>'
             )
+            # Terrain-vs-analytic cells (§4). Sub-cell features validate routing only.
+            if s.get("routing_only"):
+                terrain_cell = '<span style="color:#7f8c8d;">routing-only</span>'
+                delta_cell = "—"
+            elif s.get("terrain_ponding_m3") is not None:
+                terrain_cell = f"{s['terrain_ponding_m3']:,.1f}"
+                dp = s.get("capacity_delta_pct")
+                delta_cell = f"{dp:+.0f}%" if dp is not None else "—"
+            else:
+                terrain_cell = "—"
+                delta_cell = "—"
             ew_rows += f"""
             <tr>
               <td>{s['name']}</td>
               <td>{s['type'].capitalize()}</td>
               <td>{s['capacity_m3']:,.1f}</td>
+              <td>{terrain_cell}</td>
+              <td>{delta_cell}</td>
               <td>{s.get('total_inflow_m3', 0):,.1f}</td>
               <td>{s['peak_fill_pct']:.0f}%</td>
               <td>{overflow_cell}</td>
@@ -278,6 +418,39 @@ def export_html(comparison: ComparisonResult, output_path: str,
               <td>{s.get('cut_vol_m3', 0):,.1f}</td>
               <td>{s.get('fill_vol_m3', 0):,.1f}</td>
             </tr>"""
+
+    # Build the non-circular verification block (§4)
+    verification_html = ""
+    v = comparison.verification
+    if v is not None:
+        delta_colour = "#1a7a1a" if abs(v.delta_pct) <= 25 else "#cc6600"
+        caveat_items = "".join(f"<li>{c}</li>" for c in v.caveats)
+        unattr_row = (
+            f'<tr><td>Unattributed terrain ponding</td>'
+            f'<td>{v.unattributed_m3:,.1f} m³</td></tr>'
+            if v.unattributed_m3 > 0.05 else ""
+        )
+        verification_html = f"""
+  <h2>4b. Non-circular Verification (terrain vs analytic)</h2>
+  <div class="card">
+    <p>Independent check: storage measured on the <strong>burned</strong> terrain
+    (ponding difference vs baseline) against the analytic sizing. Non-circular because
+    the terrain figure never sees the analytic capacity.</p>
+    <table>
+      <tbody>
+        <tr><td>Analytic capacity (Σ storage features)</td>
+            <td>{v.analytic_total_m3:,.1f} m³</td></tr>
+        <tr><td>Terrain-derived storage (earthworks − baseline)</td>
+            <td>{v.terrain_total_m3:,.1f} m³</td></tr>
+        <tr><td>Delta</td><td><span style="color:{delta_colour};font-weight:bold;">
+            {v.delta_m3:+,.1f} m³ ({v.delta_pct:+.0f}%)</span></td></tr>
+        {unattr_row}
+      </tbody>
+    </table>
+    <p style="margin-top:8px;font-size:0.85rem;color:#7f8c8d;">The delta is diagnostic,
+    not pass/fail — a graded channel legitimately ponds less than its static capacity.</p>
+    <div class="caveats"><strong>Attribution caveats</strong><ul>{caveat_items}</ul></div>
+  </div>"""
 
     # Build exit points tables
     def _exit_table(exit_points, title):
@@ -422,7 +595,8 @@ def export_html(comparison: ComparisonResult, output_path: str,
     <table>
       <thead>
         <tr>
-          <th>Name</th><th>Type</th><th>Capacity (m³)</th><th>Total Inflow (m³)</th>
+          <th>Name</th><th>Type</th><th>Capacity (m³)</th>
+          <th>Terrain Ponding (m³)</th><th>Δ vs analytic</th><th>Total Inflow (m³)</th>
           <th>Peak Fill</th><th>Overflowed?</th><th>Overflow Vol (m³)</th>
           <th>Infiltration (m³)</th><th>Cut (m³)</th><th>Fill (m³)</th>
         </tr>
@@ -431,6 +605,7 @@ def export_html(comparison: ComparisonResult, output_path: str,
     </table>
     <p style="margin-top:12px;font-size:0.85rem;color:#7f8c8d;">{net_cut_fill}</p>
   </div>
+  {verification_html}
 
   <!-- Section 5: Fill timeline -->
   <h2>5. Fill Timeline</h2>

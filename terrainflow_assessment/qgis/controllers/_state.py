@@ -70,6 +70,7 @@ class PluginState:
     baseline_report: Any | None = None
     post_report: Any | None = None
     comparison: Any | None = None
+    verification: Any | None = None       # VerificationResult (terrain vs analytic, §4)
 
     # ------------------------------------------------------------------ Workers (prevent GC)
     analysis_worker: Any | None = None

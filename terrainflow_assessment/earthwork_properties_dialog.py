@@ -1,3 +1,5 @@
+import math
+
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -11,12 +13,20 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from .core.sizing import (
+    batter_advisory,
+    grade_advisory,
+    trapezoid_section,
+)
 from .modules.earthwork_design import (
     berm_height_estimate,
     calculate_capacity,
     calculate_diversion_discharge,
     calculate_spillway_width,
 )
+
+# Channel types that expose an editable side-slope (z:1) control + batter advisory.
+_SIDE_SLOPE_TYPES = ("swale", "diversion")
 
 
 class EarthworkPropertiesDialog(QDialog):
@@ -28,7 +38,7 @@ class EarthworkPropertiesDialog(QDialog):
 
     def __init__(self, ew_type, geometry, parent=None, earthwork=None,
                  peak_inflow_m3=None, crest_elevation=None, duration_hours=None,
-                 dem_path=None):
+                 dem_path=None, soil_name=None, cn=None):
         super().__init__(parent)
         self.ew_type = ew_type
         self.geometry = geometry
@@ -38,6 +48,8 @@ class EarthworkPropertiesDialog(QDialog):
         self._crest_elevation = crest_elevation  # pre-sampled for dam type
         self._duration_hours = duration_hours    # storm duration for spillway sizing
         self._dem_path = dem_path                # for dam wall height/volume
+        self._soil_name = soil_name              # site earthwork soil → batter/grade advisory
+        self._cn = cn                            # curve number (advisory cross-check context)
 
         type_labels = {"diversion": "Diversion Drain"}
         type_label = type_labels.get(ew_type, ew_type.capitalize())
@@ -100,6 +112,36 @@ class EarthworkPropertiesDialog(QDialog):
         self.spin_width.valueChanged.connect(self._update_capacity)
         lbl_width = "Wall thickness:" if self.ew_type == "dam" else "Width:"
         form.addRow(lbl_width, self.spin_width)
+
+        # Bottom width (channels only) — the canonical cross-section input, centred
+        # under the top width (symmetric trapezoid). The side batter is derived and
+        # shown in degrees below. setValue before connect avoids an early fire.
+        if self.ew_type in _SIDE_SLOPE_TYPES:
+            self.spin_bottom_width = QDoubleSpinBox()
+            self.spin_bottom_width.setRange(0.05, 100.0)
+            self.spin_bottom_width.setDecimals(2)
+            self.spin_bottom_width.setSingleStep(0.1)
+            self.spin_bottom_width.setSuffix(" m")
+            seed_bottom = (ew.bottom_width_m if ew
+                           else max(0.05, self.spin_width.value() - 2 * 0.5))
+            self.spin_bottom_width.setValue(min(seed_bottom, self.spin_width.value()))
+            self.spin_bottom_width.setToolTip(
+                "Width of the channel floor, centred under the top width.\n"
+                "Together with depth and top width this sets the side batter\n"
+                "(shown below). A narrower bottom → steeper batter."
+            )
+            self.spin_bottom_width.valueChanged.connect(self._update_capacity)
+            form.addRow("Bottom width:", self.spin_bottom_width)
+
+            self.lbl_side_slope = QLabel("—")
+            self.lbl_side_slope.setToolTip(
+                "Side batter angle from horizontal, derived from top/bottom width and\n"
+                "depth. 45° = 1:1; a smaller angle is flatter/more stable; 90° = vertical."
+            )
+            form.addRow("Side slope:", self.lbl_side_slope)
+        else:
+            self.spin_bottom_width = None
+            self.lbl_side_slope = None
 
         # Gradient (diversion drains only)
         if self.ew_type == "diversion":
@@ -247,6 +289,24 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             self.lbl_req_length = None
 
+        # Channel batter feedback: narrowest width (min_dimension) + live soil advisory.
+        if self.ew_type in _SIDE_SLOPE_TYPES:
+            self.lbl_min_dim = QLabel("—")
+            self.lbl_min_dim.setToolTip(
+                "Narrowest dimension of the cross-section (the channel bottom width).\n"
+                "If this falls below the DEM cell size the feature burns at 1-cell width\n"
+                "(routing effect only) — you'll see a warning when you re-analyse."
+            )
+            cap_layout.addRow("Bottom width (min):", self.lbl_min_dim)
+
+            self.lbl_advisory = QLabel("")
+            self.lbl_advisory.setWordWrap(True)
+            self.lbl_advisory.setStyleSheet("font-style: italic;")
+            cap_layout.addRow(self.lbl_advisory)
+        else:
+            self.lbl_min_dim = None
+            self.lbl_advisory = None
+
         layout.addWidget(cap_group)
 
         # Spillway sizing — shown when peak inflow and storm duration are known
@@ -331,13 +391,16 @@ class EarthworkPropertiesDialog(QDialog):
             depth = self.spin_depth.value()
             width = self.spin_width.value()
             gradient = self.spin_gradient.value()
-            q = calculate_diversion_discharge(depth, width, gradient)
+            side_slope = self._current_side_slope()
+            # width is the top width; the bottom drives the batter → Manning's Q.
+            bottom = self._current_bottom_width(width) or max(0.05, width - 2 * side_slope * depth)
+            q = calculate_diversion_discharge(depth, width, gradient, bottom_width=bottom)
             self.lbl_capacity_m3.setText(f"{q:.4f} m³/s  ({q * 1000:.1f} L/s)")
+            self._update_channel_feedback(width, bottom, depth, side_slope, gradient)
             # Compare against peak inflow rate if available
             if self._peak_inflow_m3 is not None:
-                # Approximate storm duration: assume 1 hour (3600 s) as a reference
                 # peak_inflow_m3 is total volume — inflow rate is not directly derivable
-                # Show a note instead of a comparison (we don't know storm duration here)
+                # here (we don't know storm duration), so show a note instead.
                 self.lbl_capacity_l.setText(
                     "Peak inflow volume: see swale properties\n"
                     "for direct comparison."
@@ -345,7 +408,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_capacity_l.setStyleSheet("color: #555555; font-style: italic;")
             else:
                 self.lbl_capacity_l.setText(
-                    "Manning's n = 0.025 · trapezoidal 1:1 side slopes"
+                    f"Manning's n = 0.025 · trapezoidal {side_slope:.2g}:1 side slopes"
                 )
                 self.lbl_capacity_l.setStyleSheet("color: #555555; font-style: italic;")
             return
@@ -353,15 +416,23 @@ class EarthworkPropertiesDialog(QDialog):
         depth = self.spin_depth.value()
         width = self.spin_width.value()
         companion = self.chk_companion.isChecked() if self.ew_type == "swale" else False
-        # Honour the feature's stored side slope (bottom width) when editing; a fresh
-        # feature falls back to the 1:1 derivation inside calculate_capacity.
-        bottom_width = getattr(self._earthwork, "bottom_width_m", None)
+        # Channels (swale) take the bottom width directly from the control; non-channel
+        # storage (basin) falls back to the feature's stored bottom width.
+        if self.spin_bottom_width is not None:
+            side_slope = self._current_side_slope()
+            bottom_width = self._current_bottom_width(width)
+        else:
+            side_slope = None
+            bottom_width = getattr(self._earthwork, "bottom_width_m", None)
         m3, litres = calculate_capacity(
             self.ew_type, self.geometry, depth, width, companion,
             bottom_width=bottom_width,
         )
         self.lbl_capacity_m3.setText(f"{m3:,.2f}")
         self.lbl_capacity_l.setText(f"{litres:,.0f}")
+
+        if side_slope is not None:
+            self._update_channel_feedback(width, bottom_width, depth, side_slope, None)
 
         if self.lbl_berm_height is not None:
             if companion:
@@ -387,6 +458,51 @@ class EarthworkPropertiesDialog(QDialog):
                         self.lbl_req_length.setStyleSheet("font-weight: bold; color: #cc0000;")
             else:
                 self.lbl_req_length.setText("—")
+
+    def _current_bottom_width(self, top_width):
+        """Bottom width from the control (never wider than the top), or None if absent."""
+        if self.spin_bottom_width is None:
+            return None
+        return min(self.spin_bottom_width.value(), top_width)
+
+    def _current_side_slope(self):
+        """Side slope (z:1) derived from the current top/bottom width and depth."""
+        if self.spin_bottom_width is None:
+            return 1.0
+        depth = self.spin_depth.value()
+        top = self.spin_width.value()
+        bottom = self._current_bottom_width(top)
+        if depth <= 0:
+            return 0.0
+        return max(0.0, (top - bottom) / (2.0 * depth))
+
+    def _update_channel_feedback(self, top_width, bottom_width, depth, side_slope, grade_pct):
+        """Live batter/grade advisory + narrowest-dimension + degrees readout for channels."""
+        if self.lbl_min_dim is None:
+            return
+        sec = trapezoid_section(top_width, bottom_width, depth)
+        self.lbl_min_dim.setText(f"{sec.min_dimension:.2f} m")
+
+        if self.lbl_side_slope is not None:
+            # Batter angle from horizontal: atan(rise/run) = atan(1/z). z=0 → 90° (vertical).
+            angle = math.degrees(math.atan2(1.0, side_slope))
+            self.lbl_side_slope.setText(f"{angle:.1f}°  ({side_slope:.2g} : 1)")
+
+        within, text = batter_advisory(self._soil_name, side_slope)
+        if grade_pct is not None:
+            g_within, g_text = grade_advisory(self._soil_name, grade_pct)
+            within = within and g_within
+            text = f"{text}\n{g_text}"
+        self._set_advisory(within, text)
+
+    def _set_advisory(self, within, text):
+        """Colour the advisory label green (within envelope) / amber (outside)."""
+        if self.lbl_advisory is None:
+            return
+        colour = "#1a7a1a" if within else "#cc6600"
+        self.lbl_advisory.setStyleSheet(f"font-style: italic; color: {colour};")
+        self.lbl_advisory.setText(text)
+        self.lbl_advisory.setToolTip(text)
 
     def _update_spillway_sizing(self):
         if self.spin_spillway_head is None or self._peak_flow_m3s is None:
@@ -414,6 +530,11 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_gradient_pct(self):
         return self.spin_gradient.value() if self.spin_gradient is not None else 1.0
+
+    def get_bottom_width(self):
+        """Bottom width (m) from the control, or None when the type has no channel section."""
+        return self._current_bottom_width(self.spin_width.value()) \
+            if self.spin_bottom_width is not None else None
 
     def _calc_dam_wall_metrics(self, crest_elev, wall_thickness):
         """

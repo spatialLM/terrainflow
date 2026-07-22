@@ -182,19 +182,37 @@ class SimulationController:
                 self._state.baseline_report.peak_outflow_ls = peak_bl
 
         from terrainflow_assessment.modules.reporting import PostInterventionReport, compare
+
+        earthwork_summary = result.get("earthwork_summary", [])
+        self._merge_verification_into_summary(earthwork_summary)
+
         self._state.post_report = PostInterventionReport(
             exit_volume_m3=result.get("total_outflow_m3", 0),
             peak_outflow_ls=result.get("peak_outflow_ls", 0),
             peak_outflow_time_hr=result.get("peak_outflow_time_hr", 0),
-            earthwork_summary=result.get("earthwork_summary", []),
+            earthwork_summary=earthwork_summary,
             timestep_table=result.get("timestep_table", []),
             exit_points=(self._state.earthworks_result or {}).get("exit_points", []),
         )
 
         if self._state.baseline_report and self._state.post_report:
             comparison = compare(self._state.baseline_report, self._state.post_report)
+            comparison.verification = self._state.verification  # terrain-vs-analytic (§4)
             self._panel.set_report_summary(comparison)
             self._state.comparison = comparison
+
+    def _merge_verification_into_summary(self, summary):
+        """Copy per-feature terrain ponding + Δ from state.verification onto summary rows."""
+        v = self._state.verification
+        if not v:
+            return
+        by_name = {f["name"]: f for f in v.per_feature}
+        for row in summary:
+            feat = by_name.get(row.get("name"))
+            if feat:
+                row["terrain_ponding_m3"] = feat["terrain_m3"]
+                row["capacity_delta_pct"] = feat["delta_pct"]
+                row["routing_only"] = feat["routing_only"]
 
     # ---------------------------------------------------------------- Ponding
 

@@ -205,6 +205,8 @@ class EarthworksController:
             crest_elevation=crest_elev,
             duration_hours=self._panel.duration_hr,
             dem_path=self._state.dem_path if ew_type == "dam" else None,
+            soil_name=self._panel.earthwork_soil_name,
+            cn=self._panel.cn,
         )
 
         if dlg.exec():
@@ -215,6 +217,11 @@ class EarthworksController:
                 ew.crest_elevation = dlg.get_crest_elevation()
             elif ew_type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+            # Apply the bottom width (channels only; None otherwise) — the canonical
+            # cross-section field that drives capacity and the burn footprint.
+            bw = getattr(dlg, "get_bottom_width", lambda: None)()
+            if bw is not None:
+                ew.bottom_width_m = bw
 
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
                 ew_type, geometry, ew.depth, ew.width,
@@ -244,10 +251,24 @@ class EarthworksController:
             earthwork=ew,
             duration_hours=self._panel.duration_hr,
             dem_path=self._state.dem_path if ew.type == "dam" else None,
+            soil_name=self._panel.earthwork_soil_name,
+            cn=self._panel.cn,
         )
         if dlg.exec():
             ew.name = dlg.get_name()
             ew.depth = dlg.get_depth()
+            # Re-read every edited dimension (the edit path previously dropped
+            # width / companion / gradient / side-slope changes silently).
+            ew.width = getattr(dlg, "get_width", lambda: ew.width)()
+            if ew.type == "dam":
+                ew.crest_elevation = dlg.get_crest_elevation()
+            elif ew.type == "swale":
+                ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+            elif ew.type == "diversion":
+                ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
+            bw = getattr(dlg, "get_bottom_width", lambda: None)()
+            if bw is not None:
+                ew.bottom_width_m = bw
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
                 ew.type, ew.geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
@@ -413,9 +434,110 @@ class EarthworksController:
         self._load_burned_dem_layer()
         if result.get("ponding"):
             self._state.ponding_raster_path = result["ponding"]
-        self._panel.set_earthworks_complete(
-            "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
+
+        # Non-circular check: terrain-derived ponding vs analytic capacity (§4).
+        self._state.verification = self._compute_verification()
+        msg = "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
+        v = self._state.verification
+        if v is not None:
+            msg += (
+                f"\nTerrain-derived storage {v.terrain_total_m3:,.0f} m³ vs analytic "
+                f"{v.analytic_total_m3:,.0f} m³ (Δ {v.delta_pct:+.0f}%)."
+            )
+        self._panel.set_earthworks_complete(msg)
+
+    def _compute_verification(self):
+        """Reconcile terrain-derived ponding (burned DEM) against analytic capacity (§4).
+
+        Returns a reporting.VerificationResult, or None if the ponding raster or any
+        storage feature is unavailable. Pure maths lives in modules/reporting.py; this
+        only reads the rasters + builds per-feature footprint masks.
+        """
+        import json
+
+        import numpy as np
+        import rasterio
+        from rasterio.features import rasterize as _rasterize
+        from shapely.geometry import shape as _shp
+
+        from terrainflow_assessment.modules.reporting import (
+            attribute_ponding_volume,
+            build_verification,
+            raster_ponding_volume,
         )
+
+        ew_result = self._state.earthworks_result or {}
+        ew_pond_path = ew_result.get("ponding")
+        if not ew_pond_path or not os.path.exists(ew_pond_path):
+            return None
+
+        try:
+            with rasterio.open(ew_pond_path) as src:
+                ew_pond = src.read(1).astype("float64")
+                nodata = src.nodata
+                transform = src.transform
+                shape = ew_pond.shape
+            cell_area = abs(transform.a * transform.e)
+            cell_size = abs(transform.a)
+            if nodata is not None:
+                ew_pond[ew_pond == nodata] = 0.0
+            ew_pond = np.clip(ew_pond, 0.0, None)
+        except Exception:
+            return None
+
+        # Baseline ponding (absent → zeros; only used if it aligns to the same grid).
+        bl_pond = np.zeros(shape, dtype="float64")
+        bl_pond_path = (self._state.baseline_result or {}).get("ponding")
+        if bl_pond_path and os.path.exists(bl_pond_path):
+            try:
+                with rasterio.open(bl_pond_path) as src:
+                    arr = src.read(1).astype("float64")
+                    bnd = src.nodata
+                if arr.shape == shape:
+                    if bnd is not None:
+                        arr[arr == bnd] = 0.0
+                    bl_pond = np.clip(arr, 0.0, None)
+            except Exception:
+                pass
+
+        diff = np.clip(ew_pond - bl_pond, 0.0, None)
+
+        analytic_by_name = {}
+        min_dims = {}
+        footprints = []
+        for ew in self._state.earthwork_manager.get_enabled():
+            if getattr(ew, "capacity_m3", 0.0) <= 0:
+                continue
+            analytic_by_name[ew.name] = ew.capacity_m3
+            # Sub-cell check keys off the channel bottom width; polygons never sub-cell.
+            min_dims[ew.name] = (
+                getattr(ew, "bottom_width_m", None) if ew.type == "swale" else None
+            )
+            try:
+                geom = _shp(json.loads(ew.geometry.asJson()))
+                if geom.geom_type in ("LineString", "MultiLineString"):
+                    geom = geom.buffer(max(getattr(ew, "width", 2.0) / 2.0, cell_size))
+                mask = _rasterize(
+                    [(geom, 1)], out_shape=shape, transform=transform,
+                    fill=0, dtype="uint8",
+                ).astype(bool)
+                footprints.append((ew.name, mask))
+            except Exception:
+                footprints.append((ew.name, np.zeros(shape, dtype=bool)))
+
+        if not analytic_by_name:
+            return None
+
+        terrain_by_name, unattributed = attribute_ponding_volume(diff, cell_area, footprints)
+        baseline_total = raster_ponding_volume(bl_pond, cell_area)
+        earthworks_total = raster_ponding_volume(ew_pond, cell_area)
+
+        result = build_verification(
+            analytic_by_name, terrain_by_name, baseline_total, earthworks_total,
+            min_dims, cell_size,
+        )
+        result.unattributed_m3 = unattributed
+        return result
 
     def _load_burned_dem_layer(self):
         """Add the burned (Strategy-C) DEM to the layer panel so the carve/ridge is visible.

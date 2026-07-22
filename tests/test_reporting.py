@@ -1,17 +1,22 @@
 """Tests for terrainflow_assessment/modules/reporting.py"""
 import os
 
+import numpy as np
 import pytest
 
 from terrainflow_assessment.modules.reporting import (
     BaselineReport,
     ComparisonResult,
     PostInterventionReport,
+    VerificationResult,
     _build_fill_timeline_chart,
     _build_hydrograph_chart,
     _fig_to_base64,
+    attribute_ponding_volume,
+    build_verification,
     compare,
     export_html,
+    raster_ponding_volume,
 )
 
 # ---------------------------------------------------------------------------
@@ -381,3 +386,159 @@ class TestExportHTML:
         export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
         content = open(out, encoding="utf-8").read()
         assert "Net cut" in content
+
+
+# ---------------------------------------------------------------------------
+# Non-circular verification (§4) — pure reducers
+# ---------------------------------------------------------------------------
+
+class TestRasterPondingVolume:
+    def test_sum_times_cell_area(self):
+        pond = np.array([[0.0, 0.5], [1.0, 0.0]], dtype="float32")
+        # (0.5 + 1.0) * cell_area 4 = 6.0
+        assert raster_ponding_volume(pond, 4.0) == pytest.approx(6.0)
+
+    def test_min_depth_excludes_shallow(self):
+        pond = np.array([[0.0005, 0.0005]], dtype="float32")  # below 0.001
+        assert raster_ponding_volume(pond, 1.0) == pytest.approx(0.0)
+
+
+class TestAttributePondingVolume:
+    def _pond_band(self):
+        # A single connected pond: row 2, cols 1-3, depth 1.0 → 3 cells
+        arr = np.zeros((5, 5), dtype="float64")
+        arr[2, 1:4] = 1.0
+        return arr
+
+    def _mask_at(self, cells):
+        m = np.zeros((5, 5), dtype=bool)
+        for r, c in cells:
+            m[r, c] = True
+        return m
+
+    def test_whole_region_attributed_even_beyond_footprint(self):
+        # Footprint touches one cell of a 3-cell pond → the *whole* connected region
+        # (incl. cells outside the footprint, i.e. a dam pool) attributes to it.
+        pond = self._pond_band()
+        per_name, unattr = attribute_ponding_volume(
+            pond, 1.0, [("A", self._mask_at([(2, 1)]))]
+        )
+        assert per_name["A"] == pytest.approx(3.0)
+        assert unattr == pytest.approx(0.0)
+
+    def test_region_touching_no_footprint_is_unattributed(self):
+        pond = self._pond_band()
+        per_name, unattr = attribute_ponding_volume(
+            pond, 1.0, [("A", self._mask_at([(0, 0)]))]
+        )
+        assert per_name["A"] == pytest.approx(0.0)
+        assert unattr == pytest.approx(3.0)
+
+    def test_region_goes_to_largest_overlap(self):
+        pond = self._pond_band()
+        footprints = [
+            ("A", self._mask_at([(2, 1)])),           # overlap 1
+            ("B", self._mask_at([(2, 2), (2, 3)])),   # overlap 2 → wins
+        ]
+        per_name, unattr = attribute_ponding_volume(pond, 1.0, footprints)
+        assert per_name["B"] == pytest.approx(3.0)
+        assert per_name["A"] == pytest.approx(0.0)
+
+    def test_no_footprints_all_unattributed(self):
+        pond = self._pond_band()
+        per_name, unattr = attribute_ponding_volume(pond, 1.0, [])
+        assert per_name == {}
+        assert unattr == pytest.approx(3.0)
+
+
+class TestBuildVerification:
+    def test_site_and_per_feature_math(self):
+        v = build_verification(
+            analytic_by_name={"S1": 200.0, "S2": 100.0},
+            terrain_by_name={"S1": 180.0, "S2": 90.0},
+            baseline_total_m3=10.0,
+            earthworks_total_m3=290.0,
+            min_dims={"S1": 1.0, "S2": 0.3},
+            cell_size=1.0,
+        )
+        assert v.analytic_total_m3 == pytest.approx(300.0)
+        assert v.terrain_total_m3 == pytest.approx(280.0)   # 290 − 10
+        assert v.delta_m3 == pytest.approx(-20.0)
+        assert v.delta_pct == pytest.approx(-20.0 / 300.0 * 100.0)
+
+        by_name = {f["name"]: f for f in v.per_feature}
+        # S1 resolvable (bottom 1.0 == cell) → independent terrain + delta
+        assert by_name["S1"]["routing_only"] is False
+        assert by_name["S1"]["terrain_m3"] == pytest.approx(180.0)
+        assert by_name["S1"]["delta_pct"] == pytest.approx(-10.0)
+        # S2 sub-cell (0.3 < 1.0) → routing-only, no volume claim
+        assert by_name["S2"]["routing_only"] is True
+        assert by_name["S2"]["terrain_m3"] is None
+        assert by_name["S2"]["delta_pct"] is None
+
+    def test_zero_analytic_total_no_divide(self):
+        v = build_verification(
+            analytic_by_name={"S1": 0.0},
+            terrain_by_name={"S1": 5.0},
+            baseline_total_m3=0.0,
+            earthworks_total_m3=5.0,
+            min_dims={},
+            cell_size=1.0,
+        )
+        assert v.delta_pct == 0.0
+        assert v.per_feature[0]["delta_pct"] is None  # analytic 0 → no % for the feature
+
+    def test_terrain_total_floored_at_zero(self):
+        v = build_verification(
+            analytic_by_name={"S1": 100.0},
+            terrain_by_name={"S1": 0.0},
+            baseline_total_m3=50.0,
+            earthworks_total_m3=40.0,   # earthworks < baseline → floored
+            min_dims={"S1": 2.0},
+            cell_size=1.0,
+        )
+        assert v.terrain_total_m3 == 0.0
+
+
+class TestExportHtmlVerification:
+    def _summary_with_terrain(self):
+        base = _post().earthwork_summary[0].copy()
+        base.update(terrain_ponding_m3=180.0, capacity_delta_pct=-10.0, routing_only=False)
+        sub = {
+            "name": "Swale 2", "type": "swale", "capacity_m3": 50.0,
+            "peak_fill_pct": 40.0, "overflowed": False, "first_overflow_hr": None,
+            "terrain_ponding_m3": None, "capacity_delta_pct": None, "routing_only": True,
+        }
+        return [base, sub]
+
+    def _comparison(self):
+        v = VerificationResult(
+            analytic_total_m3=250.0, terrain_total_m3=230.0, delta_m3=-20.0,
+            delta_pct=-8.0, unattributed_m3=5.0,
+            per_feature=[], caveats=["Site total is robust; per-feature is indicative."],
+        )
+        c = ComparisonResult(
+            baseline=_baseline(),
+            post=_post(earthwork_summary=self._summary_with_terrain()),
+            verification=v,
+        )
+        return c
+
+    def test_verification_section_and_columns(self, tmp_path):
+        out = str(tmp_path / "report.html")
+        export_html(self._comparison(), out)
+        content = open(out, encoding="utf-8").read()
+        assert "Non-circular Verification" in content
+        assert "Terrain Ponding (m³)" in content
+        assert "Terrain-derived storage" in content
+        assert "routing-only" in content          # sub-cell feature flagged
+        assert "180.0" in content                  # resolvable feature terrain volume
+        assert "Unattributed terrain ponding" in content
+
+    def test_no_verification_still_renders(self, tmp_path):
+        out = str(tmp_path / "report.html")
+        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
+        content = open(out, encoding="utf-8").read()
+        # No verification attached → section omitted, table still present
+        assert "Non-circular Verification" not in content
+        assert "Earthwork Summary" in content

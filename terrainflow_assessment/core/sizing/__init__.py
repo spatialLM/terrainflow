@@ -20,6 +20,12 @@ Conventions
   export payload; it is *not* a render-resolution selector.
 """
 
+from .advisories import (  # noqa: F401
+    batter_advisory,
+    cn_slope_crosscheck,
+    grade_advisory,
+    soil_from_cn,
+)
 from .primitives import (  # noqa: F401
     ContourSpacingResult,
     DrawdownResult,
