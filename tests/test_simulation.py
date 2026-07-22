@@ -117,6 +117,37 @@ class TestFindDownslopeStore:
 
 
 # ---------------------------------------------------------------------------
+# _find_downslope_store — user-specified overflow links
+# ---------------------------------------------------------------------------
+
+class TestFindDownslopeStoreLinked:
+    def _store(self, name, elevation, target=None):
+        return EarthworkStore(
+            name=name, ew_type="swale", capacity_m3=100.0, area_m2=20.0,
+            elevation=elevation, id=name, overflow_target_id=target,
+        )
+
+    def test_downhill_link_overrides_nearest(self):
+        # source links to 'far' (a lower store) → routes there, not the nearest-lower 'close'
+        source = self._store("source", 70.0, target="far")
+        close = self._store("close", 65.0)
+        far = self._store("far", 30.0)
+        assert _find_downslope_store(source, [source, close, far]) is far
+
+    def test_uphill_link_ignored_falls_back_to_elevation(self):
+        # link points uphill (invalid for a single-pass cascade) → elevation heuristic
+        source = self._store("source", 30.0, target="high")
+        high = self._store("high", 70.0)
+        low = self._store("low", 10.0)
+        assert _find_downslope_store(source, [source, high, low]) is low
+
+    def test_missing_link_target_falls_back_to_elevation(self):
+        source = self._store("source", 70.0, target="ghost")
+        mid = self._store("mid", 50.0)
+        assert _find_downslope_store(source, [source, mid]) is mid
+
+
+# ---------------------------------------------------------------------------
 # cascade_overflow
 # ---------------------------------------------------------------------------
 

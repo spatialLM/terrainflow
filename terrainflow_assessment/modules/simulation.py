@@ -75,12 +75,27 @@ class EarthworkStore:
 
 def _find_downslope_store(store, all_stores):
     """
-    Return the nearest lower-elevation EarthworkStore to route overflow into.
+    Return the EarthworkStore to route this store's overflow into.
 
-    Simple heuristic: find the store with the highest elevation that is still
-    below this store (i.e. directly downslope).  Returns None if no lower
-    store exists (overflow exits the site).
+    Honours a user-specified overflow link first: if ``store.overflow_target_id``
+    matches another store that is **downslope** (lower elevation — which keeps the
+    single top→bottom cascade pass valid), route there. Otherwise fall back to the
+    elevation heuristic: the highest store still below this one (the most direct
+    downslope receiver). Returns None if no lower store exists (overflow exits site).
     """
+    if store.overflow_target_id is not None:
+        linked = next(
+            (
+                s for s in all_stores
+                if s is not store
+                and s.id == store.overflow_target_id
+                and s.elevation < store.elevation
+            ),
+            None,
+        )
+        if linked is not None:
+            return linked
+
     candidates = [
         s for s in all_stores
         if s is not store and s.elevation < store.elevation

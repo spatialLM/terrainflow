@@ -119,6 +119,9 @@ class TerrainFlowAssessmentPlugin:
         p._ew_delete_btn.clicked.connect(ew.delete_selected_earthwork)
         p._ew_toggle_btn.clicked.connect(ew.toggle_selected_earthwork)
 
+        # Live analytical assessment — recompute when storm/soil inputs change
+        p.analysis_inputs_changed.connect(ew._recompute_live_assessment)
+
         # Simulation
         p.run_simulation_requested.connect(sim.run_simulation)
         p.sim_frame_changed.connect(sim.show_sim_frame)

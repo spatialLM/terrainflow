@@ -81,6 +81,7 @@ class AssessmentPanel(QDockWidget):
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
     before_after_toggled = pyqtSignal(bool)   # True = with earthworks
+    analysis_inputs_changed = pyqtSignal()    # storm/soil input changed → live re-assess
 
     # Simulation
     run_simulation_requested = pyqtSignal()
@@ -116,8 +117,10 @@ class AssessmentPanel(QDockWidget):
         self._build_section_baseline()
         self._build_section_contour_keypoint()
         self._build_section_earthworks()
+        self._build_section_live_assessment()
         self._build_section_simulation()
         self._build_section_report()
+        self._wire_input_change_signals()
 
     def _section(self, title, collapsed=False):
         """Create a collapsible QGroupBox section."""
@@ -702,10 +705,33 @@ class AssessmentPanel(QDockWidget):
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
 
-    # ---------------------------------------------------------------- Section 5: Simulation
+    # ---------------------------------------------------------------- Section 5: Live Assessment
+
+    def _build_section_live_assessment(self):
+        lay = self._section("5 — Live Assessment")
+
+        self._live_assessment_lbl = QLabel(
+            "<i style='color:#7f8c8d;'>Draw an earthwork to see the live analytical "
+            "assessment.</i>"
+        )
+        self._live_assessment_lbl.setWordWrap(True)
+        self._live_assessment_lbl.setStyleSheet(
+            "background: #eef7f0; padding: 10px; border-radius: 6px; font-size: 11px;"
+        )
+        lay.addWidget(self._live_assessment_lbl)
+
+    def _wire_input_change_signals(self):
+        """Emit analysis_inputs_changed on any storm/soil input change (drives the live
+        analytical readout — the accumulation raster is storm-independent, so no re-analyse)."""
+        for spin in (self._rainfall_spin, self._duration_spin, self._cn_spin):
+            spin.valueChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+        for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo):
+            combo.currentTextChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+
+    # ---------------------------------------------------------------- Section 6: Simulation
 
     def _build_section_simulation(self):
-        lay = self._section("5 — Fill Simulation", collapsed=True)
+        lay = self._section("6 — Fill Simulation", collapsed=True)
 
         lay.addWidget(self._label("Rainfall mode"))
         self._sim_mode_combo = QComboBox()
@@ -819,7 +845,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 6: Report
 
     def _build_section_report(self):
-        lay = self._section("6 — Report", collapsed=True)
+        lay = self._section("7 — Report", collapsed=True)
 
         self._report_summary_lbl = QLabel("Run baseline and simulation first.")
         self._report_summary_lbl.setWordWrap(True)
@@ -881,6 +907,10 @@ class AssessmentPanel(QDockWidget):
     def set_earthworks_complete(self, summary=""):
         self._earthworks_progress.setVisible(False)
         self._earthworks_results_lbl.setText(summary)
+
+    def set_live_assessment(self, html):
+        """Update the live analytical assessment readout (design-tier, no burn)."""
+        self._live_assessment_lbl.setText(html)
 
     def set_contour_results(self, contours):
         self._contour_list.clear()

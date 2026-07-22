@@ -233,6 +233,7 @@ class EarthworksController:
                 len(self._state.earthwork_manager) - 1, ew.summary()
             )
             self._refresh_ew_layer()
+            self._recompute_live_assessment()
         self._canvas.unsetMapTool(self._canvas.mapTool())
 
     def _on_draw_cancelled(self):
@@ -276,6 +277,7 @@ class EarthworksController:
             )
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
+            self._recompute_live_assessment()
 
     def delete_selected_earthwork(self):
         idx = self._panel.get_selected_earthwork_index()
@@ -284,6 +286,7 @@ class EarthworksController:
         self._state.earthwork_manager.remove(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
         self._refresh_ew_layer()
+        self._recompute_live_assessment()
 
     def toggle_selected_earthwork(self):
         idx = self._panel.get_selected_earthwork_index()
@@ -291,6 +294,105 @@ class EarthworksController:
             return
         self._state.earthwork_manager.toggle(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
+        self._recompute_live_assessment()
+
+    # ---------------------------------------------------------------- Live analytical assessment
+
+    def _recompute_live_assessment(self):
+        """Design-tier: recompute the live analytical water balance → panel readout.
+
+        Fast, no burn. Geometry metrics (capacity/cut/fill) always; storm capture %
+        once a baseline (flow accumulation) exists. Runoff is recomputed live from the
+        current storm/soil inputs, so the score reacts without re-running baseline.
+        Fires on every earthwork edit and storm/soil change; failures are swallowed so
+        the readout never breaks the edit flow.
+        """
+        try:
+            from terrainflow_assessment.modules.catchment import SCSRunoff
+            from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+            from terrainflow_assessment.modules.swale_design import sample_peak_inflow
+            from terrainflow_assessment.modules.water_balance import run_water_balance
+
+            enabled = [
+                ew for ew in self._state.earthwork_manager.get_enabled()
+                if getattr(ew, "capacity_m3", 0.0) > 0
+            ]
+            if not enabled:
+                self._panel.set_live_assessment(
+                    "<i style='color:#7f8c8d;'>No storage earthworks yet — "
+                    "draw a swale or basin.</i>"
+                )
+                return
+
+            scs = SCSRunoff()
+            runoff_mm = scs.runoff_depth(
+                self._panel.rainfall_mm,
+                scs.adjust_cn(self._panel.cn, self._panel.moisture),
+            )
+            duration_hr = self._panel.duration_hr or 1.0
+            soil = self._panel.earthwork_soil_name
+
+            baseline = self._state.baseline_result or {}
+            acc_path = baseline.get("flow_accumulation")
+            have_flow = bool(acc_path)
+            cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
+            total_runoff_m3 = (
+                runoff_mm / 1000.0 * baseline.get("catchment_area_m2", 0.0)
+                if have_flow else 0.0
+            )
+
+            stores = build_stores_from_earthworks(
+                enabled, soil_name=soil, dem_path=self._state.dem_path
+            )
+            if have_flow:
+                by_name = {s.name: s for s in stores}
+                for ew in enabled:
+                    store = by_name.get(ew.name)
+                    if store is None:
+                        continue
+                    try:
+                        acc_cells = sample_peak_inflow(ew.geometry, acc_path)
+                        store.inflow_m3 = acc_cells * cell_area * runoff_mm / 1000.0
+                    except Exception:
+                        store.inflow_m3 = 0.0
+
+            result = run_water_balance(stores, duration_hr, total_runoff_m3)
+            self._panel.set_live_assessment(self._format_live_assessment(result, have_flow))
+        except Exception as exc:  # never let the readout break the edit flow
+            print(f"TerrainFlow Assessment — live assessment error: {exc}")
+
+    def _format_live_assessment(self, r, have_flow):
+        """Build the HTML summary for the Live Assessment panel readout."""
+        lines = [
+            f"<b>Storage capacity:</b> {r.total_capacity_m3:,.0f} m³",
+            f"<b>Earthworks (cut / fill):</b> {r.total_cut_m3:,.0f} / {r.total_fill_m3:,.0f} m³",
+        ]
+        if have_flow:
+            colour = (
+                "#1a7a1a" if r.capture_pct >= 80
+                else "#cc6600" if r.capture_pct >= 40 else "#cc0000"
+            )
+            lines.append(
+                f"<b>Storm capture:</b> <span style='color:{colour};font-weight:bold;'>"
+                f"{r.capture_pct:.0f}%</span> "
+                f"({r.total_captured_m3:,.0f} of {r.total_inflow_m3:,.0f} m³ runoff; "
+                f"{r.site_exit_m3:,.0f} m³ spills)"
+            )
+            overflowing = [f["name"] for f in r.per_feature if f["overflowed"]]
+            if overflowing:
+                lines.append(
+                    f"<span style='color:#cc6600;'>Overflowing: "
+                    f"{', '.join(overflowing)}</span>"
+                )
+        else:
+            lines.append(
+                "<i style='color:#7f8c8d;'>Run baseline analysis to see storm capture %.</i>"
+            )
+        lines.append(
+            "<span style='color:#7f8c8d;font-size:10px;'>Analytical estimate — "
+            "confirm with Re-analyse with Earthworks.</span>"
+        )
+        return "<br>".join(lines)
 
     # ---------------------------------------------------------------- Earthwork layers
 
