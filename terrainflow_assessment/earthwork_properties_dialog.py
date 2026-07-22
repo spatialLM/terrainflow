@@ -32,6 +32,7 @@ class EarthworkPropertiesDialog(QDialog):
         super().__init__(parent)
         self.ew_type = ew_type
         self.geometry = geometry
+        self._earthwork = earthwork
         self._editing = earthwork is not None
         self._peak_inflow_m3 = peak_inflow_m3   # None for freehand swales
         self._crest_elevation = crest_elevation  # pre-sampled for dam type
@@ -303,20 +304,6 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_spillway_width = None
             self._peak_flow_m3s = None
 
-        # Spillway section (display only in properties, placement done via map tool)
-        if self.ew_type != "berm" and ew and ew.spillway_point:
-            spill_group = QGroupBox("Spillway")
-            spill_layout = QFormLayout(spill_group)
-            spill_layout.addRow("Point:", QLabel("Placed ✓"))
-            self.spin_spillway_elev = QDoubleSpinBox()
-            self.spin_spillway_elev.setRange(0, 5000)
-            self.spin_spillway_elev.setValue(ew.spillway_elevation or 0)
-            self.spin_spillway_elev.setSuffix(" m")
-            spill_layout.addRow("Overflow elevation:", self.spin_spillway_elev)
-            layout.addWidget(spill_group)
-        else:
-            self.spin_spillway_elev = None
-
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -366,7 +353,13 @@ class EarthworkPropertiesDialog(QDialog):
         depth = self.spin_depth.value()
         width = self.spin_width.value()
         companion = self.chk_companion.isChecked() if self.ew_type == "swale" else False
-        m3, litres = calculate_capacity(self.ew_type, self.geometry, depth, width, companion)
+        # Honour the feature's stored side slope (bottom width) when editing; a fresh
+        # feature falls back to the 1:1 derivation inside calculate_capacity.
+        bottom_width = getattr(self._earthwork, "bottom_width_m", None)
+        m3, litres = calculate_capacity(
+            self.ew_type, self.geometry, depth, width, companion,
+            bottom_width=bottom_width,
+        )
         self.lbl_capacity_m3.setText(f"{m3:,.2f}")
         self.lbl_capacity_l.setText(f"{litres:,.0f}")
 
@@ -421,11 +414,6 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_gradient_pct(self):
         return self.spin_gradient.value() if self.spin_gradient is not None else 1.0
-
-    def get_spillway_elevation(self):
-        if self.spin_spillway_elev:
-            return self.spin_spillway_elev.value()
-        return None
 
     def _calc_dam_wall_metrics(self, crest_elev, wall_thickness):
         """

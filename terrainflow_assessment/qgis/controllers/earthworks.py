@@ -219,6 +219,7 @@ class EarthworksController:
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
                 ew_type, geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
+                bottom_width=getattr(ew, "bottom_width_m", None),
             )
             self._state.earthwork_manager.add(ew)
             self._panel.add_earthwork_to_list(
@@ -250,6 +251,7 @@ class EarthworksController:
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
                 ew.type, ew.geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
+                bottom_width=getattr(ew, "bottom_width_m", None),
             )
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()

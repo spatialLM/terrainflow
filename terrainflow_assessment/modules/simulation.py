@@ -40,6 +40,11 @@ class EarthworkStore:
     infiltration_rate_mm_hr: float = 4.0  # default Loam
     elevation: float = 0.0     # approximate centroid elevation (for cascade ordering)
 
+    # Overflow linkage (carried from Earthwork; consumed by the future analytical cascade).
+    # id — stable identity; overflow_target_id — user-intended recipient (None = infer).
+    id: Optional[str] = None
+    overflow_target_id: Optional[str] = None
+
     # Per-timestep accumulators (set externally each step)
     inflow_m3: float = 0.0
     stored_m3: float = 0.0
@@ -503,6 +508,8 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
             fill_vol_m3=fill_vol,
             centroid_row=centroid_row,
             centroid_col=centroid_col,
+            id=getattr(ew, "id", None),
+            overflow_target_id=getattr(ew, "overflow_target_id", None),
         )
         stores.append(store)
 

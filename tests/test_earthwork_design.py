@@ -60,6 +60,129 @@ class TestEarthwork:
 
 
 # ---------------------------------------------------------------------------
+# Earthwork data-model SHAPE (side slope, wall batter, length, id, overflow link)
+# ---------------------------------------------------------------------------
+
+class TestEarthworkShape:
+    def _make(self, ew_type="swale"):
+        return Earthwork(ew_type, make_mock_line_geom(), f"Test {ew_type}")
+
+    # -- id --------------------------------------------------------------
+    def test_id_auto_assigned_and_unique(self):
+        a, b = self._make(), self._make()
+        assert isinstance(a.id, str) and len(a.id) == 32
+        assert a.id != b.id
+
+    # -- bottom_width_m is now a stored field ---------------------------
+    def test_bottom_width_stored_default_channel(self):
+        # swale: top=2.0, depth=0.5, default_side_slope=1.0 → bottom = 2 − 2·1·0.5 = 1.0
+        assert self._make("swale").bottom_width_m == pytest.approx(1.0)
+
+    def test_bottom_width_is_writable_field(self):
+        ew = self._make("swale")
+        ew.bottom_width_m = 0.4
+        assert ew.bottom_width_m == 0.4
+
+    def test_unknown_type_falls_back_to_1to1_default(self):
+        # KeyError branch in __init__ → default_side_slope 1.0
+        ew = Earthwork("not_a_real_type", make_mock_line_geom(), "x")
+        assert ew.bottom_width_m == pytest.approx(1.0)
+
+    # -- side_slope derived property + setter ---------------------------
+    def test_side_slope_derived_from_widths(self):
+        ew = self._make("swale")  # top 2.0, bottom 1.0, depth 0.5
+        assert ew.side_slope == pytest.approx(1.0)
+
+    def test_side_slope_setter_back_solves_bottom_width(self):
+        ew = self._make("swale")
+        ew.side_slope = 0.5  # bottom = 2.0 − 2·0.5·0.5 = 1.5
+        assert ew.bottom_width_m == pytest.approx(1.5)
+        assert ew.side_slope == pytest.approx(0.5)  # round-trips
+
+    def test_side_slope_zero_depth_is_safe(self):
+        ew = self._make("swale")
+        ew.depth = 0.0
+        assert ew.side_slope == 0.0
+
+    # -- wall_slope (basin) derived property + setter -------------------
+    def test_wall_slope_default_vertical(self):
+        ew = self._make("basin")
+        assert ew.batter_run_m == 0.0
+        assert ew.wall_slope == 0.0
+
+    def test_wall_slope_setter_back_solves_batter_run(self):
+        ew = self._make("basin")
+        ew.depth = 0.5
+        ew.wall_slope = 1.5  # run = 1.5 · 0.5 = 0.75
+        assert ew.batter_run_m == pytest.approx(0.75)
+        assert ew.wall_slope == pytest.approx(1.5)
+
+    def test_wall_slope_zero_depth_is_safe(self):
+        ew = self._make("basin")
+        ew.depth = 0.0
+        assert ew.wall_slope == 0.0
+
+    # -- length_m derived from geometry ---------------------------------
+    def test_length_m_reads_from_geometry(self):
+        ew = self._make("swale")
+        ew.geometry.length.return_value = 137.5
+        assert ew.length_m == pytest.approx(137.5)
+
+    # -- overflow linkage ----------------------------------------------
+    def test_overflow_target_defaults_none(self):
+        assert self._make("swale").overflow_target_id is None
+
+    def test_overflow_target_settable(self):
+        a, b = self._make(), self._make()
+        a.overflow_target_id = b.id
+        assert a.overflow_target_id == b.id
+
+
+# ---------------------------------------------------------------------------
+# Calc functions honour an explicit bottom_width (stored side slope)
+# ---------------------------------------------------------------------------
+
+class TestExplicitBottomWidth:
+    def _line(self, length=100.0):
+        geom = make_mock_line_geom()
+        geom.length.return_value = length
+        return geom
+
+    def test_capacity_explicit_bottom_differs_from_default(self):
+        geom = self._line()
+        default_v, _ = calculate_capacity("swale", geom, 0.5, 2.0)
+        narrow_v, _ = calculate_capacity("swale", geom, 0.5, 2.0, bottom_width=0.5)
+        # bottom 0.5 < derived 1.0 → smaller trapezoid
+        assert narrow_v < default_v
+        assert narrow_v == pytest.approx(((0.5 + 2.0) / 2) * 0.5 * 100.0 * 0.8, rel=1e-3)
+
+    def test_cut_volume_explicit_bottom(self):
+        geom = self._line()
+        cut = calculate_cut_volume("swale", geom, 0.5, 2.0, bottom_width=0.5)
+        assert cut == pytest.approx(((0.5 + 2.0) / 2) * 0.5 * 100.0, rel=1e-3)
+
+    def test_fill_volume_companion_explicit_bottom(self):
+        geom = self._line()
+        v = calculate_fill_volume("swale", geom, 0.5, 2.0, companion_berm=True,
+                                  bottom_width=0.5)
+        assert v > 0.0
+
+    def test_berm_height_explicit_bottom(self):
+        h = berm_height_estimate(0.5, 2.0, bottom_width=0.5)
+        assert h > 0.0
+
+    def test_diversion_discharge_stored_geometry_path(self):
+        # explicit bottom_width switches to the top-width convention; still positive
+        q = calculate_diversion_discharge(0.3, 1.0, 1.0, bottom_width=0.4)
+        assert q > 0.0
+
+    def test_diversion_discharge_default_unchanged(self):
+        # None path must stay byte-identical to legacy behaviour
+        q = calculate_diversion_discharge(0.3, 1.0, 1.0)
+        assert q > 0.0
+
+
+# ---------------------------------------------------------------------------
 # EarthworkManager (assessment version)
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,21 @@ has_cut      : bool — True if calculate_cut_volume returns non-zero values
 has_fill     : bool — True if calculate_fill_volume returns non-zero values
 burn_method  : str  — key into DEMBurner._BURN_DISPATCH
 style        : tuple[str, str, str] — (symbol_type, hex_colour, line_width_or_opacity)
+default_side_slope : float — default wall/side batter as an H:V ratio (horizontal run
+               per unit vertical rise). 1.0 == 1:1 (today's implicit assumption); 0.0 ==
+               vertical / not modelled. Seeds Earthwork.bottom_width_m / batter_run_m defaults.
+
+Sizing policy fields (consumed by core.sizing + the properties dialog)
+----------------------------------------------------------------------
+default_depth    : float — seed depth (m) for a fresh feature of this type
+depth_range      : (min, max) — advisory depth bounds (m) for the UI spinbox
+default_top_width: float — seed top width (m)
+top_width_range  : (min, max) — advisory top-width bounds (m)
+independent_dims : tuple[str, ...] — dims the user sets directly
+derived_dims     : tuple[str, ...] — dims computed from the independent ones
+                   (e.g. a channel's bottom_width follows top_width + side slope)
+soil_group       : str | None — default soil texture association, or None to use the
+                   site soil. Keys the batter/grade advisories in core.sizing.advisories.
 """
 
 from __future__ import annotations
@@ -33,6 +48,16 @@ class EarthworkTypeConfig:
     has_fill: bool
     burn_method: str
     style: tuple[str, str, str]  # (symbol_type, hex_colour, line_width)
+    default_side_slope: float = 1.0  # H:V run-per-rise; 1.0 == 1:1, 0.0 == vertical
+
+    # --- sizing policy (per-feature dimension defaults/limits + soil) ---
+    default_depth: float = 0.5
+    depth_range: tuple[float, float] = (0.1, 10.0)
+    default_top_width: float = 2.0
+    top_width_range: tuple[float, float] = (0.1, 100.0)
+    independent_dims: tuple[str, ...] = ("depth", "top_width")
+    derived_dims: tuple[str, ...] = ("bottom_width",)
+    soil_group: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +81,14 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="swale",
     style=("line", "#00BCD4", "2.5"),
+    default_side_slope=1.0,
+    default_depth=0.5,
+    depth_range=(0.1, 2.0),
+    default_top_width=2.0,
+    top_width_range=(0.5, 10.0),
+    independent_dims=("depth", "top_width"),
+    derived_dims=("bottom_width",),
+    soil_group=None,
 ))
 
 _add(EarthworkTypeConfig(
@@ -68,6 +101,14 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="berm",
     style=("line", "#8BC34A", "2.5"),
+    default_side_slope=1.0,
+    default_depth=0.5,
+    depth_range=(0.1, 2.0),
+    default_top_width=2.0,
+    top_width_range=(0.5, 10.0),
+    independent_dims=("depth", "top_width"),
+    derived_dims=(),
+    soil_group=None,
 ))
 
 _add(EarthworkTypeConfig(
@@ -80,6 +121,14 @@ _add(EarthworkTypeConfig(
     has_fill=False,
     burn_method="basin",
     style=("fill", "#2196F3", "1.0"),
+    default_side_slope=0.0,  # vertical walls today; batter is a future calc change
+    default_depth=1.5,
+    depth_range=(0.2, 5.0),
+    default_top_width=0.0,  # footprint comes from the drawn polygon, not a width
+    top_width_range=(0.0, 0.0),
+    independent_dims=("depth",),
+    derived_dims=(),
+    soil_group=None,
 ))
 
 _add(EarthworkTypeConfig(
@@ -92,6 +141,14 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="dam",
     style=("line", "#795548", "3.5"),
+    default_side_slope=0.0,  # rectangular wall approximation today
+    default_depth=2.0,       # nominal wall height when no crest is sampled
+    depth_range=(0.2, 10.0),
+    default_top_width=2.0,   # wall thickness (the drawn line is the inner/wet-side wall)
+    top_width_range=(0.5, 20.0),
+    independent_dims=("crest_elevation", "top_width"),
+    derived_dims=(),
+    soil_group=None,
 ))
 
 _add(EarthworkTypeConfig(
@@ -104,6 +161,14 @@ _add(EarthworkTypeConfig(
     has_fill=False,
     burn_method="diversion",
     style=("line", "#FF9800", "2.0"),
+    default_side_slope=1.0,
+    default_depth=0.3,
+    depth_range=(0.1, 1.5),
+    default_top_width=1.0,
+    top_width_range=(0.3, 5.0),
+    independent_dims=("depth", "top_width", "gradient_pct"),
+    derived_dims=("bottom_width",),
+    soil_group=None,
 ))
 
 

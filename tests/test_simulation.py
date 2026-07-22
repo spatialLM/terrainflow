@@ -493,6 +493,16 @@ class TestBuildStoresFromEarthworks:
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
         assert build_stores_from_earthworks([]) == []
 
+    def test_overflow_linkage_carried_into_store(self):
+        """id + overflow_target_id flow from Earthwork onto its EarthworkStore."""
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        upstream = self._line_ew()
+        downstream = self._line_ew()
+        upstream.overflow_target_id = downstream.id
+        stores = build_stores_from_earthworks([upstream], soil_name="Loam")
+        assert stores[0].id == upstream.id
+        assert stores[0].overflow_target_id == downstream.id
+
     def test_disabled_earthworks_skipped(self):
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
         ew = self._line_ew()

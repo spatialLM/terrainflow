@@ -18,6 +18,7 @@ berm_height_estimate          — companion berm height from swale volume
 
 import json
 import logging
+import uuid
 
 import numpy as np
 import rasterio
@@ -25,6 +26,7 @@ from rasterio.features import rasterize
 from shapely.geometry import shape as shapely_shape
 
 from terrainflow_assessment.core.registry.earthwork_types import get_type
+from terrainflow_assessment.core.sizing import manning_flow, trapezoid_section
 from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_length
 
 _log = logging.getLogger(__name__)
@@ -49,25 +51,65 @@ class Earthwork:
         self.type = ew_type          # 'swale' | 'berm' | 'basin' | 'dam' | 'diversion'
         self.geometry = geometry     # QgsGeometry
         self.name = name
+        self.id = uuid.uuid4().hex   # stable identity (for overflow linkage; survives reorder)
         self.depth = 0.5             # metres cut/raised (not used for dam)
         self.top_width_m = 2.0       # declared top width of cross-section (metres)
+        # Bottom width is the canonical stored cross-section field; side_slope is derived
+        # from it (see the side_slope property). Seeded from the type's default batter so a
+        # fresh feature reproduces its historical slope (channels default 1:1 → bottom = 1.0 m).
+        try:
+            default_slope = get_type(ew_type).default_side_slope
+        except KeyError:
+            default_slope = 1.0
+        self.bottom_width_m = max(0.1, self.top_width_m - 2 * default_slope * self.depth)
+        self.batter_run_m = 0.0      # basin only: horizontal inset to full depth (0 = vertical)
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
         self.gradient_pct = 1.0      # diversion only: channel gradient (%)
-        self.spillway_point = None   # QgsPointXY or None
-        self.spillway_elevation = None
+        self.overflow_target_id = None  # user-intended overflow recipient (None = analytics decide)
         self.enabled = True
         self.capacity_m3 = 0.0
         self.capacity_l = 0.0
 
     # ------------------------------------------------------------------
-    # Derived geometry fields (computed from top_width_m + depth)
+    # Derived geometry fields
     # ------------------------------------------------------------------
 
     @property
-    def bottom_width_m(self):
-        """Bottom width for 1:1 side slopes: top_width_m − 2×depth."""
-        return max(0.1, self.top_width_m - 2 * self.depth)
+    def side_slope(self):
+        """Channel side slope as an H:V ratio, derived from the stored widths.
+
+        side_slope = (top_width_m − bottom_width_m) / (2 × depth). 1.0 == 1:1.
+        Returns 0.0 for zero depth (avoids divide-by-zero).
+        """
+        if self.depth <= 0:
+            return 0.0
+        return (self.top_width_m - self.bottom_width_m) / (2.0 * self.depth)
+
+    @side_slope.setter
+    def side_slope(self, value):
+        """Set the slope by back-solving the canonical bottom_width_m at the current depth."""
+        self.bottom_width_m = max(0.1, self.top_width_m - 2.0 * value * self.depth)
+
+    @property
+    def wall_slope(self):
+        """Basin wall batter as an H:V ratio, derived from batter_run_m / depth.
+
+        Returns 0.0 (vertical) for zero depth.
+        """
+        if self.depth <= 0:
+            return 0.0
+        return self.batter_run_m / self.depth
+
+    @wall_slope.setter
+    def wall_slope(self, value):
+        """Set the wall batter by back-solving the canonical batter_run_m at the current depth."""
+        self.batter_run_m = max(0.0, value * self.depth)
+
+    @property
+    def length_m(self):
+        """Feature length in metres, derived from the geometry (single source of truth)."""
+        return shapely_length(self.geometry)
 
     @property
     def buffer_radius_m(self):
@@ -137,13 +179,30 @@ class EarthworkManager:
 # Capacity and hydraulic calculations
 # ---------------------------------------------------------------------------
 
-def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
+def _resolve_bottom_width(bottom_width, top_width, depth):
+    """Return the trapezoid bottom width, defaulting to the 1:1 derivation when unset.
+
+    ``bottom_width is None`` reproduces the historical ``top_width − 2×depth`` (1:1 side
+    slopes); an explicit value honours the feature's stored side slope. Clamped to ≥ 0.1 m.
+    """
+    if bottom_width is None:
+        return max(0.1, top_width - 2 * depth)
+    return max(0.1, bottom_width)
+
+
+def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
+                       bottom_width=None):
     """
     Calculate storage capacity of an earthwork.
 
-    Swale — trapezoidal cross-section (1:1 side slopes) × length × 0.8 freeboard.
+    Swale — trapezoidal cross-section × length × 0.8 freeboard.
     Basin — polygon area × depth × 0.8 freeboard.
     Berm / Dam / Diversion — no storage, returns (0.0, 0.0).
+
+    ``bottom_width`` is the trapezoid's bottom width (m). When ``None`` it is derived
+    from the declared top width assuming 1:1 side slopes (``top_width − 2×depth``) —
+    preserving historical behaviour. Pass ``Earthwork.bottom_width_m`` to honour the
+    feature's stored side slope.
 
     Returns (volume_m3, volume_l).
     """
@@ -155,10 +214,9 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
 
     if ew_type == "swale":
         length = shapely_length(geometry)
-        # width parameter is the declared top width; derive bottom from 1:1 slopes
         top_width = width
-        bottom_width = max(0.1, top_width - 2 * depth)
-        cross_section = ((bottom_width + top_width) / 2) * depth
+        bottom_width = _resolve_bottom_width(bottom_width, top_width, depth)
+        cross_section = trapezoid_section(top_width, bottom_width, depth).area
 
         if companion_berm and cross_section > 0:
             berm_height = (cross_section * 0.75) ** 0.5
@@ -168,6 +226,8 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
         volume_m3 = cross_section * length * 0.8
 
     elif ew_type == "basin":
+        # TODO(feature-list): honour Earthwork.batter_run_m for sloped basin walls;
+        # currently vertical (prismatic) — value change, deferred out of the shape pass.
         area_m2 = shapely_area(geometry)
         volume_m3 = area_m2 * depth * 0.8
     else:
@@ -176,13 +236,16 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False):
     return round(volume_m3, 2), round(volume_m3 * 1000, 1)
 
 
-def calculate_cut_volume(ew_type, geometry, depth, width):
+def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None):
     """
     Calculate the volume of soil excavated (cut) by an earthwork.
 
-    Swale — trapezoidal cross-section (1:1 slopes, no freeboard) × length.
+    Swale — trapezoidal cross-section (no freeboard) × length.
     Basin / Diversion — area × depth.
     Berm / Dam — 0 (these place material, not remove it).
+
+    ``bottom_width`` — trapezoid bottom width (m); ``None`` derives it from 1:1 side slopes
+    (historical behaviour). Applies to the swale branch. See ``calculate_capacity``.
 
     Returns cut volume in m³.
     """
@@ -195,8 +258,8 @@ def calculate_cut_volume(ew_type, geometry, depth, width):
     if ew_type == "swale":
         length = shapely_length(geometry)
         top_width = width
-        bottom_width = max(0.1, top_width - 2 * depth)
-        cross_section = ((bottom_width + top_width) / 2) * depth
+        bottom_width = _resolve_bottom_width(bottom_width, top_width, depth)
+        cross_section = trapezoid_section(top_width, bottom_width, depth).area
         return round(cross_section * length, 2)
 
     if ew_type == "basin":
@@ -204,16 +267,21 @@ def calculate_cut_volume(ew_type, geometry, depth, width):
         return round(area_m2 * depth, 2)
 
     if ew_type == "diversion":
+        # Diversion 'width' is the *bed* width here (a different convention from the swale
+        # top width — reconciled in the calc pass). The section is now computed via the
+        # shared trapezoid_section primitive so it can no longer diverge from the
+        # capacity/discharge copies: a symmetric ±2×depth (1:1) section around the bed.
         length = shapely_length(geometry)
         bottom_width = max(0.05, width - 2 * depth)
         top_width = width + 2 * depth
-        cross_section = ((bottom_width + top_width) / 2) * depth
+        cross_section = trapezoid_section(top_width, bottom_width, depth).area
         return round(cross_section * length, 2)
 
     return 0.0
 
 
-def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False):
+def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False,
+                          bottom_width=None):
     """
     Calculate the volume of material placed (fill) by an earthwork.
 
@@ -222,18 +290,23 @@ def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False)
     Dam — wall footprint × depth (approximate).
     Others — 0.
 
+    ``bottom_width`` — swale trapezoid bottom width (m) for the companion-berm branch;
+    ``None`` derives it from 1:1 side slopes (historical behaviour).
+
     Returns fill volume in m³.
     """
     if ew_type == "berm":
+        # TODO(feature-list): honour the stored side slope for a battered berm; currently
+        # a fixed 1:1 triangle (base=2*depth, height=depth → area=depth²).
         length = shapely_length(geometry)
-        cross_section = depth * depth  # triangular: base=2*depth, height=depth → area=depth²
+        cross_section = depth * depth
         return round(cross_section * length, 2)
 
     if ew_type == "swale" and companion_berm:
         length = shapely_length(geometry)
         top_width = width
-        bottom_width = max(0.1, top_width - 2 * depth)
-        swale_cs = ((bottom_width + top_width) / 2) * depth
+        bottom_width = _resolve_bottom_width(bottom_width, top_width, depth)
+        swale_cs = trapezoid_section(top_width, bottom_width, depth).area
         berm_height = (swale_cs * 0.75) ** 0.5
         berm_cs = berm_height * berm_height  # triangular
         return round(berm_cs * length, 2)
@@ -245,38 +318,56 @@ def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False)
     return 0.0
 
 
-def berm_height_estimate(depth, width):
+def berm_height_estimate(depth, width, bottom_width=None):
     """Estimate companion berm height from swale excavation (75% compaction).
 
-    ``width`` is the declared top width of the swale (metres).
+    ``width`` is the declared top width of the swale (metres). ``bottom_width`` is the
+    trapezoid bottom width; ``None`` derives it from 1:1 side slopes (historical behaviour).
     """
     top_width = width
-    bottom_width = max(0.1, top_width - 2 * depth)
-    cross_section = ((bottom_width + top_width) / 2) * depth
+    bottom_width = _resolve_bottom_width(bottom_width, top_width, depth)
+    cross_section = trapezoid_section(top_width, bottom_width, depth).area
     return round((cross_section * 0.75) ** 0.5, 2)
 
 
-def calculate_diversion_discharge(depth, width, gradient_pct):
+def calculate_diversion_discharge(depth, width, gradient_pct, bottom_width=None):
     """
     Peak discharge capacity of a diversion drain (Manning's equation).
 
-    Trapezoidal cross-section, 1:1 side slopes, n=0.025 (compacted earthen).
-    Returns Q in m³/s.
+    Trapezoidal cross-section, n=0.025 (compacted earthen). Returns Q in m³/s.
+
+    ``bottom_width`` — trapezoid bottom width (m):
+      * ``None`` (default): legacy behaviour — ``width`` is the *bed* width, section is
+        symmetric (bottom = width−2×depth, top = width+2×depth) with 1:1 side slopes.
+        TODO(feature-list): this bed-width convention differs from the swale top-width
+        convention; reconcile in the calc pass.
+      * explicit value: ``width`` is the *top* width and ``bottom_width`` the bottom, so the
+        side slope (and hence the slant term ``sqrt(1+s²)×depth``) follow the stored geometry.
     """
     import math
     n = 0.025
     s = gradient_pct / 100.0
     if s <= 0 or depth <= 0 or width <= 0:
         return 0.0
-    bottom_width = max(0.05, width - 2 * depth)
-    top_width = width + 2 * depth
-    area = ((bottom_width + top_width) / 2) * depth
-    slant_side = math.sqrt(2) * depth  # 1:1 slope
-    wetted_perimeter = bottom_width + 2 * slant_side
-    if wetted_perimeter <= 0:
-        return 0.0
-    r = area / wetted_perimeter
-    q = (1.0 / n) * area * (r ** (2.0 / 3.0)) * (s ** 0.5)
+    if bottom_width is None:
+        # Legacy bed-width convention — preserved byte-for-byte. Symmetric ±2×depth
+        # section around the bed, with the historical 1:1 slant term (geometrically
+        # inconsistent with the ±2×depth widths; the fix is deferred with the
+        # width-convention reconciliation). Area comes from the shared primitive; the
+        # wetted perimeter keeps the legacy √2 slant so the number is unchanged.
+        bottom = max(0.05, width - 2 * depth)
+        top = width + 2 * depth
+        area = trapezoid_section(top, bottom, depth).area
+        # bottom ≥ 0.05 and depth > 0 (guarded above) → wetted perimeter is always > 0.
+        wetted_perimeter = bottom + 2 * (math.sqrt(2) * depth)
+        r = area / wetted_perimeter
+    else:
+        # Stored-geometry path — width is the top width; the section (and hence the
+        # wetted perimeter / hydraulic radius) follow the stored widths exactly.
+        sec = trapezoid_section(width, max(0.05, bottom_width), depth)
+        area = sec.area
+        r = sec.hydraulic_radius
+    q = manning_flow(area, r, s, n).discharge
     return round(q, 4)
 
 
