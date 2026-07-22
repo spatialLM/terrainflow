@@ -30,12 +30,13 @@ class ContourSegmentTool(QgsMapTool):
 
     Signals
     -------
-    segment_selected(QgsGeometry, float)
-        Emitted with the sub-line geometry and the contour's elevation.
+    segment_selected(QgsGeometry, float, list)
+        Emitted with the sub-line geometry, the contour's elevation, and the
+        full contour polyline coords [(x, y), ...] (reshape provenance).
     cancelled()
     """
 
-    segment_selected = pyqtSignal(object, float)
+    segment_selected = pyqtSignal(object, float, object)  # geometry, elevation, contour coords
     cancelled = pyqtSignal()
 
     _HINT = [
@@ -182,9 +183,12 @@ class ContourSegmentTool(QgsMapTool):
         # Convert segment to QgsGeometry
         qgs_geom = QgsGeometry.fromWkt(segment_shp.wkt)
         elev = self._elevation
+        # Full contour provenance (before cleanup clears it) — lets the reshape
+        # tool slide the swale's endpoints along this contour later.
+        contour_coords = [(float(x), float(y)) for x, y in self._contour_shp.coords]
 
         self._cleanup()
-        self.segment_selected.emit(qgs_geom, elev)
+        self.segment_selected.emit(qgs_geom, elev, contour_coords)
 
     # ---------------------------------------------------------------- helpers
 

@@ -5,6 +5,7 @@ from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.modules.swale_design import (
     INFILTRATION_RATE_MM_HR,
     SOIL_REFERENCE,
+    contour_section,
     contour_to_swale_geometry,
     get_infiltration_rate,
     recommend_swale_length,
@@ -137,6 +138,50 @@ class TestContourToSwaleGeometry:
         from unittest.mock import MagicMock
         geom = MagicMock()
         assert contour_to_swale_geometry(geom) is geom
+
+
+# ---------------------------------------------------------------------------
+# contour_section
+# ---------------------------------------------------------------------------
+
+class TestContourSection:
+    # A simple L-shaped contour: 10 m east then 10 m north.
+    CONTOUR = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+
+    def test_section_between_two_points(self):
+        section = contour_section(self.CONTOUR, (2.0, 0.0), (8.0, 0.0))
+        assert section is not None
+        assert section[0] == (2.0, 0.0)
+        assert section[-1] == (8.0, 0.0)
+
+    def test_follows_contour_around_corner(self):
+        # Section spanning the corner must include the corner vertex — i.e. it
+        # follows the contour rather than cutting straight across.
+        section = contour_section(self.CONTOUR, (5.0, 0.0), (10.0, 5.0))
+        assert (10.0, 0.0) in section
+
+    def test_endpoint_order_is_irrelevant(self):
+        a = contour_section(self.CONTOUR, (2.0, 0.0), (8.0, 0.0))
+        b = contour_section(self.CONTOUR, (8.0, 0.0), (2.0, 0.0))
+        assert a == b
+
+    def test_off_contour_points_project_onto_it(self):
+        # Points near (not on) the contour snap to their nearest point on it.
+        section = contour_section(self.CONTOUR, (2.0, 1.5), (8.0, -1.5))
+        assert section[0] == (2.0, 0.0)
+        assert section[-1] == (8.0, 0.0)
+
+    def test_zero_length_section_none(self):
+        assert contour_section(self.CONTOUR, (5.0, 0.0), (5.0, 0.0)) is None
+
+    def test_empty_contour_none(self):
+        assert contour_section([], (0.0, 0.0), (1.0, 0.0)) is None
+
+    def test_single_point_contour_none(self):
+        assert contour_section([(0.0, 0.0)], (0.0, 0.0), (1.0, 0.0)) is None
+
+    def test_invalid_coords_none(self):
+        assert contour_section([("a", "b"), ("c", "d")], (0.0, 0.0), (1.0, 0.0)) is None
 
 
 # ---------------------------------------------------------------------------

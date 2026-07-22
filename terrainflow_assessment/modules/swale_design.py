@@ -88,6 +88,46 @@ def contour_to_swale_geometry(contour_qgs_geom):
     return contour_qgs_geom
 
 
+def contour_section(contour_coords, end_a_xy, end_b_xy):
+    """
+    Extract the section of a contour polyline between two endpoint positions.
+
+    Used by the reshape tool for contour-locked swales: each endpoint is
+    projected onto the contour and the polyline between the two projections is
+    returned, so a slid endpoint always re-follows the contour (same substring
+    behaviour as the original Pick Segment draw).
+
+    Parameters
+    ----------
+    contour_coords : list of (x, y) — the full contour polyline
+    end_a_xy, end_b_xy : tuple (x, y) — the two endpoints (any order)
+
+    Returns
+    -------
+    list of (x, y) for the section, or None if it can't be built
+    (degenerate contour or zero-length section).
+    """
+    if not contour_coords or len(contour_coords) < 2:
+        return None
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.ops import substring
+
+        line = LineString(contour_coords)
+        d0 = line.project(Point(end_a_xy))
+        d1 = line.project(Point(end_b_xy))
+        if d0 > d1:
+            d0, d1 = d1, d0
+        if d1 - d0 <= 0:
+            return None
+        section = substring(line, d0, d1)
+        if section.is_empty or section.geom_type != "LineString":
+            return None
+        return [(float(x), float(y)) for x, y in section.coords]
+    except Exception:
+        return None
+
+
 def snap_point_to_contour_elevation(point_xy, dem_path):
     """
     Given a map point (x, y), return the DEM elevation at that location.

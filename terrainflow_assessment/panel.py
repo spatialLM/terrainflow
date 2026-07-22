@@ -80,6 +80,7 @@ class AssessmentPanel(QDockWidget):
     draw_diversion_requested = pyqtSignal()
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
+    reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
     before_after_toggled = pyqtSignal(bool)   # True = with earthworks
     analysis_inputs_changed = pyqtSignal()    # storm/soil input changed → live re-assess
 
@@ -670,9 +671,16 @@ class AssessmentPanel(QDockWidget):
 
         ew_actions = QHBoxLayout()
         self._ew_edit_btn = QPushButton("Edit")
+        self._ew_reshape_btn = QPushButton("Reshape")
+        self._ew_reshape_btn.setToolTip(
+            "Drag earthwork vertices on the map — the Live Assessment updates\n"
+            "as you drag. Double-click a segment to insert a vertex; Del removes\n"
+            "the highlighted vertex; right-click or Esc finishes."
+        )
         self._ew_delete_btn = QPushButton("Delete")
         self._ew_toggle_btn = QPushButton("Enable/Disable")
         ew_actions.addWidget(self._ew_edit_btn)
+        ew_actions.addWidget(self._ew_reshape_btn)
         ew_actions.addWidget(self._ew_toggle_btn)
         ew_actions.addWidget(self._ew_delete_btn)
         lay.addLayout(ew_actions)
@@ -703,6 +711,7 @@ class AssessmentPanel(QDockWidget):
         self._draw_dam_btn.clicked.connect(self.draw_dam_requested)
         self._draw_diversion_btn.clicked.connect(self.draw_diversion_requested)
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
+        self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
 
     # ---------------------------------------------------------------- Section 5: Live Assessment

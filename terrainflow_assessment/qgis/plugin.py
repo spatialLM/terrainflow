@@ -113,6 +113,7 @@ class TerrainFlowAssessmentPlugin:
         p.draw_diversion_requested.connect(lambda: ew.activate_draw_line("diversion"))
         p.usable_area_source_changed.connect(ew.on_usable_area_source_changed)
         p.run_earthworks_requested.connect(ew.run_with_earthworks)
+        p.reshape_earthworks_requested.connect(ew.activate_edit_earthwork_vertices)
 
         # Earthworks table buttons
         p._ew_edit_btn.clicked.connect(ew.edit_selected_earthwork)

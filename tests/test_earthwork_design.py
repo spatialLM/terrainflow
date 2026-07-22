@@ -1108,3 +1108,70 @@ class TestDamStageStorage:
         b = DEMBurner(self._enclosed_valley_dem(tmp_path))
         b.dam_stage_storage(self._channel_dam(52.0))
         assert not any("bank" in w.lower() for w in b.warnings)
+
+
+class TestDamWindowedFlood:
+    """The dam flood runs on a crop around the dam, growing until the pond fits."""
+
+    def _long_valley_dem(self, tmp_path):
+        # 300-row valley descending gently southward (0.02 m/row), centre col 20.
+        # A dam near the south end ponds ~100 rows upstream — larger than the
+        # initial 64-cell window pad, so the crop must grow to fit the pond.
+        data = np.fromfunction(
+            lambda r, c: 100.0 - r * 0.02 + np.abs(c - 20) * 1.0, (300, 40)
+        ).astype("float32")
+        return _make_dem(tmp_path, data)
+
+    def _dam(self, crest):
+        # Across the valley at y=50 → row 250 (floor there = 95.0).
+        return _mock_ew(
+            "dam", make_mock_line_geom([(10.0, 50.0), (30.0, 50.0)]),
+            width=2.0, crest_elevation=crest,
+        )
+
+    def test_windowed_matches_full_dem_flood(self, tmp_path):
+        from terrainflow_assessment.modules.reporting import impounded_volume
+        b = DEMBurner(self._long_valley_dem(tmp_path))
+        dam = self._dam(97.0)  # pond reaches ~row 150 → beyond the initial pad
+        windowed = b.dam_stage_storage(dam)
+
+        dammed = b.burn_earthworks([dam])
+        full = impounded_volume(
+            b.get_ponding_layer(b.original), b.get_ponding_layer(dammed), 1.0
+        )
+        assert windowed > 0.0
+        assert windowed == pytest.approx(full, rel=1e-3)
+
+    def test_small_pond_stays_positive(self, tmp_path):
+        # A modest crest ponds well inside the first window — no growth needed.
+        b = DEMBurner(self._long_valley_dem(tmp_path))
+        assert b.dam_stage_storage(self._dam(95.5)) > 0.0
+
+    def test_pond_touches_edge_helper(self):
+        # The check reads the ring ONE cell in from the boundary — depression-fill
+        # drains the boundary itself, so a clipped pond appears there instead.
+        from terrainflow_assessment.modules.earthwork_design import _pond_touches_edge
+        z = np.zeros((6, 6))
+        assert not _pond_touches_edge(z)
+        for r, c in ((1, 3), (4, 3), (3, 1), (3, 4)):
+            arr = np.zeros((6, 6))
+            arr[r, c] = 0.5
+            assert _pond_touches_edge(arr)
+        centre = np.zeros((7, 7))
+        centre[3, 3] = 0.5
+        assert not _pond_touches_edge(centre)
+        assert _pond_touches_edge(np.zeros((3, 3)))  # tiny window always grows
+
+    def test_dam_cell_bounds_clamped(self, tmp_path):
+        b = DEMBurner(self._long_valley_dem(tmp_path))
+        r_lo, r_hi, c_lo, c_hi = b._dam_cell_bounds(self._dam(97.0))
+        assert 0 <= r_lo <= r_hi < 300
+        assert 0 <= c_lo <= c_hi < 40
+
+    def test_dam_cell_bounds_bad_geometry_full_dem(self, tmp_path):
+        from unittest.mock import MagicMock
+        b = DEMBurner(self._long_valley_dem(tmp_path))
+        bad = MagicMock()
+        bad.asJson.side_effect = RuntimeError("no geometry")
+        dam = _mock_ew("dam", bad, width=2.0, crest_elevation=97.0)
+        assert b._dam_cell_bounds(dam) == (0, 299, 0, 39)

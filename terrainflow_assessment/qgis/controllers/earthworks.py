@@ -32,6 +32,7 @@ from qgis.PyQt.QtGui import QColor
 from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
 from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
 from terrainflow_assessment.map_tools.draw_polygon_tool import DrawPolygonTool
+from terrainflow_assessment.map_tools.edit_earthwork_tool import EditEarthworkTool
 from terrainflow_assessment.map_tools.ponding_query_tool import PondingQueryTool
 from terrainflow_assessment.map_tools.select_contour_tool import SelectContourTool
 from terrainflow_assessment.modules.earthwork_design import (
@@ -74,7 +75,9 @@ class EarthworksController:
                 return
             tool = ContourSegmentTool(self._canvas, self._state.contour_layer)
             tool.segment_selected.connect(
-                lambda geom, elev: self._on_contour_selected_for_swale(geom, elev)
+                lambda geom, elev, coords: self._on_contour_selected_for_swale(
+                    geom, elev, coords
+                )
             )
             tool.cancelled.connect(self._on_draw_cancelled)
             self._canvas.setMapTool(tool)
@@ -87,7 +90,9 @@ class EarthworksController:
                 return
             tool = SelectContourTool(self._canvas, self._state.contour_layer)
             tool.contour_selected.connect(
-                lambda geom, elev: self._on_contour_selected_for_swale(geom, elev)
+                lambda geom, elev, coords: self._on_contour_selected_for_swale(
+                    geom, elev, coords
+                )
             )
             tool.cancelled.connect(self._on_draw_cancelled)
             self._canvas.setMapTool(tool)
@@ -99,9 +104,9 @@ class EarthworksController:
             tool.cancelled.connect(self._on_draw_cancelled)
             self._canvas.setMapTool(tool)
 
-    def _on_contour_selected_for_swale(self, geom, elevation):
+    def _on_contour_selected_for_swale(self, geom, elevation, contour_coords=None):
         swale_geom = contour_to_swale_geometry(geom)
-        self._on_geometry_drawn("swale", swale_geom)
+        self._on_geometry_drawn("swale", swale_geom, source_contour=contour_coords)
 
     def activate_draw_line(self, ew_type):
         tool = DrawLineTool(self._canvas,
@@ -162,7 +167,7 @@ class EarthworksController:
                 "TerrainFlow Assessment", f"Could not read usable area layer: {exc}"
             )
 
-    def _on_geometry_drawn(self, ew_type, geometry):
+    def _on_geometry_drawn(self, ew_type, geometry, source_contour=None):
         from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
 
         peak_inflow = 0.0
@@ -195,6 +200,7 @@ class EarthworksController:
         n = len(self._state.earthwork_manager) + 1
         ew_name = f"{ew_type.capitalize()} {n}"
         ew = Earthwork(ew_type, geometry, ew_name)
+        ew.source_contour_coords = source_contour  # reshape stays contour-locked
 
         dlg = EarthworkPropertiesDialog(
             ew_type=ew_type,
@@ -304,6 +310,68 @@ class EarthworksController:
             return
         self._state.earthwork_manager.toggle(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
+        self._recompute_live_assessment()
+
+    # ---------------------------------------------------------------- Vertex reshaping (live)
+
+    def activate_edit_earthwork_vertices(self):
+        """Start the reshape tool: drag vertices with a live analytical readout."""
+        earthworks = self._state.earthwork_manager.get_all()
+        if not earthworks:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment", "No earthworks to reshape — draw one first."
+            )
+            return
+        tool = EditEarthworkTool(
+            self._canvas,
+            [
+                (i, ew.geometry, ew.type, getattr(ew, "source_contour_coords", None))
+                for i, ew in enumerate(earthworks)
+            ],
+        )
+        tool.geometry_edited.connect(self._on_vertex_drag)
+        tool.edit_finished.connect(self._on_vertex_edit_finished)
+        tool.session_ended.connect(self._on_draw_cancelled)
+        self._canvas.setMapTool(tool)
+
+    def _on_vertex_drag(self, idx, geometry):
+        """Throttled live tier during a drag: cheap geometry metrics + water balance.
+
+        No DEM flood here — a dam keeps its cached capacity until release, so the
+        readout stays instant (design record: throttle only the flow-dependent part,
+        never run the heavy sub-calcs per mouse event).
+        """
+        manager = self._state.earthwork_manager
+        if not (0 <= idx < len(manager)):
+            return  # stale tool index (feature deleted mid-session)
+        ew = manager.get(idx)
+        ew.geometry = geometry
+        if ew.type != "dam":
+            ew.capacity_m3, ew.capacity_l = calculate_capacity(
+                ew.type, geometry, ew.depth, ew.width,
+                getattr(ew, "companion_berm", False),
+                bottom_width=getattr(ew, "bottom_width_m", None),
+            )
+        self._recompute_live_assessment()
+
+    def _on_vertex_edit_finished(self, idx, geometry):
+        """Exact tier on release / insert / delete: full capacity + layer + list."""
+        manager = self._state.earthwork_manager
+        if not (0 <= idx < len(manager)):
+            return  # stale tool index (feature deleted mid-session)
+        ew = manager.get(idx)
+        ew.geometry = geometry
+        if ew.type == "dam":
+            ew.capacity_m3 = self._compute_dam_capacity(ew)
+            ew.capacity_l = ew.capacity_m3 * 1000.0
+        else:
+            ew.capacity_m3, ew.capacity_l = calculate_capacity(
+                ew.type, geometry, ew.depth, ew.width,
+                getattr(ew, "companion_berm", False),
+                bottom_width=getattr(ew, "bottom_width_m", None),
+            )
+        self._panel.update_earthwork_in_list(idx, ew.summary())
+        self._refresh_ew_layer()
         self._recompute_live_assessment()
 
     # ---------------------------------------------------------------- Dam analytical capacity

@@ -7,12 +7,14 @@ from qgis.PyQt.QtGui import QCursor
 class SelectContourTool(QgsMapTool):
     """
     Map tool that lets the user click on a contour line to select it.
-    Emits contour_selected(QgsGeometry, float elevation) on click.
-    Picks the geometrically nearest feature within the search radius so it
-    works correctly on flat single-layer ranked contour outputs.
+    Emits contour_selected(QgsGeometry, float elevation, list contour_coords)
+    on click — the coords are the full contour polyline [(x, y), ...] used as
+    reshape provenance. Picks the geometrically nearest feature within the
+    search radius so it works correctly on flat single-layer ranked contour
+    outputs.
     """
 
-    contour_selected = pyqtSignal(object, float)   # QgsGeometry, elevation
+    contour_selected = pyqtSignal(object, float, object)   # QgsGeometry, elevation, coords
     cancelled = pyqtSignal()
 
     def __init__(self, canvas, contour_layer):
@@ -56,7 +58,22 @@ class SelectContourTool(QgsMapTool):
                 except (ValueError, TypeError):
                     pass
                 break
-        self.contour_selected.emit(geom, elev)
+        contour_coords = self._geometry_coords(geom)
+        self.contour_selected.emit(geom, elev, contour_coords)
+
+    @staticmethod
+    def _geometry_coords(geom):
+        """Full contour polyline coords (longest part of a multi-line), or None."""
+        try:
+            import json
+
+            from shapely.geometry import shape as _shape
+            shp = _shape(json.loads(geom.asJson()))
+            if shp.geom_type == "MultiLineString":
+                shp = max(shp.geoms, key=lambda g: g.length)
+            return [(float(x), float(y)) for x, y in shp.coords]
+        except Exception:
+            return None
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

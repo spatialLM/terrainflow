@@ -38,6 +38,22 @@ from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_leng
 _log = logging.getLogger(__name__)
 
 _MAX_PONDING_CELLS = 4_000_000  # ~2000 × 2000
+_DAM_WINDOW_PAD_CELLS = 64      # initial crop padding for the windowed dam flood
+
+
+def _pond_touches_edge(pond, eps=1e-6):
+    """True if ponding reaches the window rim (the pond may be clipped).
+
+    Depression-filling treats the array boundary as the drainage outlet, so the
+    boundary cells themselves never pond — a clipped pond shows up in the ring
+    one cell in from the edge instead. Tiny windows always report clipped.
+    """
+    if pond.shape[0] < 4 or pond.shape[1] < 4:
+        return True
+    return bool(
+        (pond[1, :] > eps).any() or (pond[-2, :] > eps).any()
+        or (pond[:, 1] > eps).any() or (pond[:, -2] > eps).any()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +88,10 @@ class Earthwork:
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
         self.key_into_banks = False  # dam only: opt-in idealised (keyed) storage estimate
+        # Contour provenance: full contour polyline [(x, y), ...] when this feature was
+        # born from a contour (Pick Segment / Full Contour). The reshape tool uses it to
+        # slide endpoints ALONG the contour instead of free vertex dragging. None = freehand.
+        self.source_contour_coords = None
         self.gradient_pct = 1.0      # diversion only: channel gradient (%)
         self.overflow_target_id = None  # user-intended overflow recipient (None = analytics decide)
         self.enabled = True
@@ -662,13 +682,15 @@ class DEMBurner:
         self._warn_sub_cell(ew.name, max(0.05, ew.width - 2 * ew.depth))
         return dem
 
-    def get_ponding_layer(self, modified_dem):
+    def get_ponding_layer(self, modified_dem, transform=None):
         """
         Calculate ponding depth where water pools in the modified DEM.
 
         Compares modified DEM against a depression-filled version.
         Returns float32 array of ponding depth in metres (0 = no ponding).
         Auto-downsamples large DEMs to stay within memory limits.
+        ``transform`` overrides the burner's own affine — pass the windowed
+        transform when flooding a cropped sub-DEM (dam stage-storage).
         """
         import os
         import tempfile
@@ -676,6 +698,7 @@ class DEMBurner:
         from pysheds.grid import Grid
         from rasterio.transform import Affine
 
+        base_transform = transform if transform is not None else self.transform
         rows, cols = modified_dem.shape
         n_cells = rows * cols
         scale = 1.0
@@ -696,8 +719,8 @@ class DEMBurner:
             work_dem = modified_dem
 
         scaled_transform = Affine(
-            self.transform.a / scale, self.transform.b, self.transform.c,
-            self.transform.d, self.transform.e / scale, self.transform.f,
+            base_transform.a / scale, base_transform.b, base_transform.c,
+            base_transform.d, base_transform.e / scale, base_transform.f,
         )
 
         tmp = tempfile.mktemp(suffix=".tif")
@@ -830,12 +853,56 @@ class DEMBurner:
         if getattr(dam, "crest_elevation", None) is None:
             return 0.0
 
-        from terrainflow_assessment.modules.reporting import impounded_volume
-
         self.warnings = []
         dammed = self._keyed_dam_dem(dam) if key_into_banks else self.burn_earthworks([dam])
-        dammed_ponding = self.get_ponding_layer(dammed)
-        if baseline_ponding is None:
-            baseline_ponding = self.get_ponding_layer(self.original)
         cell_area = abs(self.transform.a * self.transform.e)
-        return impounded_volume(baseline_ponding, dammed_ponding, cell_area)
+
+        # Windowed flood: a dam's pond is local, so flood a crop around the dam
+        # instead of the whole DEM (the reshape-tool release felt slow on real
+        # rasters). If the new ponding touches the window edge the pond may be
+        # clipped — double the padding and retry, falling back to the full DEM.
+        from rasterio.transform import Affine
+
+        rows, cols = self.shape
+        r_lo, r_hi, c_lo, c_hi = self._dam_cell_bounds(dam)
+        pad = _DAM_WINDOW_PAD_CELLS
+        while True:
+            r0, r1 = max(0, r_lo - pad), min(rows - 1, r_hi + pad)
+            c0, c1 = max(0, c_lo - pad), min(cols - 1, c_hi + pad)
+            full_window = r0 == 0 and c0 == 0 and r1 == rows - 1 and c1 == cols - 1
+            sub_t = self.transform * Affine.translation(c0, r0)
+
+            dam_pond = self.get_ponding_layer(dammed[r0:r1 + 1, c0:c1 + 1], transform=sub_t)
+            if baseline_ponding is not None:
+                base_pond = np.clip(
+                    np.asarray(baseline_ponding, dtype="float64")[r0:r1 + 1, c0:c1 + 1],
+                    0.0, None,
+                )
+            else:
+                base_pond = self.get_ponding_layer(
+                    self.original[r0:r1 + 1, c0:c1 + 1], transform=sub_t
+                )
+
+            new_pond = np.clip(dam_pond.astype("float64") - base_pond, 0.0, None)
+            if full_window or not _pond_touches_edge(new_pond):
+                return float(new_pond.sum() * cell_area)
+            pad *= 2
+
+    def _dam_cell_bounds(self, dam):
+        """(row_lo, row_hi, col_lo, col_hi) of the dam geometry, clamped to the DEM."""
+        rows, cols = self.shape
+        line = self._to_shapely(dam.geometry)
+        if line is None:
+            return 0, rows - 1, 0, cols - 1
+        minx, miny, maxx, maxy = line.bounds
+        c_lo = int((minx - self.transform.c) / self.transform.a)
+        c_hi = int((maxx - self.transform.c) / self.transform.a)
+        # transform.e is negative (north-up): larger y → smaller row
+        r_lo = int((maxy - self.transform.f) / self.transform.e)
+        r_hi = int((miny - self.transform.f) / self.transform.e)
+        r_lo, r_hi = sorted((r_lo, r_hi))
+        c_lo, c_hi = sorted((c_lo, c_hi))
+        return (
+            max(0, min(rows - 1, r_lo)), max(0, min(rows - 1, r_hi)),
+            max(0, min(cols - 1, c_lo)), max(0, min(cols - 1, c_hi)),
+        )
