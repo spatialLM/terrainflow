@@ -372,6 +372,10 @@ class EarthworksController:
             return
 
         modified_dem = self._state.burner.burn_earthworks(enabled)
+        # Surface Strategy-C honesty warnings (sub-cell features, resolution-cap
+        # degrade) so a 1-cell routing approximation is never silent.
+        for msg in getattr(self._state.burner, "warnings", []):
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
         mod_path = os.path.join(self._state.output_dir, "modified_dem.tif")
         self._state.burner.save(modified_dem, mod_path)
         self._state.modified_dem_path = mod_path
@@ -406,11 +410,33 @@ class EarthworksController:
         bl = BaselineController(self._state, self._panel, self._project,
                                 self._iface, self._canvas)
         bl._load_result_layers(result, is_earthworks=True)
+        self._load_burned_dem_layer()
         if result.get("ponding"):
             self._state.ponding_raster_path = result["ponding"]
         self._panel.set_earthworks_complete(
             "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
         )
+
+    def _load_burned_dem_layer(self):
+        """Add the burned (Strategy-C) DEM to the layer panel so the carve/ridge is visible.
+
+        Placed at the bottom of the layer tree (it is a backdrop, not a result overlay)
+        and registered under the earthworks layer group so it shows/hides with the
+        'with earthworks' toggle. Silently skips if the burn produced no valid raster.
+        """
+        path = self._state.modified_dem_path
+        if not path or not os.path.exists(path):
+            return
+        from qgis.core import QgsRasterLayer
+        layer = QgsRasterLayer(path, "Earthworks — Burned DEM")
+        if not layer.isValid():
+            return
+        project = self._project.instance()
+        project.addMapLayer(layer, False)          # don't auto-add to legend top
+        project.layerTreeRoot().addLayer(layer)     # append at the bottom instead
+        ids = list(getattr(self._state, "earthworks_layer_ids", None) or [])
+        ids.append(layer.id())
+        self._state.earthworks_layer_ids = ids
 
     def _on_analysis_error(self, tb):
         self._panel.set_earthworks_complete("Analysis failed — see Python console for details.")

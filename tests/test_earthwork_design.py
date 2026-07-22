@@ -863,3 +863,146 @@ class TestSwaleWidthSplit:
         footprint_width_m = footprint_width_cells * 1.0  # 1m cell size
 
         assert footprint_width_m == pytest.approx(declared_width, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — Strategy-C burn stage
+# ---------------------------------------------------------------------------
+
+class TestStrategyCConveyances:
+    """Sub-cell snap (empty-mask no-op fix) + monotonic breach + warnings."""
+
+    def test_sub_cell_swale_modifies_at_least_one_cell(self, tmp_path):
+        # Regression: a sub-metre swale on a 1 m DEM used to burn nothing (empty mask).
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, companion_berm=False)
+        ew.width = 0.4          # top width < cell → buffer rasterises empty
+        ew.bottom_width_m = 0.3  # narrowest dim < cell → sub-cell warning
+        result = b.burn_earthworks([ew])
+
+        assert (result < 50.0).sum() >= 1
+        assert any("1-cell width" in w for w in b.warnings)
+
+    def test_resolvable_swale_keeps_true_footprint(self, tmp_path):
+        # A 2 m swale on a 1 m DEM is resolvable → no sub-cell warning.
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=False)
+        result = b.burn_earthworks([ew])
+        assert result.min() < 50.0
+        assert b.warnings == []  # bottom width 1.0 == cell size, not sub-cell
+
+    def test_before_after_integrity_changes_localized(self, tmp_path):
+        # Baseline vs with-earthwork must be identical except at earthwork cells.
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=1.0, width=2.0, companion_berm=False)
+        result = b.burn_earthworks([ew])
+
+        # Swale sits on rows 9–10; everything above row 9 and below row 10 untouched.
+        assert np.array_equal(result[:9, :], data[:9, :])
+        assert np.array_equal(result[11:, :], data[11:, :])
+
+    def test_sub_cell_diversion_snaps_and_warns(self, tmp_path):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        ew = _mock_ew("diversion", geom, depth=0.3, width=0.4, gradient_pct=1.0)
+        result = b.burn_earthworks([ew])
+        assert result.min() < 50.0
+        assert any("1-cell width" in w for w in b.warnings)
+
+
+class TestStrategyCBarriers:
+    """Barriers raise a ridge (never a cut); dam uses the downstream inner-wall offset."""
+
+    def test_sub_cell_berm_raises_via_path(self, tmp_path):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        ew = _mock_ew("berm", geom, depth=1.0, width=0.4)  # sub-cell width
+        result = b.burn_earthworks([ew])
+        assert result.max() > 50.0            # raised, not cut
+        assert result.min() >= 50.0           # never lowers
+        assert any("1-cell width" in w for w in b.warnings)
+
+    def test_dam_downstream_offset_raises_to_crest(self, tmp_path):
+        # Sloped DEM so a downstream (lower) side genuinely exists.
+        data = np.fromfunction(lambda r, c: 50.0 - r * 0.5, (20, 20)).astype("float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=60.0)
+        result = b.burn_earthworks([ew])
+        assert result.max() >= 60.0
+
+    def test_dam_sub_cell_raises_via_path(self, tmp_path):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("dam", geom, depth=1.0, width=0.4, crest_elevation=60.0)
+        result = b.burn_earthworks([ew])
+        assert result.max() >= 60.0
+        assert any("1-cell width" in w for w in b.warnings)
+
+    def test_dam_parallel_offset_failure_falls_back_to_centred(self, tmp_path, monkeypatch):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        from shapely.geometry import LineString as _LS
+
+        def _raise(*a, **kw):
+            raise ValueError("mock parallel_offset failure")
+
+        monkeypatch.setattr(_LS, "parallel_offset", _raise, raising=False)
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=60.0)
+        result = b.burn_earthworks([ew])
+        assert result.max() >= 60.0  # centred-buffer fallback still raised the wall
+
+
+class TestStrategyCWarnings:
+    def test_warnings_reset_between_burns(self, tmp_path):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, companion_berm=False)
+        ew.width = 0.4
+        ew.bottom_width_m = 0.3
+        b.burn_earthworks([ew])
+        assert b.warnings  # sub-cell warning present
+
+        b.burn_earthworks([])  # fresh burn clears prior warnings
+        assert b.warnings == []
+
+    def test_ponding_cap_warning_recorded(self, tmp_path, monkeypatch):
+        import terrainflow_assessment.modules.earthwork_design as mod
+        monkeypatch.setattr(mod, "_MAX_PONDING_CELLS", 25)  # force over-cap on 20×20
+
+        data = np.full((20, 20), 50.0, dtype="float32")
+        data[9:12, 9:12] = 48.0
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+        b.get_ponding_layer(data)
+        assert any("reduced resolution" in w for w in b.warnings)

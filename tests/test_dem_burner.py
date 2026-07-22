@@ -32,12 +32,15 @@ def _mock_ew(ew_type, geom, **kwargs):
     ew.type = ew_type
     ew.geometry = geom
     ew.enabled = True
+    ew.name = kwargs.get("name", f"Test {ew_type}")
     ew.depth = kwargs.get("depth", 0.5)
     ew.width = kwargs.get("width", 2.0)
-    # DEMBurner uses the active Earthwork interface (top_width_m + buffer_radius_m),
-    # not the legacy `.width`; provide them so shapely buffering gets real numbers.
+    # DEMBurner uses the active Earthwork interface (top_width_m + buffer_radius_m
+    # + bottom_width_m for the Strategy-C sub-cell check), not the legacy `.width`;
+    # provide them so shapely buffering and the width comparison get real numbers.
     ew.top_width_m = kwargs.get("width", 2.0)
     ew.buffer_radius_m = kwargs.get("width", 2.0) / 2.0
+    ew.bottom_width_m = kwargs.get("bottom_width_m", 1.0)
     ew.companion_berm = kwargs.get("companion_berm", False)
     ew.crest_elevation = kwargs.get("crest_elevation", None)
     ew.gradient_pct = kwargs.get("gradient_pct", 1.0)

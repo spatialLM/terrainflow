@@ -27,6 +27,12 @@ from shapely.geometry import shape as shapely_shape
 
 from terrainflow_assessment.core.registry.earthwork_types import get_type
 from terrainflow_assessment.core.sizing import manning_flow, trapezoid_section
+from terrainflow_assessment.modules.burn_strategy import (
+    enforce_monotonic_path,
+    line_cells,
+    ponding_resolution_warning,
+    sub_cell_warning,
+)
 from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_length
 
 _log = logging.getLogger(__name__)
@@ -408,6 +414,10 @@ class DEMBurner:
             self.nodata = src.nodata
             self.shape = self.original.shape
         self.cell_size = abs(self.transform.a)
+        # Non-fatal advisories raised during the last burn / ponding pass (sub-cell
+        # features, resolution-cap degrade). The controller surfaces these to the
+        # QGIS message bar — Strategy C is honest about what it approximates.
+        self.warnings = []
 
     def burn_earthworks(self, earthworks):
         """
@@ -415,6 +425,7 @@ class DEMBurner:
         Returns modified DEM as float32 numpy array.
         """
         modified = self.original.copy()
+        self.warnings = []
         _dispatch = {
             "swale":     self._burn_swale,
             "berm":      self._burn_berm,
@@ -461,13 +472,63 @@ class DEMBurner:
             fill=0, dtype="uint8",
         ).astype(bool)
 
+    def _line_path_cells(self, line):
+        """Connected in-bounds cell path along *line* (nearest-cell snap fallback)."""
+        try:
+            coords = list(line.coords)
+        except (NotImplementedError, AttributeError):
+            return []
+        return line_cells(coords, self.transform, self.shape)
+
+    def _warn_sub_cell(self, name, min_dimension):
+        """Record a sub-cell advisory if *min_dimension* is narrower than one cell."""
+        w = sub_cell_warning(name, min_dimension, self.cell_size)
+        if w:
+            self.warnings.append(w)
+
+    def _downstream_footprint(self, line, thickness):
+        """Wall footprint offset to the downstream (lower) side of *line* (§7).
+
+        The drawn dam line is the inner (wet-side) wall; all wall thickness is added
+        downstream. Offsets the line by ``thickness/2`` to each side, keeps the side
+        whose ground is lower, and buffers it into a wall band. Falls back to a
+        centred buffer if the offset can't be built (short/degenerate lines).
+        """
+        half = thickness / 2.0
+        try:
+            left = line.parallel_offset(half, "left")
+            right = line.parallel_offset(half, "right")
+            left_mask = self._rasterize(left.buffer(half))
+            right_mask = self._rasterize(right.buffer(half))
+            left_mean = float(np.mean(self.original[left_mask])) if left_mask.any() else np.inf
+            right_mean = (
+                float(np.mean(self.original[right_mask])) if right_mask.any() else np.inf
+            )
+            if np.isinf(left_mean) and np.isinf(right_mean):
+                return line.buffer(half)
+            chosen = left if left_mean <= right_mean else right
+            return chosen.buffer(half)
+        except Exception:
+            return line.buffer(half)
+
     # ---------------------------------------------------------------- earthwork types
 
     def _burn_swale(self, dem, line, ew):
+        # Strategy C: incise the true footprint where the swale is cell-resolvable;
+        # fall back to the nearest-cell path when the buffer rasterises empty (the
+        # sub-cell no-op fix), then breach a monotonic downhill invert so the drain
+        # stays connected through depression-filling.
         footprint = line.buffer(ew.buffer_radius_m)  # radius = top_width_m / 2
         mask = self._rasterize(footprint)
+        path_cells = self._line_path_cells(line)
         dem = dem.copy()
-        dem[mask] -= ew.depth
+        if mask.any():
+            dem[mask] -= ew.depth
+        else:
+            for rc in path_cells:
+                dem[rc] -= ew.depth
+        dem = enforce_monotonic_path(dem, path_cells)
+        self._warn_sub_cell(ew.name, ew.bottom_width_m)
         if ew.companion_berm:
             dem = self._add_companion_berm(dem, line, mask, ew)
         return dem
@@ -505,10 +566,17 @@ class DEMBurner:
         return dem
 
     def _burn_berm(self, dem, line, ew):
+        # Barrier: raise a flow-blocking ridge (never a cut). Incise-free — the
+        # footprint band where resolvable, the nearest-cell path when sub-cell.
         footprint = line.buffer(ew.width / 2)
         mask = self._rasterize(footprint)
         dem = dem.copy()
-        dem[mask] += ew.depth
+        if mask.any():
+            dem[mask] += ew.depth
+        else:
+            for rc in self._line_path_cells(line):
+                dem[rc] += ew.depth
+        self._warn_sub_cell(ew.name, ew.width)
         return dem
 
     def _burn_basin(self, dem, polygon, ew):
@@ -520,10 +588,17 @@ class DEMBurner:
     def _burn_dam(self, dem, line, ew):
         if ew.crest_elevation is None:
             return self._burn_berm(dem, line, ew)
-        footprint = line.buffer(ew.width / 2)
+        # Inner-wall convention (§7): wall thickness sits downstream of the drawn
+        # line; raise the wall band (or the nearest-cell path) up to the crest.
+        footprint = self._downstream_footprint(line, ew.width)
         mask = self._rasterize(footprint)
         dem = dem.copy()
-        dem[mask] = np.maximum(dem[mask], ew.crest_elevation)
+        if mask.any():
+            dem[mask] = np.maximum(dem[mask], ew.crest_elevation)
+        else:
+            for rc in self._line_path_cells(line):
+                dem[rc] = max(dem[rc], ew.crest_elevation)
+        self._warn_sub_cell(ew.name, ew.width)
         return dem
 
     def _burn_diversion(self, dem, line, ew):
@@ -567,11 +642,21 @@ class DEMBurner:
                 from shapely.geometry import Point
                 pt_geom = Point(x, y).buffer(ew.width / 2)
                 cell_mask = self._rasterize(pt_geom)
-                if not cell_mask.any():
-                    continue
                 burn_elev = target_floor - ew.depth
-                dem[cell_mask] = np.minimum(dem[cell_mask], burn_elev)
+                if cell_mask.any():
+                    dem[cell_mask] = np.minimum(dem[cell_mask], burn_elev)
+                else:
+                    # Sub-cell channel: the buffer rasterised empty. Snap to the
+                    # nearest cell so the graded invert still carves ≥ 1 cell — but
+                    # only when the sample lies within the DEM (an off-extent point
+                    # stays a no-op, never a spurious edge-cell burn).
+                    col = int((x - self.transform.c) / self.transform.a)
+                    row = int((y - self.transform.f) / self.transform.e)
+                    if 0 <= row < self.shape[0] and 0 <= col < self.shape[1]:
+                        dem[row, col] = min(float(dem[row, col]), burn_elev)
 
+        # Bed (bottom) width of the trapezoidal channel drives the sub-cell check.
+        self._warn_sub_cell(ew.name, max(0.05, ew.width - 2 * ew.depth))
         return dem
 
     def get_ponding_layer(self, modified_dem):
@@ -591,6 +676,14 @@ class DEMBurner:
         rows, cols = modified_dem.shape
         n_cells = rows * cols
         scale = 1.0
+
+        # Resolution-aware cap: the cell cap is a memory guard, not a resolution
+        # choice. When it trips we coarsen a *copy* to stay within memory, but the
+        # DEM is never upsampled below native res (deferred Strategy B) — surface the
+        # degrade as a warning rather than letting it happen silently (§3).
+        cap_warning = ponding_resolution_warning(n_cells, _MAX_PONDING_CELLS)
+        if cap_warning:
+            self.warnings.append(cap_warning)
 
         if n_cells > _MAX_PONDING_CELLS:
             from scipy.ndimage import zoom as _zoom
