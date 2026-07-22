@@ -215,6 +215,7 @@ class EarthworksController:
             ew.width = getattr(dlg, "get_width", lambda: ew.width)()
             if ew_type == "dam":
                 ew.crest_elevation = dlg.get_crest_elevation()
+                ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
             elif ew_type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
             # Apply the bottom width (channels only; None otherwise) — the canonical
@@ -223,11 +224,15 @@ class EarthworksController:
             if bw is not None:
                 ew.bottom_width_m = bw
 
-            ew.capacity_m3, ew.capacity_l = calculate_capacity(
-                ew_type, geometry, ew.depth, ew.width,
-                getattr(ew, "companion_berm", False),
-                bottom_width=getattr(ew, "bottom_width_m", None),
-            )
+            if ew_type == "dam":
+                ew.capacity_m3 = self._compute_dam_capacity(ew)
+                ew.capacity_l = ew.capacity_m3 * 1000.0
+            else:
+                ew.capacity_m3, ew.capacity_l = calculate_capacity(
+                    ew_type, geometry, ew.depth, ew.width,
+                    getattr(ew, "companion_berm", False),
+                    bottom_width=getattr(ew, "bottom_width_m", None),
+                )
             self._state.earthwork_manager.add(ew)
             self._panel.add_earthwork_to_list(
                 len(self._state.earthwork_manager) - 1, ew.summary()
@@ -263,6 +268,7 @@ class EarthworksController:
             ew.width = getattr(dlg, "get_width", lambda: ew.width)()
             if ew.type == "dam":
                 ew.crest_elevation = dlg.get_crest_elevation()
+                ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
             elif ew.type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
             elif ew.type == "diversion":
@@ -270,11 +276,15 @@ class EarthworksController:
             bw = getattr(dlg, "get_bottom_width", lambda: None)()
             if bw is not None:
                 ew.bottom_width_m = bw
-            ew.capacity_m3, ew.capacity_l = calculate_capacity(
-                ew.type, ew.geometry, ew.depth, ew.width,
-                getattr(ew, "companion_berm", False),
-                bottom_width=getattr(ew, "bottom_width_m", None),
-            )
+            if ew.type == "dam":
+                ew.capacity_m3 = self._compute_dam_capacity(ew)
+                ew.capacity_l = ew.capacity_m3 * 1000.0
+            else:
+                ew.capacity_m3, ew.capacity_l = calculate_capacity(
+                    ew.type, ew.geometry, ew.depth, ew.width,
+                    getattr(ew, "companion_berm", False),
+                    bottom_width=getattr(ew, "bottom_width_m", None),
+                )
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
             self._recompute_live_assessment()
@@ -295,6 +305,56 @@ class EarthworksController:
         self._state.earthwork_manager.toggle(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
         self._recompute_live_assessment()
+
+    # ---------------------------------------------------------------- Dam analytical capacity
+
+    def _compute_dam_capacity(self, ew):
+        """One-time DEM flood → dam impounded volume (m³), cached on ``ew.capacity_m3``.
+
+        Heavy (a depression-fill), so run only at dam draw/edit — the live readout reads
+        the cached value. Returns 0 without a DEM or a crest; failures degrade to 0.
+        """
+        if not self._state.dem_path or getattr(ew, "crest_elevation", None) is None:
+            return 0.0
+        try:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment", "Computing dam storage…"
+            )
+            from terrainflow_assessment.modules.earthwork_design import DEMBurner
+            burner = self._state.burner or DEMBurner(self._state.dem_path)
+            baseline_ponding = self._cached_baseline_ponding(burner.shape)
+            volume = round(
+                burner.dam_stage_storage(
+                    ew, baseline_ponding=baseline_ponding,
+                    key_into_banks=getattr(ew, "key_into_banks", False),
+                ),
+                2,
+            )
+            for msg in getattr(burner, "warnings", []):
+                self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
+            return volume
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — dam storage error: {exc}")
+            return 0.0
+
+    def _cached_baseline_ponding(self, shape):
+        """Baseline ponding array (saves a flood pass), or None if unavailable/mismatched."""
+        path = (self._state.baseline_result or {}).get("ponding")
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            import rasterio
+            with rasterio.open(path) as src:
+                arr = src.read(1).astype("float32")
+                nodata = src.nodata
+            if arr.shape != shape:
+                return None
+            if nodata is not None:
+                arr[arr == nodata] = 0.0
+            return np.clip(arr, 0.0, None)
+        except Exception:
+            return None
 
     # ---------------------------------------------------------------- Live analytical assessment
 

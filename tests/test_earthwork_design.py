@@ -49,6 +49,19 @@ class TestEarthwork:
         ew.crest_elevation = 55.0
         assert "55.0 m" in ew.summary()
 
+    def test_summary_dam_capacity_labels_as_drawn(self):
+        ew = self._make("dam")
+        ew.crest_elevation = 55.0
+        ew.capacity_m3 = 1240.0
+        assert "as-drawn" in ew.summary()
+
+    def test_summary_dam_capacity_labels_keyed(self):
+        ew = self._make("dam")
+        ew.crest_elevation = 55.0
+        ew.capacity_m3 = 1240.0
+        ew.key_into_banks = True
+        assert "keyed" in ew.summary()
+
     def test_summary_diversion_shows_q(self):
         ew = self._make("diversion")
         assert "m³/s" in ew.summary()
@@ -1006,3 +1019,92 @@ class TestStrategyCWarnings:
         b = DEMBurner(path)
         b.get_ponding_layer(data)
         assert any("reduced resolution" in w for w in b.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Dam analytical capacity — DEMBurner.dam_stage_storage (DEM flood behind crest)
+# ---------------------------------------------------------------------------
+
+class TestDamStageStorage:
+    def _valley_dem(self, tmp_path):
+        # A valley running N–S: floor at column 10, sides rise gently, slopes down
+        # southward. A dam wall across it (E–W) pools water upstream (to the north).
+        data = np.fromfunction(
+            lambda r, c: 50.0 - r * 0.5 + np.abs(c - 10) * 1.0, (20, 20)
+        ).astype("float32")
+        return _make_dem(tmp_path, data)
+
+    def _dam(self, crest):
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        return _mock_ew("dam", geom, width=2.0, crest_elevation=crest)
+
+    def test_dam_impounds_positive_volume(self, tmp_path):
+        b = DEMBurner(self._valley_dem(tmp_path))
+        assert b.dam_stage_storage(self._dam(48.0)) > 0.0
+
+    def test_higher_crest_impounds_more(self, tmp_path):
+        b = DEMBurner(self._valley_dem(tmp_path))
+        assert b.dam_stage_storage(self._dam(49.0)) > b.dam_stage_storage(self._dam(46.0))
+
+    def test_no_crest_returns_zero(self, tmp_path):
+        b = DEMBurner(self._valley_dem(tmp_path))
+        assert b.dam_stage_storage(self._dam(None)) == 0.0
+
+    def test_reuses_supplied_baseline_ponding(self, tmp_path):
+        # Passing a baseline ponding array must not raise and yields a finite volume.
+        b = DEMBurner(self._valley_dem(tmp_path))
+        baseline = np.zeros(b.shape, dtype="float32")
+        assert b.dam_stage_storage(self._dam(48.0), baseline_ponding=baseline) >= 0.0
+
+    # -- Keyed (opt-in) vs as-drawn on an ENCLOSED valley --------------------
+    # High side walls (cols <6 / >14 = 60 m), a channel that rises northward
+    # (upstream), and a low outlet to the south. A short dam across only the
+    # channel middle leaks around its ends (water escapes south) unless keyed
+    # into the walls, so it cleanly separates the two modes.
+    def _enclosed_valley_dem(self, tmp_path):
+        def elev(r, c):
+            north_floor = 48.0 + np.clip(12 - r, 0, None) * 0.5
+            channel = np.where(r >= 13, 40.0, north_floor)  # low southern outlet
+            return np.where((c < 6) | (c > 14), 60.0, channel)  # side walls
+        return _make_dem(tmp_path, np.fromfunction(elev, (20, 20)).astype("float32"))
+
+    def _channel_dam(self, crest):
+        # Spans only the channel middle (cols 8–12 at y=8 → row 12), not the walls.
+        return _mock_ew(
+            "dam", make_mock_line_geom([(8.0, 8.0), (12.0, 8.0)]),
+            width=2.0, crest_elevation=crest,
+        )
+
+    def test_as_drawn_short_dam_leaks_no_storage(self, tmp_path):
+        # Default (as drawn): a short wall leaks around its ends — no reliable storage,
+        # and raising the crest doesn't inflate the number.
+        b = DEMBurner(self._enclosed_valley_dem(tmp_path))
+        assert b.dam_stage_storage(self._channel_dam(50.0)) == pytest.approx(0.0)
+        assert b.dam_stage_storage(self._channel_dam(54.0)) == pytest.approx(0.0)
+
+    def test_keyed_short_dam_keeps_growing_with_crest(self, tmp_path):
+        # Opt-in keyed estimate: the wall is virtually extended into the walls, so it
+        # fills to the crest and storage keeps rising with the crest.
+        b = DEMBurner(self._enclosed_valley_dem(tmp_path))
+        mid = b.dam_stage_storage(self._channel_dam(50.0), key_into_banks=True)
+        high = b.dam_stage_storage(self._channel_dam(54.0), key_into_banks=True)
+        assert high > mid > 0.0
+
+    def test_keyed_beats_as_drawn_for_short_dam(self, tmp_path):
+        # For the same short dam, keying holds far more than the honest as-drawn number.
+        b = DEMBurner(self._enclosed_valley_dem(tmp_path))
+        as_drawn = b.dam_stage_storage(self._channel_dam(52.0))
+        keyed = b.dam_stage_storage(self._channel_dam(52.0), key_into_banks=True)
+        assert keyed > as_drawn
+
+    def test_keying_emits_bank_warning(self, tmp_path):
+        # A short dam whose crest tops its banks must key in and warn (keyed mode only).
+        b = DEMBurner(self._enclosed_valley_dem(tmp_path))
+        b.dam_stage_storage(self._channel_dam(52.0), key_into_banks=True)
+        assert any("bank" in w.lower() for w in b.warnings)
+
+    def test_as_drawn_short_dam_no_bank_warning(self, tmp_path):
+        # Default mode never keys in, so it never emits the bank advisory.
+        b = DEMBurner(self._enclosed_valley_dem(tmp_path))
+        b.dam_stage_storage(self._channel_dam(52.0))
+        assert not any("bank" in w.lower() for w in b.warnings)

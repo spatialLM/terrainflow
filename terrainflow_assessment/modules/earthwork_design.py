@@ -71,6 +71,7 @@ class Earthwork:
         self.batter_run_m = 0.0      # basin only: horizontal inset to full depth (0 = vertical)
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
+        self.key_into_banks = False  # dam only: opt-in idealised (keyed) storage estimate
         self.gradient_pct = 1.0      # diversion only: channel gradient (%)
         self.overflow_target_id = None  # user-intended overflow recipient (None = analytics decide)
         self.enabled = True
@@ -141,7 +142,9 @@ class Earthwork:
         status = "" if self.enabled else " [OFF]"
         if self.type == "dam":
             elev_str = f"{self.crest_elevation:.1f} m" if self.crest_elevation is not None else "?"
-            return f"{self.name} (Dam) — crest {elev_str}{status}"
+            mode = "keyed" if getattr(self, "key_into_banks", False) else "as-drawn"
+            cap_str = f" · {self.capacity_m3:,.0f} m³ ({mode})" if self.capacity_m3 else ""
+            return f"{self.name} (Dam) — crest {elev_str}{cap_str}{status}"
         if self.type == "diversion":
             q = calculate_diversion_discharge(self.depth, self.width, self.gradient_pct)
             return f"{self.name} (Diversion) — {self.gradient_pct:.1f}% | Q={q:.3f} m³/s{status}"
@@ -737,3 +740,102 @@ class DEMBurner:
             ponding = np.clip(ponding.astype("float32"), 0, None)
 
         return ponding
+
+    def _key_dam_ends(self, dem, line, crest):
+        """Extend the dam wall into the banks so it holds to its crest (idealised).
+
+        A dam drawn only across the visible channel leaks around its ends: the pond's
+        pour point becomes the natural abutment saddle, not the crest, so raising the
+        crest above the saddle adds no storage (the depression-fill plateau). For the
+        *analytical design tier* we key the wall into higher ground — stepping outward
+        from each drawn endpoint along the line's bearing and raising cells to the crest
+        until the natural terrain already reaches the crest (or we run off the DEM).
+        Mutates *dem* in place; returns ``(keyed, max_reach_m)`` — ``keyed`` is True when
+        either bank sat below the crest (so the wall had to be keyed in).
+        """
+        try:
+            coords = list(line.coords)
+        except (NotImplementedError, AttributeError):
+            return (False, 0.0)
+        if len(coords) < 2:
+            return (False, 0.0)
+
+        step = self.cell_size * 0.5  # half-cell keeps the raised path 4-connected
+        max_reach = (self.shape[0] + self.shape[1]) * self.cell_size
+        keyed = False
+        max_used = 0.0
+        for (ex, ey), (ix, iy) in ((coords[0], coords[1]), (coords[-1], coords[-2])):
+            dx, dy = ex - ix, ey - iy  # outward bearing (inner → end)
+            norm = (dx * dx + dy * dy) ** 0.5
+            if norm == 0:
+                continue
+            dx, dy = dx / norm, dy / norm
+            row = int((ey - self.transform.f) / self.transform.e)
+            col = int((ex - self.transform.c) / self.transform.a)
+            if 0 <= row < self.shape[0] and 0 <= col < self.shape[1] \
+                    and self.original[row, col] < crest:
+                keyed = True
+            reach, x, y = 0.0, ex, ey
+            while reach < max_reach:
+                x += dx * step
+                y += dy * step
+                reach += step
+                row = int((y - self.transform.f) / self.transform.e)
+                col = int((x - self.transform.c) / self.transform.a)
+                if not (0 <= row < self.shape[0] and 0 <= col < self.shape[1]):
+                    break
+                if self.original[row, col] >= crest:
+                    break  # keyed into ground already above the crest
+                dem[row, col] = max(dem[row, col], crest)
+            max_used = max(max_used, reach)
+        return (keyed, max_used)
+
+    def _keyed_dam_dem(self, dam):
+        """DEM with the dam raised to its crest and keyed into the banks (analytical)."""
+        crest = dam.crest_elevation
+        dem = self.original.copy()
+        line = self._to_shapely(dam.geometry)
+        if line is None:
+            return dem
+        footprint = self._downstream_footprint(line, dam.width)
+        mask = self._rasterize(footprint)
+        if mask.any():
+            dem[mask] = np.maximum(dem[mask], crest)
+        else:
+            for rc in self._line_path_cells(line):
+                dem[rc] = max(dem[rc], crest)
+        keyed, reach = self._key_dam_ends(dem, line, crest)
+        if keyed:
+            self.warnings.append(
+                f"{getattr(dam, 'name', 'Dam')}: crest sits above the natural bank — "
+                f"keyed {reach:.0f} m into each abutment for the storage estimate; the "
+                f"dam must be built into higher ground or water escapes around the ends."
+            )
+        return dem
+
+    def dam_stage_storage(self, dam, baseline_ponding=None, key_into_banks=False):
+        """Impounded volume (m³) of a dam = the new ponding it creates behind its crest.
+
+        Burns the dam to its crest *as drawn* and depression-fills via
+        ``get_ponding_layer``; the volume is ``Σ max(dammed − baseline, 0) × cell_area``.
+        This is the honest storage the dam holds — a short wall leaks around its ends, so
+        raising the crest above the natural abutment saddle adds nothing (the signal to
+        extend the dam). Pass ``key_into_banks=True`` for the opt-in *idealised* estimate,
+        which virtually extends the wall into higher ground (see :meth:`_keyed_dam_dem`) so
+        it fills to the crest — a what-if only; it never redraws the dam or the verify-burn.
+        ``baseline_ponding`` is the pre-dam ponding array (same shape as the DEM) — pass the
+        cached baseline layer to save a flood pass, or leave None to compute it from the bare
+        DEM. Returns 0.0 for a dam without a crest.
+        """
+        if getattr(dam, "crest_elevation", None) is None:
+            return 0.0
+
+        from terrainflow_assessment.modules.reporting import impounded_volume
+
+        self.warnings = []
+        dammed = self._keyed_dam_dem(dam) if key_into_banks else self.burn_earthworks([dam])
+        dammed_ponding = self.get_ponding_layer(dammed)
+        if baseline_ponding is None:
+            baseline_ponding = self.get_ponding_layer(self.original)
+        cell_area = abs(self.transform.a * self.transform.e)
+        return impounded_volume(baseline_ponding, dammed_ponding, cell_area)

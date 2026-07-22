@@ -94,6 +94,20 @@ def raster_ponding_volume(ponding, cell_area_m2, min_depth=0.001):
     return float(ponded.sum() * cell_area_m2)
 
 
+def impounded_volume(baseline_ponding, dammed_ponding, cell_area_m2):
+    """Volume (m³) a dam impounds = the *new* ponding it creates on the DEM.
+
+    ``Σ max(dammed − baseline, 0) × cell_area`` over the two ponding-depth rasters
+    (before/after burning the dam to its crest). The positive clip counts only cells
+    the dam newly floods; a wall too short to hold water yields ~0. Pure and testable.
+    """
+    import numpy as np
+    dammed = np.asarray(dammed_ponding, dtype="float64")
+    baseline = np.asarray(baseline_ponding, dtype="float64")
+    new_ponding = np.clip(dammed - baseline, 0.0, None)
+    return float(new_ponding.sum() * cell_area_m2)
+
+
 def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001):
     """Attribute a ponding-difference raster to earthwork footprints, one region each.
 

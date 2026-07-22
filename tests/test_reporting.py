@@ -403,6 +403,27 @@ class TestRasterPondingVolume:
         assert raster_ponding_volume(pond, 1.0) == pytest.approx(0.0)
 
 
+class TestImpoundedVolume:
+    def test_new_ponding_over_baseline(self):
+        from terrainflow_assessment.modules.reporting import impounded_volume
+        baseline = np.array([[0.0, 1.0], [0.0, 0.0]], dtype="float32")
+        dammed = np.array([[0.0, 2.0], [1.0, 0.0]], dtype="float32")
+        # positive diffs: (2−1)=1 and (1−0)=1 → 2 × cell_area 3 = 6
+        assert impounded_volume(baseline, dammed, 3.0) == pytest.approx(6.0)
+
+    def test_negative_diffs_clipped(self):
+        from terrainflow_assessment.modules.reporting import impounded_volume
+        baseline = np.array([[5.0]], dtype="float32")
+        dammed = np.array([[2.0]], dtype="float32")  # dam removed ponding here → clip to 0
+        assert impounded_volume(baseline, dammed, 1.0) == pytest.approx(0.0)
+
+    def test_zero_baseline_is_total_ponding(self):
+        from terrainflow_assessment.modules.reporting import impounded_volume
+        baseline = np.zeros((2, 2), dtype="float32")
+        dammed = np.array([[0.0, 1.5], [0.5, 0.0]], dtype="float32")
+        assert impounded_volume(baseline, dammed, 2.0) == pytest.approx(4.0)
+
+
 class TestAttributePondingVolume:
     def _pond_band(self):
         # A single connected pond: row 2, cols 1-3, depth 1.0 → 3 cells

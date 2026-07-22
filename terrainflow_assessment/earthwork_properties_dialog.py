@@ -91,6 +91,30 @@ class EarthworkPropertiesDialog(QDialog):
             )
             self.spin_crest_elev.valueChanged.connect(self._update_capacity)
             form.addRow("Crest elevation:", self.spin_crest_elev)
+
+            # Opt-in idealised storage: by default we report the honest volume the
+            # dam holds *as drawn* (water escapes around the ends if the wall is
+            # short). Ticking this assumes the wall is extended into higher ground
+            # ("keyed into the banks") so it fills to the crest — a what-if only;
+            # it never changes the drawn dam or the verify-burn. Draw the dam longer
+            # to actually build that storage.
+            self.chk_key_banks = QCheckBox(
+                "Estimated storage if dam keyed into banks (idealised storage)"
+            )
+            self.chk_key_banks.setChecked(
+                bool(getattr(ew, "key_into_banks", False)) if ew else False
+            )
+            self.chk_key_banks.setToolTip(
+                "Off (default): report the storage the dam holds AS DRAWN — if the\n"
+                "wall is too short, water escapes around its ends and raising the\n"
+                "crest above that saddle adds nothing (extend the dam to store more).\n\n"
+                "On: assume the wall is extended into higher ground so it fills to\n"
+                "the crest. This is a what-if estimate only — it does NOT redraw the\n"
+                "dam or change the verification burn. To actually hold this water,\n"
+                "draw the dam further into the banks yourself."
+            )
+            self.chk_key_banks.toggled.connect(self._update_capacity)
+            form.addRow("", self.chk_key_banks)
             self.spin_depth = None
         else:
             self.spin_crest_elev = None
@@ -521,6 +545,10 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_crest_elevation(self):
         return self.spin_crest_elev.value() if self.spin_crest_elev is not None else None
+
+    def get_key_into_banks(self):
+        chk = getattr(self, "chk_key_banks", None)
+        return bool(chk.isChecked()) if chk is not None else False
 
     def get_width(self):
         return self.spin_width.value()
