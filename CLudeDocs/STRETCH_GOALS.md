@@ -87,4 +87,40 @@ and users need to hand a design to a pro modeller.
 
 ---
 
-_Last updated alongside the shared sizing engine build (build-sequence steps 1–4)._
+## 4. Further earthwork feature types (fold into Section 4)
+
+Named-but-unbuilt features the user intends to fold into the Earthwork Design
+sphere once the current UI settles. The registry redesign (2026-07) made the
+panel/dialog/map-layers fully registry-driven, so each of these is now mostly a
+`register_type()` + module wiring job rather than a UI rebuild.
+
+**a) Terrace.** The registry docstring's canonical `register_type()` example; the
+sizing engine's `contour_spacing` primitive (terrace HI = VI / slope) is built and
+tested with zero callers. Needs: registered type, burn method (berm-like bench
+cut/fill), capacity/cut maths, and a spacing-advisor UI using `contour_spacing`.
+
+**b) Pond-site → dam creation shortcut.** `recommend_pond_sites`
+(keypoint_analysis) already finds optimal impoundment sites and renders markers —
+but there is no "start a dam here" action. Needs: click a recommended marker →
+seed a dam line across the valley at that point → normal dam dialog/stage-storage
+flow. (`pond_volume_frustum` also exists for a stand-alone excavated-pond type if
+wanted later.)
+
+**c) Keyline → swale conversion.** `YeomansKeylineAnalysis` computes keylines +
+cultivation lines as display-only layers. Needs: "convert to swale" action reusing
+the contour-swale provenance path (`source_contour_coords`) so converted features
+stay reshape-locked to their line.
+
+**d) Sketch/draft design layer.** Rough drag-to-place earthwork placement explored
+freely, then committed/refined into real contour-fitted features (user idea,
+2026-07-23 — explicitly not now).
+
+**Why deferred.** UI redesign phase capped its scope at exposing already-modelled
+abilities; these add new feature semantics.
+
+**Revisit trigger.** The user finishes polishing the current Section-4 UI and asks
+to fold further earthworks in (their stated plan).
+
+---
+
+_Last updated alongside the registry-driven Earthwork Design UI redesign (2026-07)._

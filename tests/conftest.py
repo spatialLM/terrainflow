@@ -157,6 +157,7 @@ def make_mock_polygon_geom(bounds=None):
 
     asJson()  → valid GeoJSON Polygon
     area()    → shapely area
+    length()  → shapely perimeter (QgsGeometry.length() convention for polygons)
     """
     from shapely.geometry import box, mapping
 
@@ -168,6 +169,7 @@ def make_mock_polygon_geom(bounds=None):
     g = MagicMock()
     g.asJson.return_value = geojson
     g.area.return_value = float(poly.area)
+    g.length.return_value = float(poly.length)  # perimeter
     return g
 
 

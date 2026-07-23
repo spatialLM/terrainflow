@@ -27,12 +27,14 @@ from .advisories import (  # noqa: F401
     soil_from_cn,
 )
 from .primitives import (  # noqa: F401
+    BasinResult,
     ContourSpacingResult,
     DrawdownResult,
     FlowResult,
     PondResult,
     SectionResult,
     VolumeResult,
+    basin_volume_battered,
     contour_spacing,
     drawdown_time,
     manning_flow,

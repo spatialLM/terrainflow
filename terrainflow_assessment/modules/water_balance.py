@@ -99,6 +99,7 @@ def run_water_balance(stores, duration_hr, total_runoff_m3=0.0):
             "name": s.name,
             "inflow_m3": round(inflow_by_name.get(s.name, 0.0), 1),
             "stored_m3": round(s.stored_m3, 1),
+            "capacity_m3": round(s.capacity_m3, 1),
             "fill_pct": round(min(fill_pct, 100.0), 1),
             "overflowed": s.overflowed,
         })

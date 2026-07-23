@@ -15,6 +15,10 @@ has_cut      : bool — True if calculate_cut_volume returns non-zero values
 has_fill     : bool — True if calculate_fill_volume returns non-zero values
 burn_method  : str  — key into DEMBurner._BURN_DISPATCH
 style        : tuple[str, str, str] — (symbol_type, hex_colour, line_width_or_opacity)
+category     : str  — UI grouping: "storage" (holds water — swale/basin/dam; note a
+               dam's has_storage=False is a capacity-*path* flag, its volume comes via
+               stage-storage) or "control" (moves/blocks flow — berm/diversion)
+tooltip      : str  — draw-button tooltip; the panel falls back to "Draw a <label>"
 default_side_slope : float — default wall/side batter as an H:V ratio (horizontal run
                per unit vertical rise). 1.0 == 1:1 (today's implicit assumption); 0.0 ==
                vertical / not modelled. Seeds Earthwork.bottom_width_m / batter_run_m defaults.
@@ -49,6 +53,8 @@ class EarthworkTypeConfig:
     burn_method: str
     style: tuple[str, str, str]  # (symbol_type, hex_colour, line_width)
     default_side_slope: float = 1.0  # H:V run-per-rise; 1.0 == 1:1, 0.0 == vertical
+    category: str = "storage"        # "storage" | "control" — UI grouping
+    tooltip: str = ""                # draw-button tooltip ("" → panel fallback)
 
     # --- sizing policy (per-feature dimension defaults/limits + soil) ---
     default_depth: float = 0.5
@@ -81,6 +87,12 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="swale",
     style=("line", "#00BCD4", "2.5"),
+    category="storage",
+    tooltip=(
+        "On-contour channel that captures and infiltrates runoff.\n"
+        "Draw from a contour (Pick Segment / Full Contour) so it holds\n"
+        "water evenly, or freehand."
+    ),
     default_side_slope=1.0,
     default_depth=0.5,
     depth_range=(0.1, 2.0),
@@ -101,6 +113,11 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="berm",
     style=("line", "#8BC34A", "2.5"),
+    category="control",
+    tooltip=(
+        "Raised ridge that blocks or redirects surface flow\n"
+        "(no storage of its own)."
+    ),
     default_side_slope=1.0,
     default_depth=0.5,
     depth_range=(0.1, 2.0),
@@ -121,7 +138,12 @@ _add(EarthworkTypeConfig(
     has_fill=False,
     burn_method="basin",
     style=("fill", "#2196F3", "1.0"),
-    default_side_slope=0.0,  # vertical walls today; batter is a future calc change
+    category="storage",
+    tooltip=(
+        "Excavated detention/infiltration basin — draw its footprint\n"
+        "as a polygon. Wall batter is settable in its properties."
+    ),
+    default_side_slope=0.0,  # vertical walls by default; batter settable per feature
     default_depth=1.5,
     depth_range=(0.2, 5.0),
     default_top_width=0.0,  # footprint comes from the drawn polygon, not a width
@@ -141,6 +163,11 @@ _add(EarthworkTypeConfig(
     has_fill=True,
     burn_method="dam",
     style=("line", "#795548", "3.5"),
+    category="storage",
+    tooltip=(
+        "Wall across a valley that impounds water behind its crest.\n"
+        "Draw the wall line; storage is computed by flooding the DEM."
+    ),
     default_side_slope=0.0,  # rectangular wall approximation today
     default_depth=2.0,       # nominal wall height when no crest is sampled
     depth_range=(0.2, 10.0),
@@ -161,6 +188,11 @@ _add(EarthworkTypeConfig(
     has_fill=False,
     burn_method="diversion",
     style=("line", "#FF9800", "2.0"),
+    category="control",
+    tooltip=(
+        "Gently-graded channel that carries water across the slope\n"
+        "to a storage feature or safe outlet."
+    ),
     default_side_slope=1.0,
     default_depth=0.3,
     depth_range=(0.1, 1.5),

@@ -6,6 +6,7 @@ Provides:
   recommend_swale_length()  — size a swale to intercept a given inflow volume
   snap_geometry_to_contour() — snap a drawn line to the nearest contour elevation
   contour_to_swale_geometry() — convert a full contour line to a swale QgsGeometry
+  sample_total_inflow()     — total intercepted flow accumulation along a feature
 """
 
 from .catchment import SCSRunoff
@@ -213,5 +214,72 @@ def sample_peak_inflow(qgs_geom, acc_path, n_samples=30):
                 if v > peak:
                     peak = v
         return peak
+    except Exception:
+        return 0.0
+
+
+def sample_total_inflow(qgs_geom, acc_path):
+    """
+    Total flow accumulation (cell count) intercepted along a geometry.
+
+    Walks the line at half-cell steps and sums the accumulation of every
+    **unique** raster cell it passes through. For a contour-aligned feature each
+    upslope cell drains across the line roughly once, so this sum approximates
+    the feature's whole intercepted catchment — unlike a single peak sample
+    (``sample_peak_inflow``), which counts only the largest channel crossing and
+    grossly under-reads a long swale that intercepts many drainage paths.
+
+    Polygons (basins) are sampled along their exterior boundary. Returns 0.0 on
+    any failure (missing raster, degenerate geometry).
+
+    Parameters
+    ----------
+    qgs_geom : QgsGeometry (polyline or polygon)
+    acc_path : str — path to flow accumulation GeoTIFF
+
+    Returns
+    -------
+    float — total intercepted accumulation cell count.
+    """
+    import json
+
+    import numpy as np
+    import rasterio
+    from shapely.geometry import shape as shapely_shape
+
+    try:
+        shapely_geom = shapely_shape(json.loads(qgs_geom.asJson()))
+        if hasattr(shapely_geom, "exterior"):   # Polygon → sample its boundary
+            shapely_geom = shapely_geom.exterior
+    except Exception:
+        return 0.0
+
+    try:
+        with rasterio.open(acc_path) as src:
+            acc = src.read(1).astype("float32")
+            transform = src.transform
+            nodata = src.nodata
+
+        if nodata is not None:
+            acc = np.where(acc == nodata, 0.0, acc)
+
+        total_len = shapely_geom.length
+        if total_len == 0:
+            return 0.0
+
+        step = max(abs(transform.a) / 2.0, 1e-6)   # half-cell keeps every crossing
+        seen = set()
+        total = 0.0
+        for dist in np.arange(0.0, total_len + step, step):
+            pt = shapely_geom.interpolate(min(dist, total_len))
+            col = int((pt.x - transform.c) / transform.a)
+            row = int((pt.y - transform.f) / transform.e)
+            if not (0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]):
+                continue
+            if (row, col) in seen:
+                continue
+            seen.add((row, col))
+            total += max(0.0, float(acc[row, col]))
+        return total
     except Exception:
         return 0.0

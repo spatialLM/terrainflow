@@ -517,3 +517,100 @@ class TestEarthworkDesignRemainingBranches:
         ew.companion_berm = True
         result = b.burn_earthworks([ew])
         assert result.shape == (10, 3)  # no crash, valid shape
+
+
+# ---------------------------------------------------------------------------
+# swale_design.sample_total_inflow — total intercepted accumulation
+# ---------------------------------------------------------------------------
+
+class TestSampleTotalInflow:
+    def _two_channel_acc(self, tmp_path):
+        """Uniform 10 with two 'channels' (cols 7 and 13) at 5000 each."""
+        data = np.ones((20, 20), dtype="float32") * 10.0
+        data[:, 7] = 5000.0
+        data[:, 13] = 5000.0
+        return _write_raster(str(tmp_path / "acc2.tif"), data)
+
+    def test_sums_every_channel_crossing(self, tmp_path):
+        # A line crossing BOTH channels must count both — the old peak sample
+        # would report just one (5000).
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        acc = self._two_channel_acc(tmp_path)
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        total = sample_total_inflow(geom, acc)
+        assert total >= 10000.0  # both channels
+
+    def test_total_exceeds_peak_for_long_line(self, tmp_path):
+        from terrainflow_assessment.modules.swale_design import (
+            sample_peak_inflow,
+            sample_total_inflow,
+        )
+
+        acc = self._two_channel_acc(tmp_path)
+        geom = make_mock_line_geom([(2.0, 10.0), (18.0, 10.0)])
+        assert sample_total_inflow(geom, acc) > sample_peak_inflow(geom, acc)
+
+    def test_unique_cells_no_double_counting(self, tmp_path):
+        # Uniform raster: a 10 m straight line over 1 m cells crosses ~11 unique
+        # cells → total ≈ 11 × value. Double counting would give ~2×.
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        data = np.ones((20, 20), dtype="float32") * 10.0
+        acc = _write_raster(str(tmp_path / "uniform.tif"), data)
+        geom = make_mock_line_geom([(5.0, 10.5), (15.0, 10.5)])
+        total = sample_total_inflow(geom, acc)
+        assert 100.0 <= total <= 120.0  # 10-11 cells × 10, never ~2×
+
+    def test_polygon_sampled_along_boundary(self, tmp_path):
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        acc = self._two_channel_acc(tmp_path)
+        geom = make_mock_polygon_geom((5.0, 5.0, 15.0, 15.0))
+        assert sample_total_inflow(geom, acc) > 0.0
+
+    def test_invalid_geometry_returns_zero(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        acc = self._two_channel_acc(tmp_path)
+        bad = MagicMock()
+        bad.asJson.return_value = "bad-json"
+        assert sample_total_inflow(bad, acc) == 0.0
+
+    def test_bad_acc_path_returns_zero(self):
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        assert sample_total_inflow(geom, "/no/such/raster.tif") == 0.0
+
+    def test_zero_length_geometry_returns_zero(self, tmp_path):
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        acc = self._two_channel_acc(tmp_path)
+        geom = make_mock_line_geom([(10.0, 10.0), (10.0, 10.0)])
+        assert sample_total_inflow(geom, acc) == 0.0
+
+    def test_out_of_bounds_line_returns_zero(self, tmp_path):
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        acc = self._two_channel_acc(tmp_path)
+        geom = make_mock_line_geom([(100.0, 100.0), (120.0, 100.0)])
+        assert sample_total_inflow(geom, acc) == 0.0
+
+    def test_nodata_cells_treated_as_zero(self, tmp_path):
+        from terrainflow_assessment.modules.swale_design import sample_total_inflow
+
+        data = np.full((20, 20), -9999.0, dtype="float32")
+        h, w = data.shape
+        transform = from_bounds(0, 0, 20, 20, 20, 20)
+        path = str(tmp_path / "nodata_total.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=h, width=w,
+            count=1, dtype="float32", crs="EPSG:32632",
+            transform=transform, nodata=-9999.0,
+        ) as dst:
+            dst.write(data, 1)
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        assert sample_total_inflow(geom, path) == 0.0

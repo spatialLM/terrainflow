@@ -2,6 +2,7 @@ import math
 
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -13,7 +14,9 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from .core.registry.earthwork_types import get_type
 from .core.sizing import (
+    basin_volume_battered,
     batter_advisory,
     grade_advisory,
     trapezoid_section,
@@ -25,9 +28,6 @@ from .modules.earthwork_design import (
     calculate_spillway_width,
 )
 
-# Channel types that expose an editable side-slope (z:1) control + batter advisory.
-_SIDE_SLOPE_TYPES = ("swale", "diversion")
-
 
 class EarthworkPropertiesDialog(QDialog):
     """
@@ -38,7 +38,8 @@ class EarthworkPropertiesDialog(QDialog):
 
     def __init__(self, ew_type, geometry, parent=None, earthwork=None,
                  peak_inflow_m3=None, crest_elevation=None, duration_hours=None,
-                 dem_path=None, soil_name=None, cn=None):
+                 dem_path=None, soil_name=None, cn=None, overflow_options=None,
+                 own_elevation=None):
         super().__init__(parent)
         self.ew_type = ew_type
         self.geometry = geometry
@@ -50,6 +51,15 @@ class EarthworkPropertiesDialog(QDialog):
         self._dem_path = dem_path                # for dam wall height/volume
         self._soil_name = soil_name              # site earthwork soil → batter/grade advisory
         self._cn = cn                            # curve number (advisory cross-check context)
+        self._overflow_options = overflow_options or []  # [(id, name[, elev])] of OTHERS
+        self._own_elevation = own_elevation      # DEM at this feature's centroid, or None
+        self._overflow_elevations = {}           # id → elevation (None when unknown)
+        # Registry sizing policy for this type; None for unregistered types → the
+        # historical hardcoded ranges/defaults apply as fallbacks throughout.
+        try:
+            self._cfg = get_type(ew_type)
+        except KeyError:
+            self._cfg = None
 
         type_labels = {"diversion": "Diversion Drain"}
         type_label = type_labels.get(ew_type, ew_type.capitalize())
@@ -118,29 +128,41 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_depth = None
         else:
             self.spin_crest_elev = None
-            # Depth
+            # Depth — range/default from the registry sizing policy for the type.
+            depth_lo, depth_hi = self._cfg.depth_range if self._cfg else (0.1, 10.0)
+            depth_seed = ew.depth if ew else (self._cfg.default_depth if self._cfg else 0.5)
             self.spin_depth = QDoubleSpinBox()
-            self.spin_depth.setRange(0.1, 10.0)
-            self.spin_depth.setValue(ew.depth if ew else 0.5)
+            self.spin_depth.setRange(depth_lo, depth_hi)
+            self.spin_depth.setValue(depth_seed)
             self.spin_depth.setDecimals(2)
             self.spin_depth.setSuffix(" m")
             self.spin_depth.valueChanged.connect(self._update_capacity)
             form.addRow("Depth:", self.spin_depth)
 
-        # Width
-        self.spin_width = QDoubleSpinBox()
-        self.spin_width.setRange(0.1, 100.0)
-        self.spin_width.setValue(ew.width if ew else (2.0 if self.ew_type == "dam" else 1.0))
-        self.spin_width.setDecimals(2)
-        self.spin_width.setSuffix(" m")
-        self.spin_width.valueChanged.connect(self._update_capacity)
-        lbl_width = "Wall thickness:" if self.ew_type == "dam" else "Width:"
-        form.addRow(lbl_width, self.spin_width)
+        # Width — only for types that take a top width (a basin's footprint comes
+        # from the drawn polygon, so it gets no meaningless Width row).
+        if self._cfg is None or "top_width" in self._cfg.independent_dims:
+            width_lo, width_hi = self._cfg.top_width_range if self._cfg else (0.1, 100.0)
+            width_seed = ew.width if ew else (
+                self._cfg.default_top_width if self._cfg
+                else (2.0 if self.ew_type == "dam" else 1.0)
+            )
+            self.spin_width = QDoubleSpinBox()
+            self.spin_width.setRange(width_lo, width_hi)
+            self.spin_width.setValue(width_seed)
+            self.spin_width.setDecimals(2)
+            self.spin_width.setSuffix(" m")
+            self.spin_width.valueChanged.connect(self._update_capacity)
+            lbl_width = "Wall thickness:" if self.ew_type == "dam" else "Width:"
+            form.addRow(lbl_width, self.spin_width)
+        else:
+            self.spin_width = None
 
         # Bottom width (channels only) — the canonical cross-section input, centred
         # under the top width (symmetric trapezoid). The side batter is derived and
         # shown in degrees below. setValue before connect avoids an early fire.
-        if self.ew_type in _SIDE_SLOPE_TYPES:
+        # Registry-driven: any type whose bottom_width is a derived dimension.
+        if self._cfg is not None and "bottom_width" in self._cfg.derived_dims:
             self.spin_bottom_width = QDoubleSpinBox()
             self.spin_bottom_width.setRange(0.05, 100.0)
             self.spin_bottom_width.setDecimals(2)
@@ -167,8 +189,8 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_bottom_width = None
             self.lbl_side_slope = None
 
-        # Gradient (diversion drains only)
-        if self.ew_type == "diversion":
+        # Gradient — registry-driven (types with gradient_pct as an independent dim)
+        if self._cfg is not None and "gradient_pct" in self._cfg.independent_dims:
             self.spin_gradient = QDoubleSpinBox()
             self.spin_gradient.setRange(0.1, 5.0)
             self.spin_gradient.setValue(ew.gradient_pct if ew else 1.0)
@@ -189,6 +211,35 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             self.spin_gradient = None
 
+        # Basin wall batter — polygon storage types. Analytic capacity honours the
+        # batter (inset-prism model); the DEM burn stays a vertical drop this phase.
+        if self._cfg is not None and self._cfg.geom_type == "Polygon" and self._cfg.has_storage:
+            self.spin_wall_slope = QDoubleSpinBox()
+            self.spin_wall_slope.setRange(0.0, 5.0)
+            self.spin_wall_slope.setSingleStep(0.25)
+            self.spin_wall_slope.setDecimals(2)
+            self.spin_wall_slope.setSuffix(" : 1")
+            self.spin_wall_slope.setValue(
+                ew.wall_slope if ew else self._cfg.default_side_slope
+            )
+            self.spin_wall_slope.setToolTip(
+                "Wall batter as horizontal run per unit of depth (H:V).\n"
+                "0 : 1 = vertical walls; 1 : 1 = 45°; flatter is more stable.\n\n"
+                "The stored capacity accounts for the sloped walls. Note the DEM\n"
+                "burn (Re-analyse) still carves vertical walls this phase — the\n"
+                "verification comparison will surface the difference."
+            )
+            self.spin_wall_slope.valueChanged.connect(self._update_capacity)
+            form.addRow("Wall batter:", self.spin_wall_slope)
+
+            self.lbl_basin_converge = QLabel("")
+            self.lbl_basin_converge.setWordWrap(True)
+            self.lbl_basin_converge.setStyleSheet("color: #cc6600; font-style: italic;")
+            form.addRow("", self.lbl_basin_converge)
+        else:
+            self.spin_wall_slope = None
+            self.lbl_basin_converge = None
+
         # Companion berm (swales only)
         self.chk_companion = QCheckBox("Build companion berm on downhill side")
         self.chk_companion.setChecked(ew.companion_berm if ew else False)
@@ -203,6 +254,38 @@ class EarthworkPropertiesDialog(QDialog):
             )
             self.chk_companion.stateChanged.connect(self._update_capacity)
             form.addRow("", self.chk_companion)
+
+        # Overflow routing — storage-category types can name the feature their
+        # overflow spills into (id-based, survives renames/reorders).
+        if (self._cfg is not None and self._cfg.category == "storage"
+                and self._overflow_options):
+            self.combo_overflow = QComboBox()
+            self.combo_overflow.addItem("Auto (downslope)", None)
+            current_target = getattr(ew, "overflow_target_id", None) if ew else None
+            for opt in self._overflow_options:
+                opt_id, opt_name = opt[0], opt[1]
+                self._overflow_elevations[opt_id] = opt[2] if len(opt) > 2 else None
+                self.combo_overflow.addItem(opt_name, opt_id)
+                if opt_id == current_target:
+                    self.combo_overflow.setCurrentIndex(self.combo_overflow.count() - 1)
+            self.combo_overflow.setToolTip(
+                "Where this feature's overflow goes once it is full.\n\n"
+                "Auto: the nearest feature downslope (elevation heuristic).\n"
+                "A named target only receives water when it actually sits\n"
+                "downslope of this feature — water can't flow uphill. An uphill\n"
+                "choice is flagged below and its water goes downslope instead."
+            )
+            self.combo_overflow.currentIndexChanged.connect(self._update_overflow_warning)
+            form.addRow("Overflows to:", self.combo_overflow)
+
+            self.lbl_overflow_warning = QLabel("")
+            self.lbl_overflow_warning.setWordWrap(True)
+            self.lbl_overflow_warning.setStyleSheet("color: #cc6600; font-style: italic;")
+            form.addRow("", self.lbl_overflow_warning)
+            self._update_overflow_warning()
+        else:
+            self.combo_overflow = None
+            self.lbl_overflow_warning = None
 
         layout.addLayout(form)
 
@@ -292,7 +375,7 @@ class EarthworkPropertiesDialog(QDialog):
                 "Total runoff volume flowing into this swale from the slope above\n"
                 "for the current storm scenario (flow accumulation × runoff depth)."
             )
-            cap_layout.addRow("Peak storm inflow:", lbl_inflow)
+            cap_layout.addRow("Storm inflow (event total):", lbl_inflow)
 
             self.lbl_req_length = QLabel("—")
             self.lbl_req_length.setStyleSheet("font-weight: bold; color: #003080;")
@@ -314,7 +397,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_req_length = None
 
         # Channel batter feedback: narrowest width (min_dimension) + live soil advisory.
-        if self.ew_type in _SIDE_SLOPE_TYPES:
+        if self._cfg is not None and "bottom_width" in self._cfg.derived_dims:
             self.lbl_min_dim = QLabel("—")
             self.lbl_min_dim.setToolTip(
                 "Narrowest dimension of the cross-section (the channel bottom width).\n"
@@ -438,7 +521,7 @@ class EarthworkPropertiesDialog(QDialog):
             return
 
         depth = self.spin_depth.value()
-        width = self.spin_width.value()
+        width = self.spin_width.value() if self.spin_width is not None else 0.0
         companion = self.chk_companion.isChecked() if self.ew_type == "swale" else False
         # Channels (swale) take the bottom width directly from the control; non-channel
         # storage (basin) falls back to the feature's stored bottom width.
@@ -448,12 +531,17 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             side_slope = None
             bottom_width = getattr(self._earthwork, "bottom_width_m", None)
+        batter_run = (
+            self.spin_wall_slope.value() * depth
+            if self.spin_wall_slope is not None else None
+        )
         m3, litres = calculate_capacity(
             self.ew_type, self.geometry, depth, width, companion,
-            bottom_width=bottom_width,
+            bottom_width=bottom_width, batter_run=batter_run,
         )
         self.lbl_capacity_m3.setText(f"{m3:,.2f}")
         self.lbl_capacity_l.setText(f"{litres:,.0f}")
+        self._update_basin_converge(depth)
 
         if side_slope is not None:
             self._update_channel_feedback(width, bottom_width, depth, side_slope, None)
@@ -482,6 +570,54 @@ class EarthworkPropertiesDialog(QDialog):
                         self.lbl_req_length.setStyleSheet("font-weight: bold; color: #cc0000;")
             else:
                 self.lbl_req_length.setText("—")
+
+    def _update_overflow_warning(self):
+        """Flag an overflow target that sits uphill — water will NOT flow into it.
+
+        Uses the same rule as the routing (target honoured only when strictly
+        downslope of this feature, DEM elevation at centroids). Unknown elevations
+        (no DEM loaded) can't be judged, so no warning is shown for them.
+        """
+        if self.lbl_overflow_warning is None or self.combo_overflow is None:
+            return
+        target_id = self.combo_overflow.currentData()
+        if target_id is None or self._own_elevation is None:
+            self.lbl_overflow_warning.setText("")
+            return
+        target_elev = self._overflow_elevations.get(target_id)
+        if target_elev is None:
+            self.lbl_overflow_warning.setText("")
+            return
+        if target_elev >= self._own_elevation:
+            name = self.combo_overflow.currentText()
+            self.lbl_overflow_warning.setText(
+                f"⚠ {name} sits uphill of this feature "
+                f"({target_elev:.1f} m vs {self._own_elevation:.1f} m) — overflow "
+                f"will NOT flow into it. It will go to the nearest downslope "
+                f"feature (or leave the site) instead."
+            )
+        else:
+            self.lbl_overflow_warning.setText("")
+
+    def _update_basin_converge(self, depth):
+        """Amber note when battered basin walls meet before the design depth."""
+        if self.lbl_basin_converge is None or self.spin_wall_slope is None:
+            return
+        try:
+            area = self.geometry.area()
+            perimeter = self.geometry.length()
+            r = basin_volume_battered(area, perimeter, depth,
+                                      self.spin_wall_slope.value())
+            if r.effective_depth < depth - 1e-9:
+                self.lbl_basin_converge.setText(
+                    f"⚠ Walls converge at ~{r.effective_depth:.2f} m — the basin "
+                    f"bottoms out before the design depth ({depth:.2f} m). "
+                    f"Widen the footprint or flatten the batter."
+                )
+            else:
+                self.lbl_basin_converge.setText("")
+        except Exception:
+            self.lbl_basin_converge.setText("")
 
     def _current_bottom_width(self, top_width):
         """Bottom width from the control (never wider than the top), or None if absent."""
@@ -551,7 +687,19 @@ class EarthworkPropertiesDialog(QDialog):
         return bool(chk.isChecked()) if chk is not None else False
 
     def get_width(self):
+        # Basins have no width control (footprint comes from the polygon) —
+        # keep whatever the feature already stores.
+        if self.spin_width is None:
+            return self._earthwork.width if self._earthwork else 2.0
         return self.spin_width.value()
+
+    def get_wall_slope(self):
+        """Basin wall batter (H:V), or 0.0 when the type has no batter control."""
+        return self.spin_wall_slope.value() if self.spin_wall_slope is not None else 0.0
+
+    def get_overflow_target_id(self):
+        """Chosen overflow target earthwork id, or None for Auto (downslope)."""
+        return self.combo_overflow.currentData() if self.combo_overflow is not None else None
 
     def get_companion_berm(self):
         return self.chk_companion.isChecked() if self.ew_type == "swale" else False

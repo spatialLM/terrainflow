@@ -29,6 +29,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 
+from terrainflow_assessment.core.registry.earthwork_types import all_types, get_type
 from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
 from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
 from terrainflow_assessment.map_tools.draw_polygon_tool import DrawPolygonTool
@@ -41,18 +42,9 @@ from terrainflow_assessment.modules.earthwork_design import (
 )
 from terrainflow_assessment.modules.swale_design import (
     contour_to_swale_geometry,
-    sample_peak_inflow,
+    sample_total_inflow,
 )
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
-
-# Per-type styles: (geometry_type, display_name, colour, fill or None, line width)
-_EW_STYLES = {
-    "swale":     ("LineString", "Swales",     "#00BCD4", None,      "2.5"),
-    "berm":      ("LineString", "Berms",      "#FF6D00", None,      "2.5"),
-    "dam":       ("LineString", "Dams",       "#E53935", None,      "3.0"),
-    "diversion": ("LineString", "Diversions", "#AB47BC", None,      "2.0"),
-    "basin":     ("Polygon",    "Basins",     "#1565C0", "#1565C0", "1.5"),
-}
 
 
 class EarthworksController:
@@ -108,6 +100,20 @@ class EarthworksController:
         swale_geom = contour_to_swale_geometry(geom)
         self._on_geometry_drawn("swale", swale_geom, source_contour=contour_coords)
 
+    def activate_draw_earthwork(self, key):
+        """Registry-driven draw dispatch: geometry type decides the map tool."""
+        try:
+            cfg = get_type(key)
+        except KeyError:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment", f"Unknown earthwork type: {key}"
+            )
+            return
+        if cfg.geom_type == "Polygon":
+            self.activate_draw_polygon(key)
+        else:
+            self.activate_draw_line(key)
+
     def activate_draw_line(self, ew_type):
         tool = DrawLineTool(self._canvas,
                             slope_raster_path=self._state.slope_raster_path,
@@ -116,11 +122,11 @@ class EarthworksController:
         tool.cancelled.connect(self._on_draw_cancelled)
         self._canvas.setMapTool(tool)
 
-    def activate_draw_basin(self):
+    def activate_draw_polygon(self, ew_type):
         tool = DrawPolygonTool(self._canvas,
                                slope_raster_path=self._state.slope_raster_path,
-                               tool_label="basin")
-        tool.polygon_drawn.connect(lambda geom: self._on_geometry_drawn("basin", geom))
+                               tool_label=ew_type)
+        tool.polygon_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
         self._canvas.setMapTool(tool)
 
@@ -174,7 +180,8 @@ class EarthworksController:
         if self._state.baseline_result:
             acc_path = self._state.baseline_result.get("flow_accumulation")
             if acc_path:
-                acc_cells = sample_peak_inflow(geometry, acc_path)
+                # Total intercepted accumulation (every crossing), not one peak cell.
+                acc_cells = sample_total_inflow(geometry, acc_path)
                 cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
                 runoff_mm = self._state.baseline_result.get("runoff_mm", 0)
                 peak_inflow = acc_cells * cell_area * runoff_mm / 1000.0
@@ -213,6 +220,8 @@ class EarthworksController:
             dem_path=self._state.dem_path if ew_type == "dam" else None,
             soil_name=self._panel.earthwork_soil_name,
             cn=self._panel.cn,
+            overflow_options=self._overflow_options(exclude_id=ew.id),
+            own_elevation=self._feature_elevation(geometry),
         )
 
         if dlg.exec():
@@ -224,6 +233,13 @@ class EarthworksController:
                 ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
             elif ew_type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+            elif ew_type == "diversion":
+                # Was silently dropped on create (only the edit path read it).
+                ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
+            if ew_type == "basin":
+                # After depth — the wall_slope setter back-solves batter_run from it.
+                ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
+            ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
             # Apply the bottom width (channels only; None otherwise) — the canonical
             # cross-section field that drives capacity and the burn footprint.
             bw = getattr(dlg, "get_bottom_width", lambda: None)()
@@ -238,6 +254,7 @@ class EarthworksController:
                     ew_type, geometry, ew.depth, ew.width,
                     getattr(ew, "companion_berm", False),
                     bottom_width=getattr(ew, "bottom_width_m", None),
+                    batter_run=getattr(ew, "batter_run_m", None),
                 )
             self._state.earthwork_manager.add(ew)
             self._panel.add_earthwork_to_list(
@@ -265,6 +282,8 @@ class EarthworksController:
             dem_path=self._state.dem_path if ew.type == "dam" else None,
             soil_name=self._panel.earthwork_soil_name,
             cn=self._panel.cn,
+            overflow_options=self._overflow_options(exclude_id=ew.id),
+            own_elevation=self._feature_elevation(ew.geometry),
         )
         if dlg.exec():
             ew.name = dlg.get_name()
@@ -279,6 +298,10 @@ class EarthworksController:
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
             elif ew.type == "diversion":
                 ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
+            if ew.type == "basin":
+                # After depth — the wall_slope setter back-solves batter_run from it.
+                ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
+            ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
             bw = getattr(dlg, "get_bottom_width", lambda: None)()
             if bw is not None:
                 ew.bottom_width_m = bw
@@ -290,10 +313,41 @@ class EarthworksController:
                     ew.type, ew.geometry, ew.depth, ew.width,
                     getattr(ew, "companion_berm", False),
                     bottom_width=getattr(ew, "bottom_width_m", None),
+                    batter_run=getattr(ew, "batter_run_m", None),
                 )
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
             self._recompute_live_assessment()
+
+    def _overflow_options(self, exclude_id=None):
+        """(id, name, elevation) of every other earthwork — the dialog's overflow
+        targets. Elevation (DEM at centroid, same sampling as the water balance's
+        stores) lets the dialog warn when a chosen target sits uphill; None when
+        no DEM is loaded."""
+        return [
+            (e.id, e.name, self._feature_elevation(e.geometry))
+            for e in self._state.earthwork_manager.get_all()
+            if e.id != exclude_id
+        ]
+
+    def _feature_elevation(self, geometry):
+        """DEM elevation at the geometry centroid (matches store elevation), or None."""
+        if not self._state.dem_path:
+            return None
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+
+            from terrainflow_assessment.modules.swale_design import (
+                snap_point_to_contour_elevation,
+            )
+            centroid = shapely_shape(json.loads(geometry.asJson())).centroid
+            return snap_point_to_contour_elevation(
+                (centroid.x, centroid.y), self._state.dem_path
+            )
+        except Exception:
+            return None
 
     def delete_selected_earthwork(self):
         idx = self._panel.get_selected_earthwork_index()
@@ -351,6 +405,7 @@ class EarthworksController:
                 ew.type, geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
                 bottom_width=getattr(ew, "bottom_width_m", None),
+                batter_run=getattr(ew, "batter_run_m", None),
             )
         self._recompute_live_assessment()
 
@@ -369,6 +424,7 @@ class EarthworksController:
                 ew.type, geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
                 bottom_width=getattr(ew, "bottom_width_m", None),
+                batter_run=getattr(ew, "batter_run_m", None),
             )
         self._panel.update_earthwork_in_list(idx, ew.summary())
         self._refresh_ew_layer()
@@ -438,7 +494,6 @@ class EarthworksController:
         try:
             from terrainflow_assessment.modules.catchment import SCSRunoff
             from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
-            from terrainflow_assessment.modules.swale_design import sample_peak_inflow
             from terrainflow_assessment.modules.water_balance import run_water_balance
 
             enabled = [
@@ -479,48 +534,38 @@ class EarthworksController:
                     if store is None:
                         continue
                     try:
-                        acc_cells = sample_peak_inflow(ew.geometry, acc_path)
+                        # Total intercepted accumulation along the feature — a long
+                        # contour swale crosses many drainage paths; a single peak
+                        # sample under-read it by orders of magnitude.
+                        acc_cells = sample_total_inflow(ew.geometry, acc_path)
                         store.inflow_m3 = acc_cells * cell_area * runoff_mm / 1000.0
                     except Exception:
                         store.inflow_m3 = 0.0
 
             result = run_water_balance(stores, duration_hr, total_runoff_m3)
-            self._panel.set_live_assessment(self._format_live_assessment(result, have_flow))
+            from terrainflow_assessment.modules.reporting import format_live_assessment
+            self._panel.set_live_assessment(format_live_assessment(result, have_flow))
+            self._refresh_list_water_state(result)
         except Exception as exc:  # never let the readout break the edit flow
             print(f"TerrainFlow Assessment — live assessment error: {exc}")
 
-    def _format_live_assessment(self, r, have_flow):
-        """Build the HTML summary for the Live Assessment panel readout."""
-        lines = [
-            f"<b>Storage capacity:</b> {r.total_capacity_m3:,.0f} m³",
-            f"<b>Earthworks (cut / fill):</b> {r.total_cut_m3:,.0f} / {r.total_fill_m3:,.0f} m³",
-        ]
-        if have_flow:
-            colour = (
-                "#1a7a1a" if r.capture_pct >= 80
-                else "#cc6600" if r.capture_pct >= 40 else "#cc0000"
-            )
-            lines.append(
-                f"<b>Storm capture:</b> <span style='color:{colour};font-weight:bold;'>"
-                f"{r.capture_pct:.0f}%</span> "
-                f"({r.total_captured_m3:,.0f} of {r.total_inflow_m3:,.0f} m³ runoff; "
-                f"{r.site_exit_m3:,.0f} m³ spills)"
-            )
-            overflowing = [f["name"] for f in r.per_feature if f["overflowed"]]
-            if overflowing:
-                lines.append(
-                    f"<span style='color:#cc6600;'>Overflowing: "
-                    f"{', '.join(overflowing)}</span>"
-                )
-        else:
-            lines.append(
-                "<i style='color:#7f8c8d;'>Run baseline analysis to see storm capture %.</i>"
-            )
-        lines.append(
-            "<span style='color:#7f8c8d;font-size:10px;'>Analytical estimate — "
-            "confirm with Re-analyse with Earthworks.</span>"
-        )
-        return "<br>".join(lines)
+    def _refresh_list_water_state(self, result):
+        """Append the live water state (stored m³ + % full) to each list entry.
+
+        The list previously showed only the feature's earthwork numbers
+        (capacity/crest); this folds in what the analytical balance says each
+        feature is actually holding for the current storm.
+        """
+        try:
+            per = {f["name"]: f for f in result.per_feature}
+            for i, ew in enumerate(self._state.earthwork_manager.get_all()):
+                f = per.get(ew.name)
+                text = ew.summary()
+                if f is not None:
+                    text += f"  ·  💧 {f['stored_m3']:,.0f} m³ ({f['fill_pct']:.0f}% full)"
+                self._panel.update_earthwork_in_list(i, text)
+        except Exception:
+            pass  # cosmetic — never break the edit flow
 
     # ---------------------------------------------------------------- Earthwork layers
 
@@ -534,7 +579,13 @@ class EarthworksController:
             root.findGroup("Earthworks") or root.insertGroup(0, "Earthworks")
         )
 
-        for ew_type, (geom_type, display_name, color_hex, fill_hex, width) in _EW_STYLES.items():
+        # Registry-driven: the type registry is the single source of layer styling
+        # (matching the panel's draw-button colours); a future register_type() gets
+        # its map layer automatically.
+        for ew_type, cfg in all_types().items():
+            geom_type = cfg.geom_type
+            display_name = f"{cfg.label}s"
+            color_hex, width = cfg.style[1], cfg.style[2]
             existing = self._state.ew_layers.get(ew_type)
             if existing and self._project.instance().mapLayer(existing.id()):
                 continue

@@ -26,7 +26,11 @@ from rasterio.features import rasterize
 from shapely.geometry import shape as shapely_shape
 
 from terrainflow_assessment.core.registry.earthwork_types import get_type
-from terrainflow_assessment.core.sizing import manning_flow, trapezoid_section
+from terrainflow_assessment.core.sizing import (
+    basin_volume_battered,
+    manning_flow,
+    trapezoid_section,
+)
 from terrainflow_assessment.modules.burn_strategy import (
     enforce_monotonic_path,
     line_cells,
@@ -74,14 +78,19 @@ class Earthwork:
         self.geometry = geometry     # QgsGeometry
         self.name = name
         self.id = uuid.uuid4().hex   # stable identity (for overflow linkage; survives reorder)
-        self.depth = 0.5             # metres cut/raised (not used for dam)
-        self.top_width_m = 2.0       # declared top width of cross-section (metres)
+        # Registry-seeded sizing defaults (the registry is the one-file home of
+        # per-type policy); unknown types fall back to the historical 0.5 / 2.0.
         # Bottom width is the canonical stored cross-section field; side_slope is derived
         # from it (see the side_slope property). Seeded from the type's default batter so a
         # fresh feature reproduces its historical slope (channels default 1:1 → bottom = 1.0 m).
         try:
-            default_slope = get_type(ew_type).default_side_slope
+            cfg = get_type(ew_type)
+            self.depth = cfg.default_depth
+            self.top_width_m = cfg.default_top_width
+            default_slope = cfg.default_side_slope
         except KeyError:
+            self.depth = 0.5         # metres cut/raised (not used for dam)
+            self.top_width_m = 2.0   # declared top width of cross-section (metres)
             default_slope = 1.0
         self.bottom_width_m = max(0.1, self.top_width_m - 2 * default_slope * self.depth)
         self.batter_run_m = 0.0      # basin only: horizontal inset to full depth (0 = vertical)
@@ -220,18 +229,22 @@ def _resolve_bottom_width(bottom_width, top_width, depth):
 
 
 def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
-                       bottom_width=None):
+                       bottom_width=None, batter_run=None):
     """
     Calculate storage capacity of an earthwork.
 
     Swale — trapezoidal cross-section × length × 0.8 freeboard.
-    Basin — polygon area × depth × 0.8 freeboard.
+    Basin — battered-wall inset-prism volume × 0.8 freeboard (vertical when
+    ``batter_run`` is None/0 — identical to the historical prism).
     Berm / Dam / Diversion — no storage, returns (0.0, 0.0).
 
     ``bottom_width`` is the trapezoid's bottom width (m). When ``None`` it is derived
     from the declared top width assuming 1:1 side slopes (``top_width − 2×depth``) —
     preserving historical behaviour. Pass ``Earthwork.bottom_width_m`` to honour the
     feature's stored side slope.
+
+    ``batter_run`` (basins) is the horizontal inset to full depth
+    (``Earthwork.batter_run_m``); side slope z = batter_run / depth.
 
     Returns (volume_m3, volume_l).
     """
@@ -255,10 +268,14 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
         volume_m3 = cross_section * length * 0.8
 
     elif ew_type == "basin":
-        # TODO(feature-list): honour Earthwork.batter_run_m for sloped basin walls;
-        # currently vertical (prismatic) — value change, deferred out of the shape pass.
+        # Battered walls via the shared inset-prism primitive (0.8 freeboard stays
+        # here — policy lives in modules, geometry in core/sizing). NOTE: the burn
+        # tier (_burn_basin) still carves a vertical drop this phase; the analytic/
+        # burned divergence for battered basins is surfaced by the verification tier.
         area_m2 = shapely_area(geometry)
-        volume_m3 = area_m2 * depth * 0.8
+        perimeter_m = shapely_length(geometry)
+        z = (batter_run / depth) if batter_run and depth > 0 else 0.0
+        volume_m3 = basin_volume_battered(area_m2, perimeter_m, depth, z).volume * 0.8
     else:
         return 0.0, 0.0
 
@@ -603,6 +620,10 @@ class DEMBurner:
         return dem
 
     def _burn_basin(self, dem, polygon, ew):
+        # Vertical drop over the footprint. Battered walls (batter_run_m) are
+        # honoured by the analytic capacity (basin_volume_battered) but NOT burned
+        # this phase — the divergence for battered basins is deliberate and is
+        # surfaced by the verification tier's analytic-vs-terrain comparison.
         mask = self._rasterize(polygon)
         dem = dem.copy()
         dem[mask] -= ew.depth

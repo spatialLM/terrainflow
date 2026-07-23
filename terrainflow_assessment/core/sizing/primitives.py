@@ -9,6 +9,7 @@ divergent trapezoid copies that previously lived in ``modules/earthwork_design.p
     contour_spacing       — horizontal interval between contour features (terrace HI)
     manning_flow          — Manning's uniform-flow discharge + velocity (bankfull ceiling)
     pond_volume_frustum   — prismoidal volume of an excavated rectangular frustum pond
+    basin_volume_battered — battered-wall volume of an arbitrary-footprint basin
     drawdown_time         — time to infiltrate a stored volume away
 
 All functions are pure and unit-consistent (SI decimals; slopes as decimal ratios).
@@ -83,6 +84,17 @@ class PondResult:
     bottom_length: float        # m
     bottom_width: float         # m
     min_dimension: float        # min(bottom_length, bottom_width) (m)
+
+
+@dataclass(frozen=True)
+class BasinResult:
+    """Battered-wall volume of an arbitrary-footprint basin (inset-prism model)."""
+    volume: float               # m³
+    top_area: float             # surface area A (m²)
+    bottom_area: float          # floor area at effective depth (m²)
+    effective_depth: float      # ≤ design depth; smaller when walls converge (m)
+    side_slope: float           # z, decimal run-per-rise
+    min_dimension: float | None  # arbitrary footprint has no single width → None
 
 
 @dataclass(frozen=True)
@@ -229,6 +241,63 @@ def pond_volume_frustum(top_length: float, top_width: float, depth: float,
         bottom_length=bottom_length,
         bottom_width=bottom_width,
         min_dimension=min(bottom_length, bottom_width),
+    )
+
+
+def basin_volume_battered(area_m2: float, perimeter_m: float, depth_m: float,
+                          side_slope: float) -> BasinResult:
+    """Battered-wall volume of an arbitrary-footprint basin (inset-prism model).
+
+    The drawn footprint is an arbitrary polygon, so the rectangular frustum
+    (:func:`pond_volume_frustum`) does not apply. Model the walls battering inward
+    at ``side_slope`` (decimal run-per-rise) by shrinking the area linearly with
+    depth via the perimeter: ``A(t) = max(0, A − P·z·t)``, ``V = ∫₀^d A(t) dt``.
+
+    - No convergence (``P·z·d ≤ A``): ``V = A·d − P·z·d²/2``;
+      ``bottom_area = A − P·z·d``; ``effective_depth = d``.
+    - Convergence at ``t* = A/(P·z) < d``: the walls meet before design depth —
+      ``V = A²/(2·P·z)``, ``bottom_area = 0``, ``effective_depth = t*``. Clamped,
+      not an error: this runs live during vertex drags and must degrade gracefully.
+    - ``z = 0``: exact vertical prism ``A·d``.
+
+    The linear-inset model omits the positive corner term (a square 10×10 m,
+    z = 1, d = 1 m gives 80.0 m³ vs the exact 81.33 m³), so it slightly
+    *underestimates* — conservative for storage claims.
+
+    Guards (§1.3): non-positive depth or area → graceful zero-volume degenerate
+    result (never raises mid-drag). ``side_slope < 0`` → ``ValueError``
+    (programmer error; the UI floor is 0).
+    """
+    if side_slope < 0:
+        raise ValueError("basin side slope must be non-negative")
+    if depth_m <= 0 or area_m2 <= 0:
+        return BasinResult(
+            volume=0.0,
+            top_area=max(0.0, area_m2),
+            bottom_area=max(0.0, area_m2),
+            effective_depth=0.0,
+            side_slope=side_slope,
+            min_dimension=None,
+        )
+
+    shrink_rate = perimeter_m * side_slope  # m² lost per metre of depth
+    if shrink_rate * depth_m <= area_m2:
+        volume = area_m2 * depth_m - shrink_rate * depth_m ** 2 / 2.0
+        bottom_area = area_m2 - shrink_rate * depth_m
+        effective_depth = depth_m
+    else:
+        # Walls converge at t* = A / (P·z) before reaching the design depth.
+        effective_depth = area_m2 / shrink_rate
+        volume = area_m2 ** 2 / (2.0 * shrink_rate)
+        bottom_area = 0.0
+
+    return BasinResult(
+        volume=volume,
+        top_area=area_m2,
+        bottom_area=bottom_area,
+        effective_depth=effective_depth,
+        side_slope=side_slope,
+        min_dimension=None,
     )
 
 

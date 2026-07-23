@@ -78,3 +78,24 @@ class TestRegisterType:
         assert "basin" in types
         assert "dam" in types
         assert "diversion" in types
+
+
+class TestUiGrouping:
+    def test_every_type_has_label_and_valid_category(self):
+        for key, cfg in all_types().items():
+            assert cfg.label, f"{key} has no label"
+            assert cfg.category in ("storage", "control"), f"{key}: {cfg.category!r}"
+
+    def test_storage_group_includes_dam(self):
+        # A dam's has_storage=False is a capacity-path flag; to users it's storage.
+        assert get_type("dam").category == "storage"
+        assert get_type("swale").category == "storage"
+        assert get_type("basin").category == "storage"
+
+    def test_control_group(self):
+        assert get_type("berm").category == "control"
+        assert get_type("diversion").category == "control"
+
+    def test_builtin_tooltips_populated(self):
+        for key in ("swale", "berm", "basin", "dam", "diversion"):
+            assert get_type(key).tooltip.strip(), f"{key} tooltip empty"

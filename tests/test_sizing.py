@@ -9,6 +9,7 @@ import math
 import pytest
 
 from terrainflow_assessment.core.sizing import (
+    basin_volume_battered,
     contour_spacing,
     drawdown_time,
     manning_flow,
@@ -284,3 +285,52 @@ class TestCnSlopeCrosscheck:
         within, text = cn_slope_crosscheck(80, 1.5)
         assert within is True
         assert "Clay" in text
+
+
+# ---------------------------------------------------------------------------
+# basin_volume_battered — inset-prism model for arbitrary footprints
+# ---------------------------------------------------------------------------
+
+class TestBasinVolumeBattered:
+    def test_vertical_walls_exact_prism(self):
+        r = basin_volume_battered(100.0, 40.0, 2.0, 0.0)
+        assert r.volume == pytest.approx(200.0)
+        assert r.bottom_area == pytest.approx(100.0)
+        assert r.effective_depth == pytest.approx(2.0)
+
+    def test_battered_square_conservative(self):
+        # Square 10×10, z=1, d=1: inset-prism gives 80.0 (exact frustum 81.33).
+        r = basin_volume_battered(100.0, 40.0, 1.0, 1.0)
+        assert r.volume == pytest.approx(80.0)
+        exact = pond_volume_frustum(10.0, 10.0, 1.0, 1.0).volume
+        assert r.volume < exact  # conservative underestimate
+
+    def test_convergence_clamps(self):
+        # A=4, P=8, z=1: walls meet at t* = 4/8 = 0.5 m; V = 16/16 = 1.0.
+        r = basin_volume_battered(4.0, 8.0, 5.0, 1.0)
+        assert r.volume == pytest.approx(1.0)
+        assert r.effective_depth == pytest.approx(0.5)
+        assert r.bottom_area == 0.0
+
+    def test_zero_depth_degenerate(self):
+        r = basin_volume_battered(100.0, 40.0, 0.0, 1.0)
+        assert r.volume == 0.0
+        assert r.effective_depth == 0.0
+
+    def test_zero_area_degenerate(self):
+        assert basin_volume_battered(0.0, 0.0, 1.0, 1.0).volume == 0.0
+
+    def test_negative_slope_raises(self):
+        with pytest.raises(ValueError):
+            basin_volume_battered(100.0, 40.0, 1.0, -0.5)
+
+    def test_volume_decreases_with_batter(self):
+        vols = [basin_volume_battered(100.0, 40.0, 1.5, z).volume
+                for z in (0.0, 0.5, 1.0, 2.0)]
+        assert vols == sorted(vols, reverse=True)
+        assert vols[0] > vols[-1]
+
+    def test_effective_depth_full_when_not_converging(self):
+        r = basin_volume_battered(1000.0, 130.0, 2.0, 1.0)
+        assert r.effective_depth == pytest.approx(2.0)
+        assert r.min_dimension is None

@@ -40,6 +40,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.core.registry.earthwork_types import all_types
+
 
 class AssessmentPanel(QDockWidget):
     """
@@ -73,11 +75,8 @@ class AssessmentPanel(QDockWidget):
     recommend_ponds_requested = pyqtSignal()
 
     # Earthworks
-    draw_swale_requested = pyqtSignal(str)    # mode: 'freehand' or 'contour'
-    draw_berm_requested = pyqtSignal()
-    draw_basin_requested = pyqtSignal()
-    draw_dam_requested = pyqtSignal()
-    draw_diversion_requested = pyqtSignal()
+    draw_swale_requested = pyqtSignal(str)      # mode: 'freehand' | 'contour' | 'full_contour'
+    draw_earthwork_requested = pyqtSignal(str)  # registry type key (berm/basin/dam/…)
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
     reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
@@ -629,39 +628,46 @@ class AssessmentPanel(QDockWidget):
         self._ew_soil_combo.setCurrentText("Loam")
         lay.addWidget(self._ew_soil_combo)
 
-        # Swale drawing mode
-        lay.addWidget(self._label("Draw Swale"))
-        swale_row = QHBoxLayout()
-        self._draw_swale_contour_btn = QPushButton("Pick Segment")
-        self._draw_swale_contour_btn.setToolTip(
-            "Click a contour, then pick a start and end point\n"
-            "to place a swale along that segment."
-        )
-        self._draw_swale_fullcontour_btn = QPushButton("Full Contour")
-        self._draw_swale_fullcontour_btn.setToolTip(
-            "Click a contour line to place a swale along its entire length."
-        )
-        self._draw_swale_freehand_btn = QPushButton("Freehand")
-        self._draw_swale_freehand_btn.setToolTip(
-            "Draw a swale freehand — vertices snap to contour elevation."
-        )
-        swale_row.addWidget(self._draw_swale_contour_btn)
-        swale_row.addWidget(self._draw_swale_fullcontour_btn)
-        swale_row.addWidget(self._draw_swale_freehand_btn)
-        lay.addLayout(swale_row)
+        # Draw buttons are generated from the type registry, grouped by category,
+        # so a future register_type() call surfaces here automatically with its
+        # own colour + tooltip. Swale keeps its three draw modes as a special row.
+        types = all_types()
+        self._draw_ew_buttons = {}
 
-        # Other earthwork draw buttons
-        draw_row1 = QHBoxLayout()
-        self._draw_berm_btn = self._button("Berm")
-        self._draw_basin_btn = self._button("Basin")
-        self._draw_dam_btn = self._button("Dam")
-        draw_row1.addWidget(self._draw_berm_btn)
-        draw_row1.addWidget(self._draw_basin_btn)
-        draw_row1.addWidget(self._draw_dam_btn)
-        lay.addLayout(draw_row1)
+        storage_keys = [k for k, c in types.items()
+                        if c.category == "storage" and k != "swale"]
+        control_keys = [k for k, c in types.items() if c.category == "control"]
+        other_keys = [k for k, c in types.items()
+                      if c.category not in ("storage", "control") and k != "swale"]
 
-        self._draw_diversion_btn = self._button("Diversion Drain")
-        lay.addWidget(self._draw_diversion_btn)
+        lay.addWidget(self._label("Storage — holds water"))
+        if "swale" in types:
+            swale_hex = types["swale"].style[1]
+            swale_row = QHBoxLayout()
+            self._draw_swale_contour_btn = self._button("Swale: Pick Segment", swale_hex)
+            self._draw_swale_contour_btn.setToolTip(
+                "Click a contour, then pick a start and end point\n"
+                "to place a swale along that segment."
+            )
+            self._draw_swale_fullcontour_btn = self._button("Full Contour", swale_hex)
+            self._draw_swale_fullcontour_btn.setToolTip(
+                "Click a contour line to place a swale along its entire length."
+            )
+            self._draw_swale_freehand_btn = self._button("Freehand", swale_hex)
+            self._draw_swale_freehand_btn.setToolTip(
+                "Draw a swale freehand — vertices snap to contour elevation."
+            )
+            swale_row.addWidget(self._draw_swale_contour_btn)
+            swale_row.addWidget(self._draw_swale_fullcontour_btn)
+            swale_row.addWidget(self._draw_swale_freehand_btn)
+            lay.addLayout(swale_row)
+        lay.addLayout(self._build_draw_grid(storage_keys, types))
+
+        if control_keys:
+            lay.addWidget(self._label("Flow control — moves / blocks water"))
+            lay.addLayout(self._build_draw_grid(control_keys, types))
+        if other_keys:
+            lay.addLayout(self._build_draw_grid(other_keys, types))
 
         # Earthwork list
         lay.addWidget(self._label("Earthworks"))
@@ -706,13 +712,26 @@ class AssessmentPanel(QDockWidget):
             lambda: self.draw_swale_requested.emit("full_contour"))
         self._draw_swale_freehand_btn.clicked.connect(
             lambda: self.draw_swale_requested.emit("freehand"))
-        self._draw_berm_btn.clicked.connect(self.draw_berm_requested)
-        self._draw_basin_btn.clicked.connect(self.draw_basin_requested)
-        self._draw_dam_btn.clicked.connect(self.draw_dam_requested)
-        self._draw_diversion_btn.clicked.connect(self.draw_diversion_requested)
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
+
+    def _build_draw_grid(self, keys, types):
+        """Grid of registry-driven draw buttons (≤3 per row, registry colour+tooltip)."""
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        for i, key in enumerate(keys):
+            cfg = types[key]
+            btn = self._button(cfg.label, cfg.style[1])
+            btn.setToolTip(cfg.tooltip or f"Draw a {cfg.label.lower()}")
+            # Default-arg binding: a bare lambda would capture the loop variable
+            # and emit the LAST key for every button.
+            btn.clicked.connect(
+                lambda _=False, k=key: self.draw_earthwork_requested.emit(k)
+            )
+            self._draw_ew_buttons[key] = btn
+            grid.addWidget(btn, i // 3, i % 3)
+        return grid
 
     # ---------------------------------------------------------------- Section 5: Live Assessment
 

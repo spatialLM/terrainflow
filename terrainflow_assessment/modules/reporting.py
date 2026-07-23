@@ -108,6 +108,117 @@ def impounded_volume(baseline_ponding, dammed_ponding, cell_area_m2):
     return float(new_ponding.sum() * cell_area_m2)
 
 
+# ---------------------------------------------------------------------------
+# Live Assessment panel readout (design tier)
+# ---------------------------------------------------------------------------
+
+# Capture-% traffic light: green ≥ 80, amber ≥ 40, red below.
+_LIVE_GOOD, _LIVE_MID, _LIVE_BAD = "#1e8449", "#b9770e", "#c0392b"
+_LIVE_MUTED = "#566573"
+_LIVE_FILL = "#2e86c1"
+
+
+def _capture_colour(pct):
+    if pct >= 80:
+        return _LIVE_GOOD
+    if pct >= 40:
+        return _LIVE_MID
+    return _LIVE_BAD
+
+
+def _mini_bar(pct, colour, back="#d6dbdf"):
+    """A thin horizontal bar as a Qt-rich-text table (QLabel has no CSS widths)."""
+    p = int(max(0.0, min(100.0, pct)))
+    cells = []
+    if p > 0:
+        cells.append(
+            f"<td bgcolor='{colour}' width='{p}%'>"
+            "<span style='font-size:3px;'>&nbsp;</span></td>"
+        )
+    if p < 100:
+        cells.append(
+            f"<td bgcolor='{back}' width='{100 - p}%'>"
+            "<span style='font-size:3px;'>&nbsp;</span></td>"
+        )
+    return (
+        "<table width='100%' cellspacing='0' cellpadding='0'><tr>"
+        + "".join(cells) + "</tr></table>"
+    )
+
+
+def format_live_assessment(result, have_flow):
+    """Qt-rich-text HTML for the Live Assessment panel readout.
+
+    ``result`` is a :class:`~terrainflow_assessment.modules.water_balance.BalanceResult`.
+    With flow data: a colour-coded capture-% headline + bar, the held/leaves split,
+    and a per-feature table (inflow → stored, fill %, ⚠ when overflowing). Without:
+    per-feature capacities and a run-baseline hint. Pure string building — testable.
+    """
+    r = result
+    parts = []
+
+    if have_flow:
+        colour = _capture_colour(r.capture_pct)
+        parts.append(
+            f"<span style='font-size:20px;font-weight:bold;color:{colour};'>"
+            f"{r.capture_pct:.0f}%</span> "
+            f"<span style='font-size:11px;color:{_LIVE_MUTED};'>of storm runoff "
+            f"captured</span>"
+        )
+        parts.append(_mini_bar(r.capture_pct, colour))
+        stored = max(0.0, r.total_captured_m3 - r.total_infiltration_m3)
+        parts.append(
+            f"<span style='font-size:11px;color:#2c3e50;'>"
+            f"{r.total_captured_m3:,.0f} m³ held ({stored:,.0f} stored + "
+            f"{r.total_infiltration_m3:,.0f} soaked in) · "
+            f"{r.site_exit_m3:,.0f} m³ leaves site</span>"
+        )
+    else:
+        parts.append(
+            f"<span style='font-size:11px;color:{_LIVE_MUTED};'><i>Run baseline "
+            "analysis to see storm capture %.</i></span>"
+        )
+
+    if r.per_feature:
+        rows = []
+        for f in r.per_feature:
+            if have_flow:
+                detail = f"{f['inflow_m3']:,.0f} → {f['stored_m3']:,.0f} m³"
+                if f["overflowed"] or f["fill_pct"] >= 100:
+                    status = (
+                        f"<span style='color:{_LIVE_MID};font-weight:bold;'>⚠ full</span>"
+                    )
+                else:
+                    status = (
+                        f"<span style='color:{_LIVE_FILL};'>{f['fill_pct']:.0f}%</span>"
+                    )
+            else:
+                detail = f"{f.get('capacity_m3', 0.0):,.0f} m³"
+                status = ""
+            rows.append(
+                "<tr>"
+                f"<td>{f['name']}</td>"
+                f"<td align='right'>{detail}</td>"
+                f"<td align='right' width='40'>{status}</td>"
+                "</tr>"
+            )
+        parts.append(
+            "<table width='100%' cellspacing='0' cellpadding='1' "
+            "style='font-size:11px;color:#2c3e50;'>" + "".join(rows) + "</table>"
+        )
+
+    parts.append(
+        f"<span style='font-size:11px;color:{_LIVE_MUTED};'>"
+        f"Capacity {r.total_capacity_m3:,.0f} m³ · Cut {r.total_cut_m3:,.0f} · "
+        f"Fill {r.total_fill_m3:,.0f} m³</span>"
+    )
+    parts.append(
+        "<span style='font-size:10px;color:#95a5a6;'>Analytical estimate — verify "
+        "with Re-analyse with Earthworks.</span>"
+    )
+    return "<br>".join(parts)
+
+
 def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001):
     """Attribute a ponding-difference raster to earthwork footprints, one region each.
 

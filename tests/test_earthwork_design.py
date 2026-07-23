@@ -34,6 +34,20 @@ class TestEarthwork:
         assert ew.enabled is True
         assert ew.capacity_m3 == 0.0
 
+    def test_registry_seeds_basin_defaults(self):
+        # Sizing defaults come from the registry (basin: depth 1.5 m).
+        ew = self._make("basin")
+        assert ew.depth == pytest.approx(1.5)
+
+    def test_registry_seeds_dam_defaults(self):
+        ew = self._make("dam")
+        assert ew.depth == pytest.approx(2.0)
+
+    def test_unknown_type_seeds_historical_defaults(self):
+        ew = self._make("moat")
+        assert ew.depth == 0.5
+        assert ew.top_width_m == 2.0
+
     def test_type_label_diversion(self):
         assert self._make("diversion").type_label() == "Diversion Drain"
 
@@ -264,6 +278,30 @@ class TestCalculateCapacity:
         geom.area.return_value = 200.0
         vol, _ = calculate_capacity("basin", geom, 1.5, 0)
         assert vol == pytest.approx(200.0 * 1.5 * 0.8, rel=1e-3)
+
+    def test_basin_batter_none_matches_zero(self):
+        # batter_run=None and 0 both mean vertical walls — historical numbers.
+        geom = make_mock_polygon_geom()  # 10×10 → A=100, P=40
+        v_none, _ = calculate_capacity("basin", geom, 1.5, 0, batter_run=None)
+        v_zero, _ = calculate_capacity("basin", geom, 1.5, 0, batter_run=0.0)
+        assert v_none == v_zero == pytest.approx(100.0 * 1.5 * 0.8, rel=1e-3)
+
+    def test_basin_batter_reduces_capacity(self):
+        geom = make_mock_polygon_geom()  # A=100, P=40
+        vertical, _ = calculate_capacity("basin", geom, 1.0, 0)
+        battered, _ = calculate_capacity("basin", geom, 1.0, 0, batter_run=1.0)
+        # z=1: V = (100·1 − 40·1·1²/2) × 0.8 = 64.0
+        assert battered == pytest.approx(64.0, rel=1e-3)
+        assert battered < vertical
+
+    def test_basin_converging_batter_clamps(self):
+        # Tiny basin, huge batter: walls meet before design depth — volume clamps,
+        # never negative.
+        geom = make_mock_polygon_geom((0.0, 0.0, 1.0, 1.0))  # A=1, P=4
+        vol, _ = calculate_capacity("basin", geom, 2.0, 0, batter_run=4.0)
+        # z=2: t*=1/8, V = 1²/(2·8) × 0.8 = 0.05
+        assert vol == pytest.approx(0.05, rel=1e-3)
+        assert vol > 0.0
 
     def test_berm_zero(self):
         assert calculate_capacity("berm", make_mock_line_geom(), 0.5, 2.0) == (0.0, 0.0)

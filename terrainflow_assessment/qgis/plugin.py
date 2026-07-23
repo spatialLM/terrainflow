@@ -105,12 +105,10 @@ class TerrainFlowAssessmentPlugin:
         p.run_keypoint_analysis_requested.connect(ct.run_keypoint_analysis)
         p.recommend_ponds_requested.connect(ct.run_recommend_ponds)
 
-        # Earthworks drawing
+        # Earthworks drawing — registry-driven: the panel emits the type key and
+        # the controller resolves the right map tool from the type's geometry.
         p.draw_swale_requested.connect(ew.activate_draw_swale)
-        p.draw_berm_requested.connect(lambda: ew.activate_draw_line("berm"))
-        p.draw_basin_requested.connect(ew.activate_draw_basin)
-        p.draw_dam_requested.connect(lambda: ew.activate_draw_line("dam"))
-        p.draw_diversion_requested.connect(lambda: ew.activate_draw_line("diversion"))
+        p.draw_earthwork_requested.connect(ew.activate_draw_earthwork)
         p.usable_area_source_changed.connect(ew.on_usable_area_source_changed)
         p.run_earthworks_requested.connect(ew.run_with_earthworks)
         p.reshape_earthworks_requested.connect(ew.activate_edit_earthwork_vertices)

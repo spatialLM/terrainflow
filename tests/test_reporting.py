@@ -12,12 +12,15 @@ from terrainflow_assessment.modules.reporting import (
     _build_fill_timeline_chart,
     _build_hydrograph_chart,
     _fig_to_base64,
+    _mini_bar,
     attribute_ponding_volume,
     build_verification,
     compare,
     export_html,
+    format_live_assessment,
     raster_ponding_volume,
 )
+from terrainflow_assessment.modules.water_balance import BalanceResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -563,3 +566,116 @@ class TestExportHtmlVerification:
         # No verification attached → section omitted, table still present
         assert "Non-circular Verification" not in content
         assert "Earthwork Summary" in content
+
+
+# ---------------------------------------------------------------------------
+# format_live_assessment (Live Assessment panel readout)
+# ---------------------------------------------------------------------------
+
+def _balance(**kwargs):
+    defaults = dict(
+        capture_pct=85.0,
+        total_inflow_m3=1000.0,
+        total_captured_m3=850.0,
+        site_exit_m3=150.0,
+        total_capacity_m3=900.0,
+        total_infiltration_m3=200.0,
+        total_cut_m3=320.0,
+        total_fill_m3=180.0,
+        per_feature=[
+            {"name": "Swale 1", "inflow_m3": 500.0, "stored_m3": 400.0,
+             "capacity_m3": 450.0, "fill_pct": 88.9, "overflowed": False},
+        ],
+    )
+    defaults.update(kwargs)
+    return BalanceResult(**defaults)
+
+
+class TestMiniBar:
+    def test_mid_has_both_cells(self):
+        html = _mini_bar(60.0, "#1e8449")
+        assert "width='60%'" in html and "width='40%'" in html
+
+    def test_zero_only_background(self):
+        html = _mini_bar(0.0, "#1e8449")
+        assert "#1e8449" not in html
+        assert "width='100%'" in html
+
+    def test_full_only_fill(self):
+        html = _mini_bar(100.0, "#1e8449")
+        assert "#1e8449" in html
+        assert "d6dbdf" not in html
+
+    def test_clamps_out_of_range(self):
+        assert "width='100%'" in _mini_bar(140.0, "#1e8449")
+        assert "#1e8449" not in _mini_bar(-5.0, "#1e8449")
+
+
+class TestFormatLiveAssessment:
+    def test_high_capture_green_headline(self):
+        html = format_live_assessment(_balance(capture_pct=85.0), have_flow=True)
+        assert "85%" in html
+        assert "#1e8449" in html          # green traffic light
+        assert "of storm runoff captured" in html
+
+    def test_mid_capture_amber(self):
+        html = format_live_assessment(_balance(capture_pct=55.0), have_flow=True)
+        assert "#b9770e" in html
+
+    def test_low_capture_red(self):
+        html = format_live_assessment(_balance(capture_pct=20.0), have_flow=True)
+        assert "#c0392b" in html
+
+    def test_held_split_line(self):
+        html = format_live_assessment(_balance(), have_flow=True)
+        # 850 held = 650 stored + 200 soaked in; 150 leaves site
+        assert "850 m³ held" in html
+        assert "650 stored" in html
+        assert "200 soaked in" in html
+        assert "150 m³ leaves site" in html
+
+    def test_per_feature_row_inflow_to_stored(self):
+        html = format_live_assessment(_balance(), have_flow=True)
+        assert "Swale 1" in html
+        assert "500 → 400 m³" in html
+        assert "89%" in html
+
+    def test_overflowed_feature_flagged_full(self):
+        r = _balance(per_feature=[
+            {"name": "Basin 1", "inflow_m3": 900.0, "stored_m3": 300.0,
+             "capacity_m3": 300.0, "fill_pct": 100.0, "overflowed": True},
+        ])
+        html = format_live_assessment(r, have_flow=True)
+        assert "⚠ full" in html
+
+    def test_fill_pct_100_flagged_even_without_overflow_flag(self):
+        r = _balance(per_feature=[
+            {"name": "Basin 1", "inflow_m3": 300.0, "stored_m3": 300.0,
+             "capacity_m3": 300.0, "fill_pct": 100.0, "overflowed": False},
+        ])
+        html = format_live_assessment(r, have_flow=True)
+        assert "⚠ full" in html
+
+    def test_no_flow_shows_hint_and_capacities(self):
+        html = format_live_assessment(_balance(), have_flow=False)
+        assert "Run baseline analysis" in html
+        assert "450 m³" in html            # per-feature capacity shown instead
+        assert "→" not in html             # no inflow routing without flow data
+
+    def test_no_flow_missing_capacity_key_defaults_zero(self):
+        r = _balance(per_feature=[
+            {"name": "Swale 1", "inflow_m3": 0.0, "stored_m3": 0.0,
+             "fill_pct": 0.0, "overflowed": False},
+        ])
+        html = format_live_assessment(r, have_flow=False)
+        assert "0 m³" in html
+
+    def test_empty_features_skips_table(self):
+        html = format_live_assessment(_balance(per_feature=[]), have_flow=True)
+        assert "<table width='100%' cellspacing='0' cellpadding='1'" not in html
+
+    def test_footer_totals_and_disclaimer(self):
+        html = format_live_assessment(_balance(), have_flow=True)
+        assert "Capacity 900 m³" in html
+        assert "Cut 320" in html and "Fill 180" in html
+        assert "Analytical estimate" in html
