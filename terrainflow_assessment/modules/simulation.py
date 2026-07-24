@@ -106,6 +106,30 @@ def _find_downslope_store(store, all_stores):
     return max(candidates, key=lambda s: s.elevation)
 
 
+def overflow_graph(stores):
+    """Resolve the overflow routing as a graph, for display (matches the cascade).
+
+    Returns ``{from_id: (to_id_or_None, is_user_link)}`` for every store with an
+    ``id``. ``to_id`` is where its overflow goes once full (None = leaves the
+    site); ``is_user_link`` is True when an honoured user-set ``overflow_target_id``
+    drove the choice, False when the elevation heuristic did. Uses the same
+    :func:`_find_downslope_store` rule as the routing, so the drawn graph can
+    never disagree with where water actually goes.
+    """
+    graph = {}
+    for store in stores:
+        if store.id is None:
+            continue
+        target = _find_downslope_store(store, stores)
+        is_user = (
+            store.overflow_target_id is not None
+            and target is not None
+            and target.id == store.overflow_target_id
+        )
+        graph[store.id] = (target.id if target is not None else None, is_user)
+    return graph
+
+
 def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
                      dt_hr: float) -> float:
     """

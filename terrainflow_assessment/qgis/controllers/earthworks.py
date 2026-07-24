@@ -496,17 +496,17 @@ class EarthworksController:
             from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
             from terrainflow_assessment.modules.water_balance import run_water_balance
 
-            enabled = [
-                ew for ew in self._state.earthwork_manager.get_enabled()
-                if getattr(ew, "capacity_m3", 0.0) > 0
-            ]
-            if not enabled:
-                self._panel.set_live_assessment(
-                    "<i style='color:#7f8c8d;'>No storage earthworks yet — "
-                    "draw a swale or basin.</i>"
-                )
+            all_ews = self._state.earthwork_manager.get_all()
+            if not all_ews:
+                self._panel.set_network([], {}, 0.0)
+                self._panel.set_live_assessment("")
                 self._panel.scorecard_empty()
                 return
+
+            enabled = [
+                ew for ew in all_ews
+                if ew.enabled and getattr(ew, "capacity_m3", 0.0) > 0
+            ]
 
             scs = SCSRunoff()
             runoff_mm = scs.runoff_depth(
@@ -543,39 +543,74 @@ class EarthworksController:
                     except Exception:
                         store.inflow_m3 = 0.0
 
-            result = run_water_balance(stores, duration_hr, total_runoff_m3)
-            from terrainflow_assessment.modules.reporting import format_live_assessment
-            self._panel.set_live_assessment(format_live_assessment(result, have_flow))
-            self._refresh_list_water_state(result)
+            result = run_water_balance(stores, duration_hr, total_runoff_m3) if stores else None
+
+            # Flow network (Live Assessment) — every earthwork, ordered high→low.
+            from terrainflow_assessment.modules.simulation import overflow_graph
+            nodes = self._build_network_nodes(all_ews, stores, result)
+            edges = overflow_graph(stores)
+            exit_m3 = result.site_exit_m3 if result is not None else 0.0
+            self._panel.set_network(nodes, edges, exit_m3)
+            self._panel.set_live_assessment(self._network_footer(result))
+
             # Persistent scorecard (Workbench header) — blue means actual water.
-            if have_flow:
+            if result is not None and have_flow:
                 stored = max(0.0, result.total_captured_m3 - result.total_infiltration_m3)
                 self._panel.update_scorecard(
                     result.capture_pct, stored,
                     result.total_infiltration_m3, result.site_exit_m3,
                 )
-            else:
+            elif result is not None:
                 self._panel.scorecard_no_flow(result.total_capacity_m3)
+            else:
+                self._panel.scorecard_empty(
+                    "No storage yet — draw a swale, basin or dam."
+                )
         except Exception as exc:  # never let the readout break the edit flow
             print(f"TerrainFlow Assessment — live assessment error: {exc}")
 
-    def _refresh_list_water_state(self, result):
-        """Append the live water state (stored m³ + % full) to each list entry.
+    def _build_network_nodes(self, all_ews, stores, result):
+        """Node dicts for the flow network — one per earthwork, water from the balance."""
+        from terrainflow_assessment.core.registry.earthwork_types import get_type
 
-        The list previously showed only the feature's earthwork numbers
-        (capacity/crest); this folds in what the analytical balance says each
-        feature is actually holding for the current storm.
-        """
-        try:
-            per = {f["name"]: f for f in result.per_feature}
-            for i, ew in enumerate(self._state.earthwork_manager.get_all()):
-                f = per.get(ew.name)
-                text = ew.summary()
-                if f is not None:
-                    text += f"  ·  💧 {f['stored_m3']:,.0f} m³ ({f['fill_pct']:.0f}% full)"
-                self._panel.update_earthwork_in_list(i, text)
-        except Exception:
-            pass  # cosmetic — never break the edit flow
+        store_elev = {s.name: s.elevation for s in stores}
+        per = {f["name"]: f for f in result.per_feature} if result is not None else {}
+        nodes = []
+        for i, ew in enumerate(all_ews):
+            try:
+                colour = get_type(ew.type).style[1]
+            except KeyError:
+                colour = "#888888"
+            elev = store_elev.get(ew.name)
+            if elev is None:
+                elev = self._feature_elevation(ew.geometry) or 0.0
+            f = per.get(ew.name)
+            nodes.append({
+                "index": i,
+                "id": ew.id,
+                "name": ew.name,
+                "ew_type": ew.type,
+                "colour": colour,
+                "elevation": elev,
+                "capacity_m3": getattr(ew, "capacity_m3", 0.0) or 0.0,
+                "stored_m3": f["stored_m3"] if f else 0.0,
+                "fill_pct": f["fill_pct"] if f else 0.0,
+                "overflowed": bool(f["overflowed"]) if f else False,
+                "enabled": bool(ew.enabled),
+                "has_water": f is not None,
+                "summary": ew.summary(),
+            })
+        return nodes
+
+    def _network_footer(self, result):
+        """Totals + disclaimer line beneath the network."""
+        if result is None:
+            return ""
+        return (
+            f"Capacity {result.total_capacity_m3:,.0f} m³ · "
+            f"Cut {result.total_cut_m3:,.0f} · Fill {result.total_fill_m3:,.0f} m³"
+            "  ·  Analytical estimate — verify with Re-analyse."
+        )
 
     # ---------------------------------------------------------------- Earthwork layers
 

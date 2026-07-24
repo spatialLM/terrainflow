@@ -50,8 +50,6 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from terrainflow_assessment.core.registry.earthwork_types import all_types
-
 
 class AssessmentPanel(QDockWidget):
     """
@@ -731,52 +729,12 @@ class AssessmentPanel(QDockWidget):
         self._ew_soil_combo.setCurrentText("Loam")
         lay.addWidget(self._ew_soil_combo)
 
-        # Draw buttons are generated from the type registry, grouped by category,
-        # so a future register_type() call surfaces here automatically with its
-        # own colour + tooltip. Swale keeps its three draw modes as a special row.
-        types = all_types()
-        self._draw_ew_buttons = {}
-
-        storage_keys = [k for k, c in types.items()
-                        if c.category == "storage" and k != "swale"]
-        control_keys = [k for k, c in types.items() if c.category == "control"]
-        other_keys = [k for k, c in types.items()
-                      if c.category not in ("storage", "control") and k != "swale"]
-
-        lay.addWidget(self._label("Storage — holds water"))
-        if "swale" in types:
-            swale_hex = types["swale"].style[1]
-            swale_row = QHBoxLayout()
-            self._draw_swale_contour_btn = self._button("Swale: Pick Segment", swale_hex)
-            self._draw_swale_contour_btn.setToolTip(
-                "Click a contour, then pick a start and end point\n"
-                "to place a swale along that segment."
-            )
-            self._draw_swale_fullcontour_btn = self._button("Full Contour", swale_hex)
-            self._draw_swale_fullcontour_btn.setToolTip(
-                "Click a contour line to place a swale along its entire length."
-            )
-            self._draw_swale_freehand_btn = self._button("Freehand", swale_hex)
-            self._draw_swale_freehand_btn.setToolTip(
-                "Draw a swale freehand — vertices snap to contour elevation."
-            )
-            swale_row.addWidget(self._draw_swale_contour_btn)
-            swale_row.addWidget(self._draw_swale_fullcontour_btn)
-            swale_row.addWidget(self._draw_swale_freehand_btn)
-            lay.addLayout(swale_row)
-        lay.addLayout(self._build_draw_grid(storage_keys, types))
-
-        if control_keys:
-            lay.addWidget(self._label("Flow control — moves / blocks water"))
-            lay.addLayout(self._build_draw_grid(control_keys, types))
-        if other_keys:
-            lay.addLayout(self._build_draw_grid(other_keys, types))
-
-        # Earthwork list
-        lay.addWidget(self._label("Earthworks"))
-        self._ew_list = QListWidget()
-        self._ew_list.setMaximumHeight(130)
-        lay.addWidget(self._ew_list)
+        # Felt-style tool menu (registry-driven) replaces the button grid.
+        from terrainflow_assessment.qgis.widgets.tool_menu import EarthworkToolMenu
+        self._tool_menu = EarthworkToolMenu()
+        self._tool_menu.draw_swale_requested.connect(self.draw_swale_requested)
+        self._tool_menu.draw_earthwork_requested.connect(self.draw_earthwork_requested)
+        lay.addWidget(self._tool_menu)
 
         ew_actions = QHBoxLayout()
         self._ew_edit_btn = QPushButton("Edit")
@@ -809,46 +767,23 @@ class AssessmentPanel(QDockWidget):
         lay.addWidget(self._before_after_check)
 
         # Connections
-        self._draw_swale_contour_btn.clicked.connect(
-            lambda: self.draw_swale_requested.emit("contour"))
-        self._draw_swale_fullcontour_btn.clicked.connect(
-            lambda: self.draw_swale_requested.emit("full_contour"))
-        self._draw_swale_freehand_btn.clicked.connect(
-            lambda: self.draw_swale_requested.emit("freehand"))
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
 
-    def _build_draw_grid(self, keys, types):
-        """Grid of registry-driven draw buttons (≤3 per row, registry colour+tooltip)."""
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        for i, key in enumerate(keys):
-            cfg = types[key]
-            btn = self._button(cfg.label, cfg.style[1])
-            btn.setToolTip(cfg.tooltip or f"Draw a {cfg.label.lower()}")
-            # Default-arg binding: a bare lambda would capture the loop variable
-            # and emit the LAST key for every button.
-            btn.clicked.connect(
-                lambda _=False, k=key: self.draw_earthwork_requested.emit(k)
-            )
-            self._draw_ew_buttons[key] = btn
-            grid.addWidget(btn, i // 3, i % 3)
-        return grid
-
-    # ---------------------------------------------------------------- Section 5: Live Assessment
+    # ---------------------------------------------------------------- Section 5: Live Assessment (network)
 
     def _build_section_live_assessment(self):
         lay = self._section("Live Assessment")
 
-        self._live_assessment_lbl = QLabel(
-            "<i style='color:#7f8c8d;'>Draw an earthwork to see the live analytical "
-            "assessment.</i>"
-        )
+        from terrainflow_assessment.qgis.widgets.network_view import NetworkView
+        self._network = NetworkView()
+        lay.addWidget(self._network)
+
+        # Totals + disclaimer line under the network (capacity / cut / fill).
+        self._live_assessment_lbl = QLabel("")
         self._live_assessment_lbl.setWordWrap(True)
-        self._live_assessment_lbl.setStyleSheet(
-            "background: #eef7f0; padding: 10px; border-radius: 6px; font-size: 11px;"
-        )
+        self._live_assessment_lbl.setStyleSheet("font-size: 10.5px; color: #7f8c8d;")
         lay.addWidget(self._live_assessment_lbl)
 
     def _wire_input_change_signals(self):
@@ -1081,25 +1016,25 @@ class AssessmentPanel(QDockWidget):
     def set_keypoint_results(self, summary):
         self._keypoint_results_lbl.setText(summary)
 
+    # The earthwork list is now the flow network (driven by set_network on every
+    # recompute). These legacy hooks are retained as no-ops so the controller's
+    # mutation paths stay unchanged; the network re-renders via the recompute
+    # that always follows each mutation.
     def add_earthwork_to_list(self, index, summary):
-        item = QListWidgetItem(summary)
-        item.setCheckState(Qt.Checked)
-        self._ew_list.addItem(item)
+        pass
 
     def update_earthwork_in_list(self, index, summary):
-        if 0 <= index < self._ew_list.count():
-            self._ew_list.item(index).setText(summary)
+        pass
 
     def refresh_earthwork_list(self, earthworks):
-        self._ew_list.clear()
-        for ew in earthworks:
-            item = QListWidgetItem(ew.summary())
-            item.setCheckState(Qt.Checked if ew.enabled else Qt.Unchecked)
-            self._ew_list.addItem(item)
+        pass
+
+    def set_network(self, nodes, edges, exit_m3):
+        """Render the earthwork flow network (Live Assessment)."""
+        self._network.set_network(nodes, edges, exit_m3)
 
     def get_selected_earthwork_index(self):
-        row = self._ew_list.currentRow()
-        return row if row >= 0 else None
+        return self._network.selected_index()
 
     def set_simulation_progress(self, pct, msg):
         self._sim_progress.setVisible(True)

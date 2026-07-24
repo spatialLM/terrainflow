@@ -147,6 +147,45 @@ class TestFindDownslopeStoreLinked:
         assert _find_downslope_store(source, [source, mid]) is mid
 
 
+class TestOverflowGraph:
+    def _store(self, name, elevation, target=None):
+        return EarthworkStore(
+            name=name, ew_type="swale", capacity_m3=100.0, area_m2=20.0,
+            elevation=elevation, id=name, overflow_target_id=target,
+        )
+
+    def test_auto_edge_to_nearest_downslope(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        hi = self._store("hi", 70.0)
+        lo = self._store("lo", 40.0)
+        g = overflow_graph([hi, lo])
+        assert g["hi"] == ("lo", False)      # auto edge
+        assert g["lo"] == (None, False)      # lowest → exits site
+
+    def test_user_link_flagged(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        src = self._store("src", 70.0, target="far")
+        close = self._store("close", 65.0)
+        far = self._store("far", 30.0)
+        g = overflow_graph([src, close, far])
+        assert g["src"] == ("far", True)     # honoured user link
+        assert g["close"] == ("far", False)  # auto
+
+    def test_uphill_user_link_not_flagged_as_user(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        src = self._store("src", 30.0, target="high")
+        high = self._store("high", 70.0)
+        low = self._store("low", 10.0)
+        g = overflow_graph([src, high, low])
+        assert g["src"] == ("low", False)    # uphill link ignored → auto, not user
+
+    def test_store_without_id_skipped(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        s = EarthworkStore(name="x", ew_type="swale", capacity_m3=1.0,
+                           area_m2=1.0, elevation=10.0, id=None)
+        assert overflow_graph([s]) == {}
+
+
 # ---------------------------------------------------------------------------
 # cascade_overflow
 # ---------------------------------------------------------------------------
