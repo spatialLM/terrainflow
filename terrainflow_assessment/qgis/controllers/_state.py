@@ -71,6 +71,10 @@ class PluginState:
     post_report: Any | None = None
     comparison: Any | None = None
     verification: Any | None = None       # VerificationResult (terrain vs analytic, §4)
+    # Verified-vs-design tracking (Workbench scorecard chip). edits_since_verify is
+    # None until the first burn; 0 right after a burn; incremented per design edit.
+    verified_delta_pct: float | None = None
+    edits_since_verify: int | None = None
 
     # ------------------------------------------------------------------ Workers (prevent GC)
     analysis_worker: Any | None = None

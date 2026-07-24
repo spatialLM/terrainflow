@@ -30,7 +30,6 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -224,30 +223,49 @@ class AssessmentPanel(QDockWidget):
         self._wire_input_change_signals()
 
     def _section(self, title, collapsed=False):
-        """Create a collapsible QGroupBox section."""
-        box = QGroupBox(title)
-        box.setCheckable(True)
-        box.setChecked(not collapsed)
-        box.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #bdc3c7; "
-            "border-radius: 6px; margin-top: 8px; padding-top: 8px; } "
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
-            "padding: 0 4px; color: #2c3e50; }"
+        """A collapsible section with a disclosure-arrow header (▶ / ▼).
+
+        Replaces the old checkable QGroupBox (the tick-box → dropdown-arrow change
+        from the UI review). The stylesheet is scoped by objectName so it never
+        cascades into the section's child frames / cards.
+        """
+        frame = QFrame()
+        frame.setObjectName("tfSection")
+        frame.setStyleSheet(
+            "QFrame#tfSection { border: 1px solid #dde4e5; border-radius: 7px;"
+            " background: #ffffff; }"
         )
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        header = QPushButton()
+        header.setObjectName("tfSectionHeader")
+        header.setCheckable(True)
+        header.setChecked(not collapsed)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet(
+            "QPushButton#tfSectionHeader { border: none; text-align: left;"
+            " padding: 8px 10px; font-weight: 650; font-size: 12.5px;"
+            " color: #22302e; background: transparent; border-radius: 7px; }"
+            " QPushButton#tfSectionHeader:hover { background: #f6f8f8; }"
+        )
+
+        body = QWidget()
+        layout = QVBoxLayout(body)
         layout.setSpacing(6)
-        layout.setContentsMargins(8, 4, 8, 8)
-        box.setLayout(QVBoxLayout())
-        box.layout().addWidget(inner)
-        box.layout().setContentsMargins(0, 12, 0, 0)
+        layout.setContentsMargins(10, 0, 10, 10)
+        body.setVisible(not collapsed)
 
         def _toggle(checked):
-            inner.setVisible(checked)
-        box.toggled.connect(_toggle)
-        inner.setVisible(not collapsed)
+            body.setVisible(checked)
+            header.setText(("▼  " if checked else "▶  ") + title)
+        header.toggled.connect(_toggle)
+        _toggle(not collapsed)
 
-        self._layout.addWidget(box)
+        outer.addWidget(header)
+        outer.addWidget(body)
+        self._layout.addWidget(frame)
         return layout
 
     def _label(self, text, small=False):
@@ -422,12 +440,9 @@ class AssessmentPanel(QDockWidget):
         thr_grid.addWidget(self._routing_combo, 2, 1)
         lay.addLayout(thr_grid)
 
-        self._run_baseline_btn = self._button("Run Baseline Analysis", "#2980b9")
+        from terrainflow_assessment.qgis.widgets.run_button import RunButton
+        self._run_baseline_btn = RunButton("Run Baseline Analysis")
         lay.addWidget(self._run_baseline_btn)
-
-        self._baseline_progress = QProgressBar()
-        self._baseline_progress.setVisible(False)
-        lay.addWidget(self._baseline_progress)
 
         self._baseline_results_lbl = self._label("", small=True)
         self._baseline_results_lbl.setWordWrap(True)
@@ -752,12 +767,9 @@ class AssessmentPanel(QDockWidget):
         ew_actions.addWidget(self._ew_delete_btn)
         lay.addLayout(ew_actions)
 
-        self._run_ew_btn = self._button("Re-analyse with Earthworks", "#e67e22")
+        from terrainflow_assessment.qgis.widgets.run_button import RunButton
+        self._run_ew_btn = RunButton("Re-analyse with Earthworks")
         lay.addWidget(self._run_ew_btn)
-
-        self._earthworks_progress = QProgressBar()
-        self._earthworks_progress.setVisible(False)
-        lay.addWidget(self._earthworks_progress)
 
         self._earthworks_results_lbl = self._label("", small=True)
         self._earthworks_results_lbl.setWordWrap(True)
@@ -946,12 +958,10 @@ class AssessmentPanel(QDockWidget):
         self.mark_stage("terrain", "done" if info_str else "todo")
 
     def set_baseline_progress(self, pct, msg):
-        self._baseline_progress.setVisible(True)
-        self._baseline_progress.setValue(pct)
-        self._baseline_progress.setFormat(f"{msg} ({pct}%)")
+        self._run_baseline_btn.set_progress(pct, f"{msg} ({pct}%)")
 
     def set_baseline_complete(self, summary):
-        self._baseline_progress.setVisible(False)
+        self._run_baseline_btn.set_done()
         self._baseline_results_lbl.setText(summary)
         self.mark_stage("baseline", "done")
         # Enable results tools after first successful baseline
@@ -981,13 +991,16 @@ class AssessmentPanel(QDockWidget):
         self._recommend_ponds_btn.setEnabled(bool(summary))
 
     def set_earthworks_progress(self, pct, msg):
-        self._earthworks_progress.setVisible(True)
-        self._earthworks_progress.setValue(pct)
-        self._earthworks_progress.setFormat(f"{msg} ({pct}%)")
+        self._run_ew_btn.set_progress(pct, f"{msg} ({pct}%)")
 
     def set_earthworks_complete(self, summary=""):
-        self._earthworks_progress.setVisible(False)
+        self._run_ew_btn.set_done()
         self._earthworks_results_lbl.setText(summary)
+        self.mark_stage("verify", "done")
+
+    def set_verified_chip(self, text, fresh):
+        """Scorecard's verified-vs-design chip (Workbench)."""
+        self._scorecard.set_verified(text, fresh)
 
     def set_live_assessment(self, html):
         """Update the live analytical assessment readout (design-tier, no burn)."""

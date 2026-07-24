@@ -262,6 +262,7 @@ class EarthworksController:
             )
             self._refresh_ew_layer()
             self._recompute_live_assessment()
+            self._mark_design_edit()
         self._canvas.unsetMapTool(self._canvas.mapTool())
 
     def _on_draw_cancelled(self):
@@ -318,6 +319,7 @@ class EarthworksController:
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
             self._recompute_live_assessment()
+            self._mark_design_edit()
 
     def _overflow_options(self, exclude_id=None):
         """(id, name, elevation) of every other earthwork — the dialog's overflow
@@ -357,6 +359,7 @@ class EarthworksController:
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
         self._refresh_ew_layer()
         self._recompute_live_assessment()
+        self._mark_design_edit()
 
     def toggle_selected_earthwork(self):
         idx = self._panel.get_selected_earthwork_index()
@@ -365,6 +368,7 @@ class EarthworksController:
         self._state.earthwork_manager.toggle(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
         self._recompute_live_assessment()
+        self._mark_design_edit()
 
     # ---------------------------------------------------------------- Vertex reshaping (live)
 
@@ -429,6 +433,30 @@ class EarthworksController:
         self._panel.update_earthwork_in_list(idx, ew.summary())
         self._refresh_ew_layer()
         self._recompute_live_assessment()
+        self._mark_design_edit()
+
+    # ---------------------------------------------------------------- Verified-vs-design tracking
+
+    def _mark_design_edit(self):
+        """A discrete design change happened — the last burn verification is now
+        one edit more stale (once a verification exists)."""
+        if self._state.edits_since_verify is not None:
+            self._state.edits_since_verify += 1
+            self._panel.mark_stage("verify", "stale")
+        self._update_verified_chip()
+
+    def _update_verified_chip(self):
+        n = self._state.edits_since_verify
+        if n is None:
+            self._panel.set_verified_chip("", False)   # never burned → hidden
+        elif n == 0:
+            d = self._state.verified_delta_pct
+            extra = f" · Δ {d:+.0f}%" if d is not None else ""
+            self._panel.set_verified_chip(f"Verified{extra}", True)
+        else:
+            self._panel.set_verified_chip(
+                f"{n} edit{'s' if n != 1 else ''} since verify", False
+            )
 
     # ---------------------------------------------------------------- Dam analytical capacity
 
@@ -771,6 +799,11 @@ class EarthworksController:
                 f"{v.analytic_total_m3:,.0f} m³ (Δ {v.delta_pct:+.0f}%)."
             )
         self._panel.set_earthworks_complete(msg)
+
+        # The design is now verified against a burn — reset the drift counter.
+        self._state.edits_since_verify = 0
+        self._state.verified_delta_pct = v.delta_pct if v is not None else None
+        self._update_verified_chip()
 
     def _compute_verification(self):
         """Reconcile terrain-derived ponding (burned DEM) against analytic capacity (§4).
