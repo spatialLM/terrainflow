@@ -1,13 +1,21 @@
 """
-panel.py — Docked panel UI for TerrainFlow Assessment.
+panel.py — Docked Workbench panel UI for TerrainFlow Assessment.
 
-AssessmentPanel is a QDockWidget with six collapsible sections:
-  1. Data (DEM + boundary + site info)
-  2. Baseline Analysis (run + results)
-  3. Contour & Keypoint Analysis
-  4. Earthwork Design (draw tools + properties + soil selector)
-  5. Simulation (rainfall input + timestep controls + fill table)
-  6. Report (before/after stats + HTML export)
+AssessmentPanel is a QDockWidget structured as a pipeline workbench:
+
+  Persistent chrome (always visible)
+    · header — site name + DEM info, storm chip (the scenario the score is
+      scored against; click → Baseline stage)
+    · scorecard — capture % + proportional water-budget band
+    · stage stepper — Terrain → Baseline → Design → Verify → Report, with
+      per-stage state (· todo / ✓ done / ⚠ stale)
+
+  Stages (one visible at a time, QStackedWidget)
+    terrain  — Data Input + Contour & Keypoint Analysis
+    baseline — Baseline Analysis (storm inputs + run)
+    design   — Earthwork Design + Live Assessment
+    verify   — Fill Simulation (+ Re-analyse burn lives in design for now)
+    report   — Report & Export
 """
 
 from qgis.core import QgsMapLayerProxyModel
@@ -20,6 +28,7 @@ from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,6 +42,7 @@ from qgis.PyQt.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -91,35 +101,128 @@ class AssessmentPanel(QDockWidget):
     # Report
     export_report_requested = pyqtSignal()
 
+    # Workbench pipeline stages: (key, label) → which section builders live in it
+    _STAGES = (
+        ("terrain", "Terrain"),
+        ("baseline", "Baseline"),
+        ("design", "Design"),
+        ("verify", "Verify"),
+        ("report", "Report"),
+    )
+
     def __init__(self, parent=None):
         super().__init__("TerrainFlow Assessment", parent)
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.setMinimumWidth(340)
 
+        root = QWidget()
+        root_lay = QVBoxLayout(root)
+        root_lay.setSpacing(6)
+        root_lay.setContentsMargins(8, 8, 8, 8)
+
+        self._build_workbench_chrome(root_lay)
+        self._build_ui()
+        root_lay.addWidget(self._stack, 1)
+        self.setWidget(root)
+
+        # Default landing stage
+        self._show_stage("design")
+
+    # ---------------------------------------------------------------- Workbench chrome
+
+    def _build_workbench_chrome(self, root_lay):
+        """Persistent header: site line + storm chip, scorecard, pipeline stepper."""
+        from terrainflow_assessment.qgis.widgets.scorecard import Scorecard
+        from terrainflow_assessment.qgis.widgets.stepper import StageStepper
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        site_col = QVBoxLayout()
+        site_col.setSpacing(0)
+        self._head_site_lbl = QLabel("Unnamed Site")
+        self._head_site_lbl.setStyleSheet("font-weight: 600; font-size: 13px; color: #22302e;")
+        self._head_info_lbl = QLabel("Load a DEM to begin")
+        self._head_info_lbl.setStyleSheet("font-size: 10px; color: #8fa0a4;")
+        site_col.addWidget(self._head_site_lbl)
+        site_col.addWidget(self._head_info_lbl)
+        head.addLayout(site_col, 1)
+
+        # Storm chip — the scenario the score is scored against; click → Baseline
+        self._storm_chip = QPushButton("— set storm ▾")
+        self._storm_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._storm_chip.setStyleSheet(
+            "QPushButton { border: 1px solid #c6d1d3; border-radius: 12px;"
+            " padding: 3px 11px; font-size: 11px; color: #5f7176; background: transparent; }"
+            "QPushButton:hover { border-color: #2e7d55; color: #22302e; }"
+        )
+        self._storm_chip.setToolTip(
+            "The design storm the score is computed against.\nClick to edit in Baseline."
+        )
+        self._storm_chip.clicked.connect(lambda: self._show_stage("baseline"))
+        head.addWidget(self._storm_chip)
+        root_lay.addLayout(head)
+
+        self._scorecard = Scorecard()
+        root_lay.addWidget(self._scorecard)
+
+        self._stepper = StageStepper(list(self._STAGES))
+        self._stepper.stage_selected.connect(self._show_stage)
+        root_lay.addWidget(self._stepper)
+
+    def _make_stage_page(self):
+        """A scrollable page hosting one stage's sections; returns (page, layout)."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
         container = QWidget()
-        self._layout = QVBoxLayout(container)
-        self._layout.setSpacing(8)
-        self._layout.setContentsMargins(8, 8, 8, 8)
-
-        self._build_ui()
-
-        self._layout.addStretch()
+        lay = QVBoxLayout(container)
+        lay.setSpacing(8)
+        lay.setContentsMargins(0, 4, 0, 4)
         scroll.setWidget(container)
-        self.setWidget(scroll)
+        return scroll, lay
+
+    def _show_stage(self, key):
+        idx = [k for k, _ in self._STAGES].index(key)
+        self._stack.setCurrentIndex(idx)
+        self._stepper.set_current(key)
+
+    def mark_stage(self, key, state):
+        """Set a stage's pipeline state: 'todo' | 'done' | 'stale'."""
+        self._stepper.set_state(key, state)
 
     # ---------------------------------------------------------------- UI construction
 
     def _build_ui(self):
+        self._stack = QStackedWidget()
+        self._stage_layouts = {}
+        for key, _label in self._STAGES:
+            page, lay = self._make_stage_page()
+            self._stack.addWidget(page)
+            self._stage_layouts[key] = lay
+
+        # Sections keep their builders untouched — each stage just repoints
+        # self._layout (the target _section() appends to) before building.
+        self._layout = self._stage_layouts["terrain"]
         self._build_section_data()
-        self._build_section_baseline()
         self._build_section_contour_keypoint()
+
+        self._layout = self._stage_layouts["baseline"]
+        self._build_section_baseline()
+
+        self._layout = self._stage_layouts["design"]
         self._build_section_earthworks()
         self._build_section_live_assessment()
+
+        self._layout = self._stage_layouts["verify"]
         self._build_section_simulation()
+
+        self._layout = self._stage_layouts["report"]
         self._build_section_report()
+
+        for lay in self._stage_layouts.values():
+            lay.addStretch()
+
         self._wire_input_change_signals()
 
     def _section(self, title, collapsed=False):
@@ -168,7 +271,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 1: Data
 
     def _build_section_data(self):
-        lay = self._section("1 — Data Input")
+        lay = self._section("Data Input")
 
         lay.addWidget(self._label("DEM Layer"))
         self._dem_combo = QgsMapLayerComboBox()
@@ -223,7 +326,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 2: Baseline
 
     def _build_section_baseline(self):
-        lay = self._section("2 — Baseline Analysis")
+        lay = self._section("Baseline Analysis")
 
         # Rainfall
         rf_grid = QGridLayout()
@@ -421,7 +524,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 3: Contour & Keypoint
 
     def _build_section_contour_keypoint(self):
-        lay = self._section("3 — Contour & Keypoint Analysis", collapsed=True)
+        lay = self._section("Contour & Keypoint Analysis", collapsed=True)
 
         tabs = QTabWidget()
 
@@ -619,7 +722,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 4: Earthworks
 
     def _build_section_earthworks(self):
-        lay = self._section("4 — Earthwork Design")
+        lay = self._section("Earthwork Design")
 
         lay.addWidget(self._label("Soil type (for earthwork sizing)"))
         self._ew_soil_combo = QComboBox()
@@ -736,7 +839,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 5: Live Assessment
 
     def _build_section_live_assessment(self):
-        lay = self._section("5 — Live Assessment")
+        lay = self._section("Live Assessment")
 
         self._live_assessment_lbl = QLabel(
             "<i style='color:#7f8c8d;'>Draw an earthwork to see the live analytical "
@@ -750,16 +853,28 @@ class AssessmentPanel(QDockWidget):
 
     def _wire_input_change_signals(self):
         """Emit analysis_inputs_changed on any storm/soil input change (drives the live
-        analytical readout — the accumulation raster is storm-independent, so no re-analyse)."""
+        analytical readout — the accumulation raster is storm-independent, so no re-analyse).
+        Also keeps the header's storm chip and site name live."""
         for spin in (self._rainfall_spin, self._duration_spin, self._cn_spin):
             spin.valueChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+            spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
         for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo):
             combo.currentTextChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+        self._site_name_edit.textChanged.connect(
+            lambda text: self._head_site_lbl.setText(text.strip() or "Unnamed Site")
+        )
+        self._refresh_storm_chip()
+
+    def _refresh_storm_chip(self):
+        self._storm_chip.setText(
+            f"{self._rainfall_spin.value():.0f} mm · "
+            f"{self._duration_spin.value():.0f} h · CN {self._cn_spin.value()} ▾"
+        )
 
     # ---------------------------------------------------------------- Section 6: Simulation
 
     def _build_section_simulation(self):
-        lay = self._section("6 — Fill Simulation", collapsed=True)
+        lay = self._section("Fill Simulation", collapsed=False)
 
         lay.addWidget(self._label("Rainfall mode"))
         self._sim_mode_combo = QComboBox()
@@ -873,7 +988,7 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 6: Report
 
     def _build_section_report(self):
-        lay = self._section("7 — Report", collapsed=True)
+        lay = self._section("Report", collapsed=False)
 
         self._report_summary_lbl = QLabel("Run baseline and simulation first.")
         self._report_summary_lbl.setWordWrap(True)
@@ -892,6 +1007,8 @@ class AssessmentPanel(QDockWidget):
 
     def set_dem_info(self, info_str):
         self._dem_info_lbl.setText(info_str)
+        self._head_info_lbl.setText(info_str or "Load a DEM to begin")
+        self.mark_stage("terrain", "done" if info_str else "todo")
 
     def set_baseline_progress(self, pct, msg):
         self._baseline_progress.setVisible(True)
@@ -901,6 +1018,7 @@ class AssessmentPanel(QDockWidget):
     def set_baseline_complete(self, summary):
         self._baseline_progress.setVisible(False)
         self._baseline_results_lbl.setText(summary)
+        self.mark_stage("baseline", "done")
         # Enable results tools after first successful baseline
         self._query_ponding_btn.setEnabled(True)
         self._toggle_slope_class_btn.setEnabled(True)
@@ -939,6 +1057,19 @@ class AssessmentPanel(QDockWidget):
     def set_live_assessment(self, html):
         """Update the live analytical assessment readout (design-tier, no burn)."""
         self._live_assessment_lbl.setText(html)
+
+    def update_scorecard(self, capture_pct, stored_m3, soaked_m3, leaves_m3):
+        """Feed the persistent scorecard with the live balance."""
+        self._scorecard.set_balance(capture_pct, stored_m3, soaked_m3, leaves_m3)
+
+    def scorecard_empty(self, message=None):
+        if message:
+            self._scorecard.show_empty(message)
+        else:
+            self._scorecard.show_empty()
+
+    def scorecard_no_flow(self, capacity_m3):
+        self._scorecard.show_no_flow(capacity_m3)
 
     def set_contour_results(self, contours):
         self._contour_list.clear()

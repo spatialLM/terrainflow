@@ -505,6 +505,7 @@ class EarthworksController:
                     "<i style='color:#7f8c8d;'>No storage earthworks yet — "
                     "draw a swale or basin.</i>"
                 )
+                self._panel.scorecard_empty()
                 return
 
             scs = SCSRunoff()
@@ -546,6 +547,15 @@ class EarthworksController:
             from terrainflow_assessment.modules.reporting import format_live_assessment
             self._panel.set_live_assessment(format_live_assessment(result, have_flow))
             self._refresh_list_water_state(result)
+            # Persistent scorecard (Workbench header) — blue means actual water.
+            if have_flow:
+                stored = max(0.0, result.total_captured_m3 - result.total_infiltration_m3)
+                self._panel.update_scorecard(
+                    result.capture_pct, stored,
+                    result.total_infiltration_m3, result.site_exit_m3,
+                )
+            else:
+                self._panel.scorecard_no_flow(result.total_capacity_m3)
         except Exception as exc:  # never let the readout break the edit flow
             print(f"TerrainFlow Assessment — live assessment error: {exc}")
 
