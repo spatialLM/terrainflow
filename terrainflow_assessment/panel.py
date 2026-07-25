@@ -7,12 +7,12 @@ AssessmentPanel is a QDockWidget structured as a pipeline workbench:
     · header — site name + DEM info, storm chip (the scenario the score is
       scored against; click → Baseline stage)
     · scorecard — capture % + proportional water-budget band
-    · stage stepper — Terrain → Baseline → Design → Verify → Report, with
+    · stage stepper — Baseline → Analysis → Design → Verify → Report, with
       per-stage state (· todo / ✓ done / ⚠ stale)
 
   Stages (one visible at a time, QStackedWidget)
-    terrain  — Data Input + Contour & Keypoint Analysis
-    baseline — Baseline Analysis (storm inputs + run)
+    baseline — Data Input + Baseline Analysis (storm inputs + run button)
+    analysis — Terrain Tools (ponding/slope/contours) + Contour & Keypoint
     design   — Earthwork Design + Live Assessment
     verify   — Fill Simulation (+ Re-analyse burn lives in design for now)
     report   — Report & Export
@@ -100,8 +100,8 @@ class AssessmentPanel(QDockWidget):
 
     # Workbench pipeline stages: (key, label) → which section builders live in it
     _STAGES = (
-        ("terrain", "Terrain"),
         ("baseline", "Baseline"),
+        ("analysis", "Analysis"),
         ("design", "Design"),
         ("verify", "Verify"),
         ("report", "Report"),
@@ -198,14 +198,18 @@ class AssessmentPanel(QDockWidget):
             self._stack.addWidget(page)
             self._stage_layouts[key] = lay
 
-        # Sections keep their builders untouched — each stage just repoints
-        # self._layout (the target _section() appends to) before building.
-        self._layout = self._stage_layouts["terrain"]
-        self._build_section_data()
-        self._build_section_contour_keypoint()
-
+        # Each stage repoints self._layout (the target _section() appends to)
+        # before building its sections.
+        # Baseline = data input + storm inputs + the run button (everything up
+        # to and including "Run Baseline Analysis").
         self._layout = self._stage_layouts["baseline"]
-        self._build_section_baseline()
+        self._build_section_data()
+        self._build_section_baseline_inputs()
+
+        # Analysis = post-baseline exploration: results tools + contour/keypoint.
+        self._layout = self._stage_layouts["analysis"]
+        self._build_section_baseline_results()
+        self._build_section_contour_keypoint()
 
         self._layout = self._stage_layouts["design"]
         self._build_section_earthworks()
@@ -341,7 +345,7 @@ class AssessmentPanel(QDockWidget):
 
     # ---------------------------------------------------------------- Section 2: Baseline
 
-    def _build_section_baseline(self):
+    def _build_section_baseline_inputs(self):
         lay = self._section("Baseline Analysis")
 
         # Rainfall
@@ -448,8 +452,15 @@ class AssessmentPanel(QDockWidget):
         self._baseline_results_lbl.setWordWrap(True)
         lay.addWidget(self._baseline_results_lbl)
 
-        # Results tools (enabled after baseline runs)
-        lay.addWidget(self._label("Results"))
+        self._run_baseline_btn.clicked.connect(self.run_baseline_requested)
+
+    def _build_section_baseline_results(self):
+        """Post-baseline exploration tools (Analysis stage). Enabled after a run."""
+        lay = self._section("Terrain Tools")
+
+        lay.addWidget(self._label(
+            "Run Baseline first, then explore ponding, slope and contours."
+        ))
         self._query_ponding_btn = QPushButton("Query Depression / Ponding")
         self._query_ponding_btn.setEnabled(False)
         self._query_ponding_btn.setToolTip(
@@ -527,7 +538,6 @@ class AssessmentPanel(QDockWidget):
         lay.addLayout(contour_row)
 
         self._generate_contours_btn.clicked.connect(self.generate_simple_contours_requested)
-        self._run_baseline_btn.clicked.connect(self.run_baseline_requested)
         self._query_ponding_btn.clicked.connect(self.query_ponding_requested)
         self._toggle_slope_class_btn.toggled.connect(self.toggle_slope_class_requested)
         self._toggle_slope_arrows_btn.toggled.connect(self.toggle_slope_arrows_requested)
@@ -955,7 +965,6 @@ class AssessmentPanel(QDockWidget):
     def set_dem_info(self, info_str):
         self._dem_info_lbl.setText(info_str)
         self._head_info_lbl.setText(info_str or "Load a DEM to begin")
-        self.mark_stage("terrain", "done" if info_str else "todo")
 
     def set_baseline_progress(self, pct, msg):
         self._run_baseline_btn.set_progress(pct, f"{msg} ({pct}%)")
@@ -979,6 +988,7 @@ class AssessmentPanel(QDockWidget):
         self._contour_progress.setVisible(False)
         self._top5_contours_btn.setEnabled(True)
         self._find_segments_btn.setEnabled(True)
+        self.mark_stage("analysis", "done")
 
     def set_keypoint_progress(self, pct, msg):
         self._keypoint_progress.setVisible(True)
