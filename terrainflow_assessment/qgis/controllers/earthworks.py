@@ -23,6 +23,7 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
     QgsTextFormat,
+    QgsUnitTypes,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -706,6 +707,7 @@ class EarthworksController:
                 QgsField("type",        QMetaType.QString),
                 QgsField("capacity_m3", QMetaType.Double),
                 QgsField("enabled",     QMetaType.Int),
+                QgsField("width_m",     QMetaType.Double),
             ])
             layer.updateFields()
 
@@ -796,32 +798,46 @@ class EarthworksController:
         try:
             layers = []
             if enabled:
+                # Casing (white underlay) scales with the real width so it always
+                # wraps the coloured band; +0.6 m total ≈ 0.3 m of white each side.
                 casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
-                casing.setWidth(main_w + 0.9)
+                casing.setWidth(main_w + 0.9)   # fallback only if width_m is NULL/0
+                casing.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+                casing.setDataDefinedProperty(
+                    QgsSymbolLayer.PropertyStrokeWidth,
+                    QgsProperty.fromExpression('"width_m" + 0.6'),
+                )
                 casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
                 casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
                 layers.append(casing)
 
-            # Diversion: render the channel itself as a repeated flow-arrow ribbon
-            # (QgsArrowSymbolLayer follows the drawn line, so direction is
-            # unambiguous — no marker-rotation guessing). Falls back to a dash-dot
-            # line if the arrow layer isn't available.
-            arrow = self._arrow_line_layer(colour, main_w) if (enabled and key == "diversion") else None
-            if arrow is not None:
-                layers.append(arrow)
-                return QgsLineSymbol(layers)
-
+            # Main line: when enabled, its width is the earthwork's real ground
+            # width (data-defined from the width_m attribute, in map metres) so the
+            # band reads as the true dimension and scales with zoom. Disabled stays
+            # a thin greyed mm dashed line — an "inactive" cue, not a true-scale band.
             main = QgsSimpleLineSymbolLayer(colour)
             main.setWidth(main_w if enabled else max(0.4, main_w * 0.6))
             main.setPenCapStyle(Qt.PenCapStyle.RoundCap)
             main.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            if not enabled:
-                main.setPenStyle(Qt.PenStyle.DashLine)
-            elif key == "diversion":
-                main.setPenStyle(Qt.PenStyle.DashDotLine)
-            elif key == "berm":
+            if enabled:
+                main.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+                main.setDataDefinedProperty(
+                    QgsSymbolLayer.PropertyStrokeWidth,
+                    QgsProperty.fromField("width_m"),
+                )
+            # Diversion keeps a solid base line — the flow-arrow ribbon below carries
+            # the direction signal. Disabled + berm read as dashed.
+            if not enabled or key == "berm":
                 main.setPenStyle(Qt.PenStyle.DashLine)
             layers.append(main)
+
+            if enabled and key == "diversion":
+                # Flow-direction ribbon on top of the real-width base line — a
+                # fixed-mm decorative accent (QgsArrowSymbolLayer follows the drawn
+                # line, so direction is unambiguous). Skipped if unavailable.
+                arrow = self._arrow_line_layer(colour, main_w)
+                if arrow is not None:
+                    layers.append(arrow)
 
             if enabled and key == "dam":
                 # Embankment/barrier look: short white dashes across the wall
@@ -835,6 +851,16 @@ class EarthworksController:
                 except Exception:
                     hatch.setPenStyle(Qt.PenStyle.DotLine)
                 layers.append(hatch)
+
+            if enabled:
+                # Thin fixed-mm centreline so the feature stays visible when the
+                # real-width band is sub-pixel at low zoom; it disappears into the
+                # band once zoomed in.
+                pin = QgsSimpleLineSymbolLayer(colour)
+                pin.setWidth(0.5)   # millimetres — constant on screen
+                pin.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+                pin.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                layers.append(pin)
 
             return QgsLineSymbol(layers)
         except Exception:
@@ -880,8 +906,12 @@ class EarthworksController:
                 continue
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromWkt(ew.geometry.asWkt()))
+            # width_m drives the data-defined, map-units symbol width so each
+            # earthwork renders at its real ground width. Basin (polygon) writes
+            # 0.0 harmlessly — its fill symbol never reads the field.
+            w = float(getattr(ew, "top_width_m", 0.0) or 0.0)
             f.setAttributes([ew.name, ew.type, ew.capacity_m3,
-                              1 if getattr(ew, "enabled", True) else 0])
+                              1 if getattr(ew, "enabled", True) else 0, w])
             layer.dataProvider().addFeature(f)
 
         for layer in self._state.ew_layers.values():
