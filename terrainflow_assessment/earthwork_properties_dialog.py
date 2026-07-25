@@ -28,6 +28,73 @@ from .modules.earthwork_design import (
     calculate_spillway_width,
 )
 
+# Design-language tokens (see the reference "TerrainFlow panel visual language").
+# Kept local to this dialog for now; the eventual repo theme.py can absorb them.
+_INK = "#22302e"           # primary text
+_MUTED = "#5f7176"         # secondary / italic notes
+_HAIRLINE = "#dde4e5"      # card borders
+_HAIRLINE_STRONG = "#c6d1d3"  # input borders / separators
+_GROUND = "#eef1f2"        # dialog background
+_SURFACE = "#ffffff"       # card / input background
+_ACCENT = "#2e7d55"        # actions, selection, focus
+_ACCENT_HOVER = "#256645"
+_WATER = "#1273b5"         # actual water quantities ONLY (stored m³)
+_GOOD = "#1e8449"          # traffic-light green (within envelope / pass)
+_WARN = "#b9770e"          # traffic-light amber (advisory / uphill / converge)
+_BAD = "#c0392b"           # traffic-light red (fail / needs engineer)
+
+# One cohesive stylesheet so the dialog reads as part of the Workbench panel:
+# white card group-boxes, hairline-bordered inputs with a green focus ring, an
+# accented OK button and a ghost Cancel.
+_DIALOG_QSS = f"""
+QDialog {{ background: {_GROUND}; }}
+QLabel {{ color: {_INK}; font-size: 12px; }}
+QLineEdit, QDoubleSpinBox, QComboBox {{
+    background: {_SURFACE};
+    border: 1px solid {_HAIRLINE_STRONG};
+    border-radius: 5px;
+    padding: 4px 7px;
+    color: {_INK};
+    selection-background-color: {_ACCENT};
+    selection-color: #ffffff;
+}}
+QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+    border: 1px solid {_ACCENT};
+}}
+QCheckBox {{ color: {_INK}; font-size: 12px; spacing: 6px; }}
+QGroupBox {{
+    background: {_SURFACE};
+    border: 1px solid {_HAIRLINE};
+    border-radius: 7px;
+    margin-top: 12px;
+    padding: 10px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 5px;
+    color: {_INK};
+    font-weight: 650;
+    font-size: 11px;
+    background: {_GROUND};
+}}
+QDialogButtonBox QPushButton {{
+    min-width: 84px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-weight: 600;
+}}
+QDialogButtonBox QPushButton:default {{
+    background: {_ACCENT}; color: #ffffff; border: 1px solid {_ACCENT};
+}}
+QDialogButtonBox QPushButton:default:hover {{ background: {_ACCENT_HOVER}; }}
+QDialogButtonBox QPushButton:!default {{
+    background: {_SURFACE}; color: {_INK}; border: 1px solid {_HAIRLINE_STRONG};
+}}
+QDialogButtonBox QPushButton:!default:hover {{ border-color: {_ACCENT}; color: {_ACCENT}; }}
+"""
+
 
 class EarthworkPropertiesDialog(QDialog):
     """
@@ -69,9 +136,15 @@ class EarthworkPropertiesDialog(QDialog):
         self._update_capacity()
 
     def _build_ui(self, ew=None):
+        self.setStyleSheet(_DIALOG_QSS)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
         form = QFormLayout()
+        form.setVerticalSpacing(8)
+        form.setHorizontalSpacing(10)
+        form.setContentsMargins(2, 2, 2, 4)
 
         # Name
         self.edit_name = QLineEdit(ew.name if ew else f"New {self.ew_type.capitalize()}")
@@ -234,7 +307,7 @@ class EarthworkPropertiesDialog(QDialog):
 
             self.lbl_basin_converge = QLabel("")
             self.lbl_basin_converge.setWordWrap(True)
-            self.lbl_basin_converge.setStyleSheet("color: #cc6600; font-style: italic;")
+            self.lbl_basin_converge.setStyleSheet("color: #b9770e; font-style: italic;")
             form.addRow("", self.lbl_basin_converge)
         else:
             self.spin_wall_slope = None
@@ -280,7 +353,7 @@ class EarthworkPropertiesDialog(QDialog):
 
             self.lbl_overflow_warning = QLabel("")
             self.lbl_overflow_warning.setWordWrap(True)
-            self.lbl_overflow_warning.setStyleSheet("color: #cc6600; font-style: italic;")
+            self.lbl_overflow_warning.setStyleSheet("color: #b9770e; font-style: italic;")
             form.addRow("", self.lbl_overflow_warning)
             self._update_overflow_warning()
         else:
@@ -325,11 +398,14 @@ class EarthworkPropertiesDialog(QDialog):
 
             self.lbl_capacity_m3 = QLabel("—")
             self.lbl_capacity_l  = QLabel("—")
+            # Stored water volume → the water-quantity blue (the only on-grammar use).
+            for _lbl in (self.lbl_capacity_m3, self.lbl_capacity_l):
+                _lbl.setStyleSheet("font-weight: 600; color: #1273b5;")
             cap_layout.addRow("Volume (m³):", self.lbl_capacity_m3)
             cap_layout.addRow("Volume (L):",  self.lbl_capacity_l)
             if self.ew_type == "swale":
                 self.lbl_berm_height = QLabel("")
-                self.lbl_berm_height.setStyleSheet("color: #555555; font-style: italic;")
+                self.lbl_berm_height.setStyleSheet("color: #5f7176; font-style: italic;")
                 cap_layout.addRow(self.lbl_berm_height)
             else:
                 self.lbl_berm_height = None
@@ -357,7 +433,7 @@ class EarthworkPropertiesDialog(QDialog):
                     "Retained water volume depends on valley shape.\n"
                     "Run Re-analyse with Earthworks to see ponded volume."
                 )
-                lbl_note.setStyleSheet("color: #555555; font-style: italic;")
+                lbl_note.setStyleSheet("color: #5f7176; font-style: italic;")
                 lbl_note.setWordWrap(True)
                 cap_layout.addRow(lbl_note)
             else:
@@ -367,7 +443,7 @@ class EarthworkPropertiesDialog(QDialog):
         # Recommended length — only shown for contour swales where inflow is known
         if self.ew_type == "swale" and self._peak_inflow_m3 is not None:
             sep = QLabel("─" * 30)
-            sep.setStyleSheet("color: #aaaaaa;")
+            sep.setStyleSheet("color: #c6d1d3;")
             cap_layout.addRow(sep)
 
             lbl_inflow = QLabel(f"{self._peak_inflow_m3:,.1f} m³")
@@ -378,7 +454,7 @@ class EarthworkPropertiesDialog(QDialog):
             cap_layout.addRow("Storm inflow (event total):", lbl_inflow)
 
             self.lbl_req_length = QLabel("—")
-            self.lbl_req_length.setStyleSheet("font-weight: bold; color: #003080;")
+            self.lbl_req_length.setStyleSheet("font-weight: bold; color: #22302e;")
             self.lbl_req_length.setToolTip(
                 "Minimum swale length needed to store the full storm inflow.\n\n"
                 "Formula: inflow volume ÷ cross-section area\n"
@@ -391,7 +467,7 @@ class EarthworkPropertiesDialog(QDialog):
 
             self._swale_length_m = self.geometry.length()
             lbl_note = QLabel("Adjust depth / width above to see how\ndimensions affect required length.")
-            lbl_note.setStyleSheet("color: #555555; font-style: italic;")
+            lbl_note.setStyleSheet("color: #5f7176; font-style: italic;")
             cap_layout.addRow(lbl_note)
         else:
             self.lbl_req_length = None
@@ -451,7 +527,7 @@ class EarthworkPropertiesDialog(QDialog):
             spill_size_layout.addRow(head_row)
 
             self.lbl_spillway_width = QLabel("—")
-            self.lbl_spillway_width.setStyleSheet("font-weight: bold; color: #003080;")
+            self.lbl_spillway_width.setStyleSheet("font-weight: bold; color: #22302e;")
             self.lbl_spillway_width.setToolTip(
                 "Minimum spillway width — broad-crested weir formula:\n"
                 "  Q = 1.7 × L × H^1.5\n"
@@ -486,7 +562,7 @@ class EarthworkPropertiesDialog(QDialog):
                 thickness = self.spin_width.value()
                 max_h, wall_vol = self._calc_dam_wall_metrics(crest, thickness)
                 self.lbl_wall_volume.setText(f"{wall_vol:,.0f} m³")
-                colour = "#cc0000" if max_h > 5 else "#cc6600" if max_h > 3 else "#006600"
+                colour = "#c0392b" if max_h > 5 else "#b9770e" if max_h > 3 else "#1e8449"
                 self.lbl_max_height.setText(
                     f'<span style="color:{colour}; font-weight:bold;">{max_h:.1f} m</span>'
                     + ("  ⚠ may need engineer" if max_h > 5 else "  ✓ feasible" if max_h <= 4 else "")
@@ -512,12 +588,12 @@ class EarthworkPropertiesDialog(QDialog):
                     "Peak inflow volume: see swale properties\n"
                     "for direct comparison."
                 )
-                self.lbl_capacity_l.setStyleSheet("color: #555555; font-style: italic;")
+                self.lbl_capacity_l.setStyleSheet("color: #5f7176; font-style: italic;")
             else:
                 self.lbl_capacity_l.setText(
                     f"Manning's n = 0.025 · trapezoidal {side_slope:.2g}:1 side slopes"
                 )
-                self.lbl_capacity_l.setStyleSheet("color: #555555; font-style: italic;")
+                self.lbl_capacity_l.setStyleSheet("color: #5f7176; font-style: italic;")
             return
 
         depth = self.spin_depth.value()
@@ -565,9 +641,9 @@ class EarthworkPropertiesDialog(QDialog):
                 actual_m = getattr(self, "_swale_length_m", None)
                 if actual_m is not None:
                     if actual_m >= req_m:
-                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #1a7a1a;")
+                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #1e8449;")
                     else:
-                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #cc0000;")
+                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #c0392b;")
             else:
                 self.lbl_req_length.setText("—")
 
@@ -659,7 +735,7 @@ class EarthworkPropertiesDialog(QDialog):
         """Colour the advisory label green (within envelope) / amber (outside)."""
         if self.lbl_advisory is None:
             return
-        colour = "#1a7a1a" if within else "#cc6600"
+        colour = "#1e8449" if within else "#b9770e"
         self.lbl_advisory.setStyleSheet(f"font-style: italic; color: {colour};")
         self.lbl_advisory.setText(text)
         self.lbl_advisory.setToolTip(text)
