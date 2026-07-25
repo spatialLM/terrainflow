@@ -176,6 +176,11 @@ class EarthworksController:
     def _on_geometry_drawn(self, ew_type, geometry, source_contour=None):
         from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
 
+        # Diversions run (and grade) downhill — orient the geometry high→low so the
+        # flow arrow and the channel invert both follow the actual slope.
+        if ew_type == "diversion":
+            geometry = self._orient_downhill(geometry)
+
         peak_inflow = 0.0
         if self._state.baseline_result:
             acc_path = self._state.baseline_result.get("flow_accumulation")
@@ -332,6 +337,35 @@ class EarthworksController:
             if e.id != exclude_id
         ]
 
+    def _orient_downhill(self, geometry):
+        """Reverse a line so its first vertex is the higher end (diversions).
+
+        The diversion arrow points along the drawn line AND the burn grades the
+        invert from the first vertex, so both must run high→low. Sample the DEM at
+        each endpoint; reverse when the line was drawn uphill. No-op without a DEM
+        or on any sampling failure (geometry returned unchanged)."""
+        if not self._state.dem_path:
+            return geometry
+        try:
+            import json
+
+            from shapely.geometry import LineString
+            from shapely.geometry import shape as shapely_shape
+
+            from terrainflow_assessment.modules.swale_design import (
+                snap_point_to_contour_elevation,
+            )
+            coords = list(shapely_shape(json.loads(geometry.asJson())).coords)
+            if len(coords) < 2:
+                return geometry
+            z0 = snap_point_to_contour_elevation(coords[0], self._state.dem_path)
+            z1 = snap_point_to_contour_elevation(coords[-1], self._state.dem_path)
+            if z0 is not None and z1 is not None and z1 > z0:
+                return QgsGeometry.fromWkt(LineString(coords[::-1]).wkt)
+        except Exception:
+            pass
+        return geometry
+
     def _feature_elevation(self, geometry):
         """DEM elevation at the geometry centroid (matches store elevation), or None."""
         if not self._state.dem_path:
@@ -419,6 +453,8 @@ class EarthworksController:
         if not (0 <= idx < len(manager)):
             return  # stale tool index (feature deleted mid-session)
         ew = manager.get(idx)
+        if ew.type == "diversion":
+            geometry = self._orient_downhill(geometry)
         ew.geometry = geometry
         if ew.type == "dam":
             ew.capacity_m3 = self._compute_dam_capacity(ew)
@@ -643,7 +679,7 @@ class EarthworksController:
     # ---------------------------------------------------------------- Earthwork layers
 
     def _ensure_ew_layers(self):
-        from qgis.core import QgsFillSymbol, QgsLineSymbol, QgsTextBufferSettings
+        from qgis.core import QgsRuleBasedRenderer, QgsTextBufferSettings
         from qgis.PyQt.QtGui import QFont
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
@@ -658,7 +694,7 @@ class EarthworksController:
         for ew_type, cfg in all_types().items():
             geom_type = cfg.geom_type
             display_name = f"{cfg.label}s"
-            color_hex, width = cfg.style[1], cfg.style[2]
+            color_hex = cfg.style[1]
             existing = self._state.ew_layers.get(ew_type)
             if existing and self._project.instance().mapLayer(existing.id()):
                 continue
@@ -673,20 +709,19 @@ class EarthworksController:
             ])
             layer.updateFields()
 
-            if geom_type == "LineString":
-                sym = QgsLineSymbol.createSimple({
-                    "color": color_hex, "width": width,
-                    "capstyle": "round", "joinstyle": "round",
-                })
-                layer.setRenderer(QgsSingleSymbolRenderer(sym))
-            else:
-                sym = QgsFillSymbol.createSimple({
-                    "style": "no",
-                    "outline_style": "solid",
-                    "outline_width": width,
-                    "outline_color": color_hex,
-                })
-                layer.setRenderer(QgsSingleSymbolRenderer(sym))
+            # Rule-based: enabled features get the rich casing+signature symbol;
+            # disabled ones render greyed + dashed so a toggled-off earthwork reads
+            # as inactive at a glance.
+            on_sym = self._build_ew_symbol(cfg, enabled=True)
+            off_sym = self._build_ew_symbol(cfg, enabled=False)
+            root_rule = QgsRuleBasedRenderer.Rule(None)
+            root_rule.appendChild(
+                QgsRuleBasedRenderer.Rule(on_sym, filterExp='"enabled" = 1', label="Enabled")
+            )
+            root_rule.appendChild(
+                QgsRuleBasedRenderer.Rule(off_sym, filterExp='"enabled" = 0', label="Disabled")
+            )
+            layer.setRenderer(QgsRuleBasedRenderer(root_rule))
 
             text_fmt = QgsTextFormat()
             font = QFont()
@@ -700,7 +735,13 @@ class EarthworksController:
             buf.setSize(1.2)
             text_fmt.setBuffer(buf)
             lbl = QgsPalLayerSettings()
-            lbl.fieldName = "name"
+            # Name + storage metric (e.g. "Swale 1 · 140 m³"). Type is carried by
+            # the symbol signature + colour, so it's not repeated in the label.
+            lbl.fieldName = (
+                "\"name\" || CASE WHEN \"capacity_m3\" > 0 THEN "
+                "' · ' || format_number(\"capacity_m3\", 0) || ' m³' ELSE '' END"
+            )
+            lbl.isExpression = True
             lbl.enabled = True
             lbl.setFormat(text_fmt)
             layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
@@ -709,6 +750,123 @@ class EarthworksController:
             self._project.instance().addMapLayer(layer, False)
             self._state.ew_group.addLayer(layer)
             self._state.ew_layers[ew_type] = layer
+
+    # ---------------------------------------------------------------- Earthwork symbology
+
+    def _build_ew_symbol(self, cfg, enabled=True):
+        """Rich per-type canvas symbol. Casing (white underlay) for legibility on any
+        background, a per-type line signature (dam ticks / diversion flow arrows /
+        berm + diversion dash patterns), and a greyed dashed variant when disabled.
+        Every embellishment is best-effort — on any failure it degrades to a plain
+        coloured symbol so layer creation never breaks."""
+        from qgis.PyQt.QtGui import QColor
+
+        base = QColor(cfg.style[1])
+        try:
+            main_w = float(cfg.style[2])
+        except (TypeError, ValueError):
+            main_w = 2.0
+        colour = base if enabled else QColor("#9aa4a2")
+
+        if cfg.geom_type == "Polygon":
+            return self._build_ew_fill(colour, enabled, main_w)
+        return self._build_ew_line(cfg.key, colour, enabled, main_w)
+
+    def _build_ew_fill(self, colour, enabled, main_w):
+        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtGui import QColor
+        try:
+            rgba = QColor(colour.red(), colour.green(), colour.blue(), 45 if enabled else 22)
+            fl = QgsSimpleFillSymbolLayer(rgba)
+            fl.setStrokeColor(colour)
+            fl.setStrokeWidth(0.7 if enabled else 0.4)
+            if not enabled:
+                fl.setStrokeStyle(Qt.PenStyle.DashLine)
+            return QgsFillSymbol([fl])
+        except Exception:
+            return QgsFillSymbol.createSimple(
+                {"style": "no", "outline_color": colour.name(), "outline_width": str(main_w)}
+            )
+
+    def _build_ew_line(self, key, colour, enabled, main_w):
+        from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtGui import QColor
+        try:
+            layers = []
+            if enabled:
+                casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
+                casing.setWidth(main_w + 0.9)
+                casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+                casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                layers.append(casing)
+
+            # Diversion: render the channel itself as a repeated flow-arrow ribbon
+            # (QgsArrowSymbolLayer follows the drawn line, so direction is
+            # unambiguous — no marker-rotation guessing). Falls back to a dash-dot
+            # line if the arrow layer isn't available.
+            arrow = self._arrow_line_layer(colour, main_w) if (enabled and key == "diversion") else None
+            if arrow is not None:
+                layers.append(arrow)
+                return QgsLineSymbol(layers)
+
+            main = QgsSimpleLineSymbolLayer(colour)
+            main.setWidth(main_w if enabled else max(0.4, main_w * 0.6))
+            main.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+            main.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            if not enabled:
+                main.setPenStyle(Qt.PenStyle.DashLine)
+            elif key == "diversion":
+                main.setPenStyle(Qt.PenStyle.DashDotLine)
+            elif key == "berm":
+                main.setPenStyle(Qt.PenStyle.DashLine)
+            layers.append(main)
+
+            if enabled and key == "dam":
+                # Embankment/barrier look: short white dashes across the wall
+                # (marker-free, so it always renders).
+                hatch = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
+                hatch.setWidth(max(0.6, main_w * 0.55))
+                hatch.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+                try:
+                    hatch.setUseCustomDashPattern(True)
+                    hatch.setCustomDashVector([1.4, 2.6])  # dash, gap (mm)
+                except Exception:
+                    hatch.setPenStyle(Qt.PenStyle.DotLine)
+                layers.append(hatch)
+
+            return QgsLineSymbol(layers)
+        except Exception:
+            return QgsLineSymbol.createSimple(
+                {"color": colour.name(), "width": str(main_w),
+                 "capstyle": "round", "joinstyle": "round"}
+            )
+
+    def _arrow_line_layer(self, colour, main_w):
+        """Flow-direction ribbon along a line — repeated arrowheads pointing in the
+        drawn (downhill) direction, via QgsArrowSymbolLayer. Returns None on failure."""
+        from qgis.core import QgsArrowSymbolLayer, QgsFillSymbol
+        try:
+            arrow = QgsArrowSymbolLayer()
+            shaft = max(0.7, main_w * 0.55)
+            for name, val in (
+                ("setArrowWidth", shaft),
+                ("setArrowStartWidth", shaft),
+                ("setArrowHeadLength", 3.4),
+                ("setArrowHeadThickness", 3.4),
+            ):
+                if hasattr(arrow, name):
+                    getattr(arrow, name)(val)
+            if hasattr(arrow, "setIsRepeated"):
+                arrow.setIsRepeated(True)   # multiple arrowheads down the line
+            fill = QgsFillSymbol.createSimple(
+                {"color": colour.name(), "outline_style": "no"}
+            )
+            arrow.setSubSymbol(fill)
+            return arrow
+        except Exception:
+            return None
 
     def _refresh_ew_layer(self):
         self._ensure_ew_layers()
