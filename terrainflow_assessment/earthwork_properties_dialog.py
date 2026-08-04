@@ -1,5 +1,7 @@
 import math
 
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -12,6 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from .core.registry.earthwork_types import get_type
@@ -22,11 +25,16 @@ from .core.sizing import (
     trapezoid_section,
 )
 from .modules.earthwork_design import (
+    Spillway,
     berm_height_estimate,
+    bind_crest,
     calculate_capacity,
     calculate_diversion_discharge,
     calculate_spillway_width,
+    spillway_datum,
+    spillway_validity,
 )
+from .qgis import help_text as H
 
 # Design-language tokens (see the reference "TerrainFlow panel visual language").
 # Kept local to this dialog for now; the eventual repo theme.py can absorb them.
@@ -96,6 +104,62 @@ QDialogButtonBox QPushButton:!default:hover {{ border-color: {_ACCENT}; color: {
 """
 
 
+class _InflowSparkline(QWidget):
+    """Where the catchment arrives along the alignment.
+
+    A flat line means the lumped "total capacity vs total inflow" verdict is safe. A
+    spike means it is not: a swale with adequate total capacity can still go over the
+    side where a drainage line crosses it. The amber tick is the overtopping station.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._values = []
+        self._overtop_frac = None
+        self.setFixedHeight(34)
+        self.setMinimumWidth(160)
+
+    def set_profile(self, profile, overtop_station=None):
+        self._values = list((profile or {}).get("inflow_m3") or [])
+        length = None
+        stations = (profile or {}).get("stations") or []
+        if stations:
+            step = (profile or {}).get("station_length_m") or 0.0
+            length = stations[-1] + step / 2.0
+        self._overtop_frac = (
+            float(overtop_station) / length
+            if overtop_station is not None and length else None)
+        self.update()
+
+    def paintEvent(self, event):
+        from qgis.PyQt.QtGui import QPainter, QPen
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#f2f6f7"))
+        p.drawRoundedRect(0, 0, w, h, 4, 4)
+
+        if not self._values:
+            p.end()
+            return
+        peak = max(self._values) or 1.0
+        n = len(self._values)
+        bar_w = max(1.0, (w - 6) / n)
+        p.setBrush(QColor(_WATER))
+        for i, value in enumerate(self._values):
+            bar_h = max(1.0, (h - 8) * (value / peak))
+            p.drawRect(int(3 + i * bar_w), int(h - 4 - bar_h),
+                       max(1, int(bar_w - 1)), int(bar_h))
+
+        if self._overtop_frac is not None:
+            x = int(3 + self._overtop_frac * (w - 6))
+            p.setPen(QPen(QColor(_WARN), 1.5))
+            p.drawLine(x, 2, x, h - 2)
+        p.end()
+
+
 class EarthworkPropertiesDialog(QDialog):
     """
     Popup dialog shown after an earthwork is drawn.
@@ -106,7 +170,11 @@ class EarthworkPropertiesDialog(QDialog):
     def __init__(self, ew_type, geometry, parent=None, earthwork=None,
                  peak_inflow_m3=None, crest_elevation=None, duration_hours=None,
                  dem_path=None, soil_name=None, cn=None, overflow_options=None,
-                 own_elevation=None):
+                 own_elevation=None, catchment_m2=None, count_infiltration=False,
+                 rim_elevation=None, invert_elevation=None,
+                 peak_flow_m3s=None, upstream_flow_m3s=0.0,
+                 harvesting_coefficient=False,
+                 inflow_profile=None, overtop_station=None, overtop_surplus=0.0):
         super().__init__(parent)
         self.ew_type = ew_type
         self.geometry = geometry
@@ -120,7 +188,26 @@ class EarthworkPropertiesDialog(QDialog):
         self._cn = cn                            # curve number (advisory cross-check context)
         self._overflow_options = overflow_options or []  # [(id, name[, elev])] of OTHERS
         self._own_elevation = own_elevation      # DEM at this feature's centroid, or None
+        self._catchment_m2 = catchment_m2        # direct contributing area (flow_graph)
+        self._count_infiltration = count_infiltration  # does soakage count as capture?
         self._overflow_elevations = {}           # id → elevation (None when unknown)
+        # Spillway datums, sampled by the controller from footprint.pour_point:
+        # the rim is the lowest containing ground (where it would spill unaided),
+        # the invert the burned floor. Both None without a DEM — the crest is then
+        # editable but unanchored, and the dialog says so.
+        self._rim_elevation = rim_elevation
+        self._invert_elevation = invert_elevation
+        self._spillway_binding = False           # re-entrancy guard for crest ↔ drop
+        # Peak flow (m³/s) from the rational method, with upstream overflow already
+        # cascaded in; the controller owns that because only it knows the network.
+        self._peak_flow_m3s = peak_flow_m3s
+        self._upstream_flow_m3s = float(upstream_flow_m3s or 0.0)
+        self._harvesting_coefficient = harvesting_coefficient
+        # Where the catchment arrives along the alignment, and where (if anywhere)
+        # arriving water outruns the storage upstream of it.
+        self._inflow_profile = inflow_profile
+        self._overtop_station = overtop_station
+        self._overtop_surplus = float(overtop_surplus or 0.0)
         # Registry sizing policy for this type; None for unregistered types → the
         # historical hardcoded ranges/defaults apply as fallbacks throughout.
         try:
@@ -166,7 +253,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.spin_crest_elev.setValue(self._crest_elevation)
             self.spin_crest_elev.setToolTip(
                 "Absolute elevation of the dam crest (top of the wall).\n\n"
-                "Pre-filled from the higher of the two drawn endpoints.\n"
+                "Pre-filled from the highest ground the drawn line touches.\n"
                 "All cells under the wall will be raised to this elevation,\n"
                 "so the wall height varies with the valley shape beneath it.\n\n"
                 "Water will pool behind the dam up to this level.\n"
@@ -175,26 +262,27 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_crest_elev.valueChanged.connect(self._update_capacity)
             form.addRow("Crest elevation:", self.spin_crest_elev)
 
-            # Opt-in idealised storage: by default we report the honest volume the
-            # dam holds *as drawn* (water escapes around the ends if the wall is
-            # short). Ticking this assumes the wall is extended into higher ground
-            # ("keyed into the banks") so it fills to the crest — a what-if only;
-            # it never changes the drawn dam or the verify-burn. Draw the dam longer
-            # to actually build that storage.
-            self.chk_key_banks = QCheckBox(
-                "Estimated storage if dam keyed into banks (idealised storage)"
-            )
+            # Keying in is now real geometry, not a what-if: the wall is extended to
+            # the natural abutments so the drawn dam, its capacity and the verification
+            # burn all describe the same structure. It was previously an idealised
+            # capacity estimate that left the short wall in place — which is how a dam
+            # could report 69% full while water visibly ran over it on the map.
+            self.chk_key_banks = QCheckBox("Extend wall into the banks (key in)")
             self.chk_key_banks.setChecked(
-                bool(getattr(ew, "key_into_banks", False)) if ew else False
+                bool(getattr(ew, "key_into_banks", False)) if ew else True
             )
             self.chk_key_banks.setToolTip(
-                "Off (default): report the storage the dam holds AS DRAWN — if the\n"
-                "wall is too short, water escapes around its ends and raising the\n"
-                "crest above that saddle adds nothing (extend the dam to store more).\n\n"
-                "On: assume the wall is extended into higher ground so it fills to\n"
-                "the crest. This is a what-if estimate only — it does NOT redraw the\n"
-                "dam or change the verification burn. To actually hold this water,\n"
-                "draw the dam further into the banks yourself."
+                "On (default): extend each end of the wall along its own bearing\n"
+                "until the ground rises to the crest elevation, so water cannot flow\n"
+                "around the ends. The drawn line is replaced by the wall that would\n"
+                "actually have to be built — often noticeably longer — and both the\n"
+                "capacity and the verification burn use that wall.\n\n"
+                "You are told how far each end moved. If an end finds no ground at\n"
+                "crest height within 250 m you get a warning: the design does not\n"
+                "impound as drawn, and the crest is too high for this location.\n\n"
+                "Off: keep the wall exactly as drawn. Water escapes around the ends\n"
+                "if it stops short of high ground, and the reported storage is what\n"
+                "the short wall actually holds."
             )
             self.chk_key_banks.toggled.connect(self._update_capacity)
             form.addRow("", self.chk_key_banks)
@@ -328,6 +416,26 @@ class EarthworkPropertiesDialog(QDialog):
             self.chk_companion.stateChanged.connect(self._update_capacity)
             form.addRow("", self.chk_companion)
 
+        # Per-feature soil. Soil is rarely uniform across a farm and infiltration is
+        # the term most sensitive to it, so a basin in a clay hollow can be sized on
+        # clay without misrepresenting the loam everywhere else. Blank = site default.
+        if self._cfg is not None and self._cfg.has_cut:
+            self.combo_soil = QComboBox()
+            self.combo_soil.addItem(
+                f"Site default ({self._soil_name or 'Loam'})", None)
+            for _name in ("Sand", "Sandy loam", "Loam", "Clay loam", "Clay"):
+                self.combo_soil.addItem(_name, _name)
+            own = getattr(ew, "soil_name", None) if ew else None
+            if own:
+                idx = self.combo_soil.findData(own)
+                if idx >= 0:
+                    self.combo_soil.setCurrentIndex(idx)
+            self.combo_soil.setToolTip(H.FEATURE_SOIL)
+            self.combo_soil.currentIndexChanged.connect(self._update_capacity)
+            form.addRow("Soil here:", self.combo_soil)
+        else:
+            self.combo_soil = None
+
         # Overflow routing — storage-category types can name the feature their
         # overflow spills into (id-based, survives renames/reorders).
         if (self._cfg is not None and self._cfg.category == "storage"
@@ -440,37 +548,69 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_wall_volume = None
                 self.lbl_max_height = None
 
-        # Recommended length — only shown for contour swales where inflow is known
+        # Does this swale, as drawn, hold its event? Deficit leads; recommended
+        # length is demoted to a muted secondary line — see H.SWALE_DEFICIT for why.
         if self.ew_type == "swale" and self._peak_inflow_m3 is not None:
             sep = QLabel("─" * 30)
             sep.setStyleSheet("color: #c6d1d3;")
             cap_layout.addRow(sep)
 
-            lbl_inflow = QLabel(f"{self._peak_inflow_m3:,.1f} m³")
-            lbl_inflow.setToolTip(
-                "Total runoff volume flowing into this swale from the slope above\n"
-                "for the current storm scenario (flow accumulation × runoff depth)."
-            )
-            cap_layout.addRow("Storm inflow (event total):", lbl_inflow)
+            catch_txt = ""
+            if self._catchment_m2:
+                catch_txt = f"   (from {self._catchment_m2 / 10_000.0:,.1f} ha draining here)"
+            lbl_inflow = QLabel(f"{self._peak_inflow_m3:,.1f} m³{catch_txt}")
+            lbl_inflow.setToolTip(H.DIRECT_CATCHMENT)
+            cap_layout.addRow("Event inflow:", lbl_inflow)
+
+            self.lbl_holds = QLabel("—")
+            self.lbl_holds.setToolTip(H.SWALE_HOLDS)
+            cap_layout.addRow("Holds over the event:", self.lbl_holds)
+
+            self.lbl_verdict = QLabel("—")
+            self.lbl_verdict.setWordWrap(True)
+            self.lbl_verdict.setToolTip(H.SWALE_DEFICIT)
+            cap_layout.addRow(self.lbl_verdict)
 
             self.lbl_req_length = QLabel("—")
-            self.lbl_req_length.setStyleSheet("font-weight: bold; color: #22302e;")
-            self.lbl_req_length.setToolTip(
-                "Minimum swale length needed to store the full storm inflow.\n\n"
-                "Formula: inflow volume ÷ cross-section area\n"
-                "Cross-section treated as rectangular (depth × width).\n\n"
-                "This is a conservative estimate — a trapezoidal cross-section\n"
-                "would require slightly less length. Add 10–20% safety margin\n"
-                "for practical construction."
-            )
-            cap_layout.addRow("Recommended length:", self.lbl_req_length)
+            self.lbl_req_length.setStyleSheet("color: #8fa0a4; font-size: 10.5px;")
+            self.lbl_req_length.setToolTip(H.SWALE_RECOMMENDED_LENGTH)
+            cap_layout.addRow(self.lbl_req_length)
 
             self._swale_length_m = self.geometry.length()
-            lbl_note = QLabel("Adjust depth / width above to see how\ndimensions affect required length.")
-            lbl_note.setStyleSheet("color: #5f7176; font-style: italic;")
-            cap_layout.addRow(lbl_note)
         else:
             self.lbl_req_length = None
+            self.lbl_holds = None
+            self.lbl_verdict = None
+
+        # Where along the alignment the catchment actually arrives. The lumped verdict
+        # above is only safe while inflow is reasonably even; this is what shows when
+        # it is not.
+        if self._inflow_profile:
+            self.spark_inflow = _InflowSparkline()
+            self.spark_inflow.set_profile(self._inflow_profile, self._overtop_station)
+            self.spark_inflow.setToolTip(H.INFLOW_PROFILE)
+            cap_layout.addRow("Inflow along it:", self.spark_inflow)
+
+            uniformity = self._inflow_profile.get("uniformity", 1.0)
+            if self._overtop_station is not None:
+                text = (f"⚠ Overtops about {self._overtop_station:,.0f} m along, "
+                        f"{self._overtop_surplus:,.0f} m³ over — a check-bank near the "
+                        f"peak, or start it further upslope.")
+                colour = _WARN
+            elif uniformity < 0.5:
+                text = (f"Inflow is concentrated (uniformity {uniformity:.2f}); the "
+                        f"total-vs-total verdict above is optimistic.")
+                colour = _MUTED
+            else:
+                text = f"Inflow is reasonably even (uniformity {uniformity:.2f})."
+                colour = _MUTED
+            self.lbl_inflow_note = QLabel(text)
+            self.lbl_inflow_note.setWordWrap(True)
+            self.lbl_inflow_note.setStyleSheet(f"color: {colour}; font-size: 10.5px;")
+            cap_layout.addRow(self.lbl_inflow_note)
+        else:
+            self.spark_inflow = None
+            self.lbl_inflow_note = None
 
         # Channel batter feedback: narrowest width (min_dimension) + live soil advisory.
         if self._cfg is not None and "bottom_width" in self._cfg.derived_dims:
@@ -492,60 +632,143 @@ class EarthworkPropertiesDialog(QDialog):
 
         layout.addWidget(cap_group)
 
-        # Spillway sizing — shown when peak inflow and storm duration are known
-        if (self.ew_type in ("swale", "dam", "basin")
-                and self._peak_inflow_m3 is not None
-                and self._duration_hours is not None
-                and self._duration_hours > 0):
-            spill_size_group = QGroupBox("Spillway Sizing")
-            spill_size_layout = QFormLayout(spill_size_group)
+        # Spillway — the designed overflow point.
+        #
+        # Shown for every type that holds water, regardless of whether the baseline
+        # has run. Previously the whole group was gated on a known peak inflow, so
+        # the crest — a decision about the feature's own geometry, not about any
+        # storm — could not be set until after the analysis it feeds. Only the
+        # *sizing* rows genuinely need the flow, so only they are conditional now.
+        if self.ew_type in ("swale", "dam", "basin"):
+            self.grp_spillway = QGroupBox("Spillway — designed overflow")
+            self.grp_spillway.setCheckable(True)
+            existing = getattr(ew, "spillway", None) if ew else None
+            self.grp_spillway.setChecked(existing is not None)
+            self.grp_spillway.setToolTip(H.SPILLWAY_GROUP)
+            spill_layout = QFormLayout(self.grp_spillway)
 
-            duration_s = self._duration_hours * 3600.0
-            peak_flow = self._peak_inflow_m3 / duration_s
-            lbl_qdesign = QLabel(f"{peak_flow:.4f} m³/s  ({peak_flow * 1000:.1f} L/s)")
-            lbl_qdesign.setToolTip(
-                "Estimated peak design flow rate = total storm inflow ÷ storm duration.\n"
-                "Conservative (average rate) — actual peak may be higher in short storms."
-            )
-            spill_size_layout.addRow("Design flow rate:", lbl_qdesign)
+            # Datum. Every other number here is relative to it, so it is stated
+            # rather than assumed.
+            if self._rim_elevation is not None:
+                rim_txt = f"{self._rim_elevation:.2f} m"
+                rim_style = f"color: {_MUTED};"
+            else:
+                rim_txt = "unknown — load a DEM to anchor the crest"
+                rim_style = f"color: {_WARN}; font-style: italic;"
+            lbl_rim = QLabel(rim_txt)
+            lbl_rim.setStyleSheet(rim_style)
+            lbl_rim.setToolTip(H.SPILLWAY_RIM)
+            spill_layout.addRow("Rim (lowest ground):", lbl_rim)
 
-            head_row = QHBoxLayout()
-            head_row.addWidget(QLabel("Head above crest (H):"))
+            self.spin_spillway_crest = QDoubleSpinBox()
+            self.spin_spillway_crest.setRange(-500, 9000)
+            self.spin_spillway_crest.setDecimals(2)
+            self.spin_spillway_crest.setSingleStep(0.05)
+            self.spin_spillway_crest.setSuffix(" m")
+            self.spin_spillway_crest.setToolTip(H.SPILLWAY_CREST)
+            spill_layout.addRow("Crest elevation:", self.spin_spillway_crest)
+
+            self.spin_spillway_drop = QDoubleSpinBox()
+            self.spin_spillway_drop.setRange(0.0, 50.0)
+            self.spin_spillway_drop.setDecimals(2)
+            self.spin_spillway_drop.setSingleStep(0.05)
+            self.spin_spillway_drop.setSuffix(" m")
+            self.spin_spillway_drop.setEnabled(self._rim_elevation is not None)
+            self.spin_spillway_drop.setToolTip(H.SPILLWAY_DROP)
+            spill_layout.addRow("Below rim:", self.spin_spillway_drop)
+
             self.spin_spillway_head = QDoubleSpinBox()
             self.spin_spillway_head.setRange(0.05, 2.0)
-            self.spin_spillway_head.setValue(0.3)
             self.spin_spillway_head.setDecimals(2)
-            self.spin_spillway_head.setSuffix(" m")
             self.spin_spillway_head.setSingleStep(0.05)
-            self.spin_spillway_head.setToolTip(
-                "Depth of water flowing over the spillway crest at peak flow.\n"
-                "Typical design values: 0.2–0.5 m\n\n"
-                "Lower head → wider spillway needed.\n"
-                "Higher head → narrower spillway, but less freeboard."
-            )
-            head_row.addWidget(self.spin_spillway_head)
-            spill_size_layout.addRow(head_row)
+            self.spin_spillway_head.setSuffix(" m")
+            self.spin_spillway_head.setValue(
+                existing.head_m if existing is not None else 0.30)
+            self.spin_spillway_head.setToolTip(H.SPILLWAY_HEAD)
+            spill_layout.addRow("Head above crest (H):", self.spin_spillway_head)
+
+            # Peak flow, supplied by the controller from the rational method with the
+            # upstream cascade already added. It was previously derived here as event
+            # volume / event duration — the storm *average*, which sized a 2.8 ha
+            # spillway at 7 cm.
+            if self._peak_flow_m3s is not None:
+                bits = [f"{self._peak_flow_m3s * 1000:,.1f} L/s"]
+                if self._upstream_flow_m3s:
+                    bits.append(
+                        f"({(self._peak_flow_m3s - self._upstream_flow_m3s) * 1000:,.1f}"
+                        f" own + {self._upstream_flow_m3s * 1000:,.1f} from upslope)")
+                lbl_qdesign = QLabel("  ".join(bits))
+                lbl_qdesign.setToolTip(H.SPILLWAY_DESIGN_FLOW_PEAK)
+                spill_layout.addRow("Peak design flow:", lbl_qdesign)
 
             self.lbl_spillway_width = QLabel("—")
-            self.lbl_spillway_width.setStyleSheet("font-weight: bold; color: #22302e;")
-            self.lbl_spillway_width.setToolTip(
-                "Minimum spillway width — broad-crested weir formula:\n"
-                "  Q = 1.7 × L × H^1.5\n"
-                "  L = Q / (1.7 × H^1.5)\n\n"
-                "Add 20–30% safety margin for design, and ensure the\n"
-                "spillway outlet is protected against erosion."
-            )
-            spill_size_layout.addRow("Min spillway width:", self.lbl_spillway_width)
+            self.lbl_spillway_width.setStyleSheet(f"font-weight: bold; color: {_INK};")
+            self.lbl_spillway_width.setToolTip(H.SPILLWAY_WIDTH)
+            spill_layout.addRow("Min spillway width:", self.lbl_spillway_width)
 
-            self._peak_flow_m3s = peak_flow
-            self.spin_spillway_head.valueChanged.connect(self._update_spillway_sizing)
+            # Built width. Until now the stored width WAS the computed requirement, so
+            # "is it big enough" could not be asked — spillway_validity carried the
+            # check and nothing could reach it.
+            width_row = QHBoxLayout()
+            width_row.setContentsMargins(0, 0, 0, 0)
+            width_row.setSpacing(6)
+            self.spin_built_width = QDoubleSpinBox()
+            self.spin_built_width.setRange(0.0, 200.0)
+            self.spin_built_width.setDecimals(2)
+            self.spin_built_width.setSingleStep(0.1)
+            self.spin_built_width.setSuffix(" m")
+            self.spin_built_width.setToolTip(H.SPILLWAY_BUILT_WIDTH)
+            width_row.addWidget(self.spin_built_width, 1)
+            self.chk_width_auto = QCheckBox("auto")
+            self.chk_width_auto.setChecked(
+                existing.width_auto if existing is not None else True)
+            self.chk_width_auto.setToolTip(H.SPILLWAY_BUILT_WIDTH)
+            width_row.addWidget(self.chk_width_auto)
+            spill_layout.addRow("Built width:", width_row)
+
+            if existing is not None and existing.width_m:
+                self.spin_built_width.setValue(float(existing.width_m))
+            self.spin_built_width.valueChanged.connect(self._update_spillway_sizing)
+            self.chk_width_auto.toggled.connect(self._update_spillway_sizing)
+
+            sited = existing.point_wkt if existing is not None else None
+            self.lbl_spillway_site = QLabel(
+                "placed on the map" if sited else "not sited — use Place Spillway on the map"
+            )
+            self.lbl_spillway_site.setStyleSheet(
+                f"color: {_MUTED if sited else _WARN}; font-size: 10.5px; font-style: italic;")
+            self.lbl_spillway_site.setToolTip(H.SPILLWAY_LOCATION)
+            spill_layout.addRow("Location:", self.lbl_spillway_site)
+
+            self.lbl_spillway_warn = QLabel("")
+            self.lbl_spillway_warn.setWordWrap(True)
+            self.lbl_spillway_warn.setStyleSheet(
+                f"color: {_BAD}; font-size: 10.5px;")
+            spill_layout.addRow(self.lbl_spillway_warn)
+
+            self._spillway_point_wkt = sited
+            self._spillway_auto = existing.auto if existing is not None else True
+            self._seed_spillway(existing)
+
+            self.spin_spillway_crest.valueChanged.connect(self._on_spillway_crest_changed)
+            self.spin_spillway_drop.valueChanged.connect(self._on_spillway_drop_changed)
+            self.spin_spillway_head.valueChanged.connect(self._on_spillway_head_changed)
+            self.grp_spillway.toggled.connect(self._update_spillway_sizing)
             self._update_spillway_sizing()
 
-            layout.addWidget(spill_size_group)
+            layout.addWidget(self.grp_spillway)
         else:
+            self.grp_spillway = None
+            self.spin_spillway_crest = None
+            self.spin_spillway_drop = None
             self.spin_spillway_head = None
+            self.spin_built_width = None
+            self.chk_width_auto = None
             self.lbl_spillway_width = None
-            self._peak_flow_m3s = None
+            self.lbl_spillway_warn = None
+            self.lbl_spillway_site = None
+            self._spillway_point_wkt = None
+            self._spillway_auto = True
 
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -632,27 +855,83 @@ class EarthworkPropertiesDialog(QDialog):
             else:
                 self.lbl_berm_height.setText("")
 
-        if self.lbl_req_length is not None and self._peak_inflow_m3 is not None:
-            section = depth * width   # rectangular cross-section (m²)
-            if section > 0:
-                req_m = self._peak_inflow_m3 / section
-                self.lbl_req_length.setText(f"{req_m:.0f} m")
-                # Colour feedback: green = swale is long enough, red = too short
-                actual_m = getattr(self, "_swale_length_m", None)
-                if actual_m is not None:
-                    if actual_m >= req_m:
-                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #1e8449;")
-                    else:
-                        self.lbl_req_length.setStyleSheet("font-weight: bold; color: #c0392b;")
-            else:
-                self.lbl_req_length.setText("—")
+        self._update_swale_verdict(depth, width, side_slope)
+
+    def _update_swale_verdict(self, depth, width, side_slope):
+        """Deficit-at-the-drawn-length readout for a swale.
+
+        Uses the real trapezoidal section, the 0.8 freeboard allowance and event
+        infiltration — i.e. the same model as the capacity the swale actually
+        delivers. The old readout divided the inflow by a rectangular ``depth ×
+        width``, which overstated capacity by ~⅓ for a 1:1 batter, and the result was
+        labelled "recommended length" even though that figure scales with the drawn
+        length and so could never be satisfied by extending the swale.
+        """
+        if self.lbl_verdict is None or self._peak_inflow_m3 is None:
+            return
+        length = getattr(self, "_swale_length_m", None)
+        if not length or depth <= 0 or width <= 0:
+            return
+
+        from terrainflow_assessment.modules.swale_design import (
+            get_infiltration_rate,
+            required_storage_at_length,
+        )
+
+        soil = None
+        if getattr(self, "combo_soil", None) is not None:
+            soil = self.combo_soil.currentData()
+        soil = soil or self._soil_name
+        infil = get_infiltration_rate(soil) if soil else 0.0
+        if not self._count_infiltration:
+            infil = 0.0        # sizing on held volume alone — soakage is a bonus
+        check = required_storage_at_length(
+            self._peak_inflow_m3, length, depth, width,
+            side_slope=side_slope if side_slope is not None else 1.0,
+            freeboard=0.8,
+            infiltration_mm_hr=infil,
+            duration_hr=self._duration_hours or 0.0,
+        )
+
+        soak = (f"  ({check.storage_m3:,.0f} stored + {check.infiltration_m3:,.0f} soaked in)"
+                if check.infiltration_m3 > 0.5 else "")
+        self.lbl_holds.setText(f"{check.available_m3:,.0f} m³{soak}")
+        self.lbl_holds.setStyleSheet("font-weight: bold; color: #22302e;")
+
+        if check.holds:
+            self.lbl_verdict.setText(
+                f"✓ Holds the event — {check.available_m3 - check.inflow_m3:,.0f} m³ to spare."
+            )
+            self.lbl_verdict.setStyleSheet("font-weight: bold; color: #1e8449;")
+        elif check.depth_reachable:
+            self.lbl_verdict.setText(
+                f"Short by {check.deficit_m3:,.0f} m³ — deepen to "
+                f"{check.required_depth_m:.2f} m at this width, or route the surplus "
+                f"to a downstream feature."
+            )
+            self.lbl_verdict.setStyleSheet("font-weight: bold; color: #c0392b;")
+        else:
+            self.lbl_verdict.setText(
+                f"Short by {check.deficit_m3:,.0f} m³ — no depth at a {width:.1f} m top "
+                f"width can hold this (the batters meet first). Widen it, extend it, or "
+                f"add downstream storage."
+            )
+            self.lbl_verdict.setStyleSheet("font-weight: bold; color: #c0392b;")
+
+        if self.lbl_req_length is not None:
+            self.lbl_req_length.setText(
+                f"Length that would hold it at these dimensions: "
+                f"{check.recommended_length_m:,.0f} m  (drawn: {length:,.0f} m)"
+            )
 
     def _update_overflow_warning(self):
-        """Flag an overflow target that sits uphill — water will NOT flow into it.
+        """Advise when an overflow target sits uphill of this feature.
 
-        Uses the same rule as the routing (target honoured only when strictly
-        downslope of this feature, DEM elevation at centroids). Unknown elevations
-        (no DEM loaded) can't be judged, so no warning is shown for them.
+        This is now **advice, not a veto**. Routing used to drop any target whose
+        centroid was higher, but centroid elevation is a poor proxy once real flow
+        paths are followed — a large tilted basin's centroid can sit above a swale
+        that genuinely drains into it. A chosen target is honoured unless it would
+        create a loop; this note just flags that water may need help to get there.
         """
         if self.lbl_overflow_warning is None or self.combo_overflow is None:
             return
@@ -667,10 +946,10 @@ class EarthworkPropertiesDialog(QDialog):
         if target_elev >= self._own_elevation:
             name = self.combo_overflow.currentText()
             self.lbl_overflow_warning.setText(
-                f"⚠ {name} sits uphill of this feature "
-                f"({target_elev:.1f} m vs {self._own_elevation:.1f} m) — overflow "
-                f"will NOT flow into it. It will go to the nearest downslope "
-                f"feature (or leave the site) instead."
+                f"⚠ {name} sits uphill of this feature's centroid "
+                f"({target_elev:.1f} m vs {self._own_elevation:.1f} m). The link will "
+                f"still be used, but check that water can actually reach it — you may "
+                f"need a diversion drain to carry it there."
             )
         else:
             self.lbl_overflow_warning.setText("")
@@ -740,12 +1019,123 @@ class EarthworkPropertiesDialog(QDialog):
         self.lbl_advisory.setText(text)
         self.lbl_advisory.setToolTip(text)
 
-    def _update_spillway_sizing(self):
-        if self.spin_spillway_head is None or self._peak_flow_m3s is None:
+    # -- Spillway ------------------------------------------------------------
+
+    def _crest_band(self):
+        """Crest elevations this feature can currently offer, at the chosen head."""
+        head = self.spin_spillway_head.value() if self.spin_spillway_head else 0.30
+        return spillway_datum(self._rim_elevation, self._invert_elevation, head_m=head)
+
+    def _seed_spillway(self, existing):
+        """Initial crest/drop pair — the saved one, or the highest crest that fits.
+
+        A fresh spillway starts as high as the head and freeboard allow, because
+        that is the crest which stores the most water while still being a spillway.
+        """
+        crest = existing.crest_elevation if existing is not None else None
+        drop = existing.drop_below_rim_m if existing is not None else None
+        if crest is None and drop is None:
+            _lo, hi = self._crest_band()
+            crest = hi
+        crest, drop = bind_crest(
+            self._rim_elevation, crest=crest, drop=drop, band=self._crest_band())
+        self._set_spillway_pair(crest, drop)
+
+    def _set_spillway_pair(self, crest, drop):
+        """Write both controls without re-entering the binding."""
+        self._spillway_binding = True
+        try:
+            for widget, value in ((self.spin_spillway_crest, crest),
+                                  (self.spin_spillway_drop, drop)):
+                if widget is None or value is None:
+                    continue
+                widget.blockSignals(True)
+                widget.setValue(float(value))
+                widget.blockSignals(False)
+        finally:
+            self._spillway_binding = False
+
+    def _on_spillway_crest_changed(self):
+        if self._spillway_binding:
             return
-        head = self.spin_spillway_head.value()
-        width = calculate_spillway_width(self._peak_flow_m3s, head)
-        self.lbl_spillway_width.setText(f"{width:.2f} m")
+        crest, drop = bind_crest(
+            self._rim_elevation, crest=self.spin_spillway_crest.value(),
+            band=self._crest_band())
+        self._set_spillway_pair(crest, drop)
+        self._update_spillway_sizing()
+
+    def _on_spillway_drop_changed(self):
+        if self._spillway_binding:
+            return
+        crest, drop = bind_crest(
+            self._rim_elevation, drop=self.spin_spillway_drop.value(),
+            band=self._crest_band())
+        self._set_spillway_pair(crest, drop)
+        self._update_spillway_sizing()
+
+    def _on_spillway_head_changed(self):
+        # Head moves the ceiling of the valid band (rim − head − freeboard), so the
+        # crest may need to come down with it. Re-bind through the new band.
+        if self._spillway_binding:
+            return
+        crest, drop = bind_crest(
+            self._rim_elevation, crest=self.spin_spillway_crest.value(),
+            band=self._crest_band())
+        self._set_spillway_pair(crest, drop)
+        self._update_spillway_sizing()
+
+    def _required_width(self, head):
+        if self._peak_flow_m3s is None:
+            return None
+        return calculate_spillway_width(self._peak_flow_m3s, head)
+
+    def _update_spillway_sizing(self):
+        """Refresh the required width, the auto-tracked built width, and the notes."""
+        if self.lbl_spillway_width is None:
+            return
+        enabled = self.grp_spillway is None or self.grp_spillway.isChecked()
+        head = self.spin_spillway_head.value() if self.spin_spillway_head else 0.30
+        required = self._required_width(head)
+
+        if required is not None:
+            self.lbl_spillway_width.setText(f"{required:.2f} m")
+        else:
+            self.lbl_spillway_width.setText("— set a peak intensity on Baseline")
+
+        # Auto keeps the built width on the requirement as head, catchment or
+        # upstream routing change. Unticking it commits to a number, which is what
+        # makes the shortfall check meaningful rather than tautological.
+        if self.chk_width_auto is not None:
+            auto = self.chk_width_auto.isChecked()
+            self.spin_built_width.setEnabled(not auto)
+            if auto and required is not None:
+                self.spin_built_width.blockSignals(True)
+                self.spin_built_width.setValue(required)
+                self.spin_built_width.blockSignals(False)
+
+        if not enabled or self.lbl_spillway_warn is None:
+            if self.lbl_spillway_warn is not None:
+                self.lbl_spillway_warn.setText("")
+            return
+
+        problems = spillway_validity(
+            self.spin_spillway_crest.value() if self.spin_spillway_crest else None,
+            self._rim_elevation,
+            invert_elevation=self._invert_elevation,
+            head_m=head,
+            width_m=self.spin_built_width.value() if self.spin_built_width else None,
+            required_width_m=required,
+        )
+        if self._harvesting_coefficient:
+            problems.append(
+                "The runoff coefficient is a water-harvesting figure, calibrated for "
+                "ordinary rain rather than for the extreme event on saturated ground. "
+                "It will undersize this overflow."
+            )
+        self.lbl_spillway_warn.setText("\n".join(f"⚠ {p}" for p in problems))
+        self.lbl_spillway_warn.setToolTip(
+            H.SPILLWAY_HARVESTING_C if self._harvesting_coefficient else "")
+        self.lbl_spillway_warn.setVisible(bool(problems))
 
     # -- Result accessors --
 
@@ -757,6 +1147,11 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_crest_elevation(self):
         return self.spin_crest_elev.value() if self.spin_crest_elev is not None else None
+
+    def get_soil_name(self):
+        """Per-feature soil override, or None to inherit the site default."""
+        combo = getattr(self, "combo_soil", None)
+        return combo.currentData() if combo is not None else None
 
     def get_key_into_banks(self):
         chk = getattr(self, "chk_key_banks", None)
@@ -782,6 +1177,27 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_gradient_pct(self):
         return self.spin_gradient.value() if self.spin_gradient is not None else 1.0
+
+    def get_spillway(self):
+        """The configured :class:`Spillway`, or None when the group is unchecked.
+
+        This accessor did not exist: the dialog computed a spillway width, showed
+        it, and discarded everything on close. Nothing about a spillway survived
+        the OK button.
+        """
+        if self.grp_spillway is None or not self.grp_spillway.isChecked():
+            return None
+        head = self.spin_spillway_head.value()
+        return Spillway(
+            crest_elevation=self.spin_spillway_crest.value(),
+            drop_below_rim_m=(self.spin_spillway_drop.value()
+                              if self._rim_elevation is not None else None),
+            head_m=head,
+            width_m=self.spin_built_width.value(),
+            width_auto=self.chk_width_auto.isChecked(),
+            point_wkt=self._spillway_point_wkt,
+            auto=self._spillway_auto,
+        )
 
     def get_bottom_width(self):
         """Bottom width (m) from the control, or None when the type has no channel section."""

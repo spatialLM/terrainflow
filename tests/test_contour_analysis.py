@@ -707,6 +707,118 @@ class TestFindSwaleSegments:
         assert result == []
 
 
+class TestSegmentRankModeAndSlope:
+    def test_inflow_mode_surfaces_small_holding(self, tmp_path):
+        """catchment mode with a huge min_acc_ha finds nothing; inflow mode still
+        surfaces the largest crossing (small-holding use case)."""
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        catchment = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0,
+            min_acc_ha=100.0, rank_mode="catchment")
+        inflow = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0,
+            min_acc_ha=100.0, rank_mode="inflow")
+        assert catchment == []
+        assert len(inflow) >= 1
+
+    def test_segment_slope_filter_rejects_steep(self, tmp_path):
+        """A high constant slope raster with a low seg limit filters segments out."""
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        steep = np.full((40, 40), 30.0, dtype="float32")
+        steep_path = _write_raster(str(tmp_path / "steep_slope.tif"), steep)
+        result = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0, min_acc_ha=0.1,
+            slope_path=steep_path, seg_max_slope_deg=10.0)
+        assert result == []
+
+    def test_segment_slope_filter_keeps_gentle_and_records_slope(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        gentle = np.full((40, 40), 3.0, dtype="float32")
+        gentle_path = _write_raster(str(tmp_path / "gentle_slope.tif"), gentle)
+        result = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0, min_acc_ha=0.1,
+            slope_path=gentle_path, seg_max_slope_deg=10.0)
+        assert len(result) >= 1
+        assert result[0].segment_slope_deg == 3.0
+
+
+class TestClassifyContourInflow:
+    def test_returns_absolute_value_subsegments(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0,
+                                         runoff_mm=25.0, duration_hr=24.0)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        for r in result:
+            assert r["inflow_m3"] >= 0
+            assert r["flow_ls"] >= 0
+            assert "global_max_m3" in r
+            assert not r["geometry"].is_empty
+
+    def test_global_max_is_shared_and_matches_peak(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0,
+                                         runoff_mm=25.0, duration_hr=24.0)
+        gmax = {r["global_max_m3"] for r in result}
+        assert len(gmax) == 1  # every stretch carries the same shared maximum
+        assert max(r["inflow_m3"] for r in result) == next(iter(gmax))
+
+    def test_falls_back_to_accumulation_without_runoff(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0)
+        # Without runoff, inflow_m3 falls back to raw accumulation; flow_ls stays 0.
+        assert result
+        assert all(r["flow_ls"] == 0.0 for r in result)
+
+    def test_flat_acc_skipped(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        data = np.zeros((20, 20), dtype="float32")
+        acc_path = _write_raster(str(tmp_path / "zero_acc.tif"), data)
+        feat = ContourFeature(
+            geometry=LineString([(0.5, 10.5), (19.5, 10.5)]),
+            elevation=50.0, rank=1, length_m=19.0,
+        )
+        assert classify_contour_inflow([feat], acc_path, cell_area_m2=1.0) == []
+
+    def test_progress_callback(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        calls = []
+        classify_contour_inflow([feat], acc_path, cell_area_m2=1.0,
+                                progress_callback=lambda p, m: calls.append(p))
+        assert calls and calls[-1] == 100
+
+    def test_graded_ramp_produces_varied_values(self, tmp_path):
+        """A contour crossing a smooth accumulation ramp yields a spread of values."""
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        # Accumulation rising left→right so a horizontal contour sweeps the range.
+        data = np.fromfunction(lambda r, c: (c / 39.0) * 1000.0, (40, 40)).astype("float32")
+        acc_path = _write_raster(str(tmp_path / "ramp_acc.tif"), data)
+        feat = ContourFeature(
+            geometry=LineString([(0.5, 20.5), (39.5, 20.5)]),
+            elevation=50.0, rank=1, length_m=39.0,
+        )
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0,
+                                         runoff_mm=25.0, duration_hr=24.0)
+        vals = sorted(r["inflow_m3"] for r in result)
+        assert vals[-1] > vals[0]  # a smooth ramp spans a range of absolute values
+
+    def test_short_contour_skipped_in_classify(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        _, acc_path = _make_contour_and_acc(tmp_path)
+        short = ContourFeature(
+            geometry=LineString([(10, 10), (10.4, 10)]),
+            elevation=50.0, rank=1, length_m=0.4,
+        )
+        assert classify_contour_inflow([short], acc_path, cell_area_m2=1.0) == []
+
+
 # ---------------------------------------------------------------------------
 # _extract_contours_scipy — edge-case lines (short paths, degenerate coords)
 # ---------------------------------------------------------------------------

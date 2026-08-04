@@ -8,7 +8,10 @@ from terrainflow_assessment.modules.swale_design import (
     contour_section,
     contour_to_swale_geometry,
     get_infiltration_rate,
+    inflow_profile,
+    overtopping_station,
     recommend_swale_length,
+    required_storage_at_length,
     snap_point_to_contour_elevation,
 )
 
@@ -85,10 +88,20 @@ class TestGetInfiltrationRate:
 # ---------------------------------------------------------------------------
 
 class TestRecommendSwaleLength:
-    def test_basic_calculation(self):
-        # V=100, depth=0.5, width=2.0, cs=1.0, length=100/0.8=125
+    def test_basic_calculation_storage_only(self):
+        # Trapezoidal area for T=2.0, d=0.5, side_slope=1.0:
+        #   b = 2 - 2·1·0.5 = 1.0;  A = (2+1)/2 · 0.5 = 0.75 m²
+        #   capacity/m = 0.75 · 0.8 = 0.6 m³/m;  L = 100 / 0.6 = 166.7 m
         length = recommend_swale_length(100.0, 0.5, 2.0)
-        assert length == pytest.approx(125.0, rel=1e-3)
+        assert length == pytest.approx(166.7, rel=1e-3)
+
+    def test_infiltration_shortens_length(self):
+        # Adding infiltration over the event increases capacity per metre,
+        # so the required length falls below the storage-only figure.
+        storage_only = recommend_swale_length(100.0, 0.5, 2.0)
+        with_infil = recommend_swale_length(
+            100.0, 0.5, 2.0, infiltration_mm_hr=4.0, duration_hr=6.0)
+        assert with_infil < storage_only
 
     def test_zero_depth_returns_zero(self):
         assert recommend_swale_length(100.0, 0.0, 2.0) == 0.0
@@ -121,12 +134,13 @@ class TestRecommendSwaleLength:
         length = recommend_swale_length(100.0, 0.5, 2.0)
         assert length == round(length, 1)
 
-    def test_formula_consistency(self):
-        """length × cross_section × 0.8 == inflow volume."""
+    def test_storage_only_formula_consistency(self):
+        """With no infiltration, length × trapezoidal_area × 0.8 == inflow volume."""
         depth, width, volume = 0.5, 2.0, 150.0
         length = recommend_swale_length(volume, depth, width)
-        cs = depth * width
-        assert length * cs * 0.8 == pytest.approx(volume, rel=1e-3)
+        bottom = max(0.0, width - 2.0 * 1.0 * depth)
+        area = (width + bottom) / 2.0 * depth
+        assert length * area * 0.8 == pytest.approx(volume, rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +236,183 @@ class TestSnapPointToContourElevation:
 
         elev = snap_point_to_contour_elevation((5.0, 5.0), path)
         assert elev is None
+
+
+# ---------------------------------------------------------------------------
+# required_storage_at_length — the deficit-at-drawn-length readout
+# ---------------------------------------------------------------------------
+
+class TestRequiredStorageAtLength:
+    # Default swale: top 2.0 m, depth 0.5 m, 1:1 batter → bottom 1.0 m,
+    # trapezoid section 0.75 m², usable at 0.8 freeboard = 0.60 m³/m.
+    DIMS = dict(depth=0.5, width=2.0, side_slope=1.0, freeboard=0.8)
+
+    def test_available_storage_uses_the_trapezoid_not_a_rectangle(self):
+        r = required_storage_at_length(0.0, 100.0, **self.DIMS)
+        assert r.storage_m3 == pytest.approx(60.0)     # 0.75 × 0.8 × 100
+        # The old dialog assumed depth×width = 1.0 m³/m → 100 m³, 67% optimistic.
+        assert r.storage_m3 < 100.0
+
+    def test_holds_when_inflow_fits(self):
+        r = required_storage_at_length(50.0, 100.0, **self.DIMS)
+        assert r.holds is True
+        assert r.deficit_m3 == 0.0
+
+    def test_deficit_reported_when_short(self):
+        r = required_storage_at_length(100.0, 100.0, **self.DIMS)
+        assert r.holds is False
+        assert r.deficit_m3 == pytest.approx(40.0)
+
+    def test_required_depth_closes_the_deficit_exactly(self):
+        """The headline promise: deepen to this and the deficit goes to zero."""
+        inflow, length = 70.0, 100.0          # 70 m³ against 60 m³ available
+        r = required_storage_at_length(inflow, length, **self.DIMS)
+        assert not r.holds
+        assert r.depth_reachable
+
+        deeper = dict(self.DIMS, depth=r.required_depth_m)
+        r2 = required_storage_at_length(inflow, length, **deeper)
+        assert r2.deficit_m3 == pytest.approx(0.0, abs=1e-6)
+        assert r2.holds
+
+    def test_required_depth_with_vertical_walls(self):
+        r = required_storage_at_length(80.0, 100.0, depth=0.5, width=2.0,
+                                       side_slope=0.0, freeboard=1.0)
+        # Needs 0.8 m³/m over a 2.0 m rectangle → 0.4 m.
+        assert r.required_depth_m == pytest.approx(0.4)
+
+    def test_unreachable_section_is_flagged_not_faked(self):
+        """Battered walls close in before the section is reached.
+
+        At a 2 m top width with 1:1 batters the deepest possible section is 1.0 m²
+        (walls meeting at 1.0 m depth), so anything beyond that is unreachable —
+        the caller must say "widen it", not "deepen to 0.50 m" (the current depth).
+        """
+        r = required_storage_at_length(1e6, 10.0, depth=0.5, width=2.0,
+                                       side_slope=1.0, freeboard=0.8)
+        assert r.depth_reachable is False
+        assert r.required_depth_m == 0.5      # unchanged → no bogus advice
+        assert not r.holds
+
+    def test_reachable_deficit_is_not_flagged_unreachable(self):
+        r = required_storage_at_length(70.0, 100.0, **self.DIMS)
+        assert r.depth_reachable is True
+
+    def test_infiltration_counts_toward_holding_the_event(self):
+        dry = required_storage_at_length(100.0, 100.0, **self.DIMS)
+        wet = required_storage_at_length(100.0, 100.0, infiltration_mm_hr=10.0,
+                                         duration_hr=24.0, **self.DIMS)
+        assert wet.infiltration_m3 == pytest.approx(48.0)   # 0.01 × 24 × 2 × 100
+        assert wet.available_m3 > dry.available_m3
+        assert wet.holds and not dry.holds
+
+    def test_deficit_is_monotone_in_depth_and_width(self):
+        base = required_storage_at_length(200.0, 100.0, **self.DIMS)
+        deeper = required_storage_at_length(200.0, 100.0,
+                                            **dict(self.DIMS, depth=0.8))
+        wider = required_storage_at_length(200.0, 100.0,
+                                           **dict(self.DIMS, width=3.0))
+        assert deeper.deficit_m3 < base.deficit_m3
+        assert wider.deficit_m3 < base.deficit_m3
+
+    def test_recommended_length_is_carried_as_a_secondary_figure(self):
+        r = required_storage_at_length(120.0, 100.0, **self.DIMS)
+        assert r.recommended_length_m == pytest.approx(
+            recommend_swale_length(120.0, 0.5, 2.0, side_slope=1.0, freeboard=0.8)
+        )
+
+    def test_invalid_inputs_give_a_safe_empty_result(self):
+        for kwargs in (dict(depth=0.0, width=2.0), dict(depth=0.5, width=0.0)):
+            r = required_storage_at_length(100.0, 100.0, **kwargs)
+            assert r.available_m3 == 0.0 and r.holds is False
+        assert required_storage_at_length(100.0, 0.0, depth=0.5, width=2.0).holds is False
+
+
+# ---------------------------------------------------------------------------
+# inflow_profile / overtopping_station — inflow is not uniform along a swale
+# ---------------------------------------------------------------------------
+
+class TestInflowProfile:
+    def test_evenly_spread_inflow_reads_as_uniform(self):
+        d = [i * 5.0 for i in range(20)]        # one cell every 5 m over 100 m
+        p = inflow_profile(d, [10.0] * 20, 100.0, n_stations=20)
+        assert p["uniformity"] == pytest.approx(1.0)
+        assert sum(p["inflow_m3"]) == pytest.approx(200.0)
+        assert p["cumulative_m3"][-1] == pytest.approx(200.0)
+
+    def test_concentrated_inflow_is_flagged_and_located(self):
+        p = inflow_profile([40.0] * 10, [20.0] * 10, 100.0, n_stations=20)
+        assert p["uniformity"] < 0.2            # it all arrives in one reach
+        assert p["peak_station"] == pytest.approx(42.5)
+
+    def test_stations_span_the_alignment(self):
+        p = inflow_profile([1.0], [1.0], 100.0, n_stations=4)
+        assert p["stations"] == [12.5, 37.5, 62.5, 87.5]
+        assert p["station_length_m"] == pytest.approx(25.0)
+
+    def test_a_cell_past_the_end_is_clamped_into_the_last_station(self):
+        p = inflow_profile([150.0], [5.0], 100.0, n_stations=4)
+        assert p["inflow_m3"][-1] == pytest.approx(5.0)
+
+    def test_empty_or_degenerate_input_is_safe(self):
+        assert inflow_profile([], [], 100.0)["uniformity"] == 1.0
+        assert inflow_profile([1.0], [1.0], 0.0)["inflow_m3"] == [0.0] * 24
+        assert inflow_profile([1.0, 2.0], [1.0], 100.0)["peak_station"] == 0.0
+        assert inflow_profile([1.0], [0.0], 100.0)["uniformity"] == 1.0
+
+
+class TestOvertoppingStation:
+    def test_uniform_inflow_within_capacity_never_overtops(self):
+        d = [i * 5.0 for i in range(20)]
+        p = inflow_profile(d, [10.0] * 20, 100.0, n_stations=20)
+        station, surplus = overtopping_station(p, capacity_per_m=5.0)
+        assert station is None and surplus == 0.0
+
+    def test_concentrated_inflow_overtops_even_when_the_total_fits(self):
+        """Total capacity 100 m³ vs total inflow 60 m³ — yet it fails locally."""
+        p = inflow_profile([10.0] * 6, [10.0] * 6, 100.0, n_stations=20)
+        station, surplus = overtopping_station(p, capacity_per_m=1.0)
+        assert station is not None
+        assert station < 30.0            # fails near where the water arrives
+        assert surplus > 0
+
+    def test_degenerate_inputs_return_no_station(self):
+        p = inflow_profile([10.0], [10.0], 100.0)
+        assert overtopping_station(p, capacity_per_m=0.0) == (None, 0.0)
+        assert overtopping_station(None, capacity_per_m=5.0) == (None, 0.0)
+        assert overtopping_station({}, capacity_per_m=5.0) == (None, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# SWL-03 — converged battered walls
+# ---------------------------------------------------------------------------
+
+class TestConvergedWallSection:
+    """When 2·z·d exceeds the top width the walls meet before the drawn depth.
+
+    Clamping only the bottom width to zero while keeping the full depth built a
+    triangle taller than the batter permits: area T·d/2 instead of the true maximum
+    T²/(4z), over-stating storage in the narrowest, deepest corner of the range.
+    """
+
+    def test_section_is_capped_at_the_batters_own_maximum(self):
+        from terrainflow_assessment.modules.swale_design import _channel_section
+        # T = 1.0, z = 1.0, d = 2.0 → walls meet at 0.5 m, well short of 2.0 m.
+        sec = _channel_section(top_width=1.0, depth=2.0, side_slope=1.0)
+        assert sec.depth == pytest.approx(0.5)
+        assert sec.bottom_width == pytest.approx(0.0)
+        assert sec.area == pytest.approx(1.0 ** 2 / (4 * 1.0))    # T²/(4z) = 0.25
+        assert sec.area < 1.0 * 2.0 / 2                            # the old T·d/2
+
+    def test_ordinary_section_is_untouched(self):
+        from terrainflow_assessment.modules.swale_design import _channel_section
+        sec = _channel_section(top_width=2.0, depth=0.5, side_slope=1.0)
+        assert sec.depth == pytest.approx(0.5)
+        assert sec.bottom_width == pytest.approx(1.0)
+
+    def test_sizing_does_not_credit_the_impossible_depth(self):
+        """A swale drawn past its convergence point must not read as longer-lasting."""
+        converged = recommend_swale_length(100.0, depth=2.0, width=1.0, side_slope=1.0)
+        at_convergence = recommend_swale_length(
+            100.0, depth=0.5, width=1.0, side_slope=1.0)
+        assert converged == pytest.approx(at_convergence)

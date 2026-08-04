@@ -40,7 +40,13 @@ class SelectContourTool(QgsMapTool):
 
         best_feature = None
         best_dist = float("inf")
-        for feature in self._layer.getFeatures(request):
+        try:
+            features = list(self._layer.getFeatures(request))
+        except RuntimeError:
+            # The contour layer was deleted/swapped while this tool was active.
+            self.cancelled.emit()
+            return
+        for feature in features:
             dist = feature.geometry().distance(click_geom)
             if dist < best_dist:
                 best_dist = dist

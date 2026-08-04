@@ -9,16 +9,23 @@ held (blue), with connector rows naming where each feature's overflow goes.
 Selecting a node reports its index up to the panel, so the existing
 Edit / Reshape / Enable-Disable / Delete action bar keeps working unchanged.
 
+A feature captures water two ways — by **ponding** it (``stored_m3``, which fills the
+bar) and by **soaking it away** (``soaked_m3``). Both count as captured, and for a
+wide, shallow feature on free-draining soil the soakage can be all of it: such a
+feature ponds nothing and reads 0% full while still taking every drop that reaches
+it. Both are shown, because storage alone made that look like a broken feature.
+
 Data contract — ``set_network(nodes, edges, exit_m3)``:
   nodes : list of dicts, each
     {index, id, name, ew_type, colour, elevation, capacity_m3, stored_m3,
-     fill_pct, overflowed, enabled, has_water}
+     soaked_m3, drain_hours, fill_pct, overflowed, overflow_m3, catchment_m2,
+     is_terminal, enabled, has_water}
   edges : {from_id: (to_id_or_None, is_user_link)}
   exit_m3 : total water leaving the site
 """
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QPainter
+from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,7 +35,9 @@ from qgis.PyQt.QtWidgets import (
 )
 
 _WATER = "#1273b5"
+_SOAKED = "#79b8dd"   # same token the scorecard uses for infiltrated water
 _WARN = "#b9770e"
+_BAD = "#c0392b"
 _INK = "#22302e"
 _MUTED = "#5f7176"
 _FAINT = "#8fa0a4"
@@ -105,8 +114,52 @@ class _NodeCard(QFrame):
             wtxt = "full" if full else f"{node['fill_pct']:.0f}%"
             water = QLabel(f"💧 {node['stored_m3']:,.0f} · {wtxt}")
             water.setStyleSheet(f"font-size: 11.5px; font-weight: 600; color: {wcol};")
-            water.setToolTip("Water held (stored) · fill")
+            water.setToolTip("Water held (ponded) · fill")
             h.addWidget(water)
+
+            # Infiltration is capture too, and for a wide shallow feature it can be
+            # ALL of the capture: a large basin on free-draining soil soaks away
+            # everything that reaches it, so it ponds nothing and its fill bar sits
+            # empty. Showing stored volume alone made that read as "does nothing".
+            soaked = node.get("soaked_m3", 0.0)
+            if soaked >= 1.0:
+                soak = QLabel(f"↓ {soaked:,.0f}")
+                soak.setStyleSheet(
+                    f"font-size: 11.5px; font-weight: 600; color: {_SOAKED};")
+                soak.setToolTip(
+                    "Soaked into the ground over the event — captured, but not held "
+                    "as standing water, so it does not fill the feature."
+                )
+                h.addWidget(soak)
+
+            # How long standing water takes to soak away. Lancaster sizes earthworks
+            # so they "work, don't flood, and don't puddle" — this is the third
+            # constraint. Water left standing breeds mosquitoes, drowns the plantings
+            # the earthwork exists to support, and leaves nothing free for the next
+            # storm. Conventional practice is full drawdown inside 24-48 hours.
+            drain = node.get("drain_hours")
+            if node["stored_m3"] >= 1.0:
+                if drain is None:
+                    txt, col, tip = ("⏱ never", _BAD,
+                                     "No infiltration — this water has nowhere to go "
+                                     "and will stand until it evaporates.")
+                elif drain > 48:
+                    txt, col, tip = (f"⏱ {drain:,.0f} h", _BAD,
+                                     "Over 48 h to drain — too slow. Expect mosquito "
+                                     "breeding, drowned plantings, and no freeboard "
+                                     "left for the next storm.")
+                elif drain > 24:
+                    txt, col, tip = (f"⏱ {drain:,.0f} h", _WARN,
+                                     "24-48 h to drain — acceptable, but little margin "
+                                     "before the next storm.")
+                else:
+                    txt, col, tip = (f"⏱ {drain:,.0f} h", _MUTED,
+                                     "Drains well within the conventional 24 h target.")
+                lbl = QLabel(txt)
+                lbl.setStyleSheet(f"font-size: 11px; color: {col};")
+                lbl.setToolTip(tip)
+                h.addWidget(lbl)
+
             bar = _FillBar()
             bar.set(node["fill_pct"], full)
             h.addWidget(bar)
@@ -139,14 +192,290 @@ class _NodeCard(QFrame):
         self.clicked.emit(self.index)
 
 
+class _FlowChart(QWidget):
+    """The network as a chart: chips by rank, water flowing top to bottom.
+
+    The list view answers "what have I got"; this answers "how does it connect".
+    Rank comes from :func:`~terrainflow_assessment.modules.simulation.layer_nodes`,
+    which puts each feature below everything that spills into it — the graph maths
+    stays out of the widget so it can be tested without Qt.
+
+    Edge thickness scales with the volume actually routed, so a heavily loaded link
+    reads heavier than a nominal one.
+    """
+
+    clicked = pyqtSignal(int)
+
+    _CHIP_W, _CHIP_H = 104, 34
+    _GAP_X, _GAP_Y = 14, 40
+    _MARGIN = 10
+    _AXIS_W = 40          # room for the metre scale in elevation mode
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._nodes = []
+        self._edges = {}
+        self._layout = {}
+        self._exit_m3 = 0.0
+        self._selected_index = None
+        self._boxes = {}          # id → QRect
+        self._ticks = []          # (y, elevation) for the elevation scale
+        self._axis = "rank"
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(80)
+
+    def set_network(self, nodes, edges, exit_m3, layout):
+        self._nodes = [n for n in nodes if n.get("enabled", True)]
+        self._edges = edges or {}
+        self._layout = layout or {}
+        self._exit_m3 = exit_m3
+        self._relayout()
+        self.update()
+
+    def set_selected(self, index):
+        self._selected_index = index
+        self.update()
+
+    # ------------------------------------------------------------------ layout
+
+    def set_axis_mode(self, mode):
+        """``"rank"`` (spill order) or ``"elevation"`` (true height)."""
+        self._axis = "elevation" if mode == "elevation" else "rank"
+        self._relayout()
+        self.update()
+
+    def _relayout(self):
+        self._boxes = {}
+        self._ticks = []
+        if not self._nodes:
+            self.setFixedHeight(80)
+            return
+        if getattr(self, "_axis", "rank") == "elevation":
+            self._relayout_by_elevation()
+        else:
+            self._relayout_by_rank()
+
+    def _relayout_by_rank(self):
+        by_rank = {}
+        for node in self._nodes:
+            rank, order = self._layout.get(node["id"], (0, 0))
+            by_rank.setdefault(rank, []).append((order, node))
+
+        width = max(self.width(), 240)
+        for rank, entries in by_rank.items():
+            entries.sort(key=lambda e: e[0])
+            n = len(entries)
+            span = n * self._CHIP_W + (n - 1) * self._GAP_X
+            x0 = max(self._MARGIN, (width - span) // 2)
+            y = self._MARGIN + rank * (self._CHIP_H + self._GAP_Y)
+            for i, (_order, node) in enumerate(entries):
+                self._boxes[node["id"]] = (
+                    x0 + i * (self._CHIP_W + self._GAP_X), y,
+                    self._CHIP_W, self._CHIP_H)
+
+        depth = max(by_rank) + 1
+        # One extra band for the "leaves site" sink at the foot of the chart.
+        self.setFixedHeight(
+            self._MARGIN * 2 + depth * self._CHIP_H + depth * self._GAP_Y + 18)
+
+    def _relayout_by_elevation(self):
+        """Place chips at their true height, with a metre scale down the left.
+
+        Spill rank tells you the order things fill in; elevation tells you what is
+        *physically possible*. A feature sitting above another is a candidate route
+        even if nothing currently connects them — which is the question the rank
+        layout cannot answer, because it only draws links that already exist.
+        """
+        elevations = [float(n.get("elevation") or 0.0) for n in self._nodes]
+        lo, hi = min(elevations), max(elevations)
+        if hi - lo < 1e-6:
+            self._relayout_by_rank()
+            return
+
+        plot_h = max(180, min(520, int((hi - lo) * 12)))
+        left = self._AXIS_W
+        width = max(self.width(), 300)
+
+        # Nudge chips that would overlap sideways rather than moving them off their
+        # true height — the vertical position is the information here.
+        placed = []
+        for node, elevation in sorted(
+                zip(self._nodes, elevations), key=lambda p: -p[1]):
+            frac = (hi - elevation) / (hi - lo)
+            y = self._MARGIN + int(frac * (plot_h - self._CHIP_H))
+            column = 0
+            while any(abs(py - y) < self._CHIP_H + 2 and pc == column
+                      for _pid, py, pc in placed):
+                column += 1
+            x = left + column * (self._CHIP_W + self._GAP_X)
+            if x + self._CHIP_W > width - self._MARGIN and column > 0:
+                column = 0
+                x = left
+            placed.append((node["id"], y, column))
+            self._boxes[node["id"]] = (x, y, self._CHIP_W, self._CHIP_H)
+
+        step = _nice_step(hi - lo)
+        tick = (int(lo / step)) * step
+        while tick <= hi + step:
+            if lo - step <= tick <= hi + step:
+                frac = (hi - tick) / (hi - lo)
+                self._ticks.append(
+                    (self._MARGIN + int(frac * (plot_h - self._CHIP_H))
+                     + self._CHIP_H // 2, tick))
+            tick += step
+
+        self.setFixedHeight(plot_h + self._MARGIN * 2 + 18)
+
+    def resizeEvent(self, event):
+        self._relayout()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------ painting
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        by_id = {n["id"]: n for n in self._nodes}
+        self._draw_axis(p)
+
+        sink_y = self.height() - 16
+        for node in self._nodes:
+            src = self._boxes.get(node["id"])
+            if src is None:
+                continue
+            target_id, is_user = self._edges.get(node["id"], (None, False))
+            volume = float(node.get("overflow_m3", 0.0) or 0.0)
+            dst = self._boxes.get(target_id) if target_id else None
+
+            start = (src[0] + src[2] / 2.0, src[1] + src[3])
+            if dst is not None and target_id in by_id:
+                end = (dst[0] + dst[2] / 2.0, dst[1])
+            else:
+                end = (src[0] + src[2] / 2.0, sink_y)
+            self._draw_edge(p, start, end, volume, is_user, dst is not None)
+
+        for node in self._nodes:
+            box = self._boxes.get(node["id"])
+            if box is not None:
+                self._draw_chip(p, node, box)
+
+        if self._nodes:
+            p.setPen(QColor(_FAINT))
+            f = p.font()
+            f.setPointSizeF(7.5)
+            p.setFont(f)
+            p.drawText(self._MARGIN, sink_y + 12,
+                       f"●  {self._exit_m3:,.0f} m³ leaves the site")
+        p.end()
+
+    def _draw_axis(self, p):
+        """Metre scale down the left, in elevation mode only."""
+        if not self._ticks:
+            return
+        f = p.font()
+        f.setPointSizeF(7.0)
+        p.setFont(f)
+        for y, value in self._ticks:
+            p.setPen(QPen(QColor("#eef1f0"), 1))
+            p.drawLine(self._AXIS_W - 4, y, self.width() - self._MARGIN, y)
+            p.setPen(QColor(_FAINT))
+            p.drawText(2, y + 3, f"{value:,.0f} m")
+
+    def _draw_edge(self, p, start, end, volume, is_user, has_target):
+        width = 1.0 + min(volume / 200.0, 3.0)
+        colour = QColor(_WATER if has_target else _FAINT)
+        colour.setAlpha(210 if is_user else 130)
+        pen = QPen(colour, width)
+        pen.setStyle(Qt.PenStyle.SolidLine if is_user else Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        path = QPainterPath()
+        path.moveTo(start[0], start[1])
+        mid = (start[1] + end[1]) / 2.0
+        path.cubicTo(start[0], mid, end[0], mid, end[0], end[1])
+        p.drawPath(path)
+
+        # Arrowhead, so direction survives a crossing.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(colour)
+        head = QPainterPath()
+        head.moveTo(end[0], end[1])
+        head.lineTo(end[0] - 4, end[1] - 6)
+        head.lineTo(end[0] + 4, end[1] - 6)
+        head.closeSubpath()
+        p.drawPath(head)
+
+    def _draw_chip(self, p, node, box):
+        x, y, w, h = box
+        selected = node["index"] == self._selected_index
+        full = node.get("overflowed") or node.get("fill_pct", 0) >= 100
+
+        p.setPen(QPen(QColor("#2e7d55" if selected else "#dde4e5"), 1.5))
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(x, y, w, h, 6, 6)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(node["colour"]))
+        p.drawRoundedRect(x, y, 4, h, 2, 2)
+
+        f = p.font()
+        f.setPointSizeF(8.0)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(_INK))
+        p.drawText(x + 9, y + 14, _elide(node["name"], 15))
+
+        f.setBold(False)
+        f.setPointSizeF(7.5)
+        p.setFont(f)
+        if node.get("has_water"):
+            p.setPen(QColor(_WARN if full else _WATER))
+            label = "full" if full else f"{node.get('fill_pct', 0):.0f}%"
+            p.drawText(x + 9, y + 27, f"💧 {node.get('stored_m3', 0):,.0f} · {label}")
+        else:
+            p.setPen(QColor(_MUTED))
+            p.drawText(x + 9, y + 27, f"{node.get('capacity_m3', 0):,.0f} m³")
+
+    # ------------------------------------------------------------------ input
+
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        for node in self._nodes:
+            box = self._boxes.get(node["id"])
+            if box is None:
+                continue
+            x, y, w, h = box
+            if x <= pos.x() <= x + w and y <= pos.y() <= y + h:
+                self.clicked.emit(node["index"])
+                return
+
+
+def _elide(text, limit):
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class NetworkView(QWidget):
     selection_changed = pyqtSignal(object)   # index (int) or None
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._lay = QVBoxLayout(self)
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._outer.setSpacing(4)
+
+        self._list_host = QWidget()
+        self._lay = QVBoxLayout(self._list_host)
         self._lay.setContentsMargins(0, 0, 0, 0)
         self._lay.setSpacing(0)
+        self._outer.addWidget(self._list_host)
+
+        self._chart = _FlowChart()
+        self._chart.clicked.connect(self._on_card_clicked)
+        self._chart.setVisible(False)
+        self._outer.addWidget(self._chart)
+
+        self._mode = "list"
         self._cards = {}
         self._selected_index = None
         self._empty = QLabel("Draw a swale, basin or dam to start a network.")
@@ -158,11 +487,28 @@ class NetworkView(QWidget):
     def selected_index(self):
         return self._selected_index
 
+    def set_mode(self, mode):
+        """``"list"``, ``"flow"`` (spill order) or ``"elevation"`` (true height)."""
+        if mode in ("flow", "elevation"):
+            self._mode = "flow"
+            self._chart.set_axis_mode("elevation" if mode == "elevation" else "rank")
+        else:
+            self._mode = "list"
+        self._apply_mode()
+
+    def _apply_mode(self):
+        has_nodes = bool(self._cards)
+        flow = self._mode == "flow" and has_nodes
+        self._chart.setVisible(flow)
+        self._list_host.setVisible(not flow)
+
     def set_network(self, nodes, edges, exit_m3):
         self._clear()
         if not nodes:
             self._empty.setVisible(True)
             self._selected_index = None
+            self._chart.set_network([], {}, 0.0, {})
+            self._apply_mode()
             return
         self._empty.setVisible(False)
 
@@ -190,16 +536,30 @@ class NetworkView(QWidget):
         exit_lbl.setToolTip("Runoff not held by any feature")
         self._lay.addWidget(exit_lbl)
 
+        # The chart shares the list's data; only the arrangement differs. Rank comes
+        # from the pure layer_nodes so the graph maths is testable without Qt.
+        try:
+            from terrainflow_assessment.modules.simulation import layer_nodes
+            plain_edges = {k: v[0] for k, v in (edges or {}).items()}
+            layout = layer_nodes([n["id"] for n in ordered if n["enabled"]],
+                                 plain_edges)
+        except Exception:
+            layout = {}
+        self._chart.set_network(nodes, edges, exit_m3, layout)
+
         # Re-apply selection if it still exists.
         if self._selected_index in self._cards:
             self._cards[self._selected_index].set_selected(True)
         else:
             self._selected_index = None
+        self._chart.set_selected(self._selected_index)
+        self._apply_mode()
 
     def clear_selection(self):
         self._selected_index = None
         for c in self._cards.values():
             c.set_selected(False)
+        self._chart.set_selected(None)
 
     # ------------------------------------------------------------------ internals
 
@@ -227,6 +587,7 @@ class NetworkView(QWidget):
         self._selected_index = index
         for i, c in self._cards.items():
             c.set_selected(i == index)
+        self._chart.set_selected(index)
         self.selection_changed.emit(index)
 
     def _clear(self):
@@ -237,3 +598,13 @@ class NetworkView(QWidget):
                 w.deleteLater()
         self._lay.addWidget(self._empty)
         self._cards = {}
+
+
+def _nice_step(span):
+    """A round metre interval giving roughly 4-8 gridlines across *span*."""
+    if span <= 0:
+        return 1.0
+    for step in (1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0):
+        if span / step <= 8:
+            return step
+    return 1000.0

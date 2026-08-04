@@ -16,6 +16,7 @@ run_simulation()      — standalone function (for testing / non-GUI use)
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -39,11 +40,24 @@ class EarthworkStore:
     area_m2: float              # footprint area for infiltration
     infiltration_rate_mm_hr: float = 4.0  # default Loam
     elevation: float = 0.0     # approximate centroid elevation (for cascade ordering)
+    # False when the DEM could not supply a real elevation for this centroid — nodata,
+    # NaN, a centroid outside the raster, or a read error. Such a store must be kept out
+    # of the elevation heuristic entirely: a 0.0 (or −9999) stand-in sorts below every
+    # real feature and silently makes that one store the whole site's overflow receiver.
+    elevation_known: bool = True
 
     # Overflow linkage (carried from Earthwork; consumed by the future analytical cascade).
     # id — stable identity; overflow_target_id — user-intended recipient (None = infer).
     id: Optional[str] = None
     overflow_target_id: Optional[str] = None
+
+    # Direct contributing catchment — the cells whose runoff this feature is the FIRST
+    # to intercept (from flow_graph.label_direct_catchments). Mutually exclusive across
+    # features, so summing them never double-counts a shared hillside.
+    direct_catchment_m2: float = 0.0
+    # Flat raster index of the feature's lowest cell: where its overflow leaves from,
+    # and the start of the downslope walk that resolves its routing target.
+    outlet_flat: Optional[int] = None
 
     # Per-timestep accumulators (set externally each step)
     inflow_m3: float = 0.0
@@ -52,7 +66,8 @@ class EarthworkStore:
     first_overflow_hr: Optional[float] = None
     total_overflow_m3: float = 0.0
     total_inflow_m3: float = 0.0
-    total_infiltration_m3: float = 0.0
+    total_infiltration_m3: float = 0.0      # actually credited to capture
+    total_infiltration_potential_m3: float = 0.0  # what the soil could have taken
     peak_fill_pct: float = 0.0
 
     # Cut/fill volumes (populated from earthwork geometry, set before simulation)
@@ -64,7 +79,19 @@ class EarthworkStore:
     centroid_col: Optional[int] = None
 
     def step_infiltration(self, dt_hr):
-        """Infiltration loss this timestep (m³)."""
+        """Infiltration *potential* this timestep (m³) — rate × wetted area × time.
+
+        A single steady-state rate for the whole event: the long-run ("final")
+        infiltration capacity of the soil texture, not the much higher initial rate a
+        dry profile accepts. Real infiltration decays from that initial rate toward
+        the steady one as the profile wets (Horton / Green-Ampt), so using the final
+        rate throughout is conservative early and optimistic late.
+
+        There is deliberately **no saturation cut-off**: no soil-moisture store, no
+        water table, no mounding. The only limit applied by the caller is the water
+        actually present. Over a long event that over-credits soakage, which is why
+        capture can be reported with infiltration excluded — see ``cascade_overflow``.
+        """
         rate_m_hr = self.infiltration_rate_mm_hr / 1000.0
         return rate_m_hr * self.area_m2 * dt_hr
 
@@ -82,6 +109,11 @@ def _find_downslope_store(store, all_stores):
     single top→bottom cascade pass valid), route there. Otherwise fall back to the
     elevation heuristic: the highest store still below this one (the most direct
     downslope receiver). Returns None if no lower store exists (overflow exits site).
+
+    A store whose elevation the DEM could not supply (``elevation_known`` False) takes
+    no part in the heuristic — neither as a receiver nor as a router. Letting an
+    unknown elevation stand in as 0.0 m put it below every real feature, so it became
+    the receiver for the entire site.
     """
     if store.overflow_target_id is not None:
         linked = next(
@@ -89,16 +121,22 @@ def _find_downslope_store(store, all_stores):
                 s for s in all_stores
                 if s is not store
                 and s.id == store.overflow_target_id
-                and s.elevation < store.elevation
+                # An explicit link is honoured unless both elevations are known and
+                # contradict it; an unverifiable link is still the user's stated intent.
+                and not (s.elevation_known and store.elevation_known
+                         and s.elevation >= store.elevation)
             ),
             None,
         )
         if linked is not None:
             return linked
 
+    if not store.elevation_known:
+        return None
+
     candidates = [
         s for s in all_stores
-        if s is not store and s.elevation < store.elevation
+        if s is not store and s.elevation_known and s.elevation < store.elevation
     ]
     if not candidates:
         return None
@@ -106,56 +144,159 @@ def _find_downslope_store(store, all_stores):
     return max(candidates, key=lambda s: s.elevation)
 
 
-def overflow_graph(stores):
-    """Resolve the overflow routing as a graph, for display (matches the cascade).
+def _top_down_key(store):
+    """Sort key for a top→bottom cascade pass: highest first, unknown elevations last.
 
-    Returns ``{from_id: (to_id_or_None, is_user_link)}`` for every store with an
-    ``id``. ``to_id`` is where its overflow goes once full (None = leaves the
-    site); ``is_user_link`` is True when an honoured user-set ``overflow_target_id``
-    drove the choice, False when the elevation heuristic did. Uses the same
-    :func:`_find_downslope_store` rule as the routing, so the drawn graph can
-    never disagree with where water actually goes.
+    Used with ``reverse=True``, so ``elevation_known`` True sorts ahead of False.
     """
-    graph = {}
+    return (store.elevation_known, store.elevation)
+
+
+@dataclass
+class RoutingResult:
+    """Where every feature's overflow goes, and in what order to process them."""
+    edges: dict          # {from_id: to_id or None}   None = leaves the site
+    is_user: dict        # {from_id: bool}            True = honoured user override
+    order: list          # feature ids, upstream first — the cascade order
+    warnings: list       # human-readable notes about rejected links
+
+
+def resolve_targets(stores, walker=None):
+    """Resolve each feature's overflow target, honouring user links where legal.
+
+    ``walker(store) -> target_id or None`` is injected by the caller (it owns the
+    flow-direction raster): it follows the actual flow path from the feature's outlet
+    cell until it reaches another earthwork or the site edge. That replaces the old
+    elevation-only heuristic, which picked "the highest feature below this one"
+    regardless of whether water could ever travel between them — two features on
+    opposite sides of a ridge were routinely linked.
+
+    A user's ``overflow_target_id`` wins over the walked target, but only if it does
+    not create a cycle: cycles are detected with
+    :func:`~terrainflow_assessment.modules.flow_graph.topological_order` and the
+    offending override is demoted to its walked target (one at a time, so only the
+    actual offender is undone), each demotion recorded in ``warnings``.
+
+    Note the old "the link must be lower in elevation" test is deliberately gone —
+    with real flow paths, centroid elevation is the wrong proxy: a large tilted basin's
+    centroid can sit above a swale that genuinely drains into it.
+    """
+    from .flow_graph import topological_order
+
+    by_id = {s.id: s for s in stores if s.id is not None}
+
+    auto = {}
     for store in stores:
         if store.id is None:
             continue
-        target = _find_downslope_store(store, stores)
-        is_user = (
-            store.overflow_target_id is not None
-            and target is not None
-            and target.id == store.overflow_target_id
-        )
-        graph[store.id] = (target.id if target is not None else None, is_user)
-    return graph
+        target = None
+        if walker is not None:
+            try:
+                target = walker(store)
+            except Exception:
+                target = None
+        if target not in by_id or target == store.id:
+            target = None
+        auto[store.id] = target
+
+    edges, is_user = {}, {}
+    for sid, walked in auto.items():
+        wanted = by_id[sid].overflow_target_id
+        if wanted is not None and wanted in by_id and wanted != sid:
+            edges[sid], is_user[sid] = wanted, True
+        else:
+            edges[sid], is_user[sid] = walked, False
+
+    warnings = []
+    order, broken = topological_order(edges)
+    for _ in range(len(edges) + 2):
+        if not broken:
+            break
+        victim = next((sid for sid in broken if is_user.get(sid)), None)
+        if victim is not None:
+            warnings.append(
+                f"'{by_id[victim].name}' overflows into a loop — that link would send "
+                f"water back into itself. Using the natural downslope path instead."
+            )
+            edges[victim] = auto.get(victim)
+            is_user[victim] = False
+        else:
+            victim = broken[0]
+            warnings.append(
+                f"'{by_id[victim].name}' sits in a circular flow path; its overflow is "
+                f"treated as leaving the site."
+            )
+            edges[victim] = None
+        order, broken = topological_order(edges)
+
+    return RoutingResult(edges=edges, is_user=is_user, order=order, warnings=warnings)
+
+
+def overflow_graph(stores, walker=None):
+    """Resolve the overflow routing as a graph, for display (matches the cascade).
+
+    Returns ``{from_id: (to_id_or_None, is_user_link)}`` for every store with an
+    ``id``. Thin wrapper over :func:`resolve_targets` so the drawn network can never
+    disagree with where the cascade actually sends water.
+    """
+    routing = resolve_targets(stores, walker=walker)
+    return {sid: (tgt, routing.is_user.get(sid, False))
+            for sid, tgt in routing.edges.items()}
 
 
 def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
-                     dt_hr: float) -> float:
+                     dt_hr: float, routing: "RoutingResult" = None,
+                     count_infiltration: bool = True) -> float:
     """
     Process one simulation timestep for all earthwork stores.
 
-    Processes stores from highest to lowest elevation:
+    Processes stores upstream-first:
     1. Add inflow and subtract infiltration losses.
-    2. If stored > capacity: overflow to next downslope store or exit.
+    2. If stored > capacity: overflow to the downstream store, or off site.
     3. Update peak fill % and first overflow time.
 
     Parameters
     ----------
-    stores : list of EarthworkStore, processed highest elevation first
+    stores : list of EarthworkStore
     time_hr : float — current simulation time (hours from start)
     dt_hr   : float — timestep duration (hours)
+    routing : RoutingResult or None — flow-path routing from :func:`resolve_targets`.
+        When None, falls back to the legacy elevation sort and
+        :func:`_find_downslope_store`, so the time-stepped simulation keeps its
+        existing behaviour until it is migrated separately.
+    count_infiltration : when False, soakage is measured but **not** credited — every
+        feature must hold its water as storage. Sizing then rests only on volume
+        actually impounded, and whatever the ground takes is spare capacity rather
+        than something the design depends on. Steady-state infiltration rates are
+        hard to predict on real ground and the model has no saturation limit, so
+        treating soakage as a bonus is the defensible way to size. The potential is
+        still accumulated on each store, so the buffer can be reported.
+
+    A zero-capacity feature (berm, diversion drain) is a **redirect** node, not a
+    store: everything it intercepts immediately exceeds its zero capacity and is
+    re-emitted to its downstream target. That is what those types physically do —
+    convey or deflect water somewhere it would not otherwise have gone — and is why
+    they must not be filtered out of the store list.
 
     Returns
     -------
     float — total volume that exited the site this timestep (m³)
     """
-    sorted_stores = sorted(stores, key=lambda s: s.elevation, reverse=True)
+    if routing is not None:
+        rank = {sid: i for i, sid in enumerate(routing.order)}
+        sorted_stores = sorted(
+            stores, key=lambda s: rank.get(s.id, len(rank)))
+        by_id = {s.id: s for s in stores if s.id is not None}
+    else:
+        sorted_stores = sorted(stores, key=_top_down_key, reverse=True)
+        by_id = None
     site_exit_m3 = 0.0
 
     for store in sorted_stores:
-        infiltration = store.step_infiltration(dt_hr)
-        infiltration = min(infiltration, store.stored_m3 + store.inflow_m3)
+        potential = store.step_infiltration(dt_hr)
+        available = store.stored_m3 + store.inflow_m3
+        store.total_infiltration_potential_m3 += min(potential, available)
+        infiltration = min(potential, available) if count_infiltration else 0.0
 
         store.stored_m3 += store.inflow_m3 - infiltration
         store.stored_m3 = max(0.0, store.stored_m3)
@@ -172,8 +313,12 @@ def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
                 store.overflowed = True
                 store.first_overflow_hr = time_hr
 
-            # Route overflow to next downslope store or exit
-            downstream = _find_downslope_store(store, stores)
+            # Route overflow to the downstream store, or off site.
+            if routing is not None:
+                target_id = routing.edges.get(store.id)
+                downstream = by_id.get(target_id) if target_id is not None else None
+            else:
+                downstream = _find_downslope_store(store, stores)
             if downstream is not None:
                 downstream.inflow_m3 += overflow
             else:
@@ -184,6 +329,55 @@ def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
             store.peak_fill_pct = fill_pct
 
     return site_exit_m3
+
+
+
+def layer_nodes(node_ids, edges):
+    """Lay a flow network out in ranks — ``{id: (rank, order)}``.
+
+    *rank* is the number of features water passes through before reaching this one:
+    0 for anything nothing spills into, 1 for whatever those feed, and so on. *order*
+    is the position within a rank, kept in the caller's own sequence so the chart does
+    not reshuffle itself between refreshes when nothing has changed.
+
+    Rank is the **longest** path from a source, not the shortest. A feature fed by
+    both a first-rank swale and a third-rank dam belongs below the dam — drawing it
+    beside the swale would show water flowing upwards.
+
+    Cycle-safe. Nodes in a ring have no well-defined rank, so they are placed after
+    everything acyclic rather than being allowed to loop forever; the caller already
+    refuses to *create* a cycle, so this only has to avoid hanging on one that
+    survives some other route.
+    """
+    from .flow_graph import topological_order
+
+    ids = list(node_ids)
+    known = set(ids)
+    order, broken = topological_order({k: edges.get(k) for k in ids})
+    cyclic = set(broken)
+
+    rank = {k: 0 for k in ids}
+    for node in order:
+        if node in cyclic:
+            continue
+        target = edges.get(node)
+        if target in known and target != node and target not in cyclic:
+            rank[target] = max(rank[target], rank[node] + 1)
+
+    # Ring members sit below everything that resolves, so an unresolvable link reads
+    # as "downstream of the whole system" rather than silently mixing into it.
+    if cyclic:
+        floor = max((rank[k] for k in ids if k not in cyclic), default=-1) + 1
+        for k in cyclic:
+            rank[k] = floor
+
+    seen = {}
+    layout = {}
+    for k in ids:                       # caller order, so the chart is stable
+        r = rank[k]
+        layout[k] = (r, seen.get(r, 0))
+        seen[r] = seen.get(r, 0) + 1
+    return layout
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +503,11 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         cum_acc += inc_acc.astype("float64")
         cum_arr = cum_acc.astype("float32")
 
-        # Estimate site-level outflow this step from raster max boundary cell
-        # (rough proxy — detailed per-earthwork cascade handles the rest)
+        # Estimate site-level outflow this step from the DOMAIN-WIDE maximum
+        # accumulation — not, despite an earlier comment here, a boundary cell. On a
+        # DEM clipped to the site the two coincide; on a larger DEM the maximum can sit
+        # inside the domain, so this is an upper bound on what leaves. A rough proxy
+        # either way — the detailed per-earthwork cascade handles the rest.
         inc_max = float(inc_acc.max())
         dt_hr = (time_hr - (rainfall_data[i][0] / 60.0)) if i > 0 else time_hr
         dt_s = max(dt_hr * 3600.0, 1.0)
@@ -328,7 +525,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
             # Fix: process highest-elevation stores first and subtract their
             # captured volume from every downstream store's raw accumulation.
             sorted_by_elev = sorted(
-                earthwork_stores, key=lambda s: s.elevation, reverse=True
+                earthwork_stores, key=_top_down_key, reverse=True
             )
             # Map name → (raw_acc, captured_this_step) for upstream subtraction
             captured_this_step: dict = {}
@@ -344,7 +541,9 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
                     upstream_captured = sum(
                         captured_this_step.get(s.name, 0.0)
                         for s in earthwork_stores
-                        if s is not store and s.elevation > store.elevation
+                        if s is not store
+                        and s.elevation_known and store.elevation_known
+                        and s.elevation > store.elevation
                     )
                     actual_inflow = max(0.0, raw_inflow - upstream_captured)
                     store.inflow_m3 += actual_inflow
@@ -495,29 +694,42 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
     from .earthwork_design import calculate_cut_volume, calculate_fill_volume
     from .swale_design import get_infiltration_rate
 
-    infil_rate = get_infiltration_rate(soil_name)
+    site_rate = get_infiltration_rate(soil_name)
     stores = []
 
     for ew in earthworks:
-        if not ew.enabled or ew.capacity_m3 <= 0:
+        # Zero-capacity features are kept deliberately: a berm or diversion drain has
+        # no storage but is very much part of the routing, and filtering them here was
+        # why they always rendered "leaves site" with no downstream link.
+        if not ew.enabled:
             continue
 
-        # Get footprint area from shapely geometry
+        # Get footprint area from shapely geometry. Every shapely geometry HAS an
+        # `.area` attribute — a LineString's is simply 0.0 — so testing for the
+        # attribute made the line branch unreachable and gave swales, diversions and
+        # berms (all polylines) a zero wetted footprint: no infiltration, no drain-down.
+        # Test the value, not the attribute.
         try:
             shapely_geom = shapely_shape(json.loads(ew.geometry.asJson()))
-            if hasattr(shapely_geom, "area"):
-                area_m2 = shapely_geom.area
-            else:
-                # LineString: approximate as length × width
-                area_m2 = shapely_geom.length * ew.width
+            area_m2 = float(getattr(shapely_geom, "area", 0.0) or 0.0)
+            if area_m2 <= 0:
+                # Linear feature: its wetted footprint is length × top width.
+                area_m2 = float(shapely_geom.length) * float(ew.width or 0.0)
         except Exception:
+            shapely_geom = None
             area_m2 = 100.0  # fallback
+        if area_m2 <= 0:
+            area_m2 = 100.0
 
-        # Centroid elevation + raster coordinates from DEM
+        # Centroid elevation + raster coordinates from DEM. `elevation_known` stays
+        # False unless the DEM actually yields a finite, non-nodata value: a stand-in
+        # 0.0 m sorts below every real feature and turns this store into the site's
+        # universal overflow receiver (and every other store into its "upstream").
         elevation = 0.0
+        elevation_known = False
         centroid_row = None
         centroid_col = None
-        if dem_path:
+        if dem_path and shapely_geom is not None:
             try:
                 centroid = shapely_geom.centroid
                 import rasterio
@@ -526,9 +738,17 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
                     col = int((centroid.x - t.c) / t.a)
                     row = int((centroid.y - t.f) / t.e)
                     if 0 <= row < src.height and 0 <= col < src.width:
-                        elevation = float(src.read(1)[row, col])
                         centroid_row = row
                         centroid_col = col
+                        value = float(src.read(1)[row, col])
+                        is_nodata = (
+                            src.nodata is not None
+                            and math.isclose(value, float(src.nodata), rel_tol=1e-9,
+                                             abs_tol=1e-6)
+                        )
+                        if math.isfinite(value) and not is_nodata:
+                            elevation = value
+                            elevation_known = True
             except Exception:
                 pass
 
@@ -536,13 +756,26 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
         fill_vol = calculate_fill_volume(ew.type, ew.geometry, ew.depth, ew.width,
                                          ew.companion_berm)
 
+        # A fill-only feature (berm, dam wall) is built ground, not an excavated wetted
+        # surface — it infiltrates nothing, so crediting it soakage would invent capture.
+        try:
+            from terrainflow_assessment.core.registry.earthwork_types import get_type
+            wets_soil = bool(get_type(ew.type).has_cut)
+        except Exception:
+            wets_soil = True
+
+        # A per-feature soil overrides the site default; None inherits it.
+        own_soil = getattr(ew, "soil_name", None)
+        infil_rate = get_infiltration_rate(own_soil) if own_soil else site_rate
+
         store = EarthworkStore(
             name=ew.name,
             ew_type=ew.type,
             capacity_m3=ew.capacity_m3,
             area_m2=area_m2,
-            infiltration_rate_mm_hr=infil_rate,
+            infiltration_rate_mm_hr=infil_rate if wets_soil else 0.0,
             elevation=elevation,
+            elevation_known=elevation_known,
             cut_vol_m3=cut_vol,
             fill_vol_m3=fill_vol,
             centroid_row=centroid_row,

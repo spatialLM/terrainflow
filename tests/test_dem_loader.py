@@ -12,6 +12,7 @@ from terrainflow_assessment.modules.dem_loader import (
     clip_dem_to_polygon,
     compute_slope_raster,
     load_dem,
+    slope_degrees,
 )
 
 # ---------------------------------------------------------------------------
@@ -186,6 +187,62 @@ class TestComputeSlopeRaster:
 
 
 # ---------------------------------------------------------------------------
+# slope_degrees (shared Horn's-method helper)
+# ---------------------------------------------------------------------------
+
+class TestSlopeDegrees:
+    def test_flat_is_zero(self):
+        dem = np.full((10, 10), 50.0, dtype="float32")
+        slope = slope_degrees(dem, 1.0, 1.0)
+        assert np.allclose(slope, 0.0)
+
+    def test_shape_preserved(self):
+        dem = np.zeros((7, 9), dtype="float32")
+        assert slope_degrees(dem, 1.0, 1.0).shape == (7, 9)
+
+    def test_non_negative(self):
+        rng = np.arange(100, dtype="float32").reshape(10, 10)
+        assert np.all(slope_degrees(rng, 1.0, 1.0) >= 0.0)
+
+    def test_known_45_degree_ramp(self):
+        # Elevation rising 1 m per 1 m cell in x → 45° slope in the interior.
+        dem = np.tile(np.arange(10, dtype="float32"), (10, 1))  # z = x
+        slope = slope_degrees(dem, 1.0, 1.0)
+        assert slope[5, 5] == pytest.approx(45.0, abs=1e-3)
+
+    def test_nodata_cell_is_nan_not_a_number(self):
+        dem = np.full((6, 6), 50.0, dtype="float32")
+        dem[0, 0] = np.nan
+        slope = slope_degrees(dem, 1.0, 1.0)
+        assert slope.shape == (6, 6)
+        assert np.isnan(slope[0, 0])
+
+    def test_nodata_does_not_fabricate_a_cliff_beside_it(self):
+        """A hole in flat ground must not ring itself in near-vertical slope.
+
+        Filling NaN with 0.0 m before differencing made every neighbour of a nodata
+        cell read a ~50 m drop over one cell — indistinguishable from real terrain,
+        and a clipped DEM is nothing but nodata boundary.
+        """
+        dem = np.full((7, 7), 50.0, dtype="float32")
+        dem[3, 3] = np.nan
+        slope = slope_degrees(dem, 1.0, 1.0)
+        neighbours = slope[2:5, 2:5][~np.isnan(slope[2:5, 2:5])]
+        assert np.all(neighbours < 1.0)
+
+    def test_border_slope_matches_interior_on_a_uniform_ramp(self):
+        """Edge replication halves the sampled separation, so the divisor halves too.
+
+        Without that correction every border cell of every slope raster read half the
+        true grade — a 45° scarp at the DEM edge reported as ~27°.
+        """
+        dem = np.tile(np.arange(10, dtype="float32"), (10, 1))  # z = x, 45° everywhere
+        slope = slope_degrees(dem, 1.0, 1.0)
+        assert slope[0, 5] == pytest.approx(45.0, abs=1e-3)   # top border row
+        assert slope[5, 0] == pytest.approx(45.0, abs=1e-3)   # left border column
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 regression — item 2: projected CRS guard
 # ---------------------------------------------------------------------------
 
@@ -215,3 +272,105 @@ class TestProjectedCRSGuard:
     def test_dem_validation_error_is_value_error(self):
         """DEMValidationError must be a ValueError subclass."""
         assert issubclass(DEMValidationError, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# DEM identity — what lets a design file verify it reopened against the same DEM
+# ---------------------------------------------------------------------------
+
+class TestDemFingerprint:
+    def _write_dem(self, path, fill=50.0, size=10):
+        from rasterio.transform import from_bounds
+        data = np.full((size, size), fill, dtype="float32")
+        with rasterio.open(path, "w", driver="GTiff", height=size, width=size,
+                           count=1, dtype="float32", crs="EPSG:2193",
+                           transform=from_bounds(0, 0, size, size, size, size),
+                           nodata=-9999.0) as dst:
+            dst.write(data, 1)
+        return path
+
+    def test_digest_is_stable_for_the_same_file(self, tmp_path):
+        from terrainflow_assessment.modules.dem_loader import dem_content_digest
+        path = self._write_dem(str(tmp_path / "a.tif"))
+        assert dem_content_digest(path) == dem_content_digest(path)
+
+    def test_digest_differs_for_different_content_on_an_identical_grid(self, tmp_path):
+        """The whole point: same cell size, CRS and extent, different elevations."""
+        from terrainflow_assessment.modules.dem_loader import (
+            dem_content_digest,
+            fingerprint_dem,
+        )
+        a = self._write_dem(str(tmp_path / "a.tif"), fill=50.0)
+        b = self._write_dem(str(tmp_path / "b.tif"), fill=75.0)
+
+        assert dem_content_digest(a) != dem_content_digest(b)
+        fa, fb = fingerprint_dem(a), fingerprint_dem(b)
+        assert (fa["cell_size_m"], fa["extent"], fa["width"]) == \
+               (fb["cell_size_m"], fb["extent"], fb["width"])
+        assert fa["fingerprint"] != fb["fingerprint"]
+
+    def test_digest_records_its_algorithm(self, tmp_path):
+        from terrainflow_assessment.modules.dem_loader import dem_content_digest
+        assert dem_content_digest(
+            self._write_dem(str(tmp_path / "a.tif"))).startswith("sha256:")
+
+    def test_large_files_switch_to_a_distinguishable_sampled_digest(self, tmp_path, monkeypatch):
+        """A sampled digest must never compare equal to a full one for the same bytes."""
+        from terrainflow_assessment.modules import dem_loader
+
+        path = self._write_dem(str(tmp_path / "a.tif"), size=64)
+        full = dem_loader.dem_content_digest(path)
+
+        monkeypatch.setattr(dem_loader, "_FULL_HASH_MAX_BYTES", 1)
+        monkeypatch.setattr(dem_loader, "_HASH_CHUNK_BYTES", 64)
+        sampled = dem_loader.dem_content_digest(path)
+
+        assert sampled.startswith("sha256-sampled:")
+        assert sampled != full
+        assert sampled == dem_loader.dem_content_digest(path)
+
+    def test_fingerprint_carries_every_field_the_design_file_needs(self, tmp_path):
+        from terrainflow_assessment.modules.dem_loader import fingerprint_dem
+        path = self._write_dem(str(tmp_path / "a.tif"))
+        fp = fingerprint_dem(path)
+
+        assert fp["fingerprint"]
+        assert fp["original_path"] == path
+        assert fp["cell_size_m"] == pytest.approx(1.0)
+        assert "2193" in fp["crs"]
+        assert len(fp["extent"]) == 4
+        assert (fp["width"], fp["height"]) == (10, 10)
+
+    def test_fingerprint_accepts_an_already_loaded_info(self, tmp_path):
+        from terrainflow_assessment.modules.dem_loader import fingerprint_dem
+        path = self._write_dem(str(tmp_path / "a.tif"))
+        assert fingerprint_dem(path, info=load_dem(path)) == fingerprint_dem(path)
+
+    def test_fingerprint_feeds_the_design_file_reference(self, tmp_path):
+        """End-to-end: dem_loader produces identity, project_io compares it."""
+        from terrainflow_assessment.modules.dem_loader import fingerprint_dem
+        from terrainflow_assessment.modules.project_io import DemReference
+
+        a = self._write_dem(str(tmp_path / "a.tif"), fill=50.0)
+        b = self._write_dem(str(tmp_path / "b.tif"), fill=75.0)
+
+        saved = DemReference.from_dict(fingerprint_dem(a))
+        assert saved.matches(DemReference.from_dict(fingerprint_dem(a)))
+        assert not saved.matches(DemReference.from_dict(fingerprint_dem(b)))
+
+    def test_clipping_produces_a_different_identity(self, tmp_path):
+        """An embedded clip is a different raster and must not pass as the original."""
+        from shapely.geometry import box
+
+        from terrainflow_assessment.modules.dem_loader import (
+            clip_dem_to_polygon,
+            fingerprint_dem,
+        )
+        from terrainflow_assessment.modules.project_io import DemReference
+
+        source = self._write_dem(str(tmp_path / "a.tif"))
+        clipped = clip_dem_to_polygon(
+            source, box(2, 2, 8, 8), str(tmp_path / "clip.tif"))
+
+        original = DemReference.from_dict(fingerprint_dem(source))
+        assert not original.matches(DemReference.from_dict(fingerprint_dem(clipped)))

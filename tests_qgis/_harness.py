@@ -1,0 +1,525 @@
+"""
+_harness.py — real-QGIS smoke-test harness (headless).
+
+Lives OUTSIDE terrainflow_assessment/ on purpose: only that folder is deployed or
+zipped, so nothing here can reach a shipped build.
+
+Why this exists: tests/conftest.py replaces qgis.core / qgis.gui with MagicMocks so
+the pure modules/ logic can be tested without QGIS. That means the whole
+qgis/ layer — controllers, adapters, renderers, workers — is never executed by
+`pytest tests/`. This harness boots a genuine QgsApplication, builds the real
+panel and controllers, and drives them through the real panel signals.
+
+Run it with QGIS's own Python (see run_qgis_tests.ps1); it will not work under a
+plain interpreter.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Must be set before QgsApplication is constructed. Widgets are created for real
+# (the panel is a QDockWidget) but render to an offscreen surface, so the run is
+# headless without giving up widget fidelity.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+def _configure_qt_platform():
+    """Choose the Qt platform + fonts. Must run before any QApplication exists.
+
+    Called from qgis_app() rather than at import time so that launch_in_qgis.py can
+    reuse this module inside a *real* QGIS process, where the application already
+    exists and forcing offscreen would be wrong.
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    # Qt's offscreen platform on Windows registers ZERO font families, so every
+    # drawText() is a silent no-op: widget screenshots come out with layout and
+    # colours intact but not one glyph, and QGIS map labelling renders nothing.
+    # Pointing Qt at the system font directory restores it (233 families here).
+    if os.environ["QT_QPA_PLATFORM"] == "offscreen" and "QT_QPA_FONTDIR" not in os.environ:
+        for fontdir in (r"C:\Windows\Fonts", "/usr/share/fonts"):
+            if os.path.isdir(fontdir):
+                os.environ["QT_QPA_FONTDIR"] = fontdir
+                break
+
+
+# ---------------------------------------------------------------------------
+# QGIS application bootstrap
+# ---------------------------------------------------------------------------
+
+_APP = None
+
+
+def qgis_app():
+    """Boot (once) and return the QgsApplication. Idempotent."""
+    global _APP
+    if _APP is not None:
+        return _APP
+
+    _configure_qt_platform()
+
+    from qgis.core import QgsApplication
+
+    prefix = os.environ.get("QGIS_PREFIX_PATH")
+    if prefix:
+        QgsApplication.setPrefixPath(prefix, True)
+
+    app = QgsApplication([], True)
+    # Send any QSettings this run touches to a throwaway org/app name rather than
+    # the user's real QGIS configuration.
+    app.setOrganizationName("TerrainFlowTests")
+    app.setApplicationName("TerrainFlowTests")
+    app.initQgis()
+    _init_processing()
+
+    _APP = app
+    return app
+
+
+def _init_processing():
+    """Register the Processing providers — contour.py calls gdal:contour."""
+    from qgis.core import QgsApplication
+
+    plugins_dir = os.path.join(QgsApplication.prefixPath(), "python", "plugins")
+    if os.path.isdir(plugins_dir) and plugins_dir not in sys.path:
+        sys.path.append(plugins_dir)
+
+    from processing.core.Processing import Processing
+
+    Processing.initialize()
+
+    # Processing.initialize() normally registers the native provider itself; add it
+    # only if it is genuinely absent, since adding twice logs spurious warnings.
+    if QgsApplication.processingRegistry().providerById("native") is None:
+        from qgis.analysis import QgsNativeAlgorithms
+
+        QgsApplication.processingRegistry().addProvider(QgsNativeAlgorithms())
+
+
+def make_workers_synchronous():
+    """Run the QThread workers inline so checks finish deterministically.
+
+    The controllers connect progress/finished/error *before* calling start(), so
+    replacing start() with run() delivers exactly the same signals on the main
+    thread — no event loop to spin and no timeout to tune.
+    """
+    from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
+    from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
+
+    for cls in (AnalysisWorker, SimulationWorker):
+        if getattr(cls, "_tf_sync_patched", False):
+            continue
+        cls.start = cls.run
+        cls._tf_sync_patched = True
+
+
+# ---------------------------------------------------------------------------
+# Synthetic DEM
+# ---------------------------------------------------------------------------
+
+CELL_M = 2.0
+# 300x300 @ 2 m = 36 ha. Sized deliberately: the panel's default stream threshold
+# is 5 ha and, under D-infinity routing on this terrain, the most-accumulated cell
+# only ever gathers ~35 % of the site. A smaller site therefore yields a
+# legitimately empty stream layer and the stream renderer is never exercised.
+NROWS = 300
+NCOLS = 300
+ORIGIN_X = 1_750_000.0   # NZTM2000 — the plugin's target projection
+ORIGIN_Y = 5_900_000.0
+
+
+def build_synthetic_dem(path):
+    """Write a deterministic 300x300 @ 2 m DEM (36 ha) in EPSG:2193.
+
+    Shape: a valley draining south, with a concave long profile (~15 % at the top
+    easing to ~3 % at the outlet) so keypoint analysis has a real slope break to
+    find, and a parabolic cross-section so flow concentrates on the centreline
+    and accumulation/exit-point detection has something to detect.
+
+    Both coefficients are constrained, not arbitrary: the long-profile quadratic
+    must keep its slope positive across the full 400 m (otherwise the bottom of
+    the site tilts back uphill and becomes a false depression), and the
+    cross-section rise must stay well under the total longitudinal drop (or the
+    valley walls close off basins along the edges).
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    rows = np.arange(NROWS, dtype="float64")[:, None]
+    cols = np.arange(NCOLS, dtype="float64")[None, :]
+
+    down = rows * CELL_M                                # m downslope from top edge
+    across = (cols - (NCOLS - 1) / 2.0) * CELL_M        # m from the centreline
+
+    z = 100.0 - (0.15 * down - 0.00010 * down**2)       # concave long profile
+    z = z + 0.0003 * across**2                          # parabolic cross-section
+
+    # Incised channel on the centreline. Without it the valley is so smooth that
+    # D-infinity routing (the panel's default) disperses flow laterally and no cell
+    # ever accumulates enough upstream area to register as a stream — the stream
+    # renderer then has nothing to draw. Real terrain has a channel; so does this.
+    z = z - 4.0 * np.exp(-((across / 5.0) ** 2))
+
+    transform = from_origin(ORIGIN_X, ORIGIN_Y, CELL_M, CELL_M)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path, "w", driver="GTiff",
+        height=NROWS, width=NCOLS, count=1, dtype="float32",
+        crs="EPSG:2193", transform=transform, nodata=-9999.0,
+    ) as dst:
+        dst.write(np.broadcast_to(z, (NROWS, NCOLS)).astype("float32"), 1)
+
+    return str(path)
+
+
+def centreline_x():
+    return ORIGIN_X + ((NCOLS - 1) / 2.0) * CELL_M
+
+
+def site_boundary_layer(inset_m=10.0):
+    """An in-memory site boundary inset from the DEM edge.
+
+    Baseline exit points are only detected where flow crosses a boundary polygon
+    (see AnalysisWorker: exit_points stays empty without boundary_path), so the
+    boundary is what makes outflow assertions meaningful. Deliberately a memory
+    layer: that also exercises the controller's own _layer_to_path() conversion.
+    """
+    from qgis.core import QgsFeature, QgsGeometry, QgsRectangle, QgsVectorLayer
+
+    layer = QgsVectorLayer("Polygon?crs=EPSG:2193", "Site Boundary", "memory")
+    rect = QgsRectangle(
+        ORIGIN_X + inset_m,
+        ORIGIN_Y - NROWS * CELL_M + inset_m,
+        ORIGIN_X + NCOLS * CELL_M - inset_m,
+        ORIGIN_Y - inset_m,
+    )
+    feat = QgsFeature()
+    feat.setGeometry(QgsGeometry.fromRect(rect))
+    layer.dataProvider().addFeatures([feat])
+    layer.updateExtents()
+
+    # QGIS assigns a new vector layer a random pastel fill, which washes the whole
+    # site in an arbitrary colour and makes canvas screenshots unreadable (and
+    # non-deterministic between runs). Outline only.
+    from qgis.core import QgsFillSymbol, QgsSingleSymbolRenderer
+
+    symbol = QgsFillSymbol.createSimple({
+        "style": "no",
+        "outline_color": "70,70,70,255",
+        "outline_width": "0.3",
+    })
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    return layer
+
+
+def line_across_valley(row=60, half_width_m=40.0):
+    """A QgsGeometry line crossing the valley — a plausible swale alignment."""
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    cx = centreline_x()
+    y = ORIGIN_Y - row * CELL_M
+    return QgsGeometry.fromPolylineXY([
+        QgsPointXY(cx - half_width_m, y),
+        QgsPointXY(cx, y),
+        QgsPointXY(cx + half_width_m, y),
+    ])
+
+
+# ---------------------------------------------------------------------------
+# iface stub — the plugin uses only messageBar / mainWindow / mapCanvas
+# plus the toolbar/menu/dock registration pairs.
+# ---------------------------------------------------------------------------
+
+class RecordingMessageBar:
+    """Captures pushed messages so a check can assert nothing errored."""
+
+    def __init__(self):
+        self.messages = []   # list of (level, title, text)
+
+    def _push(self, level, title, text):
+        self.messages.append((level, str(title), str(text)))
+
+    def pushInfo(self, title, text):
+        self._push("info", title, text)
+
+    def pushSuccess(self, title, text):
+        self._push("success", title, text)
+
+    def pushWarning(self, title, text):
+        self._push("warning", title, text)
+
+    def pushCritical(self, title, text):
+        self._push("critical", title, text)
+
+    def pushMessage(self, *args, **kwargs):
+        title = args[0] if args else ""
+        text = args[1] if len(args) > 1 else ""
+        self._push("message", title, text)
+
+    def clearWidgets(self):
+        pass
+
+    def of(self, level):
+        return [m for m in self.messages if m[0] == level]
+
+    @property
+    def criticals(self):
+        return self.of("critical")
+
+    @property
+    def warnings(self):
+        return self.of("warning")
+
+    def render(self):
+        if not self.messages:
+            return "    (message bar empty)"
+        return "\n".join(f"    [{lvl}] {t}: {m}" for lvl, t, m in self.messages)
+
+
+class StubIface:
+    """Minimal QgisInterface stand-in covering every iface call the plugin makes."""
+
+    def __init__(self, main_window, canvas):
+        self._main_window = main_window
+        self._canvas = canvas
+        self._message_bar = RecordingMessageBar()
+        self.toolbar_actions = []
+        self.menu_items = []       # (menu_name, action)
+        self.dock_widgets = []
+
+    def mainWindow(self):
+        return self._main_window
+
+    def mapCanvas(self):
+        return self._canvas
+
+    def messageBar(self):
+        return self._message_bar
+
+    def addToolBarIcon(self, action):
+        self.toolbar_actions.append(action)
+
+    def removeToolBarIcon(self, action):
+        if action in self.toolbar_actions:
+            self.toolbar_actions.remove(action)
+
+    def addPluginToMenu(self, menu, action):
+        self.menu_items.append((menu, action))
+
+    def removePluginMenu(self, menu, action):
+        if (menu, action) in self.menu_items:
+            self.menu_items.remove((menu, action))
+
+    def addDockWidget(self, area, widget):
+        # Actually dock it, not just record it: the panel needs a real parent and a
+        # real layout pass before it can be rendered to an image (see shots.py).
+        self._main_window.addDockWidget(area, widget)
+        self.dock_widgets.append(widget)
+
+    def removeDockWidget(self, widget):
+        self._main_window.removeDockWidget(widget)
+        if widget in self.dock_widgets:
+            self.dock_widgets.remove(widget)
+
+
+# ---------------------------------------------------------------------------
+# Plugin harness
+# ---------------------------------------------------------------------------
+
+class PluginHarness:
+    """Builds the real plugin against a stub iface, on a real QgsProject.
+
+    Used as a context manager so every check starts from an empty project and
+    unloads cleanly::
+
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.assert_no_errors("baseline")
+    """
+
+    def __init__(self, dem_path=None, load_dem=True, load_boundary=True):
+        self.dem_path = dem_path
+        self._load_dem = load_dem and dem_path is not None
+        self._load_boundary = load_boundary and self._load_dem
+        self.dem_layer = None
+        self.boundary_layer = None
+
+    def __enter__(self):
+        from qgis.core import QgsCoordinateReferenceSystem, QgsProject
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtGui import QColor
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from terrainflow_assessment.qgis.plugin import TerrainFlowAssessmentPlugin
+
+        project = QgsProject.instance()
+        project.clear()
+        project.setCrs(QgsCoordinateReferenceSystem("EPSG:2193"))
+
+        self.main_window = QMainWindow()
+        # Generous: the panel is a tall dock and a screenshot of it is clipped to
+        # whatever the main window allows. No real screen is involved.
+        self.main_window.resize(1800, 1600)
+        self.canvas = QgsMapCanvas(self.main_window)
+        self.main_window.setCentralWidget(self.canvas)
+        self.canvas.setCanvasColor(QColor(255, 255, 255))
+        self.canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:2193"))
+        self.iface = StubIface(self.main_window, self.canvas)
+
+        self.plugin = TerrainFlowAssessmentPlugin(self.iface)
+        self._install_global_iface()
+        self.plugin.initGui()
+
+        self.panel = self.plugin.panel
+        self.state = self.plugin._state
+        self.bar = self.iface.messageBar()
+        self.project = project
+
+        if self._load_dem:
+            self.dem_layer = self.add_dem()
+        if self._load_boundary:
+            self.boundary_layer = self.add_boundary()
+
+        return self
+
+    def __exit__(self, *_exc):
+        from qgis.core import QgsProject
+
+        try:
+            self.plugin.unload()
+        finally:
+            QgsProject.instance().clear()
+            self._restore_global_iface()
+        return False
+
+    # ------------------------------------------------------------------ actions
+
+    def add_dem(self):
+        from qgis.core import QgsProject, QgsRasterLayer
+
+        layer = QgsRasterLayer(self.dem_path, "Test DEM")
+        if not layer.isValid():
+            raise AssertionError(f"synthetic DEM failed to load: {self.dem_path}")
+        QgsProject.instance().addMapLayer(layer)
+        self.panel.dem_changed.emit(layer)
+        return layer
+
+    def add_boundary(self):
+        from qgis.core import QgsProject
+
+        layer = site_boundary_layer()
+        QgsProject.instance().addMapLayer(layer)
+        self.panel.boundary_changed.emit(layer)
+        return layer
+
+    def run_baseline(self):
+        self.panel.run_baseline_requested.emit()
+        return self.state.baseline_result
+
+    def add_earthwork(self, ew_type="swale", geometry=None, name=None):
+        """Add an earthwork straight to the manager, bypassing the modal dialog."""
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+
+        geom = geometry if geometry is not None else line_across_valley()
+        n = len(self.state.earthwork_manager) + 1
+        ew = Earthwork(ew_type, geom, name or f"{ew_type.capitalize()} {n}")
+        self.state.earthwork_manager.add(ew)
+        return ew
+
+    def sync_canvas(self, extent_layer=None):
+        """Put the project's layers on the canvas, in layer-tree order.
+
+        In live QGIS a QgsLayerTreeMapCanvasBridge does this; the harness builds a
+        bare canvas, so rendering a screenshot means wiring it up explicitly.
+        """
+        from qgis.core import QgsProject
+
+        root = QgsProject.instance().layerTreeRoot()
+        layers = [lyr for lyr in root.layerOrder() if lyr is not None]
+        self.canvas.setLayers(layers)
+
+        target = extent_layer if extent_layer is not None else self.dem_layer
+        if target is not None:
+            extent = target.extent()
+            extent.scale(1.05)
+            self.canvas.setExtent(extent)
+        else:
+            self.canvas.zoomToFullExtent()
+
+        self.canvas.refresh()
+        self.canvas.waitWhileRendering()
+        return layers
+
+    def _install_global_iface(self):
+        """Point the global qgis.utils.iface — and its existing captures — at the stub.
+
+        Four map-tool modules do `from qgis.utils import iface` at import time, and
+        DrawLineTool calls iface.mainWindow().statusBar() from its __init__. Headless
+        that global is None, so constructing any draw tool raises AttributeError
+        before a single click is delivered.
+
+        Setting qgis.utils.iface alone is not enough: `from x import y` copies the
+        value into the importing module's namespace, so a module imported before this
+        runs still holds None. Both are needed — the attribute for modules imported
+        later (several are imported lazily inside functions), and the sweep for those
+        already in sys.modules.
+        """
+        import qgis.utils
+
+        self._prev_global_iface = getattr(qgis.utils, "iface", None)
+        qgis.utils.iface = self.iface
+
+        self._patched_iface_modules = []
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("terrainflow_assessment") or module is None:
+                continue
+            if hasattr(module, "iface"):
+                self._patched_iface_modules.append((module, module.iface))
+                module.iface = self.iface
+
+    def _restore_global_iface(self):
+        import qgis.utils
+
+        for module, previous in getattr(self, "_patched_iface_modules", []):
+            module.iface = previous
+        self._patched_iface_modules = []
+        qgis.utils.iface = getattr(self, "_prev_global_iface", None)
+
+    def prepare_canvas_for_input(self, size=(1200, 900)):
+        """Make the canvas a real, sized, visible widget so mouse input maps correctly.
+
+        Synthetic clicks are delivered at *pixel* positions and the tools convert
+        them back with toMapCoordinates(), so the canvas must have a genuine size and
+        a settled extent or every click lands somewhere else.
+        """
+        from qgis.PyQt.QtCore import QCoreApplication
+
+        self.canvas.resize(*size)
+        self.canvas.window().show()
+        self.canvas.show()
+        self.sync_canvas()
+        for _ in range(3):
+            QCoreApplication.processEvents()
+        return self.canvas
+
+    # ------------------------------------------------------------------ asserts
+
+    def assert_no_errors(self, context=""):
+        criticals = self.bar.criticals
+        if criticals:
+            raise AssertionError(
+                f"{context}: {len(criticals)} error(s) pushed to the message bar\n"
+                + self.bar.render()
+            )
+
+    def layer_names(self):
+        from qgis.core import QgsProject
+
+        return sorted(lyr.name() for lyr in QgsProject.instance().mapLayers().values())

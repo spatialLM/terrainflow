@@ -4,7 +4,24 @@
       "Bash(wc:*)",
       "Bash(pip show:*)",
       "Bash(pip install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(python -m pytest tests/ -q --no-header -p no:cacheprovider --no-cov)",
+      "Bash(git check-ignore *)",
+      "Bash(set -e)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git reset *)",
+      "Bash(git commit *)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "PowerShell(Start-Process \"C:\\\\Program Files\\\\QGIS 3.40.15\\\\bin\\\\qgis-ltr-bin.exe\")",
+      "Bash(git ls-remote *)",
+      "Bash(git push *)",
+      "Bash(git tag *)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "PowerShell(& \"C:\\\\Users\\\\liamm\\\\Documents\\\\TerrainFlow\\\\deploy.ps1\")",
+      "Read(//c/Users/liamm/.claude/**)"
     ]
   }
 }

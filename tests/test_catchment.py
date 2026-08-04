@@ -225,6 +225,103 @@ class TestSCSRunoffCSVGaps:
         assert np.all(result == 0.0)
 
 
+class TestHyetographFormatDetection:
+    """CAT-27: a constant-rate storm is non-decreasing but INCREMENTAL.
+
+    Reading 5,5,5,5 mm as a running total keeps 5 mm of a 20 mm storm and the
+    simulation then runs on a quarter of the design rainfall.
+    """
+
+    def _write(self, tmp_path, name, rows):
+        p = str(tmp_path / name)
+        with open(p, "w") as f:
+            f.write("time_min,rainfall_mm\n")
+            for t, r in rows:
+                f.write(f"{t},{r}\n")
+        return p
+
+    def test_constant_rate_storm_reads_as_incremental(self, tmp_path):
+        p = self._write(tmp_path, "flat.csv",
+                        [(10, 5), (20, 5), (30, 5), (40, 5)])
+        result = SCSRunoff.parse_hyetograph_csv(p)
+        assert result[-1][1] == pytest.approx(20.0)   # the whole storm, not 5 mm
+
+    def test_near_flat_incremental_storm_reads_as_incremental(self, tmp_path):
+        p = self._write(tmp_path, "nearflat.csv",
+                        [(10, 5), (20, 5), (30, 5), (40, 6)])
+        result = SCSRunoff.parse_hyetograph_csv(p)
+        assert result[-1][1] == pytest.approx(21.0)
+
+    def test_genuine_cumulative_trace_still_reads_as_cumulative(self, tmp_path):
+        p = self._write(tmp_path, "cum.csv",
+                        [(10, 2), (20, 8), (30, 15), (40, 25)])
+        result = SCSRunoff.parse_hyetograph_csv(p)
+        assert result[-1][1] == pytest.approx(25.0)
+
+    def test_cumulative_record_starting_mid_storm(self, tmp_path):
+        """Record begins a step or two in, so the first reading is not zero."""
+        p = self._write(tmp_path, "midcum.csv",
+                        [(10, 5), (20, 12), (30, 20), (40, 25)])
+        result = SCSRunoff.parse_hyetograph_csv(p)
+        assert result[-1][1] == pytest.approx(25.0)
+
+    def test_rise_and_fall_hyetograph_is_incremental(self, tmp_path):
+        p = self._write(tmp_path, "peaked.csv",
+                        [(10, 2), (20, 9), (30, 6), (40, 3)])
+        result = SCSRunoff.parse_hyetograph_csv(p)
+        assert result[-1][1] == pytest.approx(20.0)
+
+
+class TestSoilReferenceCondition:
+    """CAT-19: SOIL_REFERENCE is TR-55 Table 2-2 pasture in GOOD condition."""
+
+    def test_good_is_the_historical_table(self):
+        for soil, cn in SCSRunoff.SOIL_REFERENCE.items():
+            assert SCSRunoff.soil_reference_cn(soil) == cn
+
+    def test_degraded_pasture_reads_much_higher(self):
+        """Poor condition (<50% cover, heavily grazed) sheds far more."""
+        assert SCSRunoff.soil_reference_cn("Sand", "poor") == 68
+        assert SCSRunoff.soil_reference_cn("Clay", "poor") == 89
+        for soil in SCSRunoff.SOIL_REFERENCE:
+            good = SCSRunoff.soil_reference_cn(soil, "good")
+            fair = SCSRunoff.soil_reference_cn(soil, "fair")
+            poor = SCSRunoff.soil_reference_cn(soil, "poor")
+            assert good < fair < poor
+
+    def test_unknown_soil_and_condition_fall_back(self):
+        assert SCSRunoff.soil_reference_cn("Peat") == SCSRunoff.SOIL_REFERENCE["Loam"]
+        assert (SCSRunoff.soil_reference_cn("Loam", "unheard-of")
+                == SCSRunoff.SOIL_REFERENCE["Loam"])
+
+    def test_default_condition_reproduces_the_historical_table(self):
+        """Existing designs must reopen against the curve numbers they were sized on."""
+        from terrainflow_assessment.modules.catchment import DEFAULT_GROUND_CONDITION
+        for soil, cn in SCSRunoff.SOIL_REFERENCE.items():
+            assert SCSRunoff.soil_reference_cn(soil, DEFAULT_GROUND_CONDITION) == cn
+
+    def test_picker_persistence_and_engine_agree_on_the_condition_keys(self):
+        """Three places name these conditions: the picker's table, the CN tables, and
+        the design-file enum. A key present in one and not the others is either a
+        picker entry that silently selects Good, or a saved design that will not
+        reload — so they are asserted equal rather than trusted to stay in step."""
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_GROUND_CONDITION,
+            GROUND_CONDITIONS,
+        )
+        from terrainflow_assessment.modules.project_io import GROUND_CONDITION_VALUES
+
+        assert tuple(GROUND_CONDITIONS) == GROUND_CONDITION_VALUES
+        assert set(GROUND_CONDITIONS) == set(SCSRunoff._SOIL_REFERENCE_BY_CONDITION)
+        assert DEFAULT_GROUND_CONDITION in GROUND_CONDITIONS
+
+    def test_every_condition_has_a_label_and_a_meaning(self):
+        from terrainflow_assessment.modules.catchment import GROUND_CONDITIONS
+        for key, entry in GROUND_CONDITIONS.items():
+            label, meaning = entry
+            assert label.strip() and meaning.strip(), key
+
+
 # ---------------------------------------------------------------------------
 # fast_contributing_area (assessment version)
 # ---------------------------------------------------------------------------
@@ -421,3 +518,107 @@ class TestD8CatchmentCorrectness:
             f"Catchment extends to y={maxy:.1f} m — knoll cells at y>20 "
             "(north of ridge) should be excluded from contributing area"
         )
+
+
+# ---------------------------------------------------------------------------
+# Rational-method runoff (Brad Lancaster) + drain-down time
+# ---------------------------------------------------------------------------
+
+class TestLancasterCoefficients:
+    def test_table_covers_the_published_surfaces(self):
+        from terrainflow_assessment.modules.catchment import LANCASTER_COEFFICIENTS
+        for surface in ("Grass / lawn", "Bare earth", "Concrete / asphalt",
+                        "Metal roof", "Healthy indigenous landscape"):
+            assert surface in LANCASTER_COEFFICIENTS
+
+    def test_typical_sits_inside_the_published_range(self):
+        from terrainflow_assessment.modules.catchment import LANCASTER_COEFFICIENTS
+        for surface, (typical, lo, hi, _src) in LANCASTER_COEFFICIENTS.items():
+            assert lo <= typical <= hi, surface
+            assert 0.0 < lo <= hi <= 1.0, surface
+
+    def test_ordering_matches_imperviousness(self):
+        from terrainflow_assessment.modules.catchment import LANCASTER_COEFFICIENTS
+        c = {k: v[0] for k, v in LANCASTER_COEFFICIENTS.items()}
+        assert c["Grass / lawn"] < c["Healthy indigenous landscape"]
+        assert c["Healthy indigenous landscape"] < c["Bare earth"]
+        assert c["Bare earth"] < c["Concrete / asphalt"] < c["Metal roof"]
+
+    def test_the_design_default_is_wetter_than_lancasters_grass(self):
+        """The storm that breaks an earthwork usually arrives on saturated ground."""
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_RUNOFF_COEFFICIENT,
+            LANCASTER_COEFFICIENTS,
+        )
+        assert DEFAULT_RUNOFF_COEFFICIENT > LANCASTER_COEFFICIENTS["Grass / lawn"][0]
+        assert DEFAULT_RUNOFF_COEFFICIENT < LANCASTER_COEFFICIENTS["Metal roof"][0]
+
+    def test_only_the_pasture_entry_is_flagged_as_ours(self):
+        from terrainflow_assessment.modules.catchment import LANCASTER_COEFFICIENTS
+        ours = [k for k, v in LANCASTER_COEFFICIENTS.items() if v[3] != "lancaster"]
+        assert ours == ["Pasture / grass, wet ground"]
+
+
+class TestCoefficientRunoffDepth:
+    def test_multiplies_rainfall_by_the_coefficient(self):
+        from terrainflow_assessment.modules.catchment import coefficient_runoff_depth
+        assert coefficient_runoff_depth(120.0, 0.5) == pytest.approx(60.0)
+
+    def test_clamped_to_the_storm(self):
+        from terrainflow_assessment.modules.catchment import coefficient_runoff_depth
+        assert coefficient_runoff_depth(120.0, 1.7) == pytest.approx(120.0)
+        assert coefficient_runoff_depth(120.0, -0.3) == pytest.approx(0.0)
+
+    def test_no_rain_no_runoff(self):
+        from terrainflow_assessment.modules.catchment import coefficient_runoff_depth
+        assert coefficient_runoff_depth(0.0, 0.5) == 0.0
+        assert coefficient_runoff_depth(None, 0.5) == 0.0
+
+    def test_default_sits_between_scs_normal_and_total_rainfall(self):
+        """The whole point of the middle basis."""
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_RUNOFF_COEFFICIENT,
+            SCSRunoff,
+            coefficient_runoff_depth,
+        )
+        scs = SCSRunoff()
+        rain = 120.0
+        scs_mm = scs.runoff_depth(rain, scs.adjust_cn(61, "normal"))
+        c_mm = coefficient_runoff_depth(rain, DEFAULT_RUNOFF_COEFFICIENT)
+        assert scs_mm < c_mm < rain
+
+    def test_it_lands_near_scs_wet_conditions(self):
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_RUNOFF_COEFFICIENT,
+            SCSRunoff,
+            coefficient_runoff_depth,
+        )
+        scs = SCSRunoff()
+        wet = scs.runoff_depth(120.0, scs.adjust_cn(61, "wet"))
+        c = coefficient_runoff_depth(120.0, DEFAULT_RUNOFF_COEFFICIENT)
+        assert abs(c - wet) / wet < 0.15
+
+
+class TestDrainDownHours:
+    def test_time_to_empty(self):
+        from terrainflow_assessment.modules.catchment import drain_down_hours
+        # 100 m³ over 500 m² at 4 mm/hr = 0.002 m³/m²/hr → 50 h.
+        assert drain_down_hours(100.0, 500.0, 4.0) == pytest.approx(50.0)
+
+    def test_faster_soil_drains_sooner(self):
+        from terrainflow_assessment.modules.catchment import drain_down_hours
+        assert drain_down_hours(100.0, 500.0, 15.0) < drain_down_hours(100.0, 500.0, 1.5)
+
+    def test_no_standing_water_is_zero_not_none(self):
+        from terrainflow_assessment.modules.catchment import drain_down_hours
+        assert drain_down_hours(0.0, 500.0, 4.0) == 0.0
+
+    def test_no_infiltration_never_drains(self):
+        from terrainflow_assessment.modules.catchment import drain_down_hours
+        assert drain_down_hours(100.0, 500.0, 0.0) is None
+        assert drain_down_hours(100.0, 0.0, 4.0) is None
+        assert drain_down_hours(100.0, 500.0, None) is None
+
+    def test_a_deep_narrow_basin_on_clay_breaches_the_48h_guide(self):
+        from terrainflow_assessment.modules.catchment import drain_down_hours
+        assert drain_down_hours(500.0, 300.0, 1.5) > 48.0

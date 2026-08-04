@@ -22,6 +22,8 @@ omit = [
     "terrainflow_assessment/__init__.py",      # QGIS classFactory entry point
     "terrainflow_assessment/panel.py",         # QDockWidget UI
     "terrainflow_assessment/earthwork_properties_dialog.py",
+    "terrainflow_assessment/design_intensity_dialog.py",   # QDialog + QTableWidget
+    "terrainflow_assessment/rainfall_data_dialog.py",      # QDialog + QTableWidget
     "terrainflow_assessment/map_tools/*",      # Qt map-canvas interaction
     "terrainflow_assessment/qgis/*",           # Qt/QGIS adapter + controller layer
     "terrainflow_assessment/terrainflow_assessment/*",  # old nested duplicate (pending deletion)

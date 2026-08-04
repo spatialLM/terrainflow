@@ -1,7 +1,10 @@
 """Tests for plugin/processing/earthwork.py"""
+import math
+
 import pytest
 
 from terrainflow_assessment.modules.earthwork_design import (
+    BROAD_CRESTED_WEIR_C,
     Earthwork,
     EarthworkManager,
     berm_height_estimate,
@@ -265,25 +268,54 @@ class TestCalculateDiversionDischarge:
         assert q == round(q, 4)
 
     def test_known_mannings(self):
-        # For a known input, verify the Manning's equation result
-        # n=0.025, depth=0.5, width=2.0, grade=1%
+        # For a known input, verify the Manning's equation result.
+        # n=0.025, depth=0.5, width=2.0 (bed), grade=1%
         # bottom_width = max(0.05, 2.0 - 2*0.5) = 1.0
-        # top_width = 3.0
+        # top_width = 2.0 + 2*0.5 = 3.0  →  widening 1.0 m per side over 0.5 m depth
+        #                                   IS a z=2 batter
         # A = (1.0+3.0)/2 * 0.5 = 1.0
-        # P = 1.0 + 2*sqrt(2)*0.5 = 1.0 + 1.414 = 2.414
-        # R = 1.0/2.414 ≈ 0.4143
-        # Q = (1/0.025) * 1.0 * 0.4143^(2/3) * 0.1^0.5
+        # P = 1.0 + 2*sqrt(1+2**2)*0.5 = 1.0 + sqrt(5) = 3.236
+        # R = 1.0/3.236 ≈ 0.3090
+        # Q = (1/0.025) * 1.0 * 0.3090^(2/3) * 0.01^0.5
         import math
         n = 0.025
         d, w, g = 0.5, 2.0, 1.0
         s = g / 100.0
         bw = max(0.05, w - 2 * d)
         tw = w + 2 * d
+        z = (tw - bw) / (2 * d)                       # = 2, from the section itself
         A = ((bw + tw) / 2) * d
-        P = bw + 2 * math.sqrt(2) * d
+        P = bw + 2 * math.sqrt(1 + z * z) * d
         R = A / P
         expected = round((1 / n) * A * R ** (2/3) * s ** 0.5, 4)
         assert calculate_diversion_discharge(d, w, g) == pytest.approx(expected, rel=1e-4)
+
+    def test_wetted_perimeter_matches_the_sections_own_batter(self):
+        """Regression: area from a z=2 section, perimeter from a z=1 slant.
+
+        The legacy path built a ±2×depth (z=2) section but measured its wetted
+        perimeter with a √2 (z=1) slant. That understated P, so R came out ~40% high
+        and Manning's Q about 25% high — a drain reported as carrying a quarter more
+        than it can. Both must now come from one section.
+        """
+        from terrainflow_assessment.core.sizing import trapezoid_section
+        d, w = 0.5, 2.0
+        bw = max(0.05, w - 2 * d)
+        sec = trapezoid_section(w + 2 * d, bw, d)
+
+        # The section's own batter is z = 2, so the slant is √5·d, not √2·d.
+        assert sec.side_slope == pytest.approx(2.0)
+        assert sec.wetted_perimeter == pytest.approx(bw + 2 * math.sqrt(5) * d)
+
+        legacy_r = sec.area / (bw + 2 * math.sqrt(2) * d)
+        assert legacy_r > sec.hydraulic_radius       # the old overstatement, ~×1.34
+
+        q = calculate_diversion_discharge(d, w, 1.0)
+        q_legacy = (1 / 0.025) * sec.area * legacy_r ** (2 / 3) * 0.01 ** 0.5
+        assert q < q_legacy
+        # Q scales with R^(2/3), so a 34% overstatement of R was ~22% on discharge.
+        assert q == pytest.approx(
+            q_legacy * (sec.hydraulic_radius / legacy_r) ** (2 / 3), rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +346,26 @@ class TestCalculateSpillwayWidth:
 
     def test_known_value(self):
         # Q = C * L * H^1.5  →  L = Q / (C * H^1.5)
-        # Q=1.0, C=1.7, H=0.5
-        expected = round(1.0 / (1.7 * 0.5 ** 1.5), 2)
+        # Q=1.0, C=BROAD_CRESTED_WEIR_C, H=0.5
+        expected = round(1.0 / (BROAD_CRESTED_WEIR_C * 0.5 ** 1.5), 2)
         assert calculate_spillway_width(1.0, 0.5) == pytest.approx(expected, rel=1e-4)
 
+    def test_coefficient_is_the_broad_crested_band_not_the_ideal_ceiling(self):
+        """C must be Brater & King's wide-crest value, not the sharp-crested limit.
+
+        1.7 SI (≈3.08 English) only occurs at high head over a short crest; for a
+        crest ≥0.6 m wide at 0.20–0.50 m head — an earthen dam crest — the table gives
+        2.60–2.70 English = 1.44–1.49 SI. Using 1.7 over-states discharge and so
+        under-sizes the spillway by ~16%, in the direction that breaches embankments.
+        """
+        assert 1.44 <= BROAD_CRESTED_WEIR_C <= 1.49
+        width = calculate_spillway_width(1.0, 0.5)
+        old_width = round(1.0 / (1.7 * 0.5 ** 1.5), 2)
+        assert width > old_width
+        assert width == pytest.approx(old_width * 1.7 / BROAD_CRESTED_WEIR_C, rel=0.01)
+
     def test_custom_weir_coefficient(self):
-        w_default = calculate_spillway_width(1.0, 0.5, weir_coeff=1.7)
+        w_default = calculate_spillway_width(1.0, 0.5)
         w_custom = calculate_spillway_width(1.0, 0.5, weir_coeff=2.1)
         assert w_custom < w_default  # higher coeff → narrower spillway
 

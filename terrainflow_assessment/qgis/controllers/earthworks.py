@@ -14,7 +14,6 @@ from qgis.core import (
     QgsFeature,
     QgsField,
     QgsGeometry,
-    QgsMarkerSymbol,
     QgsPalLayerSettings,
     QgsProperty,
     QgsRasterLayer,
@@ -41,10 +40,7 @@ from terrainflow_assessment.modules.earthwork_design import (
     Earthwork,
     calculate_capacity,
 )
-from terrainflow_assessment.modules.swale_design import (
-    contour_to_swale_geometry,
-    sample_total_inflow,
-)
+from terrainflow_assessment.modules.swale_design import contour_to_swale_geometry
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
@@ -59,14 +55,14 @@ class EarthworksController:
     # ---------------------------------------------------------------- Drawing tools
 
     def activate_draw_swale(self, mode):
+        from terrainflow_assessment.qgis.controllers._layers import resolve_layer
+        contour_layer = resolve_layer(self._project, self._state.contour_layer_id)
         if mode == "contour":
-            if not self._state.contour_layer:
+            if contour_layer is None:
                 self._iface.messageBar().pushWarning(
-                    "TerrainFlow Assessment",
-                    "Run contour analysis first, then pick a segment on a contour.",
-                )
+                    "TerrainFlow Assessment", self._no_contour_layer_message("segment"))
                 return
-            tool = ContourSegmentTool(self._canvas, self._state.contour_layer)
+            tool = ContourSegmentTool(self._canvas, contour_layer)
             tool.segment_selected.connect(
                 lambda geom, elev, coords: self._on_contour_selected_for_swale(
                     geom, elev, coords
@@ -75,13 +71,11 @@ class EarthworksController:
             tool.cancelled.connect(self._on_draw_cancelled)
             self._canvas.setMapTool(tool)
         elif mode == "full_contour":
-            if not self._state.contour_layer:
+            if contour_layer is None:
                 self._iface.messageBar().pushWarning(
-                    "TerrainFlow Assessment",
-                    "Run contour analysis first, then click a contour.",
-                )
+                    "TerrainFlow Assessment", self._no_contour_layer_message("contour"))
                 return
-            tool = SelectContourTool(self._canvas, self._state.contour_layer)
+            tool = SelectContourTool(self._canvas, contour_layer)
             tool.contour_selected.connect(
                 lambda geom, elev, coords: self._on_contour_selected_for_swale(
                     geom, elev, coords
@@ -97,9 +91,37 @@ class EarthworksController:
             tool.cancelled.connect(self._on_draw_cancelled)
             self._canvas.setMapTool(tool)
 
+    def _no_contour_layer_message(self, what):
+        """Say which precondition is missing, not just that one is.
+
+        "Run contour analysis first" is unhelpful to someone who has just run the
+        *baseline* analysis — they are different buttons on different stages, and a
+        deleted layer looks identical from here unless the two cases are separated.
+        """
+        if getattr(self._state, "contour_layer_id", None):
+            return (f"The contour layer has been removed from the project, so there "
+                    f"is nothing to pick a {what} from. Re-run Contour Analysis on "
+                    f"the Analysis stage.")
+        return (f"Run Contour Analysis on the Analysis stage first, then pick a "
+                f"{what}. The Baseline run does not generate contours on its own.")
+
     def _on_contour_selected_for_swale(self, geom, elevation, contour_coords=None):
         swale_geom = contour_to_swale_geometry(geom)
         self._on_geometry_drawn("swale", swale_geom, source_contour=contour_coords)
+
+    def create_swale_from_keyline(self):
+        """Convert the current master keyline (generated or drawn) into a swale,
+        reusing the contour-swale path so the swale stays reshape-locked to the
+        keyline (source_contour provenance)."""
+        geom = getattr(self._state, "keyline_master_geom", None)
+        coords = getattr(self._state, "keyline_master_coords", None)
+        if geom is None:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Generate or draw a keyline first, then convert it to a swale.",
+            )
+            return
+        self._on_contour_selected_for_swale(geom, None, coords)
 
     def activate_draw_earthwork(self, key):
         """Registry-driven draw dispatch: geometry type decides the map tool."""
@@ -130,6 +152,242 @@ class EarthworksController:
         tool.polygon_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
         self._canvas.setMapTool(tool)
+
+    # ---------------------------------------------------------------- Spillways
+
+    def activate_place_spillway(self, kind="outflow"):
+        """Site the selected feature's spillway by clicking the map.
+
+        The crest is a design decision the dialog owns; *where* it sits is a
+        decision about ground, so it is made on the ground. Placing it also pins the
+        crest to a sampled elevation rather than a typed one.
+        """
+        idx = self._panel.get_selected_earthwork_index()
+        if idx is None:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "Select an earthwork in the list first, then place its spillway.",
+            )
+            return
+        ew = self._state.earthwork_manager.get(idx)
+        if ew.type not in ("swale", "dam", "basin"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{ew.name} does not hold water, so it has nothing to spill.",
+            )
+            return
+
+        from terrainflow_assessment.map_tools.place_point_tool import PlacePointTool
+
+        kind = "inflow" if kind == "inflow" else "outflow"
+        tool = PlacePointTool(self._canvas, snap_raster_path=self._state.dem_path)
+        tool.point_placed.connect(
+            lambda pt, elev, ew_id=ew.id, k=kind:
+                self._on_spillway_placed(ew_id, pt, elev, kind=k))
+        tool.cancelled.connect(self._on_draw_cancelled)
+        self._canvas.setMapTool(tool)
+        prompt = ("Click where water ENTERS {name} from upslope."
+                  if kind == "inflow" else
+                  "Click where {name} should OVERFLOW.")
+        self._iface.messageBar().pushInfo(
+            "TerrainFlow Assessment",
+            prompt.format(name=ew.name) + " Esc to cancel.",
+        )
+
+    def _on_spillway_placed(self, ew_id, point, elevation, kind="outflow"):
+        """Record the placed location, and seed the crest from the ground there."""
+        from qgis.core import QgsGeometry
+
+        from terrainflow_assessment.modules.earthwork_design import Spillway, bind_crest
+
+        ew = next((e for e in self._state.earthwork_manager.get_all()
+                   if e.id == ew_id), None)
+        self._canvas.unsetMapTool(self._canvas.mapTool())
+        if ew is None:
+            return
+
+        attr = "inflow_spillway" if kind == "inflow" else "spillway"
+        spillway = getattr(ew, attr, None) or Spillway()
+        spillway.point_wkt = QgsGeometry.fromPointXY(point).asWkt()
+
+        # A crest already chosen by hand is left alone — placing the point tells us
+        # where, not how deep. Only an auto crest follows the ground it landed on.
+        if elevation is not None and (spillway.crest_elevation is None or spillway.auto):
+            rim, _invert = self._spillway_datums(
+                ew.geometry, ew.type,
+                top_width_m=getattr(ew, "top_width_m", None),
+                depth=getattr(ew, "depth", None),
+                crest_elevation=getattr(ew, "crest_elevation", None),
+            )
+            crest, drop = bind_crest(rim, crest=float(elevation))
+            spillway.crest_elevation = crest
+            spillway.drop_below_rim_m = drop
+        setattr(ew, attr, spillway)
+
+        self._refresh_spillway_layer()
+        self._recompute_live_assessment()
+        self._mark_design_edit()
+        where = ("" if spillway.crest_elevation is None
+                 else f" — {spillway.crest_elevation:.2f} m")
+        label = "inflow" if kind == "inflow" else "outflow"
+        self._iface.messageBar().pushSuccess(
+            "TerrainFlow Assessment", f"{ew.name} {label} spillway placed{where}.")
+
+    def _refresh_spillway_layer(self):
+        """Point layer of every placed spillway, labelled with crest and width."""
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        remove_layer(self._project, self._state.spillway_layer_id)
+        self._state.spillway_layer_id = None
+
+        placed = []
+        for ew in self._state.earthwork_manager.get_all():
+            for attr, kind in (("spillway", "outflow"), ("inflow_spillway", "inflow")):
+                sp = getattr(ew, attr, None)
+                if sp is not None and sp.point_wkt:
+                    placed.append((ew, sp, kind))
+        if not placed:
+            return
+        try:
+            from qgis.core import QgsMarkerSymbol
+
+            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            layer = QgsVectorLayer(f"Point?crs={crs}", "Spillways", "memory")
+            pr = layer.dataProvider()
+            pr.addAttributes([
+                QgsField("name", QMetaType.QString),
+                QgsField("label", QMetaType.QString),
+                QgsField("crest_m", QMetaType.Double),
+                QgsField("width_m", QMetaType.Double),
+                QgsField("kind", QMetaType.QString),
+            ])
+            layer.updateFields()
+
+            feats = []
+            for ew, sp, kind in placed:
+                geom = QgsGeometry.fromWkt(sp.point_wkt)
+                if geom is None or geom.isEmpty():
+                    continue
+                crest = sp.crest_elevation
+                width = sp.width_m or 0.0
+                bits = [f"{ew.name} {kind}"]
+                if crest is not None:
+                    bits.append(f"{crest:.2f} m")
+                if kind == "outflow" and width > 0:
+                    bits.append(f"{width:.1f} m wide")
+                f = QgsFeature()
+                f.setGeometry(geom)
+                f.setAttributes([
+                    ew.name, " · ".join(bits),
+                    float(crest) if crest is not None else None, float(width), kind,
+                ])
+                feats.append(f)
+            if not feats:
+                return
+            pr.addFeatures(feats)
+            layer.updateExtents()
+
+            # An outflow points down (water leaving), an inflow points up (water
+            # arriving) — so the two read apart at a glance without the label.
+            symbol = QgsMarkerSymbol.createSimple({
+                "name": "triangle", "size": "4.0",
+                "color": "#1273b5", "outline_color": "#ffffff",
+                "outline_width": "0.4",
+            })
+            sl = symbol.symbolLayer(0)
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyFillColor,
+                QgsProperty.fromExpression(
+                    "CASE WHEN \"kind\" = 'inflow' THEN '#2e7d55' ELSE '#1273b5' END"))
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyAngle,
+                QgsProperty.fromExpression(
+                    "CASE WHEN \"kind\" = 'inflow' THEN 0 ELSE 180 END"))
+            layer.renderer().setSymbol(symbol)
+
+            settings = QgsPalLayerSettings()
+            settings.fieldName = "label"
+            fmt = QgsTextFormat()
+            fmt.setSize(8)
+            settings.setFormat(fmt)
+            settings.placement = QgsPalLayerSettings.AroundPoint
+            layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+            layer.setLabelsEnabled(True)
+
+            self._project.instance().addMapLayer(layer)
+            self._state.spillway_layer_id = layer.id()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — spillway layer error: {exc}")
+
+    # ---------------------------------------------------------------- Connections
+
+    def activate_connect_earthworks(self):
+        """Route one feature's overflow into another by clicking source then target."""
+        features = [(ew.id, ew.name, ew.geometry)
+                    for ew in self._state.earthwork_manager.get_all() if ew.enabled]
+        if len(features) < 2:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "Draw at least two earthworks before connecting them.",
+            )
+            return
+
+        from terrainflow_assessment.map_tools.connect_earthworks_tool import (
+            ConnectEarthworksTool,
+        )
+
+        tool = ConnectEarthworksTool(self._canvas, features)
+        tool.connection_made.connect(self.on_connection_made)
+        tool.source_picked.connect(
+            lambda name: self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{name} overflows into… click the receiving feature. Esc to undo.",
+            )
+        )
+        tool.cancelled.connect(self._on_draw_cancelled)
+        self._canvas.setMapTool(tool)
+        self._iface.messageBar().pushInfo(
+            "TerrainFlow Assessment",
+            "Click the feature that overflows, then the one it flows into.",
+        )
+
+    def on_connection_made(self, from_id, to_id):
+        """Accept a user overflow link unless it closes a loop.
+
+        A cycle is not merely unsimulatable — it is physically impossible, since
+        water cannot overflow back into something already overflowing into it. It is
+        refused here rather than silently demoted downstream, so the refusal names
+        the loop the user just drew.
+        """
+        from terrainflow_assessment.modules.flow_graph import topological_order
+
+        by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+        src, tgt = by_id.get(from_id), by_id.get(to_id)
+        if src is None or tgt is None:
+            return
+
+        edges = {ew.id: ew.overflow_target_id
+                 for ew in self._state.earthwork_manager.get_all()
+                 if ew.overflow_target_id}
+        edges[from_id] = to_id
+        _order, broken = topological_order(edges)
+        if broken:
+            names = " → ".join(
+                by_id[i].name for i in broken if i in by_id) or "these features"
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"{src.name} → {tgt.name} would create a loop ({names}). "
+                "Water cannot overflow back into what is feeding it.",
+            )
+            return
+
+        src.overflow_target_id = to_id
+        self._recompute_live_assessment()
+        self._mark_design_edit()
+        self._iface.messageBar().pushSuccess(
+            "TerrainFlow Assessment",
+            f"{src.name} now overflows into {tgt.name}.",
+        )
 
     def on_usable_area_source_changed(self, source):
         import json
@@ -182,39 +440,25 @@ class EarthworksController:
         if ew_type == "diversion":
             geometry = self._orient_downhill(geometry)
 
-        peak_inflow = 0.0
-        if self._state.baseline_result:
-            acc_path = self._state.baseline_result.get("flow_accumulation")
-            if acc_path:
-                # Total intercepted accumulation (every crossing), not one peak cell.
-                acc_cells = sample_total_inflow(geometry, acc_path)
-                cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
-                runoff_mm = self._state.baseline_result.get("runoff_mm", 0)
-                peak_inflow = acc_cells * cell_area * runoff_mm / 1000.0
+        # Direct contributing catchment for the not-yet-added feature: label the site
+        # as if it were already there, so the dialog opens with real numbers.
+        peak_inflow, catchment_m2 = self._provisional_catchment(ew_type, geometry)
 
         crest_elev = None
         if ew_type == "dam" and self._state.dem_path:
-            try:
-                import json
-
-                import rasterio
-                from shapely.geometry import shape as shapely_shape
-                shp = shapely_shape(json.loads(geometry.asJson()))
-                centroid = shp.centroid
-                with rasterio.open(self._state.dem_path) as src:
-                    t = src.transform
-                    col = int((centroid.x - t.c) / t.a)
-                    row = int((centroid.y - t.f) / t.e)
-                    if 0 <= row < src.height and 0 <= col < src.width:
-                        crest_elev = float(src.read(1)[row, col]) + 2.0
-            except Exception:
-                pass
+            crest_elev = self._default_crest_elevation(geometry)
 
         n = len(self._state.earthwork_manager) + 1
         ew_name = f"{ew_type.capitalize()} {n}"
         ew = Earthwork(ew_type, geometry, ew_name)
         ew.source_contour_coords = source_contour  # reshape stays contour-locked
 
+        rim, invert = self._spillway_datums(
+            geometry, ew_type,
+            top_width_m=getattr(ew, "top_width_m", None),
+            depth=getattr(ew, "depth", None),
+            crest_elevation=crest_elev,
+        )
         dlg = EarthworkPropertiesDialog(
             ew_type=ew_type,
             geometry=geometry,
@@ -228,6 +472,12 @@ class EarthworksController:
             cn=self._panel.cn,
             overflow_options=self._overflow_options(exclude_id=ew.id),
             own_elevation=self._feature_elevation(geometry),
+            catchment_m2=catchment_m2,
+            count_infiltration=self._panel.count_infiltration,
+            rim_elevation=rim,
+            invert_elevation=invert,
+            peak_flow_m3s=self._provisional_peak_flow(catchment_m2),
+            harvesting_coefficient=self._using_harvesting_coefficient(),
         )
 
         if dlg.exec():
@@ -246,6 +496,11 @@ class EarthworksController:
                 # After depth — the wall_slope setter back-solves batter_run from it.
                 ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
             ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
+            ew.soil_name = getattr(dlg, "get_soil_name", lambda: None)()
+            # The dialog is modal and cannot site a spillway, so it round-trips the
+            # location the map tool set. Read it back regardless — until now the
+            # dialog computed a spillway width, displayed it, and dropped it on OK.
+            ew.spillway = getattr(dlg, "get_spillway", lambda: None)()
             # Apply the bottom width (channels only; None otherwise) — the canonical
             # cross-section field that drives capacity and the burn footprint.
             bw = getattr(dlg, "get_bottom_width", lambda: None)()
@@ -253,6 +508,11 @@ class EarthworksController:
                 ew.bottom_width_m = bw
 
             if ew_type == "dam":
+                # Key into the banks first: capacity must be flooded against the wall
+                # that will actually be built, not the shorter line as drawn.
+                if getattr(ew, "key_into_banks", False):
+                    self._key_dam_into_banks(ew)
+                    geometry = ew.geometry
                 ew.capacity_m3 = self._compute_dam_capacity(ew)
                 ew.capacity_l = ew.capacity_m3 * 1000.0
             else:
@@ -267,6 +527,8 @@ class EarthworksController:
                 len(self._state.earthwork_manager) - 1, ew.summary()
             )
             self._refresh_ew_layer()
+            self._refresh_spillway_layer()
+            self.recompute_catchments()
             self._recompute_live_assessment()
             self._mark_design_edit()
         self._canvas.unsetMapTool(self._canvas.mapTool())
@@ -280,17 +542,39 @@ class EarthworksController:
             return
         ew = self._state.earthwork_manager.get(idx)
         from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+        rim, invert = self._spillway_datums(
+            ew.geometry, ew.type,
+            top_width_m=getattr(ew, "top_width_m", None),
+            depth=getattr(ew, "depth", None),
+            crest_elevation=getattr(ew, "crest_elevation", None),
+        )
+        peak_total, peak_upstream = self._peak_flow_for(ew)
+        edit_profile = self.feature_inflow_profile(ew)
+        edit_station, edit_surplus = self.feature_overtopping(ew, edit_profile)
         dlg = EarthworkPropertiesDialog(
             ew_type=ew.type,
             geometry=ew.geometry,
             parent=self._iface.mainWindow(),
             earthwork=ew,
+            # Was omitted, which hid the sizing block AND the whole Spillway group
+            # whenever an existing feature was reopened. Free from the cached counts.
+            peak_inflow_m3=self.feature_inflow_m3(ew) or None,
+            catchment_m2=self.feature_catchment_m2(ew) or None,
             duration_hours=self._panel.duration_hr,
             dem_path=self._state.dem_path if ew.type == "dam" else None,
             soil_name=self._panel.earthwork_soil_name,
             cn=self._panel.cn,
             overflow_options=self._overflow_options(exclude_id=ew.id),
             own_elevation=self._feature_elevation(ew.geometry),
+            count_infiltration=self._panel.count_infiltration,
+            rim_elevation=rim,
+            invert_elevation=invert,
+            peak_flow_m3s=peak_total,
+            upstream_flow_m3s=peak_upstream,
+            harvesting_coefficient=self._using_harvesting_coefficient(),
+            inflow_profile=edit_profile,
+            overtop_station=edit_station,
+            overtop_surplus=edit_surplus,
         )
         if dlg.exec():
             ew.name = dlg.get_name()
@@ -309,10 +593,17 @@ class EarthworksController:
                 # After depth — the wall_slope setter back-solves batter_run from it.
                 ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
             ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
+            ew.soil_name = getattr(dlg, "get_soil_name", lambda: None)()
+            # The dialog is modal and cannot site a spillway, so it round-trips the
+            # location the map tool set. Read it back regardless — until now the
+            # dialog computed a spillway width, displayed it, and dropped it on OK.
+            ew.spillway = getattr(dlg, "get_spillway", lambda: None)()
             bw = getattr(dlg, "get_bottom_width", lambda: None)()
             if bw is not None:
                 ew.bottom_width_m = bw
             if ew.type == "dam":
+                if getattr(ew, "key_into_banks", False):
+                    self._key_dam_into_banks(ew)
                 ew.capacity_m3 = self._compute_dam_capacity(ew)
                 ew.capacity_l = ew.capacity_m3 * 1000.0
             else:
@@ -324,6 +615,7 @@ class EarthworksController:
                 )
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
+            self._refresh_spillway_layer()
             self._recompute_live_assessment()
             self._mark_design_edit()
 
@@ -393,6 +685,8 @@ class EarthworksController:
         self._state.earthwork_manager.remove(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
         self._refresh_ew_layer()
+        self._refresh_spillway_layer()   # else the deleted feature's marker lingers
+        self.recompute_catchments()
         self._recompute_live_assessment()
         self._mark_design_edit()
 
@@ -402,6 +696,7 @@ class EarthworksController:
             return
         self._state.earthwork_manager.toggle(idx)
         self._panel.refresh_earthwork_list(self._state.earthwork_manager.get_all())
+        self.recompute_catchments()
         self._recompute_live_assessment()
         self._mark_design_edit()
 
@@ -469,6 +764,7 @@ class EarthworksController:
             )
         self._panel.update_earthwork_in_list(idx, ew.summary())
         self._refresh_ew_layer()
+        self.recompute_catchments()
         self._recompute_live_assessment()
         self._mark_design_edit()
 
@@ -489,7 +785,10 @@ class EarthworksController:
         elif n == 0:
             d = self._state.verified_delta_pct
             extra = f" · Δ {d:+.0f}%" if d is not None else ""
-            self._panel.set_verified_chip(f"Verified{extra}", True)
+            self._panel.set_verified_chip(
+                f"Verified{extra}", True,
+                tooltip=self.verification_sentence(self._state.verification),
+            )
         else:
             self._panel.set_verified_chip(
                 f"{n} edit{'s' if n != 1 else ''} since verify", False
@@ -547,18 +846,1278 @@ class EarthworksController:
 
     # ---------------------------------------------------------------- Live analytical assessment
 
+    # ---------------------------------------------------------------- Flow-graph cache
+
+    # ---------------------------------------------------------------- Persistence
+
+    _PROJECT_SCOPE = "TerrainFlow"
+    _PROJECT_KEY = "earthworks"
+
+    def save_to_project(self):
+        """Write the current design into the QGIS project file.
+
+        Without this the whole design was lost on restart: earthworks lived only in
+        an in-memory list, and the map layers mirrored 5 of ~16 fields, so even a
+        saved project could not reconstruct them.
+        """
+        try:
+            manager = self._state.earthwork_manager
+            if manager is None:
+                return
+            self._project.instance().writeEntry(
+                self._PROJECT_SCOPE, self._PROJECT_KEY, manager.to_json())
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not save earthworks: {exc}")
+
+    def load_from_project(self):
+        """Restore the design stored by :meth:`save_to_project`."""
+        try:
+            text, ok = self._project.instance().readEntry(
+                self._PROJECT_SCOPE, self._PROJECT_KEY, "")
+            if not ok or not text:
+                return 0
+            return self.restore_earthworks_from_json(text, source="the project")
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not load earthworks: {exc}")
+            return 0
+
+    def restore_earthworks_from_json(self, text, source=None):
+        """Replace the design with the one in *text* and bring the UI back in step.
+
+        Shared by the QGIS-project hook and the portable design file so both restore
+        paths refresh exactly the same things — a design that renders but never
+        re-labels, or re-labels but never re-scores, is the failure mode this avoids.
+
+        *source* names where the design came from, for the confirmation message; pass
+        ``None`` when the caller reports success itself.
+        """
+        try:
+            manager = self._state.earthwork_manager
+            if manager is None:
+                return 0
+
+            n = manager.from_json(text)
+            if not n:
+                return 0
+
+            self._panel.refresh_earthwork_list(manager.get_all())
+            self._refresh_ew_layer()
+            self._refresh_spillway_layer()
+            # Both are safe before a baseline exists: catchment labelling needs the flow
+            # graph and quietly does nothing without it, and the live assessment already
+            # has a no-flow branch that reports geometry only.
+            self.recompute_catchments()
+            self._recompute_live_assessment()
+            if source:
+                self._iface.messageBar().pushInfo(
+                    "TerrainFlow Assessment",
+                    f"Restored {n} earthwork{'s' if n != 1 else ''} from {source}.",
+                )
+            return n
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not restore earthworks: {exc}")
+            return 0
+
+    def _ensure_flow_graph(self):
+        """Build (once per DEM) the steepest-descent pointers over the conditioned DEM.
+
+        Cached because it costs ~0.4 s on a 285 ha 1 m site and depends only on the
+        terrain — not on the storm, and not on the earthworks.
+        """
+        if self._state.flow_next is not None:
+            return True
+        baseline = self._state.baseline_result or {}
+        cond_path = baseline.get("conditioned_dem")
+        if not cond_path or not os.path.exists(cond_path):
+            return False
+
+        try:
+            import numpy as np
+            import rasterio
+
+            from terrainflow_assessment.modules.flow_graph import d8_from_dem
+
+            with rasterio.open(cond_path) as src:
+                dem = src.read(1).astype("float32")
+                transform = src.transform
+                nodata = src.nodata
+            cell_w, cell_h = abs(transform.a), abs(transform.e)
+
+            next_flat, is_sink = d8_from_dem(dem, cell_w, cell_h, nodata=nodata)
+
+            domain = None
+            dom_path = baseline.get("domain_mask")
+            if dom_path and os.path.exists(dom_path):
+                with rasterio.open(dom_path) as src:
+                    domain = src.read(1) > 0.5
+            if domain is None or domain.shape != dem.shape:
+                domain = np.ones(dem.shape, dtype=bool)
+
+            self._state.flow_next = next_flat
+            self._state.flow_sink = is_sink
+            self._state.flow_dem = dem
+            self._state.flow_domain_mask = domain
+            self._state.flow_grid_meta = {
+                "shape": dem.shape,
+                "transform": transform,
+                "cell_area_m2": cell_w * cell_h,
+                "cell_size_m": (cell_w + cell_h) / 2.0,
+                "nodata": nodata,
+            }
+            return True
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — flow graph error: {exc}")
+            return False
+
+    def recompute_catchments(self):
+        """Label every site cell with the earthwork that first intercepts its runoff.
+
+        Storm-independent, so this only runs when geometry changes — a storm-slider
+        change re-scores from the cached cell counts in milliseconds. Measured at
+        ~0.3 s for 2.9 M cells, which is why it runs inline rather than on a thread.
+        """
+        self._state.invalidate_catchment_cache()
+        if not self._ensure_flow_graph():
+            return False
+
+        try:
+            import numpy as np
+
+            from terrainflow_assessment.modules.flow_graph import (
+                LABEL_NONE,
+                label_direct_catchments,
+            )
+            from terrainflow_assessment.modules.footprint import (
+                outlet_cell,
+                rasterize_footprint,
+            )
+
+            meta = self._state.flow_grid_meta
+            shape, transform = meta["shape"], meta["transform"]
+            dem = self._state.flow_dem
+
+            interceptors = np.full(shape, LABEL_NONE, dtype=np.int32)
+            label_ids, outlets = [], {}
+
+            for ew in self._state.earthwork_manager.get_all():
+                if not ew.enabled:
+                    continue
+                shp = self._shapely_of(ew)
+                if shp is None:
+                    continue
+                # Lines are conveyances with real width — buffer to their footprint so
+                # a swale intercepts the cells it actually crosses, not a 1-cell thread.
+                if shp.geom_type in ("LineString", "MultiLineString"):
+                    shp = shp.buffer(max(getattr(ew, "top_width_m", 1.0), 0.1) / 2.0)
+                mask = rasterize_footprint(shp, shape, transform)
+                if not mask.any():
+                    continue
+                label = len(label_ids)
+                interceptors[mask] = label
+                label_ids.append(ew.id)
+                rc = outlet_cell(dem, mask, nodata=meta.get("nodata"))
+                if rc is not None:
+                    outlets[ew.id] = int(rc[0]) * shape[1] + int(rc[1])
+
+            res = label_direct_catchments(
+                self._state.flow_next, interceptors, self._state.flow_domain_mask,
+                is_sink=self._state.flow_sink,
+            )
+
+            self._state.catchment_labels = res.labels
+            self._state.catchment_label_ids = label_ids
+            self._state.catchment_counts = {
+                ew_id: int(res.counts[i]) if i < len(res.counts) else 0
+                for i, ew_id in enumerate(label_ids)
+            }
+            self._state.catchment_exit_cells = res.exit_cells
+            self._state.catchment_sink_cells = res.sink_cells
+            self._state.catchment_outlets = outlets
+            if not res.is_exhaustive():
+                print("TerrainFlow Assessment — catchment labelling did not close: "
+                      f"{res.accounted} of {res.domain_cells} cells accounted for.")
+            return True
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — catchment labelling error: {exc}")
+            self._state.invalidate_catchment_cache()
+            return False
+
+    # ---------------------------------------------------------------- Dam geometry
+
+    _DAM_MAX_EXTEND_M = 250.0
+
+    def _elevation_sampler(self):
+        """Return ``f(x, y) -> elevation or None`` over the source DEM, or None."""
+        if not self._state.dem_path:
+            return None
+        try:
+            import rasterio
+            src = rasterio.open(self._state.dem_path)
+        except Exception:
+            return None
+
+        band = src.read(1)
+        t, nodata = src.transform, src.nodata
+        rows, cols = band.shape
+        src.close()
+
+        def _at(x, y):
+            col = int((x - t.c) / t.a)
+            row = int((y - t.f) / t.e)
+            if not (0 <= row < rows and 0 <= col < cols):
+                return None
+            v = float(band[row, col])
+            if nodata is not None and v == nodata:
+                return None
+            return v if v == v else None       # NaN → unknown
+
+        return _at
+
+    def _default_crest_elevation(self, geometry):
+        """Crest for a freshly drawn dam: the **highest ground the line touches**.
+
+        Previously this sampled the line's centroid and added 2 m. A dam's centroid
+        sits in the middle of the valley — its lowest point — so the default crest was
+        the valley floor plus 2 m: a low bump that water simply flowed around, however
+        the wall was drawn. Using the high point instead means the wall rises from the
+        valley floor to the level of its higher abutment, which is what "lock the
+        height at the highest point" should mean.
+        """
+        sample = self._elevation_sampler()
+        shp = None
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+            shp = shapely_shape(json.loads(geometry.asJson()))
+        except Exception:
+            return None
+        if sample is None or shp is None:
+            return None
+
+        try:
+            step = self._state.dem_info.cell_size_m if self._state.dem_info else 1.0
+            step = max(step, 0.5)
+            n = max(2, int(shp.length / step) + 1)
+            elevs = []
+            for i in range(n + 1):
+                pt = shp.interpolate(shp.length * i / n)
+                e = sample(pt.x, pt.y)
+                if e is not None:
+                    elevs.append(e)
+            return max(elevs) if elevs else None
+        except Exception:
+            return None
+
+    def _key_dam_into_banks(self, ew):
+        """Extend a dam wall at each end until the ground reaches its crest.
+
+        A wall that stops short of high ground does not impound — water goes round the
+        end. This walks outward from both endpoints until the terrain rises to the
+        crest, replacing the drawn geometry with the wall that would actually have to
+        be built. Any end that finds no high ground within
+        ``_DAM_MAX_EXTEND_M`` is reported, because the design does not work as drawn.
+        """
+        from qgis.core import QgsGeometry, QgsPointXY
+
+        from terrainflow_assessment.modules.earthwork_design import (
+            abutment_warning,
+            extend_to_abutments,
+        )
+
+        if ew.type != "dam" or ew.crest_elevation is None:
+            return False
+        sample = self._elevation_sampler()
+        if sample is None:
+            return False
+
+        shp = self._shapely_of(ew)
+        if shp is None or shp.geom_type != "LineString":
+            return False
+
+        step = self._state.dem_info.cell_size_m if self._state.dem_info else 1.0
+        coords, info = extend_to_abutments(
+            list(shp.coords), sample, ew.crest_elevation,
+            max_extend_m=self._DAM_MAX_EXTEND_M, step_m=max(step, 0.5),
+        )
+        added = info["start_m"] + info["end_m"]
+        if added > 0:
+            ew.geometry = QgsGeometry.fromPolylineXY(
+                [QgsPointXY(x, y) for x, y in coords])
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{ew.name}: wall extended {info['start_m']:.0f} m and "
+                f"{info['end_m']:.0f} m at its ends to key into the banks at "
+                f"{ew.crest_elevation:.2f} m.",
+            )
+        warn = abutment_warning(ew.name, info, ew.crest_elevation,
+                                self._DAM_MAX_EXTEND_M)
+        if warn:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", warn)
+        return added > 0
+
+    # ---------------------------------------------------------------- Peak flows
+
+    def _peak_runoff_fraction(self):
+        """Instantaneous runoff fraction for the panel's basis — the rational ``C``."""
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+        from terrainflow_assessment.modules.peak_flow import peak_runoff_fraction
+
+        scs = SCSRunoff()
+        return peak_runoff_fraction(
+            self._panel.sizing_basis,
+            rainfall_mm=self._panel.rainfall_mm,
+            coefficient=self._panel.runoff_coefficient,
+            cn=scs.adjust_cn(self._panel.cn, self._panel.moisture),
+        )
+
+    def recompute_peak_flows(self, routing=None):
+        """Per-feature peak design flow (m³/s), with upstream overflow cascaded in.
+
+        Cached on the state as ``{id: (total, from_upstream)}`` so the properties
+        dialog and the "now too small" check read the same numbers. Cheap — the
+        catchment cell counts already exist, and the basis enters as one scalar.
+        """
+        from terrainflow_assessment.modules.flow_graph import topological_order
+        from terrainflow_assessment.modules.peak_flow import (
+            rational_peak_flow,
+            upstream_contributions,
+        )
+
+        self._state.peak_flows = {}
+        counts = self._state.catchment_counts or {}
+        meta = self._state.flow_grid_meta
+        if not counts or meta is None:
+            return {}
+
+        fraction = self._peak_runoff_fraction()
+        intensity = self._panel.peak_intensity_mm_hr
+        cell_area = meta["cell_area_m2"]
+
+        direct = {
+            ew_id: rational_peak_flow(fraction, intensity, n * cell_area)
+            for ew_id, n in counts.items()
+        }
+        if routing is not None and getattr(routing, "edges", None):
+            edges = dict(routing.edges)
+        else:
+            edges = {ew.id: ew.overflow_target_id
+                     for ew in self._state.earthwork_manager.get_all()
+                     if ew.overflow_target_id}
+        for ew_id in direct:
+            edges.setdefault(ew_id, None)
+
+        order, _broken = topological_order(edges)
+        self._state.peak_flows = upstream_contributions(direct, edges, order)
+        return self._state.peak_flows
+
+    def feature_time_of_concentration(self, ew, channel_length_m=None,
+                                      hydraulic_radius_m=None):
+        """TR-55 time of concentration for *ew*'s catchment, or None.
+
+        Computed lazily rather than on every live re-assessment: the longest-path
+        traversal costs ~45 ms on a 2.8 ha catchment and ~570 ms on 50 ha, which is
+        fine on demand and would be felt during a vertex drag.
+
+        Both slope and channel length come from the *traced* path rather than from
+        catchment-wide averages. Each leg takes its slope from the actual elevation
+        profile, because hillslopes are concave and a single average is far too gentle
+        where sheet flow happens — worth about 25% of Tc, in the direction that
+        undersizes the overflow. Channel length is likewise measured, at the point
+        where contributing area first exceeds the channel threshold.
+        """
+        from terrainflow_assessment.modules.flow_graph import longest_flow_path
+        from terrainflow_assessment.modules.time_of_concentration import (
+            channel_length_from_area,
+            profile_leg_slopes,
+            split_flow_path,
+            time_of_concentration,
+        )
+
+        labels = self._state.catchment_labels
+        meta = self._state.flow_grid_meta
+        label_ids = self._state.catchment_label_ids
+        if labels is None or meta is None or ew.id not in (label_ids or []):
+            return None
+        try:
+            import numpy as np
+
+            index = list(label_ids).index(ew.id)
+            mask = labels == index
+            # Travel time is time to *reach* the feature, so the path must stop at its
+            # edge. The catchment deliberately includes the footprint (rain landing in
+            # a swale does drain into it, which is right for volume), but counting
+            # travel *within* it is wrong — a level pool shares water along its whole
+            # length the moment any arrives. Measured at 5% of Tc on a 30 m basin, and
+            # in the direction that undersizes the overflow.
+            own = self._footprint_mask(ew.geometry, getattr(ew, "top_width_m", None))
+            if own is not None:
+                trimmed = mask & ~own
+                if trimmed.any():
+                    mask = trimmed
+            if not mask.any():
+                return None
+
+            cols = meta["shape"][1]
+            cell_w = cell_h = meta["cell_size_m"]
+            transform = meta.get("transform")
+            if transform is not None:
+                cell_w, cell_h = abs(transform.a), abs(transform.e)
+
+            length_m, _visited, path = longest_flow_path(
+                self._state.flow_next, mask, cols, cell_w, cell_h, trace=True)
+            if length_m <= 0 or len(path) < 2:
+                return None
+
+            distances, elevations = self._path_profile(path, cols, cell_w, cell_h)
+
+            if channel_length_m is None:
+                channel_length_m = channel_length_from_area(
+                    distances, self._path_upstream_areas(path, meta))
+
+            slopes = profile_leg_slopes(distances, elevations,
+                                        channel_length_m=channel_length_m)
+            sheet, shallow, channel = split_flow_path(
+                length_m, slopes, channel_length_m=channel_length_m)
+
+            # The channel leg may run through the user's own drains, whose sections
+            # are known exactly, as well as natural ground where they are not. Build
+            # it as sub-segments rather than averaging that away.
+            channel_hours, runs, radius = self._channel_legs(
+                path, distances, elevations, channel_length_m,
+                override_radius_m=hydraulic_radius_m)
+
+            tc = time_of_concentration(
+                sheet, shallow, channel, p2_mm=self._sheet_flow_p2_mm(),
+                channel_hours=channel_hours,
+            )
+            tc.flow_path_m = length_m
+            tc.slope = (float(np.mean([s for s in slopes if s > 0]))
+                        if any(s > 0 for s in slopes) else 0.0)
+            tc.leg_slopes = slopes
+            tc.channel_length_m = channel_length_m
+            tc.hydraulic_radius_m = radius
+            tc.channel_runs = runs
+            return tc
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — time of concentration error: {exc}")
+            return None
+
+    def _channel_legs(self, path, distances, elevations, channel_length_m,
+                      override_radius_m=None):
+        """Channel travel time over sub-segments — ``(hours, runs, representative R)``.
+
+        Where the path crosses a swale or diversion the radius is computed from that
+        feature's entered dimensions; elsewhere it is the default farm-drain preset.
+        An explicit *override_radius_m* replaces the lot, for a user who knows better
+        than either.
+        """
+        from terrainflow_assessment.modules.time_of_concentration import (
+            DEFAULT_CHANNEL_RADIUS_M,
+            DEFAULT_CHANNEL_ROUGHNESS,
+            mixed_channel_hours,
+        )
+
+        if channel_length_m <= 0 or len(path) < 2:
+            return None, [], (override_radius_m or DEFAULT_CHANNEL_RADIUS_M)
+
+        total = distances[-1]
+        start = next((i for i, d in enumerate(distances)
+                      if d >= total - channel_length_m), 0)
+        leg_path = path[start:]
+        leg_d = [d - distances[start] for d in distances[start:]]
+        leg_z = elevations[start:]
+        if len(leg_path) < 2:
+            return None, [], (override_radius_m or DEFAULT_CHANNEL_RADIUS_M)
+
+        if override_radius_m is not None:
+            radii = [float(override_radius_m)] * len(leg_path)
+            roughs = [DEFAULT_CHANNEL_ROUGHNESS] * len(leg_path)
+        else:
+            sections = self._channel_sections_along(leg_path)
+            radii = [s[0] if s else DEFAULT_CHANNEL_RADIUS_M for s in sections]
+            roughs = [s[1] if s else DEFAULT_CHANNEL_ROUGHNESS for s in sections]
+
+        hours, runs = mixed_channel_hours(leg_d, radii, elevations_m=leg_z,
+                                          roughnesses=roughs)
+        # Report the section carrying the most length, as the single headline figure.
+        representative = DEFAULT_CHANNEL_RADIUS_M
+        if runs:
+            representative = max(runs, key=lambda r: r[0])[2]
+        return hours, runs, representative
+
+    def _channel_sections_along(self, leg_path):
+        """``(radius, roughness)`` per cell, from any swale/diversion it falls inside.
+
+        Only those two registry types carry a cross-section — a berm or dam is not
+        conveyance, and a basin is not a channel. ``None`` means natural ground.
+        """
+        from terrainflow_assessment.modules.time_of_concentration import (
+            EARTHWORK_CHANNEL_ROUGHNESS,
+            section_hydraulic_radius,
+        )
+
+        sections = []
+        for ew in self._state.earthwork_manager.get_all():
+            if not ew.enabled or ew.type not in ("swale", "diversion"):
+                continue
+            radius = section_hydraulic_radius(
+                getattr(ew, "top_width_m", None),
+                getattr(ew, "bottom_width_m", None),
+                getattr(ew, "depth", None))
+            if radius is None:
+                continue
+            mask = self._footprint_mask(ew.geometry, getattr(ew, "top_width_m", None))
+            if mask is None:
+                continue
+            sections.append((mask.ravel(), radius))
+
+        if not sections:
+            return [None] * len(leg_path)
+
+        out = []
+        for cell in leg_path:
+            hit = next((r for m, r in sections if m[cell]), None)
+            out.append((hit, EARTHWORK_CHANNEL_ROUGHNESS) if hit else None)
+        return out
+
+    def _path_profile(self, path, cols, cell_w, cell_h):
+        """``(cumulative distances, elevations)`` along a traced flow path."""
+        import math
+
+        dem_flat = self._state.flow_dem.ravel()
+        distances, elevations = [0.0], [float(dem_flat[path[0]])]
+        diag = math.hypot(cell_w, cell_h)
+        for prev, cur in zip(path, path[1:]):
+            dr = abs(cur // cols - prev // cols)
+            dc = abs(cur % cols - prev % cols)
+            step = diag if (dr == 1 and dc == 1) else (cell_h if dr == 1 else cell_w)
+            distances.append(distances[-1] + step)
+            elevations.append(float(dem_flat[cur]))
+        return distances, elevations
+
+    def _path_upstream_areas(self, path, meta):
+        """Contributing area (m²) at each cell of the path, or None without one.
+
+        Read from the baseline's flow accumulation, which is already on disk — the
+        channel transition is then measured rather than assumed.
+        """
+        try:
+            import rasterio
+
+            acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
+            if not acc_path or not os.path.exists(acc_path):
+                return None
+            with rasterio.open(acc_path) as src:
+                acc = src.read(1)
+            if acc.shape != tuple(meta["shape"]):
+                return None
+            flat = acc.ravel()
+            cell_area = meta["cell_area_m2"]
+            return [float(flat[i]) * cell_area for i in path]
+        except Exception:
+            return None
+
+    def _sheet_flow_p2_mm(self):
+        """2-year 24-hour depth from the entered rainfall data, or None."""
+        table = getattr(self._state, "idf_table", None)
+        return table.sheet_flow_p2_mm() if table is not None else None
+
+    def edit_rainfall_data(self):
+        """Open the depth-duration-frequency entry dialog and store the result."""
+        from terrainflow_assessment.modules.rainfall_idf import IDFTable
+        from terrainflow_assessment.rainfall_data_dialog import RainfallDataDialog
+
+        current = getattr(self._state, "idf_table", None) or IDFTable()
+        dlg = RainfallDataDialog(parent=self._iface.mainWindow(), table=current)
+        if not dlg.exec():
+            return
+        self._state.idf_table = dlg.get_table()
+        self.save_rainfall_data()
+        if self._state.idf_table.has_data():
+            aris = ", ".join(f"{a} yr" for a in self._state.idf_table.available_aris())
+            self._iface.messageBar().pushSuccess(
+                "TerrainFlow Assessment",
+                f"Rainfall data stored ({aris}). Use Compare on the Baseline tab to "
+                f"read an intensity at your catchment's response time.",
+            )
+
+    _RAINFALL_KEY = "idf_table"
+
+    def save_rainfall_data(self):
+        try:
+            table = getattr(self._state, "idf_table", None)
+            self._project.instance().writeEntry(
+                self._PROJECT_SCOPE, self._RAINFALL_KEY,
+                table.to_json() if table is not None else "")
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not save rainfall data: {exc}")
+
+    def load_rainfall_data(self):
+        try:
+            text, ok = self._project.instance().readEntry(
+                self._PROJECT_SCOPE, self._RAINFALL_KEY, "")
+            self.restore_rainfall_from_json(text if ok else "")
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not load rainfall data: {exc}")
+
+    def restore_rainfall_from_json(self, text):
+        """Set the IDF table from *text*, or to an empty table when there is none.
+
+        Shared by the project hook and the design file. An empty table rather than None
+        because the depth lookups treat "no data entered" as a real state and handle it —
+        leaving None would make them fail instead.
+        """
+        from terrainflow_assessment.modules.rainfall_idf import IDFTable
+        try:
+            self._state.idf_table = IDFTable.from_json(text) if text else IDFTable()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not restore rainfall data: {exc}")
+            self._state.idf_table = IDFTable()
+
+    def _provisional_peak_flow(self, catchment_m2):
+        """Peak flow for a feature being drawn but not yet in the network.
+
+        Own catchment only — it has no routing yet, so nothing spills into it. Returns
+        None when there is no catchment to work from, which leaves the dialog showing
+        "set a peak intensity" rather than a confident zero.
+        """
+        from terrainflow_assessment.modules.peak_flow import rational_peak_flow
+
+        if not catchment_m2:
+            return None
+        return rational_peak_flow(
+            self._peak_runoff_fraction(),
+            self._panel.peak_intensity_mm_hr,
+            catchment_m2,
+        )
+
+    def _peak_flow_for(self, ew):
+        """``(total_m3s, upstream_m3s)`` for one feature, or ``(None, 0.0)``."""
+        flows = getattr(self._state, "peak_flows", None) or {}
+        if ew.id not in flows:
+            return (None, 0.0)
+        own, upstream = flows[ew.id]
+        return (own + upstream, upstream)
+
+    def _using_harvesting_coefficient(self):
+        from terrainflow_assessment.modules.peak_flow import (
+            coefficient_is_harvesting_grade,
+        )
+        return coefficient_is_harvesting_grade(
+            self._panel.sizing_basis, self._panel.runoff_coefficient)
+
+    def _check_spillway_capacity(self):
+        """Warn where a *built* spillway no longer passes its design flow.
+
+        Fires after geometry or routing changes, because the usual way a sized
+        spillway becomes undersized is that someone added a feature upslope and
+        routed more through it — a change made somewhere else entirely, which the
+        user has no reason to connect to a structure they finished last week.
+        """
+        from terrainflow_assessment.modules.earthwork_design import (
+            calculate_spillway_width,
+        )
+
+        short = []
+        for ew in self._state.earthwork_manager.get_all():
+            spillway = getattr(ew, "spillway", None)
+            if spillway is None or spillway.width_auto:
+                continue          # an auto width tracks the requirement by definition
+            total, upstream = self._peak_flow_for(ew)
+            if total is None or total <= 0:
+                continue
+            required = calculate_spillway_width(total, spillway.head_m or 0.30)
+            if required > (spillway.width_m or 0.0) + 0.01:
+                short.append((ew, spillway.width_m or 0.0, required, upstream))
+
+        if not short:
+            return
+        parts = []
+        for ew, built, required, upstream in short[:3]:
+            note = f"{ew.name}: built {built:.2f} m, now needs {required:.2f} m"
+            if upstream > 0:
+                note += f" ({upstream * 1000:,.0f} L/s of that arrives from upslope)"
+            parts.append(note)
+        more = "" if len(short) <= 3 else f" (+{len(short) - 3} more)"
+        self._iface.messageBar().pushWarning(
+            "TerrainFlow Assessment",
+            "Spillway now undersized — " + "; ".join(parts) + more,
+        )
+
+    def choose_design_intensity(self):
+        """Open the peak-intensity comparison, costed against a real catchment here.
+
+        Uses the selected feature's catchment when there is one, else the largest on
+        site, so the widths quoted are ones the user will actually meet rather than a
+        worked example from a manual.
+        """
+        from terrainflow_assessment.design_intensity_dialog import DesignIntensityDialog
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        area_m2, label = 0.0, ""
+        # Initialised out here on purpose: both are read below, and scoping them
+        # inside the guard crashed the dialog with an UnboundLocalError whenever the
+        # baseline had not been run — which is exactly when a user reaches for it.
+        chosen = None
+        by_id = {}
+        counts = self._state.catchment_counts or {}
+        meta = self._state.flow_grid_meta
+        if counts and meta is not None:
+            by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+            idx = self._panel.get_selected_earthwork_index()
+            if idx is not None:
+                candidate = self._state.earthwork_manager.get(idx)
+                if candidate.id in counts:
+                    chosen = candidate.id
+            if chosen is None:
+                chosen = max(counts, key=counts.get)
+            area_m2 = counts[chosen] * meta["cell_area_m2"]
+            label = by_id[chosen].name if chosen in by_id else ""
+
+        if area_m2 <= 0:
+            # No earthworks yet — which is exactly when someone is choosing a design
+            # intensity, since the number feeds the sizing they are about to do.
+            # Costing against the whole site keeps every row a real figure instead of
+            # a column of 0.0 L/s and 0.00 m that answers nothing.
+            baseline = self._state.baseline_result or {}
+            area_m2 = float(baseline.get("domain_area_m2") or 0.0)
+            label = "whole site" if area_m2 > 0 else ""
+
+        # Time of concentration for the same catchment the widths are costed against,
+        # so the dialog can offer the duration the rational method actually asks for
+        # rather than a list of guesses.
+        tc = None
+        if chosen is not None and chosen in by_id:
+            tc = self.feature_time_of_concentration(by_id[chosen])
+
+        scs = SCSRunoff()
+        dlg = DesignIntensityDialog(
+            parent=self._iface.mainWindow(),
+            area_m2=area_m2,
+            area_label=label,
+            rainfall_mm=self._panel.rainfall_mm,
+            duration_hr=self._panel.duration_hr,
+            basis=self._panel.sizing_basis,
+            coefficient=self._panel.runoff_coefficient,
+            cn=scs.adjust_cn(self._panel.cn, self._panel.moisture),
+            current_intensity=self._panel.peak_intensity_mm_hr,
+            travel_time=tc,
+            idf_table=getattr(self._state, "idf_table", None),
+        )
+        if dlg.exec():
+            self._panel.set_peak_intensity(dlg.get_intensity())
+
+    def compute_area_subtotals(self):
+        """Break the live balance down by sub-catchment — your "smaller areas".
+
+        Partitions the *same* cell-exact labelling the headline uses. Deliberately
+        not built from ``area_outflow``: that is a 3x3 max-pooled boundary-crossing
+        sum which cannot reconcile with a cell-exact balance, and two disagreeing
+        "water leaving" numbers in one panel would be worse than one.
+        """
+        from terrainflow_assessment.modules.water_balance import area_subtotals
+
+        labels = self._state.catchment_labels
+        meta = self._state.flow_grid_meta
+        domain = self._state.flow_domain_mask
+        if labels is None or meta is None or domain is None:
+            return []
+        try:
+            polygons = (self._state.baseline_result or {}).get("catchments")
+            if not polygons:
+                return []
+            masks = {}
+            for i, poly in enumerate(polygons):
+                shp = self._shapely_of_polygon(poly)
+                if shp is None:
+                    continue
+                mask = self._footprint_mask_from_shapely(shp)
+                if mask is None or not mask.any():
+                    continue
+                label = (poly.get("label") if isinstance(poly, dict) else None)
+                masks[label or f"Catchment {i + 1}"] = mask
+            if not masks:
+                return []
+            return area_subtotals(labels, domain, masks,
+                                  meta["cell_area_m2"], self._current_runoff_mm())
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — area subtotals error: {exc}")
+            return []
+
+    def _shapely_of_polygon(self, poly):
+        """Shapely geometry from a sub-catchment entry (WKT, mapping, or geometry)."""
+        try:
+            from shapely.geometry import shape as shapely_shape
+            if hasattr(poly, "asJson"):
+                import json
+                return shapely_shape(json.loads(poly.asJson()))
+            if isinstance(poly, dict):
+                return shapely_shape(poly.get("geometry", poly))
+            if isinstance(poly, str):
+                from shapely import wkt
+                return wkt.loads(poly)
+            return poly if hasattr(poly, "geom_type") else None
+        except Exception:
+            return None
+
+    def _footprint_mask_from_shapely(self, shp):
+        meta = self._state.flow_grid_meta
+        if meta is None or shp is None:
+            return None
+        try:
+            from terrainflow_assessment.modules.footprint import rasterize_footprint
+            return rasterize_footprint(shp, meta["shape"], meta["transform"])
+        except Exception:
+            return None
+
+    # ---------------------------------------------------------------- Inflow profile
+
+    _PROFILE_MAX_CELLS = 20_000
+
+    def feature_inflow_profile(self, ew, runoff_mm=None):
+        """Where along a linear feature its catchment actually arrives.
+
+        The lumped "total capacity vs total inflow" verdict is only safe because a
+        level swale shares water along its whole length. Where inflow is concentrated
+        — a drainage line crossing the alignment — a swale with adequate *total*
+        capacity can still overtop locally, and the headline number will not say so.
+
+        Each catchment cell is attributed to its nearest point along the centreline.
+        That is an approximation of where its flow path actually crosses: exact for a
+        contour swale, where runoff runs perpendicular to the alignment, and looser as
+        the line departs from the contour. Tracing every cell's path instead would be
+        another full traversal for a refinement the profile's shape does not need.
+
+        Returns the profile dict from :func:`swale_design.inflow_profile`, or None.
+        """
+        from terrainflow_assessment.modules.swale_design import inflow_profile
+
+        labels = self._state.catchment_labels
+        meta = self._state.flow_grid_meta
+        label_ids = self._state.catchment_label_ids or []
+        if labels is None or meta is None or ew.id not in label_ids:
+            return None
+        if ew.type not in ("swale", "diversion", "berm"):
+            return None                      # a polygon has no alignment to profile
+        try:
+            import numpy as np
+
+            line = self._shapely_of(ew)
+            if line is None or line.length <= 0:
+                return None
+
+            mask = labels == list(label_ids).index(ew.id)
+            rows, cols = np.nonzero(mask)
+            if rows.size == 0:
+                return None
+
+            # Subsample very large catchments: the profile's shape is what matters,
+            # and every retained cell is scaled up so the total stays exact.
+            scale = 1.0
+            if rows.size > self._PROFILE_MAX_CELLS:
+                stride = int(np.ceil(rows.size / self._PROFILE_MAX_CELLS))
+                rows, cols = rows[::stride], cols[::stride]
+                scale = float(stride)
+
+            transform = meta["transform"]
+            xs = transform.c + (cols + 0.5) * transform.a
+            ys = transform.f + (rows + 0.5) * transform.e
+
+            from shapely.geometry import Point
+            distances = [line.project(Point(float(x), float(y)))
+                         for x, y in zip(xs, ys)]
+
+            if runoff_mm is None:
+                runoff_mm = self._current_runoff_mm()
+            per_cell = meta["cell_area_m2"] * runoff_mm / 1000.0 * scale
+            volumes = [per_cell] * len(distances)
+
+            return inflow_profile(distances, volumes, line.length)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — inflow profile error: {exc}")
+            return None
+
+    def feature_overtopping(self, ew, profile=None):
+        """``(station_m, surplus_m3)`` where a linear feature overtops, or (None, 0)."""
+        from terrainflow_assessment.modules.swale_design import overtopping_station
+
+        if profile is None:
+            profile = self.feature_inflow_profile(ew)
+        if not profile:
+            return None, 0.0
+        length = getattr(ew, "length_m", 0.0) or 0.0
+        capacity = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
+        if length <= 0 or capacity <= 0:
+            return None, 0.0
+        # capacity_m3 already carries the freeboard allowance, so pass 1.0 rather than
+        # discounting it twice.
+        return overtopping_station(profile, capacity / length, freeboard=1.0)
+
+    def refresh_stress_points_layer(self):
+        """Mark where features overtop, on the map beside the problem.
+
+        A station along an existing alignment, so this costs one interpolate per
+        feature. It is the visible counterpart to the lumped headline: "adequate
+        overall, but it goes over the side 40 m from the east end".
+        """
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        remove_layer(self._project, self._state.stress_points_layer_id)
+        self._state.stress_points_layer_id = None
+
+        feats = []
+        try:
+            from qgis.core import QgsMarkerSymbol
+
+            for ew in self._state.earthwork_manager.get_all():
+                if not ew.enabled or ew.type not in ("swale", "diversion"):
+                    continue
+                profile = self.feature_inflow_profile(ew)
+                station, surplus = self.feature_overtopping(ew, profile)
+                if station is None:
+                    continue
+                point = ew.geometry.interpolate(float(station))
+                if point is None or point.isEmpty():
+                    continue
+                f = QgsFeature()
+                f.setGeometry(point)
+                f.setAttributes([
+                    ew.name, round(float(station), 1), round(float(surplus), 1),
+                    f"{ew.name} · overtops at {station:,.0f} m · +{surplus:,.0f} m³",
+                ])
+                feats.append(f)
+
+            if not feats:
+                return
+
+            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            layer = QgsVectorLayer(f"Point?crs={crs}", "Stress points", "memory")
+            pr = layer.dataProvider()
+            pr.addAttributes([
+                QgsField("name", QMetaType.QString),
+                QgsField("station_m", QMetaType.Double),
+                QgsField("surplus_m3", QMetaType.Double),
+                QgsField("label", QMetaType.QString),
+            ])
+            layer.updateFields()
+            pr.addFeatures(feats)
+            layer.updateExtents()
+
+            symbol = QgsMarkerSymbol.createSimple({
+                "name": "equilateral_triangle", "size": "4.5",
+                "color": "#b9770e", "outline_color": "#ffffff",
+                "outline_width": "0.4",
+            })
+            layer.renderer().setSymbol(symbol)
+
+            settings = QgsPalLayerSettings()
+            settings.fieldName = "label"
+            fmt = QgsTextFormat()
+            fmt.setSize(8)
+            settings.setFormat(fmt)
+            settings.placement = QgsPalLayerSettings.AroundPoint
+            layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+            layer.setLabelsEnabled(True)
+
+            self._project.instance().addMapLayer(layer)
+            self._state.stress_points_layer_id = layer.id()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — stress points layer error: {exc}")
+
+    def _footprint_mask(self, geometry, top_width_m=None):
+        """Rasterise a geometry onto the flow grid, buffering lines to their width."""
+        meta = self._state.flow_grid_meta
+        if meta is None:
+            return None
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+
+            from terrainflow_assessment.modules.footprint import rasterize_footprint
+
+            shp = shapely_shape(json.loads(geometry.asJson()))
+            if shp.geom_type in ("LineString", "MultiLineString"):
+                shp = shp.buffer(max(top_width_m or 1.0, 0.1) / 2.0)
+            mask = rasterize_footprint(shp, meta["shape"], meta["transform"])
+            return mask if mask.any() else None
+        except Exception:
+            return None
+
+    def _spillway_datums(self, geometry, ew_type, top_width_m=None, depth=None,
+                         crest_elevation=None):
+        """``(rim, invert)`` for the spillway controls — the two levels a crest sits between.
+
+        *rim* is the lowest containing ground: where the feature would spill if
+        nothing were built. For a dam that is the wall crest, because the wall
+        **is** the containment — using the natural pour point there would sample the
+        valley floor the dam is holding back and give a rim below the design water
+        level.
+
+        *invert* is the floor. For a cut feature that is the level-invert datum the
+        burn uses (pour point − depth), so the dialog and the DEM agree; for a dam
+        it is the lowest ground the wall touches.
+        """
+        if not self._ensure_flow_graph():
+            return (None, None)
+        dem = self._state.flow_dem
+        mask = self._footprint_mask(geometry, top_width_m)
+        if dem is None or mask is None:
+            return (None, None)
+        try:
+            from terrainflow_assessment.modules.footprint import pour_point
+
+            natural_rim, _cell = pour_point(
+                dem, mask, nodata=self._state.flow_grid_meta.get("nodata"))
+            if natural_rim is None:
+                return (None, None)
+            natural_rim = float(natural_rim)
+
+            if ew_type == "dam":
+                floor = float(dem[mask].min())
+                rim = float(crest_elevation) if crest_elevation is not None else natural_rim
+                return (rim, floor)
+
+            drop = float(depth) if depth else 0.0
+            return (natural_rim, natural_rim - drop)
+        except Exception:
+            return (None, None)
+
+    def _shapely_of(self, ew):
+        """Shapely geometry for an earthwork, or None."""
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+            return shapely_shape(json.loads(ew.geometry.asJson()))
+        except Exception:
+            return None
+
+    def _make_walker(self):
+        """Return ``walker(store) -> target_id`` following the real flow path.
+
+        Walks downslope from the feature's outlet cell until it enters another
+        earthwork's footprint or leaves the site — replacing the old rule of "the
+        highest feature below this one", which linked features across ridges.
+        """
+        labels = self._state.catchment_labels
+        outlets = self._state.catchment_outlets
+        label_ids = self._state.catchment_label_ids
+        if labels is None or not label_ids:
+            return None
+
+        import numpy as np
+
+        from terrainflow_assessment.modules.flow_graph import LABEL_NONE, walk_downslope
+
+        # The catchment raster says who *receives* a cell; for the walk we need who
+        # *occupies* it, so rebuild the interceptor footprints from the label ids.
+        shape = self._state.flow_grid_meta["shape"]
+        interceptors = np.full(shape, LABEL_NONE, dtype=np.int32)
+        from terrainflow_assessment.modules.footprint import rasterize_footprint
+        transform = self._state.flow_grid_meta["transform"]
+        index_of = {}
+        for ew in self._state.earthwork_manager.get_all():
+            if ew.id not in outlets and ew.id not in label_ids:
+                continue
+            if not ew.enabled:
+                continue
+            shp = self._shapely_of(ew)
+            if shp is None:
+                continue
+            if shp.geom_type in ("LineString", "MultiLineString"):
+                shp = shp.buffer(max(getattr(ew, "top_width_m", 1.0), 0.1) / 2.0)
+            mask = rasterize_footprint(shp, shape, transform)
+            if not mask.any():
+                continue
+            idx = len(index_of)
+            interceptors[mask] = idx
+            index_of[ew.id] = idx
+        by_index = {v: k for k, v in index_of.items()}
+        inter_flat = interceptors.ravel()
+        next_flat = self._state.flow_next
+
+        def walker(store):
+            start = outlets.get(store.id)
+            if start is None:
+                return None
+            label, _ = walk_downslope(
+                next_flat, start, inter_flat,
+                skip_label=index_of.get(store.id, LABEL_NONE),
+            )
+            return by_index.get(label) if label is not None else None
+
+        return walker
+
+    def feature_inflow_m3(self, ew, runoff_mm=None):
+        """Event runoff arriving at *ew* from its own direct catchment (m³).
+
+        Read straight from the cached cell counts — no raster sampling — so the
+        properties dialog can show it on both the create and the edit path.
+        """
+        counts = self._state.catchment_counts or {}
+        meta = self._state.flow_grid_meta
+        if not counts or meta is None or ew.id not in counts:
+            return 0.0
+        if runoff_mm is None:
+            runoff_mm = self._current_runoff_mm()
+        return counts[ew.id] * meta["cell_area_m2"] * runoff_mm / 1000.0
+
+    def _provisional_catchment(self, ew_type, geometry, top_width_m=None):
+        """Direct catchment of a feature that is being drawn but not yet added.
+
+        Labels the site with the existing earthworks *plus* this candidate, so the
+        properties dialog opens with the inflow the feature will actually receive —
+        already net of whatever upslope features intercept first. Returns
+        ``(inflow_m3, catchment_m2)``, or ``(0.0, 0.0)`` without a baseline.
+        """
+        if not self._ensure_flow_graph():
+            return 0.0, 0.0
+        try:
+            import json
+
+            import numpy as np
+            from shapely.geometry import shape as shapely_shape
+
+            from terrainflow_assessment.modules.flow_graph import (
+                LABEL_NONE,
+                label_direct_catchments,
+            )
+            from terrainflow_assessment.modules.footprint import rasterize_footprint
+
+            meta = self._state.flow_grid_meta
+            shape, transform = meta["shape"], meta["transform"]
+            interceptors = np.full(shape, LABEL_NONE, dtype=np.int32)
+
+            def _foot(shp, width):
+                if shp.geom_type in ("LineString", "MultiLineString"):
+                    shp = shp.buffer(max(width or 1.0, 0.1) / 2.0)
+                return rasterize_footprint(shp, shape, transform)
+
+            label = 0
+            for ew in self._state.earthwork_manager.get_all():
+                if not ew.enabled:
+                    continue
+                shp = self._shapely_of(ew)
+                if shp is None:
+                    continue
+                mask = _foot(shp, getattr(ew, "top_width_m", 1.0))
+                if mask.any():
+                    interceptors[mask] = label
+                    label += 1
+
+            candidate = shapely_shape(json.loads(geometry.asJson()))
+            if top_width_m is None:
+                try:
+                    top_width_m = get_type(ew_type).default_top_width
+                except KeyError:
+                    top_width_m = 1.0
+            cand_mask = _foot(candidate, top_width_m)
+            if not cand_mask.any():
+                return 0.0, 0.0
+            interceptors[cand_mask] = label
+
+            res = label_direct_catchments(
+                self._state.flow_next, interceptors, self._state.flow_domain_mask,
+                is_sink=self._state.flow_sink,
+            )
+            cells = int(res.counts[label]) if label < len(res.counts) else 0
+            area = cells * meta["cell_area_m2"]
+            return area * self._current_runoff_mm() / 1000.0, area
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — provisional catchment error: {exc}")
+            return 0.0, 0.0
+
+    def feature_catchment_m2(self, ew):
+        """Direct contributing area of *ew* (m²), or 0 when unlabelled."""
+        counts = self._state.catchment_counts or {}
+        meta = self._state.flow_grid_meta
+        if not counts or meta is None or ew.id not in counts:
+            return 0.0
+        return counts[ew.id] * meta["cell_area_m2"]
+
+    def _current_runoff_mm(self):
+        """Depth of water to size against, per the panel's sizing basis.
+
+        'rainfall' treats every millimetre falling on a feature's catchment as
+        arriving at it. That is not what happens hydrologically — much of it soaks in
+        where it lands — but it is how earthworks are sized in the field, and it is
+        the safe side of a very sensitive assumption: at CN 61 in normal conditions
+        SCS-CN passes only 26% of a 120 mm storm, while the same ground on wet
+        antecedent conditions passes 53%, and at CN 80 wet, 77%. Sizing on the low
+        figure and being wrong by that margin means a breached swale.
+
+        'runoff' uses the SCS-CN surface runoff depth — physically the right answer
+        for what reaches a feature, and appropriate once the curve number and
+        antecedent condition are known for the site rather than assumed.
+        """
+        from terrainflow_assessment.modules.catchment import (
+            SCSRunoff,
+            coefficient_runoff_depth,
+        )
+        basis = self._panel.sizing_basis
+        if basis == "rainfall":
+            return self._panel.rainfall_mm
+        if basis == "coefficient":
+            return coefficient_runoff_depth(
+                self._panel.rainfall_mm, self._panel.runoff_coefficient)
+        scs = SCSRunoff()
+        return scs.runoff_depth(
+            self._panel.rainfall_mm,
+            scs.adjust_cn(self._panel.cn, self._panel.moisture),
+        )
+
+    def _runoff_basis_note(self):
+        """One line naming the sizing basis and what it costs or buys."""
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+        scs = SCSRunoff()
+        rain = self._panel.rainfall_mm or 0.0
+        if rain <= 0:
+            return ""
+        cn = scs.adjust_cn(self._panel.cn, self._panel.moisture)
+        runoff = scs.runoff_depth(rain, cn)
+        coeff = runoff / rain if rain else 0.0
+        basis = self._panel.sizing_basis
+        if basis == "coefficient":
+            c = self._panel.runoff_coefficient
+            return (
+                f"Working from {rain * c:.0f} mm — {c:.2f} of the {rain:.0f} mm storm "
+                f"(rational method, Lancaster). SCS-CN at CN {cn:.0f} "
+                f"({self._panel.moisture}) would give {runoff:.0f} mm ({coeff:.0%}); "
+                f"the full rainfall would give {rain:.0f} mm."
+            )
+        if basis == "rainfall":
+            return (
+                f"Working from the full {rain:.0f} mm of rainfall — every millimetre "
+                f"assumed to run off. That is above Lancaster's metal-roof coefficient "
+                f"(0.95) and no established method sizes a landscape catchment this "
+                f"way; SCS-CN at CN {cn:.0f} ({self._panel.moisture}) would give "
+                f"{runoff:.0f} mm ({coeff:.0%})."
+            )
+        return (
+            f"<span style='color:#b9770e;'>Working from {runoff:.0f} mm of surface "
+            f"runoff — {coeff:.0%} of the {rain:.0f} mm storm. Curve number and "
+            f"antecedent moisture swing this by 3–4×; wetter ground or a higher CN "
+            f"would demand far larger features.</span>"
+        )
+
+    # ---------------------------------------------------------------- Live assessment
+
     def _recompute_live_assessment(self):
         """Design-tier: recompute the live analytical water balance → panel readout.
 
         Fast, no burn. Geometry metrics (capacity/cut/fill) always; storm capture %
-        once a baseline (flow accumulation) exists. Runoff is recomputed live from the
-        current storm/soil inputs, so the score reacts without re-running baseline.
+        once a baseline exists. Everything storm-dependent is arithmetic over the
+        cached catchment cell counts, so this stays responsive while dragging.
         Fires on every earthwork edit and storm/soil change; failures are swallowed so
         the readout never breaks the edit flow.
         """
         try:
-            from terrainflow_assessment.modules.catchment import SCSRunoff
-            from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+            from terrainflow_assessment.modules.simulation import (
+                build_stores_from_earthworks,
+                resolve_targets,
+            )
             from terrainflow_assessment.modules.water_balance import run_water_balance
 
             all_ews = self._state.earthwork_manager.get_all()
@@ -568,55 +2127,60 @@ class EarthworksController:
                 self._panel.scorecard_empty()
                 return
 
-            enabled = [
-                ew for ew in all_ews
-                if ew.enabled and getattr(ew, "capacity_m3", 0.0) > 0
-            ]
-
-            scs = SCSRunoff()
-            runoff_mm = scs.runoff_depth(
-                self._panel.rainfall_mm,
-                scs.adjust_cn(self._panel.cn, self._panel.moisture),
-            )
+            enabled = [ew for ew in all_ews if ew.enabled]
+            runoff_mm = self._current_runoff_mm()
             duration_hr = self._panel.duration_hr or 1.0
             soil = self._panel.earthwork_soil_name
 
-            baseline = self._state.baseline_result or {}
-            acc_path = baseline.get("flow_accumulation")
-            have_flow = bool(acc_path)
-            cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
-            total_runoff_m3 = (
-                runoff_mm / 1000.0 * baseline.get("catchment_area_m2", 0.0)
-                if have_flow else 0.0
-            )
+            # The catchment labels are the source of truth for who gets what water.
+            if self._state.catchment_labels is None:
+                self.recompute_catchments()
+            counts = self._state.catchment_counts or {}
+            meta = self._state.flow_grid_meta
+            have_flow = bool(counts) and meta is not None
+
+            cell_area = meta["cell_area_m2"] if have_flow else 0.0
+            runoff_m = runoff_mm / 1000.0
+            if have_flow:
+                domain_cells = int(self._state.flow_domain_mask.sum())
+                total_runoff_m3 = domain_cells * cell_area * runoff_m
+                uncaptured_m3 = (
+                    (self._state.catchment_exit_cells + self._state.catchment_sink_cells)
+                    * cell_area * runoff_m
+                )
+            else:
+                total_runoff_m3 = uncaptured_m3 = 0.0
 
             stores = build_stores_from_earthworks(
                 enabled, soil_name=soil, dem_path=self._state.dem_path
             )
-            if have_flow:
-                by_name = {s.name: s for s in stores}
-                for ew in enabled:
-                    store = by_name.get(ew.name)
-                    if store is None:
-                        continue
-                    try:
-                        # Total intercepted accumulation along the feature — a long
-                        # contour swale crosses many drainage paths; a single peak
-                        # sample under-read it by orders of magnitude.
-                        acc_cells = sample_total_inflow(ew.geometry, acc_path)
-                        store.inflow_m3 = acc_cells * cell_area * runoff_mm / 1000.0
-                    except Exception:
-                        store.inflow_m3 = 0.0
+            for store in stores:
+                cells = counts.get(store.id, 0)
+                store.direct_catchment_m2 = cells * cell_area
+                store.inflow_m3 = cells * cell_area * runoff_m
+                store.outlet_flat = self._state.catchment_outlets.get(store.id)
 
-            result = run_water_balance(stores, duration_hr, total_runoff_m3) if stores else None
+            routing = resolve_targets(stores, walker=self._make_walker())
+            # Peak rates follow the same routing as the volumes, so a link the user
+            # drew moves both the water and the spillway it has to pass.
+            self.recompute_peak_flows(routing=routing)
+            result = run_water_balance(
+                stores, duration_hr, total_runoff_m3,
+                uncaptured_m3=uncaptured_m3, routing=routing,
+                count_infiltration=self._panel.count_infiltration,
+            ) if stores else None
 
             # Flow network (Live Assessment) — every earthwork, ordered high→low.
-            from terrainflow_assessment.modules.simulation import overflow_graph
             nodes = self._build_network_nodes(all_ews, stores, result)
-            edges = overflow_graph(stores)
+            edges = {sid: (tgt, routing.is_user.get(sid, False))
+                     for sid, tgt in routing.edges.items()}
             exit_m3 = result.site_exit_m3 if result is not None else 0.0
             self._panel.set_network(nodes, edges, exit_m3)
             self._panel.set_live_assessment(self._network_footer(result))
+            self._refresh_connections_layer(result, routing)
+            self._panel.set_area_subtotals(self.compute_area_subtotals())
+            self.refresh_stress_points_layer()
+            self._check_spillway_capacity()
 
             # Persistent scorecard (Workbench header) — blue means actual water.
             if result is not None and have_flow:
@@ -632,24 +2196,33 @@ class EarthworksController:
                     "No storage yet — draw a swale, basin or dam."
                 )
         except Exception as exc:  # never let the readout break the edit flow
+            import traceback
             print(f"TerrainFlow Assessment — live assessment error: {exc}")
+            traceback.print_exc()
 
     def _build_network_nodes(self, all_ews, stores, result):
-        """Node dicts for the flow network — one per earthwork, water from the balance."""
+        """Node dicts for the flow network — one per earthwork, water from the balance.
+
+        Keyed by ``ew.id``, not name: the default name is
+        ``f"{type} {len(manager)+1}"``, counting *all* earthworks, so deleting one and
+        drawing another reproduces an existing name. Under name keying the first of the
+        pair became unreachable in the lookup dicts (its water silently read as 0) and
+        both cards rendered the same row.
+        """
         from terrainflow_assessment.core.registry.earthwork_types import get_type
 
-        store_elev = {s.name: s.elevation for s in stores}
-        per = {f["name"]: f for f in result.per_feature} if result is not None else {}
+        store_elev = {s.id: s.elevation for s in stores}
+        per = {f["id"]: f for f in result.per_feature} if result is not None else {}
         nodes = []
         for i, ew in enumerate(all_ews):
             try:
                 colour = get_type(ew.type).style[1]
             except KeyError:
                 colour = "#888888"
-            elev = store_elev.get(ew.name)
+            elev = store_elev.get(ew.id)
             if elev is None:
                 elev = self._feature_elevation(ew.geometry) or 0.0
-            f = per.get(ew.name)
+            f = per.get(ew.id)
             nodes.append({
                 "index": i,
                 "id": ew.id,
@@ -661,6 +2234,11 @@ class EarthworksController:
                 "stored_m3": f["stored_m3"] if f else 0.0,
                 "fill_pct": f["fill_pct"] if f else 0.0,
                 "overflowed": bool(f["overflowed"]) if f else False,
+                "overflow_m3": f["overflow_m3"] if f else 0.0,
+                "soaked_m3": f["infiltration_m3"] if f else 0.0,
+                "drain_hours": f.get("drain_hours") if f else None,
+                "catchment_m2": f["direct_catchment_m2"] if f else 0.0,
+                "is_terminal": bool(f["is_terminal"]) if f else True,
                 "enabled": bool(ew.enabled),
                 "has_water": f is not None,
                 "summary": ew.summary(),
@@ -671,11 +2249,271 @@ class EarthworksController:
         """Totals + disclaimer line beneath the network."""
         if result is None:
             return ""
-        return (
+        parts = [
             f"Capacity {result.total_capacity_m3:,.0f} m³ · "
             f"Cut {result.total_cut_m3:,.0f} · Fill {result.total_fill_m3:,.0f} m³"
-            "  ·  Analytical estimate — verify with Re-analyse."
-        )
+        ]
+        if result.terminal_deficit_m3 > 0:
+            parts.append(
+                f"<span style='color:#b9770e;'>{result.terminal_deficit_m3:,.0f} m³ "
+                f"overflows past the last feature — that much more storage is needed "
+                f"upslope to hold this storm.</span>"
+            )
+        if result.uncaptured_m3 > 0:
+            parts.append(
+                f"{result.uncaptured_m3:,.0f} m³ of the site drains to no feature at all."
+            )
+        if not result.counts_infiltration and result.infiltration_buffer_m3 > 1:
+            parts.append(
+                f"Sized on held volume only — a further "
+                f"{result.infiltration_buffer_m3:,.0f} m³ would soak away over the "
+                f"event, as spare capacity rather than relied-upon storage."
+            )
+        if not result.mass_balance_ok:
+            parts.append(
+                "<span style='color:#c0392b;'>Water balance does not close — the "
+                "capture figure above is unreliable. Re-run Baseline.</span>"
+            )
+        for warn in result.routing_warnings[:2]:
+            parts.append(f"<span style='color:#b9770e;'>{warn}</span>")
+        note = self._runoff_basis_note()
+        if note:
+            parts.append(note)
+        parts.append("Analytical estimate — verify with Re-analyse.")
+        return "  ·  ".join(parts)
+
+    def _refresh_connections_layer(self, result, routing):
+        """Draw the resolved overflow links on the map as arrows between features.
+
+        One line per edge, from the source's outlet toward the target, styled with the
+        existing :meth:`_arrow_line_layer` ribbon so direction is unambiguous. Solid
+        for a user-set link, dashed for one resolved from the flow path; thickness
+        scales with the volume actually routed, so a heavily-loaded link reads heavier.
+        """
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        if result is None or not routing.edges:
+            remove_layer(self._project, self._state.connections_layer_id)
+            self._state.connections_layer_id = None
+            return
+        try:
+            from qgis.core import QgsLineSymbol, QgsPointXY
+
+            by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+            per = {f["id"]: f for f in result.per_feature}
+
+            feats = []
+            for src_id, tgt_id in routing.edges.items():
+                src = by_id.get(src_id)
+                tgt = by_id.get(tgt_id) if tgt_id else None
+                row = per.get(src_id, {})
+                volume = float(row.get("overflow_m3", 0.0) or 0.0)
+                if src is None or volume <= 0:
+                    continue          # nothing actually flows along this link
+                # Anchor to the real structures where they exist. A centroid-to-
+                # centroid line says two features are linked; an outflow-to-inflow
+                # line says *where* the water crosses, which is the thing you go and
+                # build. Falls back to centroids so an unplaced pair still draws.
+                start = self._spillway_point(src, "spillway")                     or src.geometry.centroid().asPoint()
+                if tgt is not None:
+                    end = self._spillway_point(tgt, "inflow_spillway")                         or tgt.geometry.centroid().asPoint()
+                else:
+                    end = self._downslope_exit_point(src)
+                    if end is None:
+                        continue
+                f = QgsFeature()
+                f.setGeometry(QgsGeometry.fromPolylineXY(
+                    [QgsPointXY(start), QgsPointXY(end)]))
+                f.setAttributes([
+                    src.name,
+                    tgt.name if tgt is not None else "leaves site",
+                    1 if routing.is_user.get(src_id) else 0,
+                    round(volume, 1),
+                ])
+                feats.append(f)
+
+            remove_layer(self._project, self._state.connections_layer_id)
+            self._state.connections_layer_id = None
+            if not feats:
+                return
+
+            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            layer = QgsVectorLayer(f"LineString?crs={crs}", "Overflow connections", "memory")
+            pr = layer.dataProvider()
+            pr.addAttributes([
+                QgsField("from_name", QMetaType.QString),
+                QgsField("to_name", QMetaType.QString),
+                QgsField("is_user_link", QMetaType.Int),
+                QgsField("overflow_m3", QMetaType.Double),
+            ])
+            layer.updateFields()
+            pr.addFeatures(feats)
+            layer.updateExtents()
+
+            symbol = QgsLineSymbol.createSimple({"width": "0.7", "capstyle": "round"})
+            sl = symbol.symbolLayer(0)
+            sl.setColor(QColor(20, 90, 160, 220))
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyStrokeWidth,
+                QgsProperty.fromExpression(
+                    '0.6 + min("overflow_m3" / 200.0, 2.4)'),
+            )
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyStrokeStyle,
+                QgsProperty.fromExpression(
+                    'CASE WHEN "is_user_link" = 1 THEN \'solid\' ELSE \'dash\' END'),
+            )
+            arrow = self._arrow_line_layer(QColor(20, 90, 160, 220), 1.6)
+            if arrow is not None:
+                symbol.appendSymbolLayer(arrow)
+            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+            self._project.instance().addMapLayer(layer)
+            self._state.connections_layer_id = layer.id()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — connections layer error: {exc}")
+
+    def refresh_catchment_layer(self, visible=True):
+        """Render "which earthwork catches what" — one colour per feature.
+
+        The label raster is already in memory from the balance, so this costs one
+        write and a paletted renderer. It is the clearest single answer to "why is
+        my capture only 19%?": grey is ground that reaches nothing.
+        """
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        remove_layer(self._project, self._state.catchment_labels_layer_id)
+        self._state.catchment_labels_layer_id = None
+
+        labels = self._state.catchment_labels
+        meta = self._state.flow_grid_meta
+        if labels is None or meta is None or not visible:
+            return
+        try:
+            import rasterio
+            from qgis.core import QgsPalettedRasterRenderer
+
+            from terrainflow_assessment.modules.flow_graph import LABEL_EXIT
+
+            path = os.path.join(self._state.output_dir, "catchment_labels.tif")
+            with rasterio.open(
+                path, "w", driver="GTiff", dtype="int16", nodata=-1,
+                crs=self._state.dem_info.crs if self._state.dem_info else None,
+                transform=meta["transform"],
+                width=meta["shape"][1], height=meta["shape"][0],
+                count=1, compress="lzw",
+            ) as dst:
+                dst.write(labels.astype("int16"), 1)
+
+            layer = QgsRasterLayer(path, "Catchment by earthwork")
+            if not layer.isValid():
+                return
+
+            by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+            classes = []
+            for i, ew_id in enumerate(self._state.catchment_label_ids):
+                ew = by_id.get(ew_id)
+                if ew is None:
+                    continue
+                try:
+                    colour = QColor(get_type(ew.type).style[1])
+                except KeyError:
+                    colour = QColor("#888888")
+                colour.setAlpha(150)
+                classes.append(QgsPalettedRasterRenderer.Class(i, colour, ew.name))
+            classes.append(QgsPalettedRasterRenderer.Class(
+                LABEL_EXIT, QColor(150, 150, 150, 110), "leaves site"))
+
+            if not classes:
+                return
+            layer.setRenderer(
+                QgsPalettedRasterRenderer(layer.dataProvider(), 1, classes))
+            self._project.instance().addMapLayer(layer)
+            self._state.catchment_labels_layer_id = layer.id()
+            self._canvas.refresh()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — catchment layer error: {exc}")
+
+    def toggle_catchment_layer(self, visible):
+        """Show/hide the direct-catchment layer from the panel."""
+        self.refresh_catchment_layer(visible=visible)
+
+    def highlight_selected_earthwork(self, index):
+        """Outline the selected feature on the canvas.
+
+        With five swales in the list there was no way to tell which row referred to
+        which line on the map. A rubber band rather than layer selection: it survives
+        the layer being rebuilt on every edit, and does not disturb whatever the user
+        has selected for their own purposes.
+        """
+        from qgis.gui import QgsRubberBand
+
+        band = getattr(self, "_selection_band", None)
+        if band is None:
+            from qgis.core import QgsWkbTypes
+            geom_type = QgsWkbTypes.LineGeometry
+            band = QgsRubberBand(self._canvas, geom_type)
+            band.setColor(QColor(46, 125, 85, 220))
+            band.setWidth(4)
+            self._selection_band = band
+
+        band.reset(band.geometryType())
+        if index is None:
+            self._canvas.refresh()
+            return
+        try:
+            ew = self._state.earthwork_manager.get(index)
+        except (IndexError, AttributeError):
+            return
+        try:
+            # A polygon footprint is outlined rather than filled, so the highlight
+            # never hides the ponding raster underneath it.
+            band.setToGeometry(ew.geometry.constGet().boundary()
+                               if ew.geometry.type() == 2 else ew.geometry, None)
+        except Exception:
+            try:
+                band.setToGeometry(ew.geometry, None)
+            except Exception:
+                return
+        self._canvas.refresh()
+
+    def _spillway_point(self, ew, attr):
+        """The placed point of one of *ew*'s spillways, or None if not sited."""
+        spillway = getattr(ew, attr, None)
+        if spillway is None or not spillway.point_wkt:
+            return None
+        try:
+            geom = QgsGeometry.fromWkt(spillway.point_wkt)
+            if geom is None or geom.isEmpty():
+                return None
+            return geom.asPoint()
+        except Exception:
+            return None
+
+    def _downslope_exit_point(self, ew):
+        """Where a terminal feature's overflow heads — a short stub down the flow path."""
+        try:
+            meta = self._state.flow_grid_meta
+            start = self._state.catchment_outlets.get(ew.id)
+            if meta is None or start is None:
+                return None
+            next_flat = self._state.flow_next
+            cols = meta["shape"][1]
+            transform = meta["transform"]
+            cur = int(start)
+            for _ in range(40):           # a short, legible stub, not the whole path
+                nxt = int(next_flat[cur])
+                if nxt == cur:
+                    break
+                cur = nxt
+            row, col = divmod(cur, cols)
+            from qgis.core import QgsPointXY
+            return QgsPointXY(
+                transform.c + (col + 0.5) * transform.a,
+                transform.f + (row + 0.5) * transform.e,
+            )
+        except Exception:
+            return None
 
     # ---------------------------------------------------------------- Earthwork layers
 
@@ -982,16 +2820,44 @@ class EarthworksController:
         msg = "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
         v = self._state.verification
         if v is not None:
-            msg += (
-                f"\nTerrain-derived storage {v.terrain_total_m3:,.0f} m³ vs analytic "
-                f"{v.analytic_total_m3:,.0f} m³ (Δ {v.delta_pct:+.0f}%)."
-            )
+            msg += "\n" + self.verification_sentence(v)
         self._panel.set_earthworks_complete(msg)
+
+        # Per-feature breakdown in the Verify stage. The chip carries one site-wide
+        # delta, which cannot distinguish a burn error from the freeboard allowance.
+        cell = self._state.dem_info.cell_size_m if self._state.dem_info else 1.0
+        self._panel.set_verification(v, cell_size_m=cell)
 
         # The design is now verified against a burn — reset the drift counter.
         self._state.edits_since_verify = 0
         self._state.verified_delta_pct = v.delta_pct if v is not None else None
         self._update_verified_chip()
+
+    def verification_sentence(self, v):
+        """Explain the verification delta in words.
+
+        "Verified · Δ −38%" said nothing about what was being compared or what the
+        user should do. The delta now measures **only** the burn — measured ponding
+        against what the grid can represent — with freeboard and resolution reported
+        as separate, expected differences rather than folded into the same number.
+        """
+        if v is None:
+            return ""
+        freeboard = sum(f.get("freeboard_m3", 0.0) for f in v.per_feature)
+        penalty = sum(f.get("resolution_penalty_m3", 0.0) for f in v.per_feature)
+        reference = sum(f.get("rasterisable_m3", 0.0) for f in v.per_feature)
+
+        parts = [
+            f"Δ {v.delta_pct:+.0f}% — measured storage {v.terrain_total_m3:,.0f} m³ "
+            f"against the {reference:,.0f} m³ this grid can represent."
+        ]
+        if abs(freeboard) > 1:
+            parts.append(f"Freeboard accounts for a further {freeboard:,.0f} m³ "
+                         f"deliberately kept empty.")
+        if abs(penalty) > 1:
+            parts.append(f"Grid resolution shifts the drawn shape by "
+                         f"{penalty:+,.0f} m³.")
+        return " ".join(parts)
 
     def _compute_verification(self):
         """Reconcile terrain-derived ponding (burned DEM) against analytic capacity (§4).
@@ -1004,9 +2870,13 @@ class EarthworksController:
 
         import numpy as np
         import rasterio
-        from rasterio.features import rasterize as _rasterize
         from shapely.geometry import shape as _shp
 
+        from terrainflow_assessment.modules.earthwork_design import capacity_breakdown
+        from terrainflow_assessment.modules.footprint import (
+            min_dimension,
+            rasterize_footprint,
+        )
         from terrainflow_assessment.modules.reporting import (
             attribute_ponding_volume,
             build_verification,
@@ -1051,26 +2921,44 @@ class EarthworksController:
 
         analytic_by_name = {}
         min_dims = {}
+        breakdowns = {}
         footprints = []
         for ew in self._state.earthwork_manager.get_enabled():
             if getattr(ew, "capacity_m3", 0.0) <= 0:
                 continue
             analytic_by_name[ew.name] = ew.capacity_m3
-            # Sub-cell check keys off the channel bottom width; polygons never sub-cell.
-            min_dims[ew.name] = (
-                getattr(ew, "bottom_width_m", None) if ew.type == "swale" else None
-            )
+            # Sub-cell check: channels key off the bottom width, polygons off their
+            # equivalent strip width. Basins previously passed None, so a footprint
+            # smaller than a cell still claimed its full analytic volume unflagged.
             try:
                 geom = _shp(json.loads(ew.geometry.asJson()))
-                if geom.geom_type in ("LineString", "MultiLineString"):
-                    geom = geom.buffer(max(getattr(ew, "width", 2.0) / 2.0, cell_size))
-                mask = _rasterize(
-                    [(geom, 1)], out_shape=shape, transform=transform,
-                    fill=0, dtype="uint8",
-                ).astype(bool)
-                footprints.append((ew.name, mask))
             except Exception:
-                footprints.append((ew.name, np.zeros(shape, dtype=bool)))
+                geom = None
+            if ew.type == "swale":
+                min_dims[ew.name] = getattr(ew, "bottom_width_m", None)
+            else:
+                min_dims[ew.name] = min_dimension(geom) if geom is not None else None
+
+            mask = np.zeros(shape, dtype=bool)
+            if geom is not None:
+                try:
+                    foot = geom
+                    if foot.geom_type in ("LineString", "MultiLineString"):
+                        foot = foot.buffer(
+                            max(getattr(ew, "width", 2.0) / 2.0, cell_size))
+                    mask = rasterize_footprint(foot, shape, transform,
+                                               all_touched=True)
+                except Exception:
+                    mask = np.zeros(shape, dtype=bool)
+            footprints.append((ew.name, mask))
+
+            # What this grid can actually represent — the reference the delta is
+            # measured against, so the headline isolates burn error from cell size.
+            try:
+                breakdowns[ew.name] = capacity_breakdown(
+                    ew, cell_size=cell_size, n_cells=int(mask.sum()))
+            except Exception:
+                pass
 
         if not analytic_by_name:
             return None
@@ -1081,7 +2969,7 @@ class EarthworksController:
 
         result = build_verification(
             analytic_by_name, terrain_by_name, baseline_total, earthworks_total,
-            min_dims, cell_size,
+            min_dims, cell_size, breakdowns=breakdowns,
         )
         result.unattributed_m3 = unattributed
         return result
@@ -1241,72 +3129,151 @@ class EarthworksController:
                     node.setItemVisibilityChecked(False)
             self._canvas.refresh()
 
+    # Slope-class colour ramp shared by flow lines and slope vectors (matches the
+    # Terrain-Tools slope-class legend so the whole tab reads as one grammar).
+    _SLOPE_COLOR_EXPR = (
+        "CASE"
+        " WHEN \"slope_deg\" < 3  THEN color_rgb( 80,200, 80)"
+        " WHEN \"slope_deg\" < 8  THEN color_rgb(220,220, 30)"
+        " WHEN \"slope_deg\" < 13 THEN color_rgb(255,165,  0)"
+        " WHEN \"slope_deg\" < 18 THEN color_rgb(255,102,  0)"
+        " WHEN \"slope_deg\" < 25 THEN color_rgb(204, 34,  0)"
+        " ELSE                        color_rgb(102,  0,  0)"
+        " END"
+    )
+
     def _generate_slope_arrows(self):
         if not self._state.dem_path:
             return
         try:
-            import processing
-            import rasterio
+            from qgis.core import QgsGeometry
 
-            result = processing.run("gdal:aspect", {
-                "INPUT": self._state.dem_path,
-                "BAND": 1,
-                "TRIG_ANGLE": False,
-                "ZERO_FOR_FLAT": True,
-                "COMPUTE_EDGES": True,
-                "ZEVENBERGEN": False,
-                "OUTPUT": "TEMPORARY_OUTPUT",
-            })
-            aspect_path = result["OUTPUT"]
-            if hasattr(aspect_path, "source"):
-                aspect_path = aspect_path.source()
+            from terrainflow_assessment.modules.flow_lines import trace_flow_lines
 
-            with rasterio.open(self._state.dem_path) as src:
-                cell_size = abs(src.transform.a)
-                transform = src.transform
-
-            with rasterio.open(aspect_path) as src:
-                aspect = src.read(1).astype("float32")
-                rows, cols = aspect.shape
-
-            step = max(1, int(50.0 / cell_size))
-
-            layer = QgsVectorLayer("Point", "Slope Direction", "memory")
-            layer.setCrs(self._project.instance().crs())
+            recs = trace_flow_lines(self._state.dem_path, return_slope=True)
+            crs = self._state.dem_info.crs_wkt if self._state.dem_info else None
+            uri = f"LineString?crs={crs}" if crs else "LineString"
+            layer = QgsVectorLayer(uri, "Flow Lines", "memory")
+            if crs is None:
+                layer.setCrs(self._project.instance().crs())
             pr = layer.dataProvider()
-            pr.addAttributes([QgsField("angle", QMetaType.Double)])
+            pr.addAttributes([QgsField("slope_deg", QMetaType.Double)])
             layer.updateFields()
 
-            features = []
-            for r in range(0, rows, step):
-                for c in range(0, cols, step):
-                    val = float(aspect[r, c])
-                    if val < 0 or val > 360:
-                        continue
-                    x = transform.c + c * transform.a + cell_size / 2
-                    y = transform.f + r * transform.e + cell_size / 2
-                    f = QgsFeature()
-                    from qgis.core import QgsGeometry, QgsPointXY
-                    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
-                    f.setAttributes([val])
-                    features.append(f)
-
-            pr.addFeatures(features)
+            feats = []
+            for rec in recs:
+                f = QgsFeature()
+                f.setGeometry(QgsGeometry.fromWkt(rec["geometry"].wkt))
+                f.setAttributes([rec["mean_slope_deg"]])
+                feats.append(f)
+            pr.addFeatures(feats)
             layer.updateExtents()
 
-            symbol = QgsMarkerSymbol.createSimple({
-                "name": "arrow", "color": "60,60,200,200",
-                "outline_color": "20,20,120,200", "size": "5", "angle": "0",
-            })
-            symbol.symbolLayer(0).setDataDefinedProperty(
-                QgsSymbolLayer.PropertyAngle, QgsProperty.fromField("angle"))
-            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-
+            layer.setRenderer(QgsSingleSymbolRenderer(self._flow_line_symbol()))
             self._project.instance().addMapLayer(layer)
             self._state.slope_arrows_layer_id = layer.id()
             self._canvas.refresh()
 
         except Exception as exc:
             self._iface.messageBar().pushWarning(
-                "TerrainFlow Assessment", f"Could not generate slope direction arrows: {exc}"
+                "TerrainFlow Assessment", f"Could not generate flow lines: {exc}"
+            )
+
+    def _flow_line_symbol(self):
+        """A curved flow line coloured by mean slope (gentle→steep), with a
+        downstream arrowhead mid-line (falls back to a plain line if the
+        marker-line API is unavailable)."""
+        from qgis.core import QgsLineSymbol
+        sym = QgsLineSymbol.createSimple({"width": "0.6", "capstyle": "round"})
+        sym.symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeColor,
+            QgsProperty.fromExpression(self._SLOPE_COLOR_EXPR))
+        try:
+            from qgis.core import QgsMarkerLineSymbolLayer, QgsMarkerSymbol
+            head = QgsMarkerSymbol.createSimple({
+                "name": "arrowhead", "color": "60,60,60,200",
+                "outline_style": "no", "size": "2.2", "angle": "0",
+            })
+            marker_line = QgsMarkerLineSymbolLayer()
+            marker_line.setSubSymbol(head)
+            marker_line.setRotateSymbols(True)
+            try:
+                marker_line.setPlacement(QgsMarkerLineSymbolLayer.CentralPoint)
+            except Exception:
+                pass
+            sym.appendSymbolLayer(marker_line)
+        except Exception:
+            pass
+        return sym
+
+    def toggle_slope_vectors(self, checked):
+        if checked:
+            existing = (self._state.slope_vectors_layer_id and
+                        self._project.instance().mapLayer(self._state.slope_vectors_layer_id))
+            if existing:
+                node = self._project.instance().layerTreeRoot().findLayer(
+                    self._state.slope_vectors_layer_id)
+                if node:
+                    node.setItemVisibilityChecked(True)
+            else:
+                self._generate_slope_vectors()
+        else:
+            if self._state.slope_vectors_layer_id:
+                node = self._project.instance().layerTreeRoot().findLayer(
+                    self._state.slope_vectors_layer_id)
+                if node:
+                    node.setItemVisibilityChecked(False)
+            self._canvas.refresh()
+
+    def _generate_slope_vectors(self):
+        if not self._state.dem_path:
+            return
+        try:
+            from qgis.core import QgsGeometry, QgsMarkerSymbol, QgsPointXY
+
+            from terrainflow_assessment.modules.flow_lines import slope_vectors
+
+            vecs = slope_vectors(self._state.dem_path)
+            crs = self._state.dem_info.crs_wkt if self._state.dem_info else None
+            uri = f"Point?crs={crs}" if crs else "Point"
+            layer = QgsVectorLayer(uri, "Slope Vectors", "memory")
+            if crs is None:
+                layer.setCrs(self._project.instance().crs())
+            pr = layer.dataProvider()
+            pr.addAttributes([
+                QgsField("angle", QMetaType.Double),
+                QgsField("slope_deg", QMetaType.Double),
+            ])
+            layer.updateFields()
+
+            feats = []
+            for v in vecs:
+                f = QgsFeature()
+                f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(v["x"], v["y"])))
+                f.setAttributes([v["angle_deg"], v["slope_deg"]])
+                feats.append(f)
+            pr.addFeatures(feats)
+            layer.updateExtents()
+
+            symbol = QgsMarkerSymbol.createSimple({
+                "name": "arrow", "size": "4", "angle": "0",
+            })
+            sl = symbol.symbolLayer(0)
+            # Rotate to downslope bearing; colour + size by slope steepness.
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyAngle, QgsProperty.fromField("angle"))
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyFillColor,
+                QgsProperty.fromExpression(self._SLOPE_COLOR_EXPR))
+            sl.setDataDefinedProperty(
+                QgsSymbolLayer.PropertySize,
+                QgsProperty.fromExpression('3 + min("slope_deg" / 5.0, 5)'))
+            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+            self._project.instance().addMapLayer(layer)
+            self._state.slope_vectors_layer_id = layer.id()
+            self._canvas.refresh()
+
+        except Exception as exc:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment", f"Could not generate slope vectors: {exc}"
             )

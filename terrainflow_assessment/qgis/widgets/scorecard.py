@@ -129,12 +129,17 @@ class Scorecard(QWidget):
             f"{leaves_m3:,.0f} m³ leaves site"
         )
 
-    def set_verified(self, text, fresh):
-        """Phase 3: the verified-vs-design chip. Hidden until wired."""
+    def set_verified(self, text, fresh, tooltip=""):
+        """The verified-vs-design chip.
+
+        *tooltip* carries the sentence explaining what the delta compares — a bare
+        "Δ −38%" is not self-explanatory, and the chip is too small to say more.
+        """
         colour = "#1e8449" if fresh else "#b9770e"
         self._verified_lbl.setStyleSheet(
             f"color: {colour}; border: 1px solid {colour}; border-radius: 9px;"
             f" padding: 1px 8px; font-size: 10px;"
         )
         self._verified_lbl.setText(text)
+        self._verified_lbl.setToolTip(tooltip or "")
         self._verified_lbl.setVisible(bool(text))

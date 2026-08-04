@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_earthwork_design.py tests/test_earthwork.py tests/test_simulation.py tests/test_dem_burner.py tests/test_coverage_gaps.py -q)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(ruff check *)",
+      "Bash(python -m ruff check terrainflow_assessment/ tests/test_earthwork_design.py)",
+      "Bash(python -m ruff check terrainflow_assessment/ tests/)"
+    ]
+  }
+}

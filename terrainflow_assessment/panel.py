@@ -41,6 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -48,6 +49,14 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from terrainflow_assessment.modules.project_io import (
+    INPUT_FIELDS,
+    SIZING_BASIS_VALUES,
+    normalise_inputs,
+)
+from terrainflow_assessment.qgis import help_text as H
+from terrainflow_assessment.qgis.widgets.run_button import RunButton
 
 
 class AssessmentPanel(QDockWidget):
@@ -64,6 +73,13 @@ class AssessmentPanel(QDockWidget):
     boundary_changed = pyqtSignal(object)     # QgsVectorLayer or None
     analysis_area_changed = pyqtSignal(object)
     earthworks_area_changed = pyqtSignal(object)
+    # Draw-on-canvas requests for the three polygon area pickers (for QGIS novices)
+    draw_boundary_requested = pyqtSignal()
+    draw_analysis_area_requested = pyqtSignal()
+    draw_earthworks_area_requested = pyqtSignal()
+    # Portable design files — save the whole session, reopen it here or on another machine
+    save_design_requested = pyqtSignal()
+    open_design_requested = pyqtSignal()
 
     # Baseline
     run_baseline_requested = pyqtSignal()
@@ -71,15 +87,25 @@ class AssessmentPanel(QDockWidget):
     query_ponding_requested = pyqtSignal()
     toggle_slope_class_requested = pyqtSignal(bool)
     toggle_slope_arrows_requested = pyqtSignal(bool)
+    toggle_slope_vectors_requested = pyqtSignal(bool)
+    toggle_throughflow_requested = pyqtSignal(bool)   # blue per-cell water gradient
+    throughflow_scale_changed = pyqtSignal(str)
 
     # Contour analysis
     run_contour_analysis_requested = pyqtSignal()
     select_top5_contours_requested = pyqtSignal()
     find_segments_requested = pyqtSignal()
+    show_inflow_bands_requested = pyqtSignal(bool)   # colour contours by inflow share
+    clear_analysis_requested = pyqtSignal()          # wipe analysis layers + state
     generate_simple_contours_requested = pyqtSignal()
     contour_layer_changed = pyqtSignal(object)
     run_keypoint_analysis_requested = pyqtSignal()
     recommend_ponds_requested = pyqtSignal()
+    keypoint_result_activated = pyqtSignal(float, float)  # (x, y) → zoom canvas to it
+    segment_activated = pyqtSignal(str)  # segment WKT → highlight + zoom to it
+    run_keyline_requested = pyqtSignal()   # generate Yeomans keyline + guides
+    draw_keyline_requested = pyqtSignal()  # draw a keyline plough guide freehand
+    convert_keyline_to_swale_requested = pyqtSignal()  # master keyline → swale
 
     # Earthworks
     draw_swale_requested = pyqtSignal(str)      # mode: 'freehand' | 'contour' | 'full_contour'
@@ -87,7 +113,13 @@ class AssessmentPanel(QDockWidget):
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
     reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
+    place_spillway_requested = pyqtSignal(str)    # 'outflow' | 'inflow'
+    connect_earthworks_requested = pyqtSignal()   # route one feature's overflow to another
+    choose_design_intensity_requested = pyqtSignal()  # open the peak-intensity comparison
+    edit_rainfall_data_requested = pyqtSignal()       # enter the site's HIRDS table
+    earthwork_selected = pyqtSignal(object)          # index, or None — highlight it
     before_after_toggled = pyqtSignal(bool)   # True = with earthworks
+    toggle_catchment_layer_requested = pyqtSignal(bool)  # who catches what, by colour
     analysis_inputs_changed = pyqtSignal()    # storm/soil input changed → live re-assess
 
     # Simulation
@@ -116,6 +148,10 @@ class AssessmentPanel(QDockWidget):
         root_lay = QVBoxLayout(root)
         root_lay.setSpacing(6)
         root_lay.setContentsMargins(8, 8, 8, 8)
+
+        # True once a baseline run has completed — lets input changes mark the
+        # analysis stale instead of leaving a tick over numbers that have moved.
+        self._baseline_has_run = False
 
         self._build_workbench_chrome(root_lay)
         self._build_ui()
@@ -216,6 +252,7 @@ class AssessmentPanel(QDockWidget):
         self._build_section_live_assessment()
 
         self._layout = self._stage_layouts["verify"]
+        self._build_section_verification()
         self._build_section_simulation()
 
         self._layout = self._stage_layouts["report"]
@@ -288,6 +325,69 @@ class AssessmentPanel(QDockWidget):
             )
         return btn
 
+    def _area_row(self, combo, draw_signal, tooltip):
+        """Wrap a layer combo with an inline '✏ Draw' button that emits *draw_signal*.
+
+        Lets QGIS-novice users draw the polygon directly instead of selecting an
+        existing layer (the drawn layer is then auto-selected in *combo*).
+        """
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(combo, 1)
+        draw_btn = QPushButton("✏ Draw")
+        draw_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        draw_btn.setToolTip(tooltip)
+        draw_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #c6d1d3; border-radius: 4px;"
+            " padding: 4px 9px; font-size: 11px; color: #2e7d55; background: #ffffff; }"
+            "QPushButton:hover { background: #e9f3ee; border-color: #2e7d55; }"
+        )
+        draw_btn.clicked.connect(lambda: draw_signal.emit())
+        h.addWidget(draw_btn)
+        return row
+
+    _SECONDARY_BTN_STYLE = (
+        "QPushButton { border: 1px solid #c6d1d3; border-radius: 4px;"
+        " padding: 4px 9px; font-size: 11px; color: #2e7d55; background: #ffffff; }"
+        "QPushButton:hover { background: #e9f3ee; border-color: #2e7d55; }"
+    )
+
+    def _design_file_row(self):
+        """Save / Open buttons for a portable design file.
+
+        Sits at the foot of Data Input because that is what a design file *is* — the whole
+        set of inputs above it, plus the earthworks drawn from them, in one file that can
+        move between machines.
+        """
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 4, 0, 0)
+        h.setSpacing(6)
+
+        save_btn = QPushButton("💾 Save design")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setToolTip(
+            "Save the DEM reference, every storm and sizing input, the site areas and "
+            "all drawn earthworks to a single .tfd file."
+        )
+        save_btn.setStyleSheet(self._SECONDARY_BTN_STYLE)
+        save_btn.clicked.connect(lambda: self.save_design_requested.emit())
+
+        open_btn = QPushButton("📂 Open design")
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.setToolTip(
+            "Open a .tfd design file. Inputs, areas and earthworks are restored "
+            "immediately; you are then offered the baseline re-run that restores scoring."
+        )
+        open_btn.setStyleSheet(self._SECONDARY_BTN_STYLE)
+        open_btn.clicked.connect(lambda: self.open_design_requested.emit())
+
+        h.addWidget(save_btn, 1)
+        h.addWidget(open_btn, 1)
+        return row
+
     # ---------------------------------------------------------------- Section 1: Data
 
     def _build_section_data(self):
@@ -307,7 +407,9 @@ class AssessmentPanel(QDockWidget):
         self._boundary_combo = QgsMapLayerComboBox()
         self._boundary_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
         self._boundary_combo.setAllowEmptyLayer(True)
-        lay.addWidget(self._boundary_combo)
+        lay.addWidget(self._area_row(
+            self._boundary_combo, self.draw_boundary_requested,
+            H.DRAW_BOUNDARY))
 
         self._site_name_edit = QLineEdit()
         self._site_name_edit.setPlaceholderText("Site name (for report)")
@@ -317,24 +419,21 @@ class AssessmentPanel(QDockWidget):
         self._analysis_area_combo = QgsMapLayerComboBox()
         self._analysis_area_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
         self._analysis_area_combo.setAllowEmptyLayer(True)
-        self._analysis_area_combo.setToolTip(
-            "Restrict Contour Analysis and Keypoint Analysis to this polygon.\n\n"
-            "Leave blank to use the full DEM (or the site boundary if set)."
-        )
-        lay.addWidget(self._analysis_area_combo)
+        self._analysis_area_combo.setToolTip(H.ANALYSIS_AREA)
+        lay.addWidget(self._area_row(
+            self._analysis_area_combo, self.draw_analysis_area_requested,
+            H.DRAW_ANALYSIS_AREA))
 
         lay.addWidget(self._label("Earthworks area (polygon layer)"))
         self._earthworks_area_combo = QgsMapLayerComboBox()
         self._earthworks_area_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
         self._earthworks_area_combo.setAllowEmptyLayer(True)
-        self._earthworks_area_combo.setToolTip(
-            "Optional polygon defining where earthworks can be placed.\n\n"
-            "When set, drawing tools will be constrained to this area and\n"
-            "Optimal Swale Contours will only be generated within it.\n\n"
-            "Useful for separating the project area from sensitive zones\n"
-            "(wetlands, roads, existing structures) that must not be disturbed."
-        )
-        lay.addWidget(self._earthworks_area_combo)
+        self._earthworks_area_combo.setToolTip(H.EARTHWORKS_AREA)
+        lay.addWidget(self._area_row(
+            self._earthworks_area_combo, self.draw_earthworks_area_requested,
+            H.DRAW_EARTHWORKS_AREA))
+
+        lay.addWidget(self._design_file_row())
 
         self._dem_combo.layerChanged.connect(lambda layer: self.dem_changed.emit(layer))
         self._boundary_combo.layerChanged.connect(lambda layer: self.boundary_changed.emit(layer))
@@ -355,16 +454,7 @@ class AssessmentPanel(QDockWidget):
         self._rainfall_spin.setRange(0, 1000)
         self._rainfall_spin.setValue(65)
         self._rainfall_spin.setSuffix(" mm")
-        self._rainfall_spin.setToolTip(
-            "Total rainfall depth for the storm event (mm).\n\n"
-            "This is the cumulative rainfall over the full duration —\n"
-            "the same figure reported in daily rainfall records or\n"
-            "intensity-frequency-duration (IFD) tables as a daily total.\n\n"
-            "Example: a 1-in-10-year, 24-hour storm in NZ hill country\n"
-            "might be 80–120 mm total.\n\n"
-            "The SCS model converts this total depth into runoff depth\n"
-            "using the Curve Number and soil moisture condition."
-        )
+        self._rainfall_spin.setToolTip(H.RAINFALL)
         rf_grid.addWidget(self._rainfall_spin, 0, 1)
 
         rf_grid.addWidget(self._label("Duration (hr)"), 1, 0)
@@ -372,13 +462,7 @@ class AssessmentPanel(QDockWidget):
         self._duration_spin.setRange(0.1, 72)
         self._duration_spin.setValue(24)
         self._duration_spin.setSuffix(" hr")
-        self._duration_spin.setToolTip(
-            "Storm duration in hours.\n\n"
-            "Used to calculate peak flow rate at site exit points\n"
-            "(volume ÷ duration = average flow rate).\n\n"
-            "Set this to match the duration of your total rainfall figure —\n"
-            "e.g. 24 hr if using a daily rainfall total from historical records."
-        )
+        self._duration_spin.setToolTip(H.DURATION)
         rf_grid.addWidget(self._duration_spin, 1, 1)
 
         rf_grid.addWidget(self._label("Soil Type"), 2, 0)
@@ -386,34 +470,134 @@ class AssessmentPanel(QDockWidget):
         for name in ["Sand", "Sandy loam", "Loam", "Clay loam", "Clay"]:
             self._soil_combo.addItem(name)
         self._soil_combo.setCurrentText("Loam")
+        self._soil_combo.setToolTip(H.SOIL_TYPE)
         rf_grid.addWidget(self._soil_combo, 2, 1)
 
-        rf_grid.addWidget(self._label("Curve Number (CN)"), 3, 0)
+        # Ground condition moves the curve number further than soil texture does — on
+        # sand, Good is CN 39 and Poor is 68 — and it was previously assumed to be Good
+        # and never asked. Sits next to Soil Type because the pair is what selects a
+        # row from TR-55 Table 2-2; neither means much without the other.
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_GROUND_CONDITION,
+            GROUND_CONDITIONS,
+        )
+        rf_grid.addWidget(self._label("Ground condition"), 3, 0)
+        self._ground_condition_combo = QComboBox()
+        for key, (label, meaning) in GROUND_CONDITIONS.items():
+            self._ground_condition_combo.addItem(label, key)
+            self._ground_condition_combo.setItemData(
+                self._ground_condition_combo.count() - 1,
+                meaning, Qt.ItemDataRole.ToolTipRole)
+        self._ground_condition_combo.setCurrentIndex(
+            list(GROUND_CONDITIONS).index(DEFAULT_GROUND_CONDITION))
+        self._ground_condition_combo.setToolTip(H.GROUND_CONDITION)
+        rf_grid.addWidget(self._ground_condition_combo, 3, 1)
+
+        rf_grid.addWidget(self._label("Curve Number (CN)"), 4, 0)
         self._cn_spin = QSpinBox()
         self._cn_spin.setRange(1, 100)
         self._cn_spin.setValue(61)
-        self._cn_spin.setToolTip(
-            "SCS Curve Number — soil runoff potential.\n"
-            "Higher = more runoff.\n\n"
-            "Typical values (Normal moisture):\n"
-            "  Sand: 39  |  Sandy loam: 49\n"
-            "  Loam: 61  |  Clay loam: 74  |  Clay: 80\n\n"
-            "Auto-filled from Soil Type above. Override if you know the\n"
-            "site-specific CN (e.g. from land-use or measured data)."
-        )
-        rf_grid.addWidget(self._cn_spin, 3, 1)
+        self._cn_spin.setToolTip(H.CURVE_NUMBER)
+        rf_grid.addWidget(self._cn_spin, 4, 1)
 
-        rf_grid.addWidget(self._label("Moisture Condition"), 4, 0)
+        rf_grid.addWidget(self._label("Moisture Condition"), 5, 0)
         self._moisture_combo = QComboBox()
         self._moisture_combo.addItems(["normal", "dry", "wet"])
-        rf_grid.addWidget(self._moisture_combo, 4, 1)
+        self._moisture_combo.setToolTip(H.MOISTURE)
+        rf_grid.addWidget(self._moisture_combo, 5, 1)
+
+        # Which depth of water everything downstream works from — the analysis
+        # rasters as well as earthwork sizing. It belongs with the storm inputs
+        # because it IS a statement about the storm, and having Analysis and Design
+        # quote different depths for the same event would be indefensible.
+        rf_grid.addWidget(self._label("Runoff Calculation Method"), 6, 0)
+        self._sizing_basis_combo = QComboBox()
+        self._sizing_basis_combo.addItems([
+            "Runoff coefficient (Lancaster)",
+            "Total rainfall (most conservative)",
+            "Surface runoff (SCS-CN)",
+        ])
+        self._sizing_basis_combo.setToolTip(H.RUNOFF_METHOD)
+        self._sizing_basis_combo.currentIndexChanged.connect(self._on_basis_changed)
+        rf_grid.addWidget(self._sizing_basis_combo, 6, 1)
+
+        # Lancaster's surface table drives the coefficient; the spin stays editable so
+        # a measured or locally-derived value can be typed straight in.
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_RUNOFF_COEFFICIENT,
+            LANCASTER_COEFFICIENTS,
+        )
+        from terrainflow_assessment.modules.peak_flow import DEFAULT_PEAK_INTENSITY_MM_HR
+        rf_grid.addWidget(self._label("Surface"), 7, 0)
+        self._runoff_surface_combo = QComboBox()
+        for label, (typical, lo, hi, src) in LANCASTER_COEFFICIENTS.items():
+            tag = "" if src == "lancaster" else "  ·  design default"
+            self._runoff_surface_combo.addItem(
+                f"{label} — {typical:.2f}  ({lo:.2f}–{hi:.2f}){tag}", typical)
+        self._runoff_surface_combo.addItem("Custom", None)
+        self._runoff_surface_combo.setToolTip(H.RUNOFF_SURFACE)
+        rf_grid.addWidget(self._runoff_surface_combo, 7, 1)
+
+        rf_grid.addWidget(self._label("Runoff coefficient (C)"), 8, 0)
+        self._runoff_coeff_spin = QDoubleSpinBox()
+        self._runoff_coeff_spin.setRange(0.01, 1.0)
+        self._runoff_coeff_spin.setSingleStep(0.05)
+        self._runoff_coeff_spin.setDecimals(2)
+        self._runoff_coeff_spin.setValue(DEFAULT_RUNOFF_COEFFICIENT)
+        self._runoff_coeff_spin.setToolTip(H.RUNOFF_COEFFICIENT)
+        rf_grid.addWidget(self._runoff_coeff_spin, 8, 1)
+
+        # Peak intensity — sizes overflow structures, and cannot be derived from the
+        # depth/duration above. 120 mm in 2 h and in 24 h are identical storage and a
+        # twelve-fold difference in peak flow, so this is asked rather than assumed.
+        rf_grid.addWidget(self._label("Peak intensity"), 9, 0)
+        intensity_row = QHBoxLayout()
+        intensity_row.setContentsMargins(0, 0, 0, 0)
+        intensity_row.setSpacing(4)
+        self._peak_intensity_spin = QDoubleSpinBox()
+        self._peak_intensity_spin.setRange(0.1, 500.0)
+        self._peak_intensity_spin.setDecimals(1)
+        self._peak_intensity_spin.setSingleStep(5.0)
+        self._peak_intensity_spin.setSuffix(" mm/hr")
+        self._peak_intensity_spin.setValue(DEFAULT_PEAK_INTENSITY_MM_HR)
+        self._peak_intensity_spin.setToolTip(H.PEAK_INTENSITY)
+        self._peak_intensity_spin.valueChanged.connect(self.analysis_inputs_changed)
+        intensity_row.addWidget(self._peak_intensity_spin, 1)
+
+        self._intensity_choose_btn = QPushButton("Compare…")
+        self._intensity_choose_btn.setToolTip(H.DESIGN_INTENSITY_TABLE)
+        self._intensity_choose_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._intensity_choose_btn.clicked.connect(self.choose_design_intensity_requested)
+        intensity_row.addWidget(self._intensity_choose_btn)
+        rf_grid.addLayout(intensity_row, 9, 1)
+
+        # Site rainfall statistics (HIRDS). Not derivable from terrain, so it is an
+        # explicit input — and with it the intensity above becomes a lookup at the
+        # catchment's own response time rather than a judgement.
+        rf_grid.addWidget(self._label("Site rainfall data"), 10, 0)
+        self._rainfall_data_btn = QPushButton("Enter HIRDS table…")
+        self._rainfall_data_btn.setToolTip(H.RAINFALL_DATA)
+        self._rainfall_data_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rainfall_data_btn.clicked.connect(self.edit_rainfall_data_requested)
+        rf_grid.addWidget(self._rainfall_data_btn, 10, 1)
+
+        self._runoff_surface_combo.currentIndexChanged.connect(self._on_surface_preset)
+        self._runoff_coeff_spin.valueChanged.connect(self._on_basis_changed)
+        self._sync_basis_controls()
 
         lay.addLayout(rf_grid)
 
-        # Wire soil → CN auto-fill
-        _SOIL_CN = {"Sand": 39, "Sandy loam": 49, "Loam": 61, "Clay loam": 74, "Clay": 80}
+        # Wire soil + ground condition → CN auto-fill. The CN spinner stays editable:
+        # this fills in a defensible starting point, it does not take the decision away.
+        #
+        # The lookup comes from SCSRunoff rather than a table copied into this file.
+        # There were three copies of the TR-55 curve numbers already, and the fourth
+        # one here would have gone on answering "Loam is 61" after the module learned
+        # that Loam is 61 only on well-covered ground.
         self._soil_combo.currentTextChanged.connect(
-            lambda name: self._cn_spin.setValue(_SOIL_CN.get(name, 61)))
+            lambda *_: self._refresh_cn_from_soil())
+        self._ground_condition_combo.currentIndexChanged.connect(
+            lambda *_: self._refresh_cn_from_soil())
 
         # Stream threshold
         thr_grid = QGridLayout()
@@ -422,15 +606,7 @@ class AssessmentPanel(QDockWidget):
         self._threshold_spin.setRange(0.1, 10000)
         self._threshold_spin.setValue(5.0)
         self._threshold_spin.setSuffix(" ha")
-        self._threshold_spin.setToolTip(
-            "Minimum upstream catchment area for a flow path to be shown as a channel.\n\n"
-            "Lower = more channels shown.  Higher = major watercourses only.\n\n"
-            "Channel types by contributing area:\n"
-            "  Rills / erosion paths:   < 0.5 ha\n"
-            "  Ephemeral / seasonal:    0.5 – 5 ha\n"
-            "  Permanent stream:        5 – 20 ha\n"
-            "  River:                   > 20 ha"
-        )
+        self._threshold_spin.setToolTip(H.STREAM_THRESHOLD)
         self._threshold_spin.valueChanged.connect(self._update_channel_type_label)
         thr_grid.addWidget(self._threshold_spin, 0, 1)
 
@@ -438,19 +614,39 @@ class AssessmentPanel(QDockWidget):
         self._channel_type_lbl.setStyleSheet("color: #555555; font-style: italic;")
         thr_grid.addWidget(self._channel_type_lbl, 1, 0, 1, 2)
 
-        thr_grid.addWidget(self._label("Routing"), 2, 0)
+        thr_grid.addWidget(self._label("Show exits above (L/s)"), 2, 0)
+        self._exit_flow_spin = QDoubleSpinBox()
+        self._exit_flow_spin.setRange(0.0, 10000.0)
+        self._exit_flow_spin.setValue(0.5)
+        self._exit_flow_spin.setSuffix(" L/s")
+        self._exit_flow_spin.setDecimals(2)
+        self._exit_flow_spin.setSingleStep(0.5)
+        self._exit_flow_spin.setToolTip(H.EXIT_FLOW)
+        thr_grid.addWidget(self._exit_flow_spin, 2, 1)
+
+        thr_grid.addWidget(self._label("Routing"), 3, 0)
         self._routing_combo = QComboBox()
         self._routing_combo.addItems(["D-infinity (recommended)", "D8"])
-        thr_grid.addWidget(self._routing_combo, 2, 1)
+        thr_grid.addWidget(self._routing_combo, 3, 1)
         lay.addLayout(thr_grid)
 
-        from terrainflow_assessment.qgis.widgets.run_button import RunButton
         self._run_baseline_btn = RunButton("Run Baseline Analysis")
         lay.addWidget(self._run_baseline_btn)
 
         self._baseline_results_lbl = self._label("", small=True)
         self._baseline_results_lbl.setWordWrap(True)
         lay.addWidget(self._baseline_results_lbl)
+
+        # Per-area outflow readout (populated after baseline) — instant feedback on
+        # how much water leaves each defined area.
+        self._area_outflow_lbl = QLabel("")
+        self._area_outflow_lbl.setWordWrap(True)
+        self._area_outflow_lbl.setVisible(False)
+        self._area_outflow_lbl.setStyleSheet(
+            "background: #eef4f8; border: 1px solid #d3e0e6; border-radius: 4px;"
+            " padding: 6px; font-size: 11px; color: #2c3e50;"
+        )
+        lay.addWidget(self._area_outflow_lbl)
 
         self._run_baseline_btn.clicked.connect(self.run_baseline_requested)
 
@@ -463,25 +659,22 @@ class AssessmentPanel(QDockWidget):
         ))
         self._query_ponding_btn = QPushButton("Query Depression / Ponding")
         self._query_ponding_btn.setEnabled(False)
-        self._query_ponding_btn.setToolTip(
-            "Click on a blue zone in the 'Water Captured' layer to select the\n"
-            "entire connected pooling area and report its volume and surface area.\n\n"
-            "Baseline: shows natural low spots where water collects.\n"
-            "Earthworks: shows water captured by your swales/basins."
-        )
+        self._query_ponding_btn.setToolTip(H.QUERY_PONDING)
         lay.addWidget(self._query_ponding_btn)
 
+        slope_class_row = QHBoxLayout()
+        slope_class_row.setSpacing(6)
         self._toggle_slope_class_btn = QPushButton("Show Slope Classification")
         self._toggle_slope_class_btn.setCheckable(True)
         self._toggle_slope_class_btn.setEnabled(False)
-        self._toggle_slope_class_btn.setToolTip(
-            "Semi-transparent slope suitability overlay (calculated from DEM):\n"
-            "  Green  (0–3°):   ideal — suitable for swales and basins\n"
-            "  Yellow (3–8°):   moderate — suitable with care\n"
-            "  Orange (8–15°):  challenging — consider companion berm\n"
-            "  Red    (>15°):   steep — berms or diversion drains recommended"
-        )
-        lay.addWidget(self._toggle_slope_class_btn)
+        self._toggle_slope_class_btn.setToolTip(H.SLOPE_CLASS)
+        slope_class_row.addWidget(self._toggle_slope_class_btn, 1)
+        self._slope_class_info_btn = QPushButton("ⓘ")
+        self._slope_class_info_btn.setFixedWidth(30)
+        self._slope_class_info_btn.setToolTip("What do the slope classes mean for earthworks?")
+        self._slope_class_info_btn.clicked.connect(self._show_slope_class_info)
+        slope_class_row.addWidget(self._slope_class_info_btn)
+        lay.addLayout(slope_class_row)
 
         # Inline slope legend
         slope_legend = QWidget()
@@ -508,14 +701,17 @@ class AssessmentPanel(QDockWidget):
         slope_legend_layout.addStretch()
         lay.addWidget(slope_legend)
 
-        self._toggle_slope_arrows_btn = QPushButton("Show Slope Direction")
+        self._toggle_slope_arrows_btn = QPushButton("Show Flow Lines")
         self._toggle_slope_arrows_btn.setCheckable(True)
         self._toggle_slope_arrows_btn.setEnabled(False)
-        self._toggle_slope_arrows_btn.setToolTip(
-            "Overlay arrows showing the direction of steepest downslope at regular intervals.\n"
-            "Generated from the DEM aspect — arrows point in the direction water would flow."
-        )
+        self._toggle_slope_arrows_btn.setToolTip(H.FLOW_LINES)
         lay.addWidget(self._toggle_slope_arrows_btn)
+
+        self._toggle_slope_vectors_btn = QPushButton("Show Slope Vectors")
+        self._toggle_slope_vectors_btn.setCheckable(True)
+        self._toggle_slope_vectors_btn.setEnabled(False)
+        self._toggle_slope_vectors_btn.setToolTip(H.SLOPE_VECTORS)
+        lay.addWidget(self._toggle_slope_vectors_btn)
 
         contour_row = QHBoxLayout()
         self._simple_contour_interval_spin = QDoubleSpinBox()
@@ -524,23 +720,51 @@ class AssessmentPanel(QDockWidget):
         self._simple_contour_interval_spin.setSuffix(" m")
         self._simple_contour_interval_spin.setSingleStep(0.5)
         self._simple_contour_interval_spin.setDecimals(1)
-        self._simple_contour_interval_spin.setToolTip("Contour interval (m)")
+        self._simple_contour_interval_spin.setToolTip(H.SIMPLE_CONTOUR_INTERVAL)
         self._simple_contour_interval_spin.setFixedWidth(75)
         contour_row.addWidget(self._simple_contour_interval_spin)
 
         self._generate_contours_btn = QPushButton("Generate Contours")
         self._generate_contours_btn.setEnabled(False)
-        self._generate_contours_btn.setToolTip(
-            "Generate simple elevation contours from the DEM at the chosen interval.\n\n"
-            "Useful for visualising terrain alongside the slope classification."
-        )
+        self._generate_contours_btn.setToolTip(H.GENERATE_CONTOURS)
         contour_row.addWidget(self._generate_contours_btn)
         lay.addLayout(contour_row)
+
+        # Throughflow: total event water through every cell, as a blue gradient.
+        # Sits with the other terrain overlays; off by default (it covers the map).
+        flow_row = QHBoxLayout()
+        self._toggle_throughflow_btn = QPushButton("Throughflow")
+        self._toggle_throughflow_btn.setCheckable(True)
+        self._toggle_throughflow_btn.setEnabled(False)
+        self._toggle_throughflow_btn.setToolTip(H.THROUGHFLOW)
+        flow_row.addWidget(self._toggle_throughflow_btn)
+
+        self._throughflow_scale_combo = QComboBox()
+        self._throughflow_scale_combo.addItems(["Log", "Linear", "Quantile"])
+        self._throughflow_scale_combo.setToolTip(H.THROUGHFLOW_SCALE)
+        self._throughflow_scale_combo.setFixedWidth(90)
+        self._throughflow_scale_combo.setEnabled(False)
+        flow_row.addWidget(self._throughflow_scale_combo)
+
+        flow_legend = QLabel(
+            "<span style='color:#c9e2f2;'>■</span> diffuse "
+            "<span style='color:#5aa9dd;'>■</span> gathering "
+            "<span style='color:#08246e;'>■</span> channel"
+        )
+        flow_legend.setStyleSheet("font-size: 10px; color: #5f7176;")
+        flow_row.addWidget(flow_legend)
+        flow_row.addStretch()
+        lay.addLayout(flow_row)
+
+        self._toggle_throughflow_btn.toggled.connect(self.toggle_throughflow_requested)
+        self._throughflow_scale_combo.currentIndexChanged.connect(
+            lambda _i: self.throughflow_scale_changed.emit(self.throughflow_scale_mode))
 
         self._generate_contours_btn.clicked.connect(self.generate_simple_contours_requested)
         self._query_ponding_btn.clicked.connect(self.query_ponding_requested)
         self._toggle_slope_class_btn.toggled.connect(self.toggle_slope_class_requested)
         self._toggle_slope_arrows_btn.toggled.connect(self.toggle_slope_arrows_requested)
+        self._toggle_slope_vectors_btn.toggled.connect(self.toggle_slope_vectors_requested)
 
         self._update_channel_type_label()
 
@@ -560,6 +784,7 @@ class AssessmentPanel(QDockWidget):
         self._contour_interval_spin.setRange(0.1, 100)
         self._contour_interval_spin.setValue(1.0)
         self._contour_interval_spin.setSuffix(" m")
+        self._contour_interval_spin.setToolTip(H.CONTOUR_INTERVAL)
         contour_lay.addWidget(self._contour_interval_spin)
 
         contour_lay.addWidget(self._label("Max slope (°) — filter"))
@@ -567,18 +792,13 @@ class AssessmentPanel(QDockWidget):
         self._max_slope_spin.setRange(1, 45)
         self._max_slope_spin.setValue(18.0)
         self._max_slope_spin.setSuffix("°")
+        self._max_slope_spin.setToolTip(H.MAX_SLOPE)
         contour_lay.addWidget(self._max_slope_spin)
 
         contour_lay.addWidget(self._label("Usable area (clip contours to)"))
         self._usable_area_combo = QComboBox()
         self._usable_area_combo.addItems(["None", "Analysis Area", "Earthworks Area"])
-        self._usable_area_combo.setToolTip(
-            "Optionally clip contour analysis to one of the polygon layers\n"
-            "already selected in the Data section above.\n\n"
-            "  None — analyse the full DEM extent\n"
-            "  Analysis Area — use the Analysis Area polygon layer\n"
-            "  Earthworks Area — use the Earthworks Area polygon layer"
-        )
+        self._usable_area_combo.setToolTip(H.USABLE_AREA)
         contour_lay.addWidget(self._usable_area_combo)
 
         contour_lay.addWidget(self._label("Min contour length (m)"))
@@ -587,52 +807,114 @@ class AssessmentPanel(QDockWidget):
         self._min_contour_length_spin.setValue(50.0)
         self._min_contour_length_spin.setSuffix(" m")
         self._min_contour_length_spin.setSingleStep(10)
-        self._min_contour_length_spin.setToolTip(
-            "Exclude contours shorter than this length.\n\n"
-            "Short enclosed contours (from shallow dips or small knolls)\n"
-            "can rank highly because their accumulation is concentrated,\n"
-            "but they are too short to place a meaningful swale.\n\n"
-            "Set to 0 to include all contours."
-        )
+        self._min_contour_length_spin.setToolTip(H.MIN_CONTOUR_LENGTH)
         contour_lay.addWidget(self._min_contour_length_spin)
 
-        self._run_contour_btn = self._button("Analyse Contours", "#27ae60")
+        self._run_contour_btn = RunButton(
+            "Analyse Contours", accent="#27ae60", accent_hover="#1e8449",
+            ghost_bg="#eafaf1")
+        self._run_contour_btn.setToolTip(H.ANALYSE_CONTOURS)
         contour_lay.addWidget(self._run_contour_btn)
 
-        self._contour_progress = QProgressBar()
-        self._contour_progress.setVisible(False)
-        contour_lay.addWidget(self._contour_progress)
+        # Results area as a vertical splitter so both lists can be dragged
+        # taller/shorter to show more items (top = contours, bottom = segments,
+        # controls in the middle).
+        results_splitter = QSplitter(Qt.Vertical)
+        results_splitter.setChildrenCollapsible(False)
 
         self._contour_list = QListWidget()
         self._contour_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._contour_list.setMaximumHeight(150)
-        contour_lay.addWidget(self._contour_list)
+        self._contour_list.setMinimumHeight(80)
+        results_splitter.addWidget(self._contour_list)
 
-        self._top5_contours_btn = self._button("Select Top 5 Swales", "#1a6b3a")
-        self._top5_contours_btn.setEnabled(False)
-        self._top5_contours_btn.setToolTip(
-            "Create a separate layer containing the top 5 ranked candidate\n"
-            "swale contours by peak inflow accumulation.\n\n"
-            "Requires: Analyse Contours run first."
+        mid = QWidget()
+        mid_lay = QVBoxLayout(mid)
+        mid_lay.setContentsMargins(0, 0, 0, 0)
+
+        # Legend for the rank colour grammar used on the canvas layers.
+        legend = QLabel(
+            "Rank: <span style='color:#d4a600'>■</span> #1  "
+            "<span style='color:#ff6b00'>■</span> top 5  "
+            "<span style='color:#4a90d9'>■</span> top 10  "
+            "<span style='color:#9e9e9e'>■</span> rest"
         )
-        contour_lay.addWidget(self._top5_contours_btn)
+        legend.setStyleSheet("font-size: 10px; color: #7f8c8d;")
+        mid_lay.addWidget(legend)
+
+        top_n_row = QHBoxLayout()
+        self._top_n_spin = QSpinBox()
+        self._top_n_spin.setRange(1, 50)
+        self._top_n_spin.setValue(5)
+        self._top_n_spin.setFixedWidth(56)
+        self._top_n_spin.setToolTip(H.TOP_N)
+        top_n_row.addWidget(self._top_n_spin)
+        self._top5_contours_btn = self._button("Select Top Swales", "#1a6b3a")
+        self._top5_contours_btn.setEnabled(False)
+        self._top5_contours_btn.setToolTip(H.TOP5_SWALES)
+        top_n_row.addWidget(self._top5_contours_btn, 1)
+        mid_lay.addLayout(top_n_row)
+
+        inflow_row = QHBoxLayout()
+        self._inflow_bands_btn = QPushButton("Show Inflow Gradient")
+        self._inflow_bands_btn.setCheckable(True)
+        self._inflow_bands_btn.setEnabled(False)
+        self._inflow_bands_btn.setToolTip(H.INFLOW_BANDS)
+        inflow_row.addWidget(self._inflow_bands_btn, 1)
+        self._inflow_scale_combo = QComboBox()
+        self._inflow_scale_combo.addItems(["Log", "Linear", "Quantile"])
+        self._inflow_scale_combo.setToolTip(H.INFLOW_SCALE)
+        self._inflow_scale_combo.setFixedWidth(90)
+        # Re-render live when the scale changes and the layer is showing.
+        self._inflow_scale_combo.currentIndexChanged.connect(
+            lambda _=0: self._inflow_bands_btn.isChecked()
+            and self.show_inflow_bands_requested.emit(True))
+        inflow_row.addWidget(self._inflow_scale_combo)
+        mid_lay.addLayout(inflow_row)
+
+        # Inflow gradient legend — one continuous ramp, absolute m³, shared across
+        # all contours (see the layer's own legend for the m³ ranges).
+        band_legend = QLabel(
+            "Inflow m³ (low→high): "
+            "<span style='color:#2c7bb6'>■</span>"
+            "<span style='color:#00aac8'>■</span>"
+            "<span style='color:#78c346'>■</span>"
+            "<span style='color:#fdae61'>■</span>"
+            "<span style='color:#d7191c'>■</span>"
+        )
+        band_legend.setStyleSheet("font-size: 10px; color: #7f8c8d;")
+        mid_lay.addWidget(band_legend)
 
         # --- Segment analysis ---
-        contour_lay.addWidget(self._label("Min catchment above swale (ha)"))
+        mid_lay.addWidget(self._label("Min catchment above swale (ha)"))
         self._min_catchment_ha_spin = QDoubleSpinBox()
         self._min_catchment_ha_spin.setRange(0.0, 500.0)
         self._min_catchment_ha_spin.setValue(0.5)
         self._min_catchment_ha_spin.setSuffix(" ha")
         self._min_catchment_ha_spin.setSingleStep(0.5)
-        self._min_catchment_ha_spin.setToolTip(
-            "Minimum contributing area above a contour crossing to qualify\n"
-            "as a swale placement zone.\n\n"
-            "Only flow paths draining at least this many hectares will produce\n"
-            "a recommended segment.  Raise this to focus on major drainage lines;\n"
-            "lower it to pick up smaller catchments too.\n\n"
-            "Default 0.5 ha."
-        )
-        contour_lay.addWidget(self._min_catchment_ha_spin)
+        self._min_catchment_ha_spin.setToolTip(H.MIN_CATCHMENT)
+        mid_lay.addWidget(self._min_catchment_ha_spin)
+
+        seg_mode_row = QHBoxLayout()
+        seg_mode_row.addWidget(self._label("Rank segments by"))
+        self._seg_rank_combo = QComboBox()
+        self._seg_rank_combo.addItems(["Min catchment above", "Largest inflow"])
+        self._seg_rank_combo.setToolTip(H.SEG_RANK_MODE)
+        seg_mode_row.addWidget(self._seg_rank_combo, 1)
+        mid_lay.addLayout(seg_mode_row)
+
+        seg_slope_row = QHBoxLayout()
+        self._seg_slope_check = QCheckBox("Limit segment slope")
+        self._seg_slope_check.setToolTip(H.SEG_MAX_SLOPE)
+        seg_slope_row.addWidget(self._seg_slope_check)
+        self._seg_max_slope_spin = QDoubleSpinBox()
+        self._seg_max_slope_spin.setRange(1, 45)
+        self._seg_max_slope_spin.setValue(10.0)
+        self._seg_max_slope_spin.setSuffix("°")
+        self._seg_max_slope_spin.setEnabled(False)
+        self._seg_max_slope_spin.setToolTip(H.SEG_MAX_SLOPE)
+        self._seg_slope_check.toggled.connect(self._seg_max_slope_spin.setEnabled)
+        seg_slope_row.addWidget(self._seg_max_slope_spin)
+        mid_lay.addLayout(seg_slope_row)
 
         swale_dim_grid = QGridLayout()
         swale_dim_grid.addWidget(self._label("Swale depth (m)"), 0, 0)
@@ -642,11 +924,7 @@ class AssessmentPanel(QDockWidget):
         self._swale_depth_spin.setSuffix(" m")
         self._swale_depth_spin.setSingleStep(0.05)
         self._swale_depth_spin.setDecimals(2)
-        self._swale_depth_spin.setToolTip(
-            "Design depth of the swale cross-section (m).\n"
-            "Used to calculate required swale length:\n"
-            "  length = inflow volume / (depth × width)"
-        )
+        self._swale_depth_spin.setToolTip(H.SWALE_DEPTH)
         swale_dim_grid.addWidget(self._swale_depth_spin, 0, 1)
 
         swale_dim_grid.addWidget(self._label("Swale width (m)"), 1, 0)
@@ -656,29 +934,34 @@ class AssessmentPanel(QDockWidget):
         self._swale_width_spin.setSuffix(" m")
         self._swale_width_spin.setSingleStep(0.1)
         self._swale_width_spin.setDecimals(2)
-        self._swale_width_spin.setToolTip(
-            "Design base width of the swale cross-section (m).\n"
-            "Used to calculate required swale length:\n"
-            "  length = inflow volume / (depth × width)"
-        )
+        self._swale_width_spin.setToolTip(H.SWALE_WIDTH)
         swale_dim_grid.addWidget(self._swale_width_spin, 1, 1)
-        contour_lay.addLayout(swale_dim_grid)
+        mid_lay.addLayout(swale_dim_grid)
 
-        self._find_segments_btn = self._button("Find Best Swale Segments", "#145a32")
+        self._find_segments_btn = RunButton(
+            "Find Best Swale Segments", accent="#145a32", accent_hover="#0e3d22",
+            ghost_bg="#e8f5ee")
         self._find_segments_btn.setEnabled(False)
-        self._find_segments_btn.setToolTip(
-            "Find swale placement zones on each candidate contour and size\n"
-            "each segment to capture the full incoming runoff volume.\n\n"
-            "Locates where drainage lines cross each contour (flow accumulation\n"
-            "peaks), calculates inflow volume from the contributing catchment,\n"
-            "then sets the swale length to store that volume:\n\n"
-            "  required length = inflow m³ / (depth × width)\n\n"
-            "The segment is centered on the crossing point.\n"
-            "Results ranked globally by inflow volume (m³).\n\n"
-            "Requires: Analyse Contours + Baseline Analysis run first."
-        )
-        contour_lay.addWidget(self._find_segments_btn)
-        contour_lay.addStretch()
+        self._find_segments_btn.setToolTip(H.FIND_SEGMENTS)
+        mid_lay.addWidget(self._find_segments_btn)
+        results_splitter.addWidget(mid)
+
+        # Segment results — click a row to highlight+zoom; ✓ holds / ⚠ needs overflow.
+        self._segment_list = QListWidget()
+        self._segment_list.setMinimumHeight(80)
+        self._segment_list.setToolTip(H.SEGMENT_LIST)
+        self._segment_list.itemClicked.connect(self._on_segment_item_clicked)
+        results_splitter.addWidget(self._segment_list)
+
+        results_splitter.setStretchFactor(0, 3)   # contour list grows
+        results_splitter.setStretchFactor(1, 0)   # middle controls stay compact
+        results_splitter.setStretchFactor(2, 3)   # segment list grows
+        results_splitter.setSizes([180, 300, 180])
+        contour_lay.addWidget(results_splitter, 1)
+
+        self._clear_analysis_btn = QPushButton("🗑 Clear Analysis Layers")
+        self._clear_analysis_btn.setToolTip(H.CLEAR_ANALYSIS)
+        contour_lay.addWidget(self._clear_analysis_btn)
 
         tabs.addTab(contour_w, "Contours")
 
@@ -690,39 +973,73 @@ class AssessmentPanel(QDockWidget):
         self._keypoint_count_spin = QSpinBox()
         self._keypoint_count_spin.setRange(1, 20)
         self._keypoint_count_spin.setValue(5)
-        self._keypoint_count_spin.setToolTip(
-            "Number of keypoints to detect.\n"
-            "Each keypoint is a valley inflection where slope eases from steep to gentle.\n"
-            "Keypoints are spatially separated so they cover the full elevation range."
-        )
+        self._keypoint_count_spin.setToolTip(H.KEYPOINT_COUNT)
         keypoint_lay.addWidget(self._keypoint_count_spin)
 
-        self._run_keypoint_btn = self._button("Find Keypoints + Ridgelines", "#8e44ad")
-        self._run_keypoint_btn.setToolTip(
-            "Analyse the DEM and flow accumulation to locate:\n\n"
-            "  Keypoints — valley inflection points where slope transitions\n"
-            "  from steep to gentle. This is where Yeomans' keyline begins.\n\n"
-            "  Ridgelines — watershed divides that separate drainage basins.\n\n"
-            "Requires: baseline analysis run."
-        )
+        self._run_keypoint_btn = RunButton(
+            "Find Keypoints + Ridgelines", accent="#8e44ad", accent_hover="#6c3483",
+            ghost_bg="#f5eefa")
+        self._run_keypoint_btn.setToolTip(H.RUN_KEYPOINT)
         keypoint_lay.addWidget(self._run_keypoint_btn)
 
-        self._recommend_ponds_btn = self._button("Recommend Pond Sites", "#6c3483")
+        self._recommend_ponds_btn = RunButton(
+            "Recommend Pond Sites", accent="#6c3483", accent_hover="#532567",
+            ghost_bg="#f3eaf7")
         self._recommend_ponds_btn.setEnabled(False)
-        self._recommend_ponds_btn.setToolTip(
-            "For each keypoint, find the optimal dam/pond location:\n"
-            "the narrowest valley cross-section just downstream.\n\n"
-            "Requires: keypoints found first."
-        )
+        self._recommend_ponds_btn.setToolTip(H.RECOMMEND_PONDS)
         keypoint_lay.addWidget(self._recommend_ponds_btn)
 
-        self._keypoint_progress = QProgressBar()
-        self._keypoint_progress.setVisible(False)
-        keypoint_lay.addWidget(self._keypoint_progress)
+        # --- Yeomans keyline design ---
+        keyline_grid = QGridLayout()
+        keyline_grid.addWidget(self._label("Cultivation guides (each side)"), 0, 0)
+        self._keyline_runs_spin = QSpinBox()
+        self._keyline_runs_spin.setRange(0, 20)
+        self._keyline_runs_spin.setValue(3)
+        self._keyline_runs_spin.setToolTip(H.KEYLINE_RUNS)
+        keyline_grid.addWidget(self._keyline_runs_spin, 0, 1)
 
-        self._keypoint_results_lbl = self._label("", small=True)
-        self._keypoint_results_lbl.setWordWrap(True)
-        keypoint_lay.addWidget(self._keypoint_results_lbl)
+        keyline_grid.addWidget(self._label("Guide spacing (m)"), 1, 0)
+        self._keyline_spacing_spin = QDoubleSpinBox()
+        self._keyline_spacing_spin.setRange(1.0, 100.0)
+        self._keyline_spacing_spin.setValue(5.0)
+        self._keyline_spacing_spin.setSuffix(" m")
+        self._keyline_spacing_spin.setToolTip(H.KEYLINE_SPACING)
+        keyline_grid.addWidget(self._keyline_spacing_spin, 1, 1)
+
+        keyline_grid.addWidget(self._label("Guide grade (1 : N)"), 2, 0)
+        self._keyline_grade_spin = QSpinBox()
+        self._keyline_grade_spin.setRange(50, 5000)
+        self._keyline_grade_spin.setValue(500)
+        self._keyline_grade_spin.setSingleStep(50)
+        self._keyline_grade_spin.setToolTip(H.KEYLINE_GRADE)
+        keyline_grid.addWidget(self._keyline_grade_spin, 2, 1)
+        keypoint_lay.addLayout(keyline_grid)
+
+        self._run_keyline_btn = RunButton(
+            "Generate Keylines", accent="#a0662a", accent_hover="#7d4e20",
+            ghost_bg="#f7efe6")
+        self._run_keyline_btn.setToolTip(H.RUN_KEYLINE)
+        keypoint_lay.addWidget(self._run_keyline_btn)
+
+        keyline_actions = QHBoxLayout()
+        self._draw_keyline_btn = QPushButton("✏ Draw Keyline")
+        self._draw_keyline_btn.setToolTip(H.DRAW_KEYLINE)
+        keyline_actions.addWidget(self._draw_keyline_btn)
+        self._convert_keyline_btn = QPushButton("Convert Keyline → Swale")
+        self._convert_keyline_btn.setToolTip(H.CONVERT_KEYLINE)
+        keyline_actions.addWidget(self._convert_keyline_btn)
+        keypoint_lay.addLayout(keyline_actions)
+
+        self._keypoint_status_lbl = self._label("", small=True)
+        self._keypoint_status_lbl.setWordWrap(True)
+        keypoint_lay.addWidget(self._keypoint_status_lbl)
+
+        # Clickable result list — selecting a row zooms the canvas to that feature.
+        self._keypoint_list = QListWidget()
+        self._keypoint_list.setMaximumHeight(170)
+        self._keypoint_list.setToolTip(H.KEYPOINT_LIST)
+        self._keypoint_list.itemClicked.connect(self._on_keypoint_item_clicked)
+        keypoint_lay.addWidget(self._keypoint_list)
         keypoint_lay.addStretch()
 
         tabs.addTab(keypoint_w, "Keypoints")
@@ -739,8 +1056,13 @@ class AssessmentPanel(QDockWidget):
         self._run_contour_btn.clicked.connect(self.run_contour_analysis_requested)
         self._top5_contours_btn.clicked.connect(self.select_top5_contours_requested)
         self._find_segments_btn.clicked.connect(self.find_segments_requested)
+        self._inflow_bands_btn.toggled.connect(self.show_inflow_bands_requested)
+        self._clear_analysis_btn.clicked.connect(self.clear_analysis_requested)
         self._run_keypoint_btn.clicked.connect(self.run_keypoint_analysis_requested)
         self._recommend_ponds_btn.clicked.connect(self.recommend_ponds_requested)
+        self._run_keyline_btn.clicked.connect(self.run_keyline_requested)
+        self._draw_keyline_btn.clicked.connect(self.draw_keyline_requested)
+        self._convert_keyline_btn.clicked.connect(self.convert_keyline_to_swale_requested)
 
     # ---------------------------------------------------------------- Section 4: Earthworks
 
@@ -752,13 +1074,26 @@ class AssessmentPanel(QDockWidget):
         for name in ["Sand", "Sandy loam", "Loam", "Clay loam", "Clay"]:
             self._ew_soil_combo.addItem(name)
         self._ew_soil_combo.setCurrentText("Loam")
+        self._ew_soil_combo.setToolTip(H.SITE_SOIL)
         lay.addWidget(self._ew_soil_combo)
+
+        # Off by default: size on water the feature actually HOLDS, and treat
+        # whatever soaks away as spare capacity rather than something to rely on.
+        self._count_infiltration_check = QCheckBox("Count soakage toward capture")
+        self._count_infiltration_check.setChecked(False)
+        self._count_infiltration_check.setToolTip(H.COUNT_INFILTRATION)
+        self._count_infiltration_check.toggled.connect(
+            lambda _v: self.analysis_inputs_changed.emit())
+        lay.addWidget(self._count_infiltration_check)
 
         # Felt-style tool menu (registry-driven) replaces the button grid.
         from terrainflow_assessment.qgis.widgets.tool_menu import EarthworkToolMenu
         self._tool_menu = EarthworkToolMenu()
         self._tool_menu.draw_swale_requested.connect(self.draw_swale_requested)
         self._tool_menu.draw_earthwork_requested.connect(self.draw_earthwork_requested)
+        self._tool_menu.place_spillway_requested.connect(self.place_spillway_requested)
+        self._tool_menu.connect_earthworks_requested.connect(
+            self.connect_earthworks_requested)
         lay.addWidget(self._tool_menu)
 
         ew_actions = QHBoxLayout()
@@ -788,19 +1123,75 @@ class AssessmentPanel(QDockWidget):
         self._before_after_check = QCheckBox("Show: with earthworks")
         lay.addWidget(self._before_after_check)
 
+        # The clearest answer to "why is my capture only 19%?" — grey is ground that
+        # reaches no feature at all.
+        self._catchment_layer_check = QCheckBox("Show: which earthwork catches what")
+        self._catchment_layer_check.setToolTip(H.CATCHMENT_LAYER)
+        lay.addWidget(self._catchment_layer_check)
+
         # Connections
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
+        self._catchment_layer_check.toggled.connect(self.toggle_catchment_layer_requested)
 
     # ---------------------------------------------------------------- Section 5: Live Assessment (network)
 
     def _build_section_live_assessment(self):
         lay = self._section("Live Assessment")
 
+        # List / Flow — the same network read two ways. The list answers "what have
+        # I got"; the chart answers "how does it connect", which a flat list cannot
+        # show once features start spilling into one another.
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(0)
+        mode_row.addStretch(1)
+        self._network_mode_btns = {}
+        modes = (("list", "List"), ("flow", "Flow"), ("elevation", "Elevation"))
+        for i, (mode, label) in enumerate(modes):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(mode == "list")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            left = "" if i == 0 else "border-left: none;"
+            if i == 0:
+                radius = ("border-top-left-radius: 5px;"
+                          " border-bottom-left-radius: 5px;")
+            elif i == len(modes) - 1:
+                radius = ("border-top-right-radius: 5px;"
+                          " border-bottom-right-radius: 5px;")
+            else:
+                radius = ""
+            btn.setStyleSheet(
+                "QPushButton { border: 1px solid #c6d1d3; " + left + radius
+                + " background: transparent; color: #5f7176; font-size: 10.5px;"
+                " padding: 2px 10px; } "
+                "QPushButton:checked { background: #e9f3ee; color: #2e7d55;"
+                " font-weight: 600; }"
+            )
+            btn.clicked.connect(lambda _c=False, m=mode: self._on_network_mode(m))
+            self._network_mode_btns[mode] = btn
+            mode_row.addWidget(btn)
+        lay.addLayout(mode_row)
+
         from terrainflow_assessment.qgis.widgets.network_view import NetworkView
         self._network = NetworkView()
+        # Selecting a card told nobody, so there was no way to tell which of five
+        # swales the row referred to. Relay it so the map can highlight the feature.
+        self._network.selection_changed.connect(self.earthwork_selected)
         lay.addWidget(self._network)
+
+        # Per-area breakdown. One site-wide capture figure hides where the problem
+        # is: 19% overall can be 80% on one catchment and nothing on the next, and
+        # those need different work.
+        self._area_subtotals_lbl = QLabel("")
+        self._area_subtotals_lbl.setWordWrap(True)
+        self._area_subtotals_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._area_subtotals_lbl.setStyleSheet("font-size: 10.5px;")
+        self._area_subtotals_lbl.setToolTip(H.AREA_SUBTOTALS)
+        self._area_subtotals_lbl.setVisible(False)
+        lay.addWidget(self._area_subtotals_lbl)
 
         # Totals + disclaimer line under the network (capacity / cut / fill).
         self._live_assessment_lbl = QLabel("")
@@ -815,7 +1206,8 @@ class AssessmentPanel(QDockWidget):
         for spin in (self._rainfall_spin, self._duration_spin, self._cn_spin):
             spin.valueChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
             spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
-        for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo):
+        for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo,
+                      self._ground_condition_combo):
             combo.currentTextChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
         self._site_name_edit.textChanged.connect(
             lambda text: self._head_site_lbl.setText(text.strip() or "Unnamed Site")
@@ -829,6 +1221,34 @@ class AssessmentPanel(QDockWidget):
         )
 
     # ---------------------------------------------------------------- Section 6: Simulation
+
+    def _build_section_verification(self):
+        """Design vs measured, per feature.
+
+        The scorecard chip carries one site-wide Δ, which on its own conflates the
+        freeboard allowance, the grid's resolution penalty and any actual burn error.
+        This section separates them so a number that looks alarming can be read.
+        """
+        from terrainflow_assessment.qgis.widgets.verification_table import (
+            VerificationTable,
+        )
+
+        lay = self._section("Design vs Measured", collapsed=False)
+        self._verification_empty = self._label(
+            "Re-analyse with earthworks to compare the design against what the "
+            "burned terrain actually holds.", small=True)
+        self._verification_empty.setWordWrap(True)
+        self._verification_empty.setStyleSheet("color: #8fa0a4; font-style: italic;")
+        lay.addWidget(self._verification_empty)
+
+        self._verification_table = VerificationTable()
+        self._verification_table.setToolTip(H.VERIFICATION_TABLE)
+        lay.addWidget(self._verification_table)
+
+    def set_verification(self, result, cell_size_m=1.0):
+        """Populate the per-feature verification table (None clears it)."""
+        self._verification_table.set_result(result, cell_size_m=cell_size_m)
+        self._verification_empty.setVisible(not self._verification_table.isVisible())
 
     def _build_section_simulation(self):
         lay = self._section("Fill Simulation", collapsed=False)
@@ -970,6 +1390,7 @@ class AssessmentPanel(QDockWidget):
         self._run_baseline_btn.set_progress(pct, f"{msg} ({pct}%)")
 
     def set_baseline_complete(self, summary):
+        self._baseline_has_run = True
         self._run_baseline_btn.set_done()
         self._baseline_results_lbl.setText(summary)
         self.mark_stage("baseline", "done")
@@ -977,28 +1398,97 @@ class AssessmentPanel(QDockWidget):
         self._query_ponding_btn.setEnabled(True)
         self._toggle_slope_class_btn.setEnabled(True)
         self._toggle_slope_arrows_btn.setEnabled(True)
+        self._toggle_slope_vectors_btn.setEnabled(True)
+        self._toggle_throughflow_btn.setEnabled(True)
+        self._throughflow_scale_combo.setEnabled(True)
         self._generate_contours_btn.setEnabled(True)
 
+    def set_usable_area_source(self, source):
+        """Set the contour 'Usable area (clip)' selector (fires usable-area change)."""
+        text = {"analysis": "Analysis Area", "earthworks": "Earthworks Area"}.get(
+            source, "None")
+        if self._usable_area_combo.currentText() != text:
+            self._usable_area_combo.setCurrentText(text)
+
+    def set_area_outflow(self, area_outflow):
+        """Show how much water leaves each defined area after baseline."""
+        if not area_outflow:
+            self._area_outflow_lbl.setVisible(False)
+            return
+        labels = {"site": "Site boundary", "analysis": "Analysis area",
+                  "earthworks": "Earthworks area"}
+        rows = []
+        for key in ("site", "analysis", "earthworks"):
+            d = area_outflow.get(key)
+            if not d:
+                continue
+            rows.append(
+                f"<b>{labels[key]}:</b> {d['flow_ls']:,.1f} L/s "
+                f"({d['volume_m3']:,.0f} m³ over event, {d['n_exits']} exit"
+                f"{'s' if d['n_exits'] != 1 else ''})"
+            )
+        if rows:
+            self._area_outflow_lbl.setText("Water leaving —<br>" + "<br>".join(rows))
+            self._area_outflow_lbl.setVisible(True)
+        else:
+            self._area_outflow_lbl.setVisible(False)
+
     def set_contour_progress(self, pct, msg):
-        self._contour_progress.setVisible(True)
-        self._contour_progress.setValue(pct)
-        self._contour_progress.setFormat(f"{msg} ({pct}%)")
+        self._run_contour_btn.set_progress(pct, f"{msg} ({pct}%)")
 
     def set_contour_complete(self):
-        self._contour_progress.setVisible(False)
+        self._run_contour_btn.set_done()
         self._top5_contours_btn.setEnabled(True)
         self._find_segments_btn.setEnabled(True)
+        self._inflow_bands_btn.setEnabled(True)
         self.mark_stage("analysis", "done")
 
+    def clear_analysis_ui(self):
+        """Reset the Analysis-tab widgets after the controller wipes the layers."""
+        self._contour_list.clear()
+        self._segment_list.clear()
+        self._keypoint_list.clear()
+        self._keypoint_status_lbl.setText("")
+        self._run_contour_btn.set_idle()
+        self._find_segments_btn.set_idle()
+        self._find_segments_btn.setEnabled(False)
+        self._top5_contours_btn.setEnabled(False)
+        self._inflow_bands_btn.setChecked(False)
+        self._inflow_bands_btn.setEnabled(False)
+        self._run_keypoint_btn.set_idle()
+        self._recommend_ponds_btn.set_idle()
+        self._recommend_ponds_btn.setEnabled(False)
+        self._run_keyline_btn.set_idle()
+
+    def set_segment_progress(self, pct, msg):
+        self._find_segments_btn.set_progress(pct, f"{msg} ({pct}%)")
+
+    def set_segment_complete(self):
+        self._find_segments_btn.set_done()
+
     def set_keypoint_progress(self, pct, msg):
-        self._keypoint_progress.setVisible(True)
-        self._keypoint_progress.setValue(pct)
-        self._keypoint_progress.setFormat(f"{msg} ({pct}%)")
+        self._run_keypoint_btn.set_progress(pct, f"{msg} ({pct}%)")
 
     def set_keypoint_complete(self, summary=""):
-        self._keypoint_progress.setVisible(False)
-        self._keypoint_results_lbl.setText(summary)
+        self._run_keypoint_btn.set_done()
+        self._keypoint_status_lbl.setText(summary)
         self._recommend_ponds_btn.setEnabled(bool(summary))
+
+    def set_ponds_progress(self, pct, msg):
+        self._recommend_ponds_btn.set_progress(pct, f"{msg} ({pct}%)")
+
+    def set_ponds_complete(self, summary=""):
+        self._recommend_ponds_btn.set_done()
+        if summary:
+            self._keypoint_status_lbl.setText(summary)
+
+    def set_keyline_progress(self, pct, msg):
+        self._run_keyline_btn.set_progress(pct, f"{msg} ({pct}%)")
+
+    def set_keyline_complete(self, summary=""):
+        self._run_keyline_btn.set_done()
+        if summary:
+            self._keypoint_status_lbl.setText(summary)
 
     def set_earthworks_progress(self, pct, msg):
         self._run_ew_btn.set_progress(pct, f"{msg} ({pct}%)")
@@ -1008,9 +1498,9 @@ class AssessmentPanel(QDockWidget):
         self._earthworks_results_lbl.setText(summary)
         self.mark_stage("verify", "done")
 
-    def set_verified_chip(self, text, fresh):
+    def set_verified_chip(self, text, fresh, tooltip=""):
         """Scorecard's verified-vs-design chip (Workbench)."""
-        self._scorecard.set_verified(text, fresh)
+        self._scorecard.set_verified(text, fresh, tooltip)
 
     def set_live_assessment(self, html):
         """Update the live analytical assessment readout (design-tier, no burn)."""
@@ -1036,8 +1526,55 @@ class AssessmentPanel(QDockWidget):
             item.setCheckState(Qt.Checked)
             self._contour_list.addItem(item)
 
-    def set_keypoint_results(self, summary):
-        self._keypoint_results_lbl.setText(summary)
+    def set_keypoint_results(self, items):
+        """Populate the clickable keypoint/pond result list.
+
+        *items* is a list of dicts: {label, x, y, kind}. Rows with x/y set to None
+        are treated as non-clickable headers/summaries.
+        """
+        self._keypoint_list.clear()
+        for it in items:
+            row = QListWidgetItem(it.get("label", ""))
+            x, y = it.get("x"), it.get("y")
+            if x is not None and y is not None:
+                row.setData(Qt.UserRole, (float(x), float(y)))
+            else:
+                # Header/summary row — not clickable, visually muted.
+                row.setFlags(Qt.ItemIsEnabled)
+                row.setForeground(Qt.gray)
+            self._keypoint_list.addItem(row)
+
+    def _on_keypoint_item_clicked(self, item):
+        data = item.data(Qt.UserRole)
+        if data:
+            self.keypoint_result_activated.emit(data[0], data[1])
+
+    def set_segment_results(self, segments):
+        """Populate the swale-segment list: ✓ holds / ⚠ needs overflow, storing
+        each segment's geometry so a click highlights + zooms to that exact swale."""
+        self._segment_list.clear()
+        for seg in segments:
+            mark = "⚠" if seg.capped else "✓"
+            item = QListWidgetItem(f"{mark} {seg.label}")
+            try:
+                item.setData(Qt.UserRole, seg.geometry.wkt)
+            except Exception:
+                pass
+            self._segment_list.addItem(item)
+
+    def _on_segment_item_clicked(self, item):
+        wkt = item.data(Qt.UserRole)
+        if wkt:
+            self.segment_activated.emit(wkt)
+
+    def _show_slope_class_info(self):
+        from qgis.PyQt.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Slope classes & earthworks")
+        box.setTextFormat(Qt.RichText)
+        box.setText(H.SLOPE_CLASS_INFO)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     # The earthwork list is now the flow network (driven by set_network on every
     # recompute). These legacy hooks are retained as no-ops so the controller's
@@ -1051,6 +1588,33 @@ class AssessmentPanel(QDockWidget):
 
     def refresh_earthwork_list(self, earthworks):
         pass
+
+    def set_area_subtotals(self, rows):
+        """Per-catchment capture, worst first — the row worth acting on leads."""
+        if not rows:
+            self._area_subtotals_lbl.setVisible(False)
+            self._area_subtotals_lbl.setText("")
+            return
+        ordered = sorted(rows, key=lambda r: r["capture_pct"])
+        lines = ['<div style="color:#5f7176; font-weight:600;">By catchment</div>']
+        for row in ordered[:6]:
+            pct = row["capture_pct"]
+            colour = "#c0392b" if pct < 20 else "#b9770e" if pct < 50 else "#1e8449"
+            lines.append(
+                f'<div style="color:#5f7176;">{row["name"]} — '
+                f'<span style="color:{colour}; font-weight:600;">{pct:.0f}%</span> held'
+                f' · {row["runoff_m3"]:,.0f} m³ generated'
+                f' · {row["exit_m3"]:,.0f} m³ leaves</div>'
+            )
+        if len(ordered) > 6:
+            lines.append(f'<div style="color:#8fa0a4;">+{len(ordered) - 6} more</div>')
+        self._area_subtotals_lbl.setText("".join(lines))
+        self._area_subtotals_lbl.setVisible(True)
+
+    def _on_network_mode(self, mode):
+        for key, btn in self._network_mode_btns.items():
+            btn.setChecked(key == mode)
+        self._network.set_mode(mode)
 
     def set_network(self, nodes, edges, exit_m3):
         """Render the earthwork flow network (Live Assessment)."""
@@ -1125,6 +1689,17 @@ class AssessmentPanel(QDockWidget):
     def earthworks_area_layer(self):
         return self._earthworks_area_combo.currentLayer()
 
+    def set_area_layer(self, kind, layer):
+        """Select *layer* in the picker named by *kind* ('boundary' | 'analysis' |
+        'earthworks'). Setting currentLayer re-fires the matching *_changed signal."""
+        combo = {
+            "boundary": self._boundary_combo,
+            "analysis": self._analysis_area_combo,
+            "earthworks": self._earthworks_area_combo,
+        }.get(kind)
+        if combo is not None:
+            combo.setLayer(layer)
+
     @property
     def site_name(self):
         return self._site_name_edit.text().strip() or "Unnamed Site"
@@ -1142,8 +1717,24 @@ class AssessmentPanel(QDockWidget):
         return self._soil_combo.currentText()
 
     @property
+    def ground_condition(self):
+        """TR-55 hydrologic condition key — ``"good"`` / ``"fair"`` / ``"poor"``."""
+        from terrainflow_assessment.modules.catchment import DEFAULT_GROUND_CONDITION
+        return self._ground_condition_combo.currentData() or DEFAULT_GROUND_CONDITION
+
+    def _refresh_cn_from_soil(self):
+        """Re-fill the CN spinner from the current soil texture and ground condition."""
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+        self._cn_spin.setValue(
+            SCSRunoff.soil_reference_cn(self.soil_name, self.ground_condition))
+
+    @property
     def cn(self):
-        """Direct CN value from spinner (auto-filled from soil type, but overridable)."""
+        """Direct CN value from the spinner.
+
+        Auto-filled from soil texture + ground condition, and overridable — a measured
+        or land-use-derived CN beats any table lookup.
+        """
         return self._cn_spin.value()
 
     @property
@@ -1157,6 +1748,10 @@ class AssessmentPanel(QDockWidget):
     @property
     def stream_threshold_ha(self):
         return self._threshold_spin.value()
+
+    @property
+    def exit_flow_ls(self):
+        return self._exit_flow_spin.value()
 
     @property
     def contour_interval_m(self):
@@ -1187,12 +1782,222 @@ class AssessmentPanel(QDockWidget):
         return self._swale_width_spin.value()
 
     @property
+    def top_n(self):
+        return self._top_n_spin.value()
+
+    @property
+    def segment_rank_mode(self):
+        return "inflow" if self._seg_rank_combo.currentIndex() == 1 else "catchment"
+
+    @property
+    def seg_max_slope_deg(self):
+        """Segment slope limit in degrees, or None when the filter is off."""
+        return self._seg_max_slope_spin.value() if self._seg_slope_check.isChecked() else None
+
+    @property
+    def inflow_scale_mode(self):
+        return {"Log": "log", "Linear": "linear", "Quantile": "quantile"}.get(
+            self._inflow_scale_combo.currentText(), "log")
+
+    @property
+    def throughflow_scale_mode(self):
+        return {"Log": "log", "Linear": "linear", "Quantile": "quantile"}.get(
+            self._throughflow_scale_combo.currentText(), "log")
+
+    @property
+    def throughflow_visible(self):
+        return self._toggle_throughflow_btn.isChecked()
+
+    @property
     def keypoint_count(self):
         return self._keypoint_count_spin.value()
 
     @property
+    def keyline_runs(self):
+        return self._keyline_runs_spin.value()
+
+    @property
+    def keyline_spacing_m(self):
+        return self._keyline_spacing_spin.value()
+
+    @property
+    def keyline_cross_grade(self):
+        n = self._keyline_grade_spin.value()
+        return 1.0 / n if n else 0.0
+
+    @property
     def earthwork_soil_name(self):
         return self._ew_soil_combo.currentText()
+
+    def _on_surface_preset(self, _index=None):
+        """Applying a surface preset sets C; 'Custom' leaves whatever is typed."""
+        value = self._runoff_surface_combo.currentData()
+        if value is not None:
+            self._runoff_coeff_spin.blockSignals(True)
+            self._runoff_coeff_spin.setValue(float(value))
+            self._runoff_coeff_spin.blockSignals(False)
+        self._on_basis_changed()
+
+    def _sync_basis_controls(self):
+        """Only the coefficient basis has a coefficient to set."""
+        active = self.sizing_basis == "coefficient"
+        self._runoff_surface_combo.setEnabled(active)
+        self._runoff_coeff_spin.setEnabled(active)
+
+    def _on_basis_changed(self, _index=None):
+        """The basis drives the baseline rasters too, so a run made under the old
+        one no longer describes this storm — mark it stale rather than leaving a
+        green tick over numbers that have silently changed meaning."""
+        self._sync_basis_controls()
+        self.analysis_inputs_changed.emit()
+        if self._baseline_has_run:
+            self.mark_stage("baseline", "stale")
+            self.mark_stage("analysis", "stale")
+
+    @property
+    def sizing_basis(self):
+        """'coefficient' (rational method), 'rainfall', or 'runoff' (SCS-CN)."""
+        return ("coefficient", "rainfall", "runoff")[
+            self._sizing_basis_combo.currentIndex()]
+
+    @property
+    def runoff_coefficient(self):
+        """Rational-method runoff coefficient C, used when the basis is 'coefficient'."""
+        return self._runoff_coeff_spin.value()
+
+    @property
+    def peak_intensity_mm_hr(self):
+        """Peak design rainfall intensity — sizes overflow structures.
+
+        Separate from the storm depth/duration because it cannot be derived from
+        them: dividing depth by duration gives the event *average*, which for a
+        24-hour design storm is a daily mean rather than anything a spillway will
+        ever see.
+        """
+        return self._peak_intensity_spin.value()
+
+    def set_peak_intensity(self, value):
+        """Apply an intensity chosen in the comparison dialog."""
+        self._peak_intensity_spin.setValue(float(value))
+
+    @property
+    def count_infiltration(self):
+        """Whether soakage counts as capture, or is only reported as a buffer."""
+        return self._count_infiltration_check.isChecked()
+
+    # ------------------------------------------------------------------ Design file I/O
+
+    # Input name → (widget attribute, kind). Kinds name the widget API, not the meaning:
+    # "value" is any spin box, "text" a line edit, "checked" a check box, "combo_text" a
+    # combo matched on item text, "combo_data" a combo matched on item *data* — for
+    # combos whose stored key differs from the label the user reads.
+    #
+    # `routing` and `sizing_basis` are deliberately absent: their properties *derive* a
+    # value from combo position rather than reading it back verbatim, so restoring them
+    # means inverting that mapping. Both are handled explicitly in apply_inputs.
+    _INPUT_WIDGETS = {
+        "site_name": ("_site_name_edit", "text"),
+        "rainfall_mm": ("_rainfall_spin", "value"),
+        "duration_hr": ("_duration_spin", "value"),
+        "soil_name": ("_soil_combo", "combo_text"),
+        "ground_condition": ("_ground_condition_combo", "combo_data"),
+        "cn": ("_cn_spin", "value"),
+        "moisture": ("_moisture_combo", "combo_text"),
+        "stream_threshold_ha": ("_threshold_spin", "value"),
+        "exit_flow_ls": ("_exit_flow_spin", "value"),
+        "runoff_coefficient": ("_runoff_coeff_spin", "value"),
+        "earthwork_soil_name": ("_ew_soil_combo", "combo_text"),
+        "peak_intensity_mm_hr": ("_peak_intensity_spin", "value"),
+        "count_infiltration": ("_count_infiltration_check", "checked"),
+        "contour_interval_m": ("_contour_interval_spin", "value"),
+        "simple_contour_interval_m": ("_simple_contour_interval_spin", "value"),
+        "max_slope_deg": ("_max_slope_spin", "value"),
+        "min_contour_length_m": ("_min_contour_length_spin", "value"),
+        "min_catchment_ha": ("_min_catchment_ha_spin", "value"),
+        "swale_depth_m": ("_swale_depth_spin", "value"),
+        "swale_width_m": ("_swale_width_spin", "value"),
+    }
+
+    def collect_inputs(self):
+        """Every analysis input, keyed as ``project_io.INPUT_FIELDS`` expects.
+
+        Reads through the existing public properties rather than the widgets, so there is
+        exactly one definition of what each input *means* and this cannot drift from what
+        an analysis run actually receives.
+        """
+        return {name: getattr(self, name) for name in INPUT_FIELDS}
+
+    def apply_inputs(self, values):
+        """Push a restored input set back into the widgets.
+
+        Signals are blocked across the whole apply and ``analysis_inputs_changed`` is
+        emitted once at the end. Setting twenty widgets individually would otherwise fire
+        the live re-assessment twenty times, each on a half-restored input set — slow, and
+        briefly scoring the design against a storm that is part old and part new.
+        """
+        values = normalise_inputs(values)
+        widgets = [w for w in (
+            [getattr(self, attr, None) for attr, _kind in self._INPUT_WIDGETS.values()]
+            + [self._routing_combo, self._sizing_basis_combo]
+        ) if w is not None]
+
+        try:
+            for widget in widgets:
+                widget.blockSignals(True)
+
+            for name, (attr, kind) in self._INPUT_WIDGETS.items():
+                widget = getattr(self, attr, None)
+                if widget is None:
+                    continue
+                value = values[name]
+                if kind == "value":
+                    widget.setValue(value)
+                elif kind == "text":
+                    widget.setText(value)
+                elif kind == "checked":
+                    widget.setChecked(bool(value))
+                elif kind == "combo_text":
+                    # A soil or moisture label the current build doesn't offer leaves the
+                    # combo alone: keeping a valid selection beats blanking it to nothing.
+                    index = widget.findText(value)
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+                elif kind == "combo_data":
+                    index = widget.findData(value)
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+
+            self._apply_routing(values["routing"])
+            self._apply_sizing_basis(values["sizing_basis"])
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+        # The basis governs whether the coefficient controls are live, and it was set
+        # with signals blocked, so its own handler never ran.
+        self._sync_basis_controls()
+        self.analysis_inputs_changed.emit()
+
+    def _apply_routing(self, routing):
+        """Select the combo entry the :attr:`routing` property would read back as *routing*.
+
+        Matched on item text the same way the getter is, rather than by index, so
+        relabelling or reordering the combo cannot silently invert the choice.
+        """
+        want_d8 = routing == "d8"
+        for index in range(self._routing_combo.count()):
+            if ("D8" in self._routing_combo.itemText(index)) == want_d8:
+                self._routing_combo.setCurrentIndex(index)
+                return
+
+    def _apply_sizing_basis(self, basis):
+        """Select the combo position matching *basis*, whose order SIZING_BASIS_VALUES mirrors."""
+        try:
+            index = SIZING_BASIS_VALUES.index(basis)
+        except ValueError:
+            return
+        if index < self._sizing_basis_combo.count():
+            self._sizing_basis_combo.setCurrentIndex(index)
 
     @property
     def sim_rainfall_mm(self):

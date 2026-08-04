@@ -951,7 +951,14 @@ class TestStrategyCConveyances:
         assert b.warnings == []  # bottom width 1.0 == cell size, not sub-cell
 
     def test_before_after_integrity_changes_localized(self, tmp_path):
-        # Baseline vs with-earthwork must be identical except at earthwork cells.
+        """Baseline vs with-earthwork must be identical away from the feature.
+
+        The corridor is rows 8–12 rather than 9–10 because footprints now rasterise
+        with ``all_touched``: a cell counts if the geometry touches it at all, not
+        only if its centre falls inside. That deliberately widens every footprint by
+        up to a cell — previously they were systematically undersized against the
+        exact polygon the analytic capacity used.
+        """
         data = np.full((20, 20), 50.0, dtype="float32")
         path = _make_dem(tmp_path, data)
         b = DEMBurner(path)
@@ -960,9 +967,11 @@ class TestStrategyCConveyances:
         ew = _mock_ew("swale", geom, depth=1.0, width=2.0, companion_berm=False)
         result = b.burn_earthworks([ew])
 
-        # Swale sits on rows 9–10; everything above row 9 and below row 10 untouched.
-        assert np.array_equal(result[:9, :], data[:9, :])
-        assert np.array_equal(result[11:, :], data[11:, :])
+        assert np.array_equal(result[:8, :], data[:8, :])
+        assert np.array_equal(result[12:, :], data[12:, :])
+        # The corridor itself is cut, and only the corridor.
+        assert result[9:11, 6:14].max() < 50.0
+        assert result[:8, :].min() == 50.0 and result[12:, :].min() == 50.0
 
     def test_sub_cell_diversion_snaps_and_warns(self, tmp_path):
         data = np.full((20, 20), 50.0, dtype="float32")

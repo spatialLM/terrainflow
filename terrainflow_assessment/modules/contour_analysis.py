@@ -155,18 +155,23 @@ def _extract_contours_scipy(dem_path, interval_m):
         interval_m,
     )
 
-    cell_w = abs(transform.a)
-    abs(transform.e)
     features = []
 
     for elev in levels:
-        contours_rc = measure.find_contours(np.nan_to_num(dem, nan=elev - 1), elev)
+        # NaN is passed through, not filled. find_contours excludes NaN natively and
+        # leaves the contour open where the data stops; substituting elev−1 built a
+        # synthetic wall around every hole, so marching squares closed each contour
+        # along the data boundary. Those edge-hugging artefacts are indistinguishable
+        # from real contours in the picker and are selectable for swale alignment.
+        contours_rc = measure.find_contours(dem.astype("float64"), elev)
         for rc_path in contours_rc:
             if len(rc_path) < 2:
                 continue
-            # Convert row/col → map coordinates
-            xs = transform.c + rc_path[:, 1] * cell_w + cell_w / 2
-            ys = transform.f + rc_path[:, 0] * transform.e + transform.e / 2
+            # Convert row/col → map coordinates (cell centres). Both axes use the
+            # signed transform: hard-coding |a| for x only happens to agree with it
+            # while a > 0, which is not something the geometry should rely on.
+            xs = transform.c + (rc_path[:, 1] + 0.5) * transform.a
+            ys = transform.f + (rc_path[:, 0] + 0.5) * transform.e
             coords = list(zip(xs, ys))
             if len(coords) < 2:
                 continue
@@ -215,14 +220,18 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
     if nodata is not None:
         dem = np.where(dem == nodata, np.nan, dem)
 
-    # Use a masked array so NaN border cells do not fabricate edge gradients.
+    # NOTE: this keeps a bespoke masked-array central difference rather than the shared
+    # dem_loader.slope_degrees() (Horn's method) on purpose — the two are different
+    # published estimators and this one is the stricter of the pair for a filter whose
+    # whole job is to reject steep ground. Both now mask nodata rather than filling it.
     dem_masked = np.ma.masked_invalid(dem)
-    # np.gradient handles masked arrays from NumPy 1.16+; fall back to
-    # nan_to_num if the installed NumPy is older.
+    # np.gradient handles masked arrays from NumPy 1.16+; on anything older, plain NaN
+    # propagation gives the same protection (filling with 0.0 would have put the
+    # fabricated border spike straight back).
     try:
         dz_dy, dz_dx = np.gradient(dem_masked, cell_h, cell_w)
     except TypeError:
-        dz_dy, dz_dx = np.gradient(np.nan_to_num(dem, nan=0.0), cell_h, cell_w)
+        dz_dy, dz_dx = np.gradient(dem.astype("float64"), cell_h, cell_w)
     # Convert to a plain float32 array with NaN for masked/invalid cells so
     # that indexing never returns a masked scalar (which converts to nan with
     # a warning and then poisons the mean).
@@ -247,13 +256,16 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
                 val = float(slope_deg[row, col])
                 if not np.isnan(val):
                     values.append(val)
-        return float(np.mean(values)) if values else 0.0
+        # No valid sample anywhere along the line → NaN, not 0°. Reporting 0° made a
+        # contour lying entirely over nodata the *flattest* line on the site and it
+        # sailed through a filter whose purpose is to reject unsuitable ground.
+        return float(np.mean(values)) if values else float("nan")
 
     valid = []
     for feat in contours:
         mean_slope = _sample_slope(feat.geometry)
         feat.mean_slope_deg = mean_slope
-        if mean_slope <= max_slope_deg:
+        if mean_slope <= max_slope_deg:      # NaN compares False — unknown is rejected
             valid.append(feat)
 
     return valid
@@ -451,9 +463,13 @@ class SwaleSegment:
     A recommended swale placement derived from a natural flow-crossing on a
     ranked contour.
 
-    The segment geometry is sized to store the full inflow volume:
-        required_length = inflow_m3 / (swale_depth_m × swale_width_m)
-    and is centered on the peak accumulation point on the contour.
+    The segment length is sized by :func:`swale_design.recommend_swale_length`,
+    which balances the design-storm inflow against trapezoidal trench storage plus
+    infiltration over the event — a swale is an infiltration/detention feature, not a
+    full-storm reservoir. The segment is centred on the peak accumulation point on the
+    contour. If the required length exceeds the available contour, the segment is
+    capped to the contour and ``capped`` is set True (the swale alone cannot hold the
+    design inflow).
 
     If no runoff depth is available the natural landscape crossing extent
     (walk until acc drops to drop_fraction × peak) is used instead.
@@ -461,7 +477,7 @@ class SwaleSegment:
 
     def __init__(self, geometry, elevation, peak_acc, contributing_ha,
                  inflow_m3, contour_rank, segment_rank, length_m,
-                 required_length_m=None):
+                 required_length_m=None, capped=False, segment_slope_deg=None):
         self.geometry = geometry
         self.elevation = elevation
         self.peak_acc = peak_acc
@@ -470,8 +486,12 @@ class SwaleSegment:
         self.contour_rank = contour_rank
         self.segment_rank = segment_rank
         self.length_m = length_m
-        # Length required to store inflow (may be capped by contour length)
+        # Length required to manage inflow (may exceed the available contour length)
         self.required_length_m = required_length_m if required_length_m is not None else length_m
+        # True when the contour was too short to fit required_length_m.
+        self.capped = capped
+        # Mean ground slope sampled along the segment (deg), or None if not computed.
+        self.segment_slope_deg = segment_slope_deg
 
     @property
     def label(self):
@@ -481,7 +501,13 @@ class SwaleSegment:
         ]
         if self.inflow_m3:
             parts.append(f"{self.inflow_m3:,.0f} m³ inflow")
-            parts.append(f"{self.required_length_m:.0f} m swale required")
+            if self.capped:
+                parts.append(
+                    f"⚠ needs {self.required_length_m:.0f} m — contour only "
+                    f"{self.length_m:.0f} m"
+                )
+            else:
+                parts.append(f"{self.required_length_m:.0f} m swale required")
         else:
             parts.append(f"{self.length_m:.0f} m long")
         return " — ".join(parts)
@@ -492,10 +518,12 @@ def find_swale_segments(contours, acc_path,
                         min_acc_ha=0.5, drop_fraction=0.25,
                         swale_depth_m=0.3, swale_width_m=0.6,
                         max_segments_per_contour=3,
-                        progress_callback=None):
+                        side_slope=1.0, infiltration_mm_hr=0.0, duration_hr=0.0,
+                        rank_mode="catchment", slope_path=None,
+                        seg_max_slope_deg=None, progress_callback=None):
     """
-    For each ranked contour, locate natural flow-crossing zones and size the
-    swale segment to capture the full incoming runoff volume.
+    For each ranked contour, locate natural flow-crossing zones and size a swale
+    segment to *manage* the incoming runoff over the design storm.
 
     Algorithm
     ---------
@@ -503,12 +531,15 @@ def find_swale_segments(contours, acc_path,
     2. Find local peaks with contributing area ≥ *min_acc_ha* — these are where
        drainage lines cross the contour.
     3. Calculate inflow volume:  inflow_m3 = peak_acc × cell_area × runoff_mm
-    4. Calculate required swale length to store that volume:
-           required_length = inflow_m3 / (swale_depth_m × swale_width_m)
-       This is based on a rectangular cross-section — conservative but standard.
-    5. Extract a segment of that length centered on the peak point.
-       If runoff_mm is unavailable, fall back to the landscape-walk extent
-       (walk outward until acc drops below drop_fraction × peak).
+    4. Size the required swale length with
+       :func:`swale_design.recommend_swale_length` — trapezoidal trench storage plus
+       infiltration over the event, not the old "store the whole storm in a
+       rectangular trench" model.
+    5. Extract a segment of that length centred on the peak point. If the contour is
+       shorter than the required length the segment is capped to the contour and
+       ``SwaleSegment.capped`` is set True. If runoff_mm is unavailable, fall back to
+       the landscape-walk extent (walk outward until acc drops below
+       drop_fraction × peak).
 
     Parameters
     ----------
@@ -520,7 +551,10 @@ def find_swale_segments(contours, acc_path,
                        qualify.  Default 0.5 ha.
     drop_fraction    : float — fallback landscape walk: ends where acc < fraction × peak
     swale_depth_m    : float — swale design depth (m), default 0.3 m
-    swale_width_m    : float — swale base width (m), default 0.6 m
+    swale_width_m    : float — swale top width (m), default 0.6 m
+    side_slope       : float — wall batter H:V run-per-rise (default 1.0)
+    infiltration_mm_hr : float — soil infiltration rate (mm/hr); 0 → storage only
+    duration_hr      : float — storm duration (hr); infiltration counts over the event
     max_segments_per_contour : int — max crossings extracted per contour
     progress_callback : callable(int, str) or None
 
@@ -532,11 +566,19 @@ def find_swale_segments(contours, acc_path,
     import rasterio
     from shapely.ops import substring
 
+    from .swale_design import recommend_swale_length
+
     def _p(pct, msg):
         if progress_callback:
             progress_callback(pct, msg)
 
-    min_acc_cells = max(1, int(min_acc_ha * 10_000 / cell_area_m2))
+    # rank_mode "inflow": relax the catchment filter to a 1-cell floor so small
+    # holdings (where no crossing reaches min_acc_ha) still surface their largest
+    # inflow points. "catchment": keep the min_acc_ha threshold.
+    if rank_mode == "inflow":
+        min_acc_cells = 1
+    else:
+        min_acc_cells = max(1, int(min_acc_ha * 10_000 / cell_area_m2))
 
     _p(5, "Loading accumulation raster…")
     with rasterio.open(acc_path) as src:
@@ -546,6 +588,29 @@ def find_swale_segments(contours, acc_path,
         nodata = src.nodata
     if nodata is not None:
         acc = np.where(acc == nodata, 0.0, acc)
+
+    # Optional per-segment slope filter (F7): sample a slope raster along each
+    # candidate segment and drop segments whose mean slope exceeds the limit.
+    slope_arr = None
+    if slope_path and seg_max_slope_deg is not None:
+        try:
+            with rasterio.open(slope_path) as ss:
+                slope_arr = ss.read(1).astype("float32")
+        except Exception:
+            slope_arr = None
+
+    def _mean_segment_slope(seg_geom):
+        if slope_arr is None:
+            return None
+        vals = []
+        n_s = max(2, int(seg_geom.length / max(cell_w, 1.0)))
+        for d in np.linspace(0, seg_geom.length, n_s):
+            p = seg_geom.interpolate(d)
+            c = int((p.x - transform.c) / transform.a)
+            r = int((p.y - transform.f) / transform.e)
+            if 0 <= r < slope_arr.shape[0] and 0 <= c < slope_arr.shape[1]:
+                vals.append(float(slope_arr[r, c]))
+        return float(np.mean(vals)) if vals else None
 
     all_segments = []
     n = len(contours)
@@ -609,11 +674,16 @@ def find_swale_segments(contours, acc_path,
             inflow_m3 = (peak_acc_val * cell_area_m2 * runoff_mm / 1000.0
                          if runoff_mm else 0.0)
 
+            capped = False
             if runoff_mm and swale_depth_m > 0 and swale_width_m > 0:
-                # Size segment to store the full inflow volume
-                # required_length = V / (depth × width)  [rectangular cross-section]
-                cross_section_m2 = swale_depth_m * swale_width_m
-                required_length = inflow_m3 / cross_section_m2
+                # Size to manage the inflow via trapezoidal storage + infiltration
+                # (a swale is not a full-storm reservoir).
+                required_length = recommend_swale_length(
+                    inflow_m3, swale_depth_m, swale_width_m,
+                    side_slope=side_slope,
+                    infiltration_mm_hr=infiltration_mm_hr,
+                    duration_hr=duration_hr,
+                )
                 required_length = max(required_length, 1.0)  # at least 1 m
 
                 # Center the segment on the peak, capped to contour extent
@@ -630,7 +700,8 @@ def find_swale_segments(contours, acc_path,
                     else:
                         seg_start = max(0.0, seg_start - shortfall)
 
-                seg_end - seg_start < required_length - 0.5
+                # Contour too short to fit the required swale length.
+                capped = (seg_end - seg_start) < (required_length - 0.5)
             else:
                 # Fallback: landscape-walk extent
                 threshold = peak_acc_val * drop_fraction
@@ -654,6 +725,12 @@ def find_swale_segments(contours, acc_path,
             if seg_geom is None or seg_geom.is_empty:
                 continue
 
+            # F7 — drop segments crossing ground steeper than the segment limit.
+            seg_slope = _mean_segment_slope(seg_geom)
+            if (seg_max_slope_deg is not None and seg_slope is not None
+                    and seg_slope > seg_max_slope_deg):
+                continue
+
             seg_len = seg_geom.length
 
             all_segments.append(SwaleSegment(
@@ -666,6 +743,8 @@ def find_swale_segments(contours, acc_path,
                 segment_rank=0,
                 length_m=round(seg_len, 0),
                 required_length_m=round(required_length, 0),
+                capped=capped,
+                segment_slope_deg=round(seg_slope, 1) if seg_slope is not None else None,
             ))
 
     all_segments.sort(
@@ -677,3 +756,115 @@ def find_swale_segments(contours, acc_path,
 
     _p(100, f"Found {len(all_segments)} candidate swale segment(s).")
     return all_segments
+
+
+def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
+                            duration_hr=0.0, window=3, progress_callback=None):
+    """
+    Split each contour into short sub-segments carrying the **absolute** inflow
+    that drains onto them, for a continuous, map-wide comparable gradient.
+
+    Samples flow accumulation along every contour and emits a coloured stretch
+    every ``window`` samples, each stamped with the runoff volume (m³ over the
+    event) and rate (L/s) arriving on it. Because every stretch reports an
+    absolute value (not a per-contour share), a downstream renderer can colour
+    them on one continuous ramp keyed to the global maximum — so a stretch on one
+    contour is directly comparable to a stretch on any other.
+
+    Parameters
+    ----------
+    contours : list of ContourFeature
+    acc_path : str — flow accumulation GeoTIFF
+    cell_area_m2 : float
+    runoff_mm : float or None — event runoff depth; needed to convert accumulation
+        to m³/L·s (falls back to raw accumulation cell-count if None)
+    duration_hr : float — storm duration (for the L/s rate)
+    window : int — samples per emitted stretch (larger = coarser/smoother)
+    progress_callback : callable(int, str) or None
+
+    Returns
+    -------
+    list of dict: {geometry (sub-LineString), inflow_m3, flow_ls, acc,
+    contour_rank, elevation}. Also carries ``global_max_m3`` on every dict so the
+    renderer knows the shared upper bound.
+    """
+    import rasterio
+    from shapely.ops import substring
+
+    def _p(pct, msg):
+        if progress_callback:
+            progress_callback(pct, msg)
+
+    _p(5, "Loading accumulation raster…")
+    with rasterio.open(acc_path) as src:
+        acc = src.read(1).astype("float32")
+        transform = src.transform
+        cell_w = abs(transform.a)
+        nodata = src.nodata
+    if nodata is not None:
+        acc = np.where(acc == nodata, 0.0, acc)
+
+    runoff_m = (runoff_mm / 1000.0) if runoff_mm else None
+    duration_s = duration_hr * 3600.0
+
+    results = []
+    n = len(contours)
+    for ci, feat in enumerate(contours):
+        _p(5 + int(90 * ci / max(n, 1)), f"Classifying contour {ci + 1}/{n}…")
+        geom = feat.geometry
+        total_len = geom.length
+        if total_len < 1.0:
+            continue
+
+        step = max(cell_w, 1.0)
+        n_steps = max(3, int(total_len / step))
+        dists = np.linspace(0.0, total_len, n_steps)
+
+        vals = []
+        for d in dists:
+            pt = geom.interpolate(float(d))
+            col = int((pt.x - transform.c) / transform.a)
+            row = int((pt.y - transform.f) / transform.e)
+            v = float(acc[row, col]) if (
+                0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]
+            ) else 0.0
+            vals.append(v)
+
+        if max(vals) <= 0:
+            continue
+
+        # Emit a stretch every `window` samples with that window's mean flow.
+        for k in range(0, len(dists) - 1, window):
+            k2 = min(k + window, len(dists) - 1)
+            d0, d1 = float(dists[k]), float(dists[k2])
+            if d1 - d0 < step:
+                continue
+            acc_val = float(np.mean(vals[k:k2 + 1]))
+            try:
+                sub = substring(geom, d0, d1)
+            except Exception:
+                sub = None
+            if sub is None or sub.is_empty:
+                continue
+            if runoff_m is not None:
+                inflow_m3 = acc_val * cell_area_m2 * runoff_m
+                flow_ls = (inflow_m3 * 1000.0 / duration_s) if duration_s > 0 else 0.0
+            else:
+                inflow_m3 = acc_val  # fall back to raw accumulation
+                flow_ls = 0.0
+            results.append({
+                "geometry": sub,
+                "acc": round(acc_val, 1),
+                "inflow_m3": round(inflow_m3, 1),
+                "flow_ls": round(flow_ls, 2),
+                "contour_rank": feat.rank or 0,
+                "elevation": feat.elevation,
+            })
+
+    # Stamp the shared global maximum so the renderer can scale one ramp to it.
+    global_max = max((r["inflow_m3"] for r in results), default=0.0)
+    for r in results:
+        r["global_max_m3"] = global_max
+
+    _p(100, f"Classified {len(results)} contour stretch(es).")
+    return results

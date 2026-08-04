@@ -31,7 +31,7 @@ from qgis.PyQt.QtCore import QMetaType, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.modules.catchment import SCSRunoff
-from terrainflow_assessment.modules.swale_design import SOIL_REFERENCE
+from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
 
 
@@ -98,13 +98,15 @@ class SimulationController:
             dem_path=dem_path,
         )
 
-        soil_cn = SOIL_REFERENCE.get(self._panel.soil_name, 70)
-
         self._state.sim_worker = SimulationWorker(
             dem_path=dem_path,
             fdir_path=fdir_path,
             output_dir=self._state.output_dir,
-            cn=soil_cn,
+            # The panel's CN, as every other controller uses. Re-deriving it from the
+            # soil table here discarded both a typed override and the ground condition,
+            # so the simulation could run the same site against a different storm than
+            # the baseline it is being compared with.
+            cn=self._panel.cn,
             moisture=self._panel.moisture,
             rainfall_data=rainfall_data,
             routing=self._panel.routing,
@@ -258,13 +260,8 @@ class SimulationController:
                 pass
 
         # Remove any previous frame/outline layers
-        for attr in ("sim_ponding_frame_layer", "sim_ponding_outline_layer"):
-            lyr = getattr(self._state, attr, None)
-            if lyr:
-                try:
-                    self._project.instance().removeMapLayer(lyr)
-                except Exception:
-                    pass
+        for attr in ("sim_ponding_frame_layer_id", "sim_ponding_outline_layer_id"):
+            remove_layer(self._project, getattr(self._state, attr, None))
             setattr(self._state, attr, None)
 
         # Create static full-capacity outline layer
@@ -290,7 +287,7 @@ class SimulationController:
                     outline_layer.dataProvider(), 1, shader)
                 outline_layer.setRenderer(renderer)
                 self._project.instance().addMapLayer(outline_layer)
-                self._state.sim_ponding_outline_layer = outline_layer
+                self._state.sim_ponding_outline_layer_id = outline_layer.id()
         except Exception:
             pass
 
@@ -324,18 +321,14 @@ class SimulationController:
         except Exception:
             return
 
-        if self._state.sim_ponding_frame_layer:
-            try:
-                self._project.instance().removeMapLayer(self._state.sim_ponding_frame_layer)
-            except Exception:
-                pass
-            self._state.sim_ponding_frame_layer = None
+        remove_layer(self._project, self._state.sim_ponding_frame_layer_id)
+        self._state.sim_ponding_frame_layer_id = None
 
         layer = QgsRasterLayer(frame_path, "Ponding Fill")
         if layer.isValid():
             self._apply_ponding_ramp(layer)
             self._project.instance().addMapLayer(layer)
-            self._state.sim_ponding_frame_layer = layer
+            self._state.sim_ponding_frame_layer_id = layer.id()
 
     def _apply_ponding_ramp(self, layer):
         shader = QgsRasterShader()
@@ -358,12 +351,8 @@ class SimulationController:
     # ---------------------------------------------------------------- Fill layer
 
     def _create_sim_fill_layer(self, result):
-        if self._state.sim_fill_layer:
-            try:
-                self._project.instance().removeMapLayer(self._state.sim_fill_layer)
-            except Exception:
-                pass
-            self._state.sim_fill_layer = None
+        remove_layer(self._project, self._state.sim_fill_layer_id)
+        self._state.sim_fill_layer_id = None
 
         if not self._state.sim_ew_centroids:
             return
@@ -434,7 +423,7 @@ class SimulationController:
         layer.setLabelsEnabled(True)
 
         self._project.instance().addMapLayer(layer)
-        self._state.sim_fill_layer = layer
+        self._state.sim_fill_layer_id = layer.id()
 
     # ---------------------------------------------------------------- Frame display
 
@@ -470,9 +459,9 @@ class SimulationController:
         overflow_str = ("  ⚠ OVERFLOW: " + ", ".join(new_overflows)) if new_overflows else ""
         self._panel.set_sim_time_label(time_str + overflow_str)
 
-        fill_layer = self._state.sim_fill_layer
+        fill_layer = resolve_layer(self._project, self._state.sim_fill_layer_id)
         centroids = self._state.sim_ew_centroids
-        if fill_layer and self._project.instance().mapLayer(fill_layer.id()) and centroids:
+        if fill_layer is not None and centroids:
             pr = fill_layer.dataProvider()
             pr.truncate()
             feats = []

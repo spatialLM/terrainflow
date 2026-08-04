@@ -29,10 +29,14 @@ _MAX_PREVIEW_CELLS = 500_000   # ~700 × 700 — keep preview under ~5 s
 
 def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     """
-    Delineate the contributing catchment from a site boundary using D8 reverse
-    traversal via pysheds.
+    Delineate the contributing catchment from a site boundary by reverse traversal
+    of the flow-direction network via pysheds.
 
-    Walks the D8 flow-direction network *backwards* from the highest-accumulation
+    Routing is **D-infinity** where pysheds supports it, falling back to its default
+    (D8) only when the installed version rejects the keyword — dinf avoids the
+    ``np.in1d`` call NumPy 2.x removed. Both are traversed the same way.
+
+    Walks the flow-direction network *backwards* from the highest-accumulation
     pour point on the site boundary — the faithful "find all cells that drain into
     the site" operation.  The previous BFS implementation incorrectly crossed
     saddles and included knolls whose water flows away from the site.
@@ -138,7 +142,7 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
             "Check that both layers use the same CRS."
         )
 
-    _p(35, "Computing D8 flow direction for catchment delineation...")
+    _p(35, "Computing flow direction for catchment delineation...")
 
     # Write working DEM to a temp file for pysheds
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tif")
@@ -262,6 +266,169 @@ def clip_dem_to_polygon(dem_path, clip_polygon, output_path):
 # SCS Curve Number rainfall-runoff model
 # ---------------------------------------------------------------------------
 
+# Hydrologic condition of the pasture, as TR-55 Table 2-2 defines it for the
+# "Pasture, grassland, or range" row. The condition is a statement about ground cover
+# and grazing pressure, and it moves the curve number more than the soil texture does:
+# on sand, Good is CN 39 and Poor is 68.
+#
+# It was previously assumed to be Good and never asked, which is the optimistic end of
+# the range and reads *less* runoff than the ground actually sheds — the under-sizing
+# direction on hard-grazed country. Ordered least to most runoff, which is the order
+# the picker shows.
+#
+#   key: (label, what it means on the ground)
+GROUND_CONDITIONS = {
+    "good": ("Good — dense cover, lightly grazed",
+             "More than 75% ground cover; grazed lightly or not at all."),
+    "fair": ("Fair — patchy cover, moderately grazed",
+             "50–75% ground cover; grazed but not hard."),
+    "poor": ("Poor — thin cover, heavily grazed",
+             "Under 50% ground cover, or heavily grazed, or bare and compacted."),
+}
+
+# Good reproduces every curve number this plugin used before the condition was asked,
+# so an existing design reopens unchanged.
+DEFAULT_GROUND_CONDITION = "good"
+
+
+# ---------------------------------------------------------------------------
+# Rational-method runoff coefficients (Brad Lancaster)
+# ---------------------------------------------------------------------------
+
+# Runoff coefficients from Brad Lancaster, *Rainwater Harvesting for Drylands and
+# Beyond* — https://www.harvestingrainwater.com/resource/water-harvesting-calculations/
+#
+#     runoff volume = catchment area × rainfall depth × runoff coefficient
+#
+# One empirical fraction per surface, in place of the SCS-CN storage model. Simpler,
+# far more transparent, and what water-harvesting practitioners actually use in the
+# field — which matters, because a designer can sanity-check a coefficient against
+# ground they are standing on in a way they cannot check a curve number.
+#
+# Values are the midpoint of Lancaster's published typical range, with his full range
+# kept alongside so the UI can show the spread rather than implying false precision.
+# His own ranges span 3–7× for a single surface; that uncertainty is the honest state
+# of the art, not a defect of the table.
+LANCASTER_COEFFICIENTS = {
+    #  label                              (typical, low, high, source)
+    "Pasture / grass, wet ground": (0.50, 0.35, 0.70, "design"),
+    "Grass / lawn":                (0.18, 0.05, 0.35, "lancaster"),
+    "Healthy indigenous landscape": (0.40, 0.20, 0.70, "lancaster"),
+    "Bare earth":                  (0.45, 0.20, 0.75, "lancaster"),
+    "Concrete / asphalt":          (0.88, 0.80, 0.95, "lancaster"),
+    "Metal roof":                  (0.95, 0.95, 0.95, "lancaster"),
+}
+
+# The default: pasture on ground already wet when the design storm arrives. Above
+# Lancaster's grass figure because the storm that breaks an earthwork is usually the
+# second one, and below the "every millimetre runs off" assumption, which exceeds even
+# his metal-roof coefficient and no established method uses for a landscape catchment.
+DEFAULT_RUNOFF_COEFFICIENT = 0.50
+
+
+def coefficient_runoff_depth(rainfall_mm, coefficient):
+    """Runoff depth (mm) by the rational method: ``P × C`` (Lancaster).
+
+    The coefficient is the fraction of rainfall that leaves the catchment as surface
+    flow; everything else is intercepted, ponded in surface hollows or soaked in where
+    it fell. Clamped to 0–1 — a catchment cannot shed more than it receives.
+    """
+    if rainfall_mm is None or rainfall_mm <= 0:
+        return 0.0
+    return float(rainfall_mm) * max(0.0, min(1.0, float(coefficient)))
+
+
+def scs_marginal_runoff_fraction(rainfall_mm, cn):
+    """Fraction of the *next* millimetre of rain that runs off — ``dQ/dP``.
+
+    Peak flow needs a different quantity from event volume. The rational method's
+    coefficient is an **instantaneous** fraction: what proportion of rain falling at
+    the moment of peak intensity becomes flow. The SCS curve number instead gives
+    *cumulative* runoff from *cumulative* rainfall, and its event-average ratio
+    ``Q/P`` badly understates the instantaneous value, because the initial
+    abstraction is paid off early and the ground sheds progressively more as the
+    storm proceeds.
+
+    Differentiating ``Q = u² / (u + S)`` with ``u = P − Ia`` (and ``Ia = 0.2S``, so
+    ``du/dP = 1``) gives
+
+        dQ/dP = u (u + 2S) / (u + S)²
+
+    which is 0 at ``P = Ia``, rises monotonically, approaches 1 for very large
+    storms, and always exceeds ``Q/P``. On CN 61 under a 120 mm storm it is 0.578
+    against an event average of 0.255 — using the average would undersize a spillway
+    by more than half.
+
+    .. warning::
+       Evaluated at the rainfall depth passed in. Supplying the full storm total
+       assumes the peak burst arrives at the *end* of the event, on the wettest
+       ground, which is the conservative corner rather than a neutral one: the same
+       CN 61 storm gives 0.269 half way through and 0.578 at the close. Deliberate
+       for spillway sizing, where the cost of being low is a breached embankment.
+    """
+    if cn is None or cn <= 0 or rainfall_mm is None:
+        return 0.0
+    s = (25400.0 / cn) - 254.0
+    u = float(rainfall_mm) - 0.2 * s
+    if u <= 0:
+        return 0.0
+    return max(0.0, min(1.0, u * (u + 2.0 * s) / ((u + s) ** 2)))
+
+
+def drain_down_hours(stored_m3, area_m2, infiltration_mm_hr):
+    """Hours for standing water to soak away, or ``None`` if it never does.
+
+    Lancaster sizes water-harvesting earthworks so they "work, don't flood, and don't
+    puddle" — the third constraint being one this model otherwise ignores entirely.
+    Water that stands too long breeds mosquitoes, drowns the plantings the earthwork
+    exists to support (most species fail after 2–3 days waterlogged), and leaves no
+    freeboard for the next storm. Conventional infiltration-basin practice is complete
+    drawdown inside 24–48 hours.
+
+    Uses the soil's infiltration rate over the feature's wetted area regardless of
+    whether soakage is being credited as capture: that is a sizing policy, whereas this
+    is what physically happens once the rain stops.
+    """
+    if stored_m3 is None or stored_m3 <= 0:
+        return 0.0
+    rate_m_hr = (infiltration_mm_hr or 0.0) / 1000.0
+    if rate_m_hr <= 0 or not area_m2 or area_m2 <= 0:
+        return None            # nothing draining it — standing water, indefinitely
+    return stored_m3 / (rate_m_hr * area_m2)
+
+
+def _looks_cumulative(rain_vals):
+    """Is this rainfall column a running total, or per-interval depths?
+
+    Both forms are common in the wild, neither is labelled, so the reader has to
+    guess. "Non-decreasing ⇒ cumulative" is the obvious rule and it fails on the most
+    ordinary file there is: a constant-rate storm (5, 5, 5, 5 mm) is non-decreasing,
+    and reading it as a running total throws away 15 of its 20 mm — the simulation
+    then runs on a quarter of the design rainfall.
+
+    The test that separates them is whether the trace *accumulates across the record*.
+    Read cumulatively, ``5, 5, 5, 5`` says all 5 mm fell before the first reading and
+    nothing after — not a storm. So a running total must be non-decreasing **and**
+    gain more than half its final value between the first and last reading. That keeps
+    genuine cumulative traces, including ones whose record starts a step or two into
+    the storm, and rejects the flat and near-flat incremental ones.
+
+    A hyetograph that rises monotonically to its last interval stays ambiguous; it is
+    read as incremental, which over-states rainfall rather than under-stating it.
+    """
+    if len(rain_vals) < 2:
+        return False
+    non_decreasing = all(
+        rain_vals[i] >= rain_vals[i - 1] - 1e-6 for i in range(1, len(rain_vals))
+    )
+    if not non_decreasing:
+        return False
+    first, last = rain_vals[0], rain_vals[-1]
+    if last <= 0:
+        return False
+    return (last - first) > 0.5 * last
+
+
 class SCSRunoff:
     """
     SCS Curve Number rainfall-runoff model.
@@ -278,7 +445,19 @@ class SCSRunoff:
         "wet":    lambda cn: 23 * cn / (10 + 0.13 * cn),
     }
 
-    # Typical CN values by soil type for the soil selector dropdown
+    # Typical CN values by soil type for the soil selector dropdown.
+    #
+    # PROVENANCE: TR-55 Table 2-2, row "Pasture, grassland, or range — continuous
+    # forage for grazing", hydrologic condition **Good**, across hydrologic soil
+    # groups A–D (39 / 61 / 74 / 80); texture stands in for the soil group, and 49
+    # interpolates the Fair/A value for sandy loam.
+    #
+    # That bakes in an assumption the picker does not show: Good condition means
+    # >75% ground cover and light grazing. The same soils in Poor condition (<50%
+    # cover, heavy grazing) are CN 68 / 79 / 86 / 89 — so on degraded or hard-grazed
+    # ground this table under-reads runoff, by 29 CN at the sandy end. Choose a
+    # condition deliberately with :meth:`soil_reference_cn` rather than accepting
+    # Good by default on country that has not earned it.
     SOIL_REFERENCE = {
         "Sand":        39,
         "Sandy loam":  49,
@@ -286,6 +465,28 @@ class SCSRunoff:
         "Clay loam":   74,
         "Clay":        80,
     }
+
+    # TR-55 Table 2-2, the same pasture row at its other two hydrologic conditions.
+    # Fair = 50–75% cover, not heavily grazed; Poor = <50% cover, heavily grazed.
+    _SOIL_REFERENCE_BY_CONDITION = {
+        "good": SOIL_REFERENCE,
+        "fair": {"Sand": 49, "Sandy loam": 59, "Loam": 69,
+                 "Clay loam": 79, "Clay": 84},
+        "poor": {"Sand": 68, "Sandy loam": 74, "Loam": 79,
+                 "Clay loam": 86, "Clay": 89},
+    }
+
+    @classmethod
+    def soil_reference_cn(cls, soil_name, condition=DEFAULT_GROUND_CONDITION):
+        """Reference CN for a soil texture at a stated pasture hydrologic condition.
+
+        ``condition`` is a key of :data:`GROUND_CONDITIONS`. Unknown soils and unknown
+        conditions fall back to Loam and Good respectively, so a hand-edited design
+        file degrades to the historical answer rather than to nonsense.
+        """
+        table = cls._SOIL_REFERENCE_BY_CONDITION.get(
+            str(condition).lower(), cls.SOIL_REFERENCE)
+        return table.get(soil_name, table["Loam"])
 
     STORM_PRESETS = {
         "Custom":                (None, None),
@@ -412,9 +613,7 @@ class SCSRunoff:
 
         rows.sort(key=lambda x: x[0])
         rain_vals = [r for _, r in rows]
-        is_cumulative = all(
-            rain_vals[i] >= rain_vals[i - 1] - 1e-6 for i in range(1, len(rain_vals))
-        )
+        is_cumulative = _looks_cumulative(rain_vals)
 
         if is_cumulative:
             cum_pairs = [(int(round(t)), float(r)) for t, r in rows]

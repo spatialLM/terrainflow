@@ -14,6 +14,7 @@ from terrainflow_assessment.modules.simulation import (
     EarthworkStore,
     _find_downslope_store,
     cascade_overflow,
+    layer_nodes,
 )
 
 # ---------------------------------------------------------------------------
@@ -148,42 +149,109 @@ class TestFindDownslopeStoreLinked:
 
 
 class TestOverflowGraph:
+    """Routing now follows the flow path, not centroid elevation.
+
+    The auto target comes from an injected *walker* that traces where water actually
+    goes from a feature's outlet cell. Without one there is no auto target at all —
+    deliberately: the old "highest feature below this one" heuristic happily linked
+    features on opposite sides of a ridge, which is why it was removed rather than
+    kept as a fallback.
+    """
+
     def _store(self, name, elevation, target=None):
         return EarthworkStore(
             name=name, ew_type="swale", capacity_m3=100.0, area_m2=20.0,
             elevation=elevation, id=name, overflow_target_id=target,
         )
 
-    def test_auto_edge_to_nearest_downslope(self):
+    def test_auto_edge_follows_the_walked_flow_path(self):
         from terrainflow_assessment.modules.simulation import overflow_graph
         hi = self._store("hi", 70.0)
         lo = self._store("lo", 40.0)
-        g = overflow_graph([hi, lo])
-        assert g["hi"] == ("lo", False)      # auto edge
-        assert g["lo"] == (None, False)      # lowest → exits site
+        g = overflow_graph([hi, lo], walker=lambda s: "lo" if s.id == "hi" else None)
+        assert g["hi"] == ("lo", False)      # auto edge, from the flow path
+        assert g["lo"] == (None, False)      # nothing downstream → exits site
 
-    def test_user_link_flagged(self):
+    def test_no_walker_means_no_guessed_edges(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        g = overflow_graph([self._store("hi", 70.0), self._store("lo", 40.0)])
+        assert g["hi"] == (None, False)      # elevation alone is not evidence of a path
+
+    def test_user_link_flagged_and_overrides_the_walk(self):
         from terrainflow_assessment.modules.simulation import overflow_graph
         src = self._store("src", 70.0, target="far")
         close = self._store("close", 65.0)
         far = self._store("far", 30.0)
-        g = overflow_graph([src, close, far])
-        assert g["src"] == ("far", True)     # honoured user link
+        walker = {"src": "close", "close": "far"}.get
+        g = overflow_graph([src, close, far], walker=lambda s: walker(s.id))
+        assert g["src"] == ("far", True)     # honoured user link, beating the walk
         assert g["close"] == ("far", False)  # auto
 
-    def test_uphill_user_link_not_flagged_as_user(self):
+    def test_uphill_user_link_is_honoured(self):
+        """The old "target must be lower" test is gone — see resolve_targets.
+
+        Centroid elevation is the wrong proxy once real flow paths are used: a large
+        tilted basin's centroid can sit above a swale that genuinely drains into it.
+        """
         from terrainflow_assessment.modules.simulation import overflow_graph
         src = self._store("src", 30.0, target="high")
         high = self._store("high", 70.0)
         low = self._store("low", 10.0)
-        g = overflow_graph([src, high, low])
-        assert g["src"] == ("low", False)    # uphill link ignored → auto, not user
+        g = overflow_graph([src, high, low], walker=lambda s: "low" if s.id == "src" else None)
+        assert g["src"] == ("high", True)
+
+    def test_missing_link_target_falls_back_to_the_walk(self):
+        from terrainflow_assessment.modules.simulation import overflow_graph
+        src = self._store("src", 70.0, target="ghost")
+        mid = self._store("mid", 50.0)
+        g = overflow_graph([src, mid], walker=lambda s: "mid" if s.id == "src" else None)
+        assert g["src"] == ("mid", False)
 
     def test_store_without_id_skipped(self):
         from terrainflow_assessment.modules.simulation import overflow_graph
         s = EarthworkStore(name="x", ew_type="swale", capacity_m3=1.0,
                            area_m2=1.0, elevation=10.0, id=None)
         assert overflow_graph([s]) == {}
+
+
+class TestResolveTargets:
+    def _store(self, name, target=None):
+        return EarthworkStore(
+            name=name, ew_type="swale", capacity_m3=100.0, area_m2=20.0,
+            elevation=10.0, id=name, overflow_target_id=target,
+        )
+
+    def test_order_puts_upstream_first(self):
+        from terrainflow_assessment.modules.simulation import resolve_targets
+        a, b, c = self._store("a"), self._store("b"), self._store("c")
+        links = {"a": "b", "b": "c"}
+        r = resolve_targets([c, b, a], walker=lambda s: links.get(s.id))
+        assert r.order.index("a") < r.order.index("b") < r.order.index("c")
+        assert r.warnings == []
+
+    def test_cyclic_user_link_is_demoted_and_warned(self):
+        from terrainflow_assessment.modules.simulation import resolve_targets
+        a = self._store("a", target="b")
+        b = self._store("b", target="a")
+        r = resolve_targets([a, b], walker=lambda s: None)
+        assert r.warnings and "loop" in r.warnings[0].lower()
+        # Only the offender is undone; the graph is acyclic again.
+        assert not (r.edges["a"] == "b" and r.edges["b"] == "a")
+        assert r.is_user["b"] is False or r.is_user["a"] is False
+
+    def test_self_link_is_ignored(self):
+        from terrainflow_assessment.modules.simulation import resolve_targets
+        r = resolve_targets([self._store("a", target="a")], walker=lambda s: None)
+        assert r.edges["a"] is None
+
+    def test_a_walker_that_raises_degrades_to_no_edge(self):
+        from terrainflow_assessment.modules.simulation import resolve_targets
+
+        def boom(_store):
+            raise RuntimeError("raster gone")
+
+        r = resolve_targets([self._store("a")], walker=boom)
+        assert r.edges["a"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -579,10 +647,19 @@ class TestBuildStoresFromEarthworks:
         ew.enabled = False
         assert build_stores_from_earthworks([ew]) == []
 
-    def test_zero_capacity_skipped(self):
+    def test_zero_capacity_kept_as_a_routing_node(self):
+        """Berms and diversions store nothing but still route — they must not be dropped."""
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
         ew = self._line_ew()
         ew.capacity_m3 = 0.0
+        stores = build_stores_from_earthworks([ew])
+        assert len(stores) == 1
+        assert stores[0].capacity_m3 == 0.0
+
+    def test_disabled_earthwork_is_skipped(self):
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        ew = self._line_ew()
+        ew.enabled = False
         assert build_stores_from_earthworks([ew]) == []
 
     def test_line_geom_area_from_polygon_buffer(self):
@@ -603,6 +680,47 @@ class TestBuildStoresFromEarthworks:
         assert stores[0].centroid_row is not None
         assert stores[0].centroid_col is not None
         assert stores[0].elevation != 0.0  # sampled from DEM
+        assert stores[0].elevation_known is True
+
+    def test_line_feature_gets_a_real_wetted_area(self):
+        """SIM-26: a LineString's `.area` is 0.0, so testing for the attribute made
+        the length × width branch unreachable. Swales, diversions and berms are all
+        polylines, so every one of them was credited zero infiltration."""
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        ew = self._line_ew("swale")            # 3 m long
+        stores = build_stores_from_earthworks([ew], soil_name="Loam")
+        assert stores[0].area_m2 == pytest.approx(3.0 * ew.width)
+        assert stores[0].step_infiltration(1.0) > 0
+
+    def test_nodata_centroid_elevation_is_not_treated_as_known(self, tmp_path):
+        """SIM-27: a −9999 elevation sorts below every real feature, so that store
+        silently became the receiver for the whole site's overflow."""
+        from terrainflow_assessment.modules.simulation import (
+            _find_downslope_store,
+            build_stores_from_earthworks,
+        )
+        data = np.full((10, 10), -9999.0, dtype="float32")
+        path = str(tmp_path / "allnodata.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=10, width=10, count=1,
+            dtype="float32", crs="EPSG:32632",
+            transform=from_bounds(0, 0, 10, 10, 10, 10), nodata=-9999.0,
+        ) as dst:
+            dst.write(data, 1)
+
+        stores = build_stores_from_earthworks(
+            [self._line_ew()], soil_name="Loam", dem_path=path,
+        )
+        blind = stores[0]
+        assert blind.elevation_known is False
+
+        real = build_stores_from_earthworks(
+            [self._line_ew()], soil_name="Loam",
+            dem_path=_make_sloped_dem(tmp_path, "real.tif"),
+        )[0]
+        # The unknown-elevation store neither receives nor routes by elevation.
+        assert _find_downslope_store(real, [real, blind]) is None
+        assert _find_downslope_store(blind, [real, blind]) is None
 
     def test_with_dem_path_outside_bounds(self, tmp_path):
         """Centroid outside DEM extent → centroid_row/col stay None."""
@@ -704,3 +822,59 @@ class TestStackedStoresConserveMass:
         exit_m3 = cascade_overflow([top, mid, bot], time_hr=1.0, dt_hr=1.0)
         total_out = top.stored_m3 + mid.stored_m3 + bot.stored_m3 + exit_m3
         assert total_out == pytest.approx(total_inflow, rel=1e-6)
+
+
+class TestLayerNodes:
+    """Rank/order for the Flow chart. The layout maths lives in the module rather
+    than the widget so it can be checked without Qt — and because getting it wrong
+    draws water running uphill."""
+
+    def test_a_chain_ranks_in_order(self):
+        assert layer_nodes(["a", "b", "c"], {"a": "b", "b": "c", "c": None}) == {
+            "a": (0, 0), "b": (1, 0), "c": (2, 0)}
+
+    def test_two_sources_share_the_top_rank(self):
+        layout = layer_nodes(["a", "b", "c"], {"a": "c", "b": "c", "c": None})
+        assert layout["a"][0] == layout["b"][0] == 0
+        assert layout["c"][0] == 1
+
+    def test_order_separates_nodes_sharing_a_rank(self):
+        layout = layer_nodes(["a", "b", "c"], {"a": "c", "b": "c", "c": None})
+        assert {layout["a"][1], layout["b"][1]} == {0, 1}
+
+    def test_rank_is_the_longest_path_not_the_shortest(self):
+        """A feature fed by both a rank-0 swale and a rank-1 dam belongs below the
+        dam. Ranking by shortest path would draw water flowing upwards into it."""
+        layout = layer_nodes(["a", "b", "c", "d"],
+                             {"a": "b", "b": "d", "c": "d", "d": None})
+        assert layout["d"][0] == 2
+        assert layout["c"][0] == 0
+
+    def test_a_terminal_feature_still_gets_a_rank(self):
+        assert layer_nodes(["a"], {"a": None}) == {"a": (0, 0)}
+
+    def test_order_follows_the_callers_sequence(self):
+        """So the chart does not reshuffle between refreshes when nothing changed."""
+        ids = ["x", "y", "z"]
+        first = layer_nodes(ids, {"x": None, "y": None, "z": None})
+        again = layer_nodes(ids, {"x": None, "y": None, "z": None})
+        assert first == again
+        assert [first[i][1] for i in ids] == [0, 1, 2]
+
+    def test_a_cycle_does_not_hang_and_sits_below_the_rest(self):
+        layout = layer_nodes(["a", "b", "c"], {"a": "b", "b": "a", "c": None})
+        assert layout["c"][0] == 0
+        assert layout["a"][0] == layout["b"][0] > 0
+
+    def test_a_target_outside_the_node_set_is_ignored(self):
+        assert layer_nodes(["a"], {"a": "ghost"}) == {"a": (0, 0)}
+
+    def test_a_self_link_does_not_promote_a_node(self):
+        assert layer_nodes(["a"], {"a": "a"}) == {"a": (0, 0)}
+
+    def test_an_empty_network_lays_out_to_nothing(self):
+        assert layer_nodes([], {}) == {}
+
+    def test_a_missing_edge_entry_is_treated_as_terminal(self):
+        layout = layer_nodes(["a", "b"], {"a": "b"})
+        assert layout["b"][0] == 1

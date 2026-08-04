@@ -172,6 +172,30 @@ class TestYeomansKeylineAnalysis:
         assert "cultivation_upper" in types
         assert "cultivation_lower" in types
 
+    def test_keyline_traces_curved_contour(self, tmp_path):
+        """The keyline should follow the valley contour (many vertices), not a
+        straight 2-point line, on a curved (parabolic) valley."""
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+        runs = ya.get_cultivation_runs(kp, n_runs=1)
+        keyline = next(r for r in runs if r["line_type"] == "keyline")
+        assert len(list(keyline["geometry"].coords)) > 2
+
+    def test_guides_are_offset_from_keyline(self, tmp_path):
+        """Cultivation guides must be geometrically distinct from the keyline
+        (parallel offsets), not identical lines."""
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+        runs = ya.get_cultivation_runs(kp, n_runs=1, spacing_m=5.0)
+        keyline = next(r for r in runs if r["line_type"] == "keyline")
+        upper = next(r for r in runs if r["line_type"] == "cultivation_upper")
+        # 2-D footprints should differ once offset.
+        kl_xy = [(x, y) for x, y, *_ in keyline["geometry"].coords]
+        up_xy = [(x, y) for x, y, *_ in upper["geometry"].coords]
+        assert kl_xy != up_xy
+
     def test_find_keypoint_too_small_returns_none(self, tmp_path):
         """A 3×3 DEM is too small to produce a meaningful thalweg."""
         data = np.array([[10, 8, 6], [7, 5, 3], [4, 2, 1]], dtype="float32")
@@ -180,3 +204,117 @@ class TestYeomansKeylineAnalysis:
         kp = ya.find_keypoint()
         # Either None or a valid dict — must not crash
         assert kp is None or isinstance(kp, dict)
+
+
+# ---------------------------------------------------------------------------
+# Keyline geometry helpers (parallel-offset construction)
+# ---------------------------------------------------------------------------
+
+class TestKeylineHelpers:
+    def test_fallback_keyline_returns_segment(self, tmp_path):
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        seg = ya._fallback_keyline(20, 20)
+        assert len(seg) == 2
+        assert all(len(p) == 2 for p in seg)
+
+    def test_trace_keyline_absent_level_returns_none(self, tmp_path):
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        # An elevation far outside the DEM range has no contour.
+        assert ya._trace_keyline(1.0e6, 20, 20) is None
+
+    def test_offset_line_happy_path(self, tmp_path):
+        from shapely.geometry import LineString
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        line = LineString([(0, 0), (10, 0), (20, 0)])
+        off = ya._offset_line(line, 5.0, 20, 20)
+        assert off is not None and off.length > 0
+
+    def test_offset_line_fallback_translate(self, tmp_path):
+        from shapely.geometry import LineString
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        # Zero-length line → offset_curve empty → translate fallback returns a line.
+        degenerate = LineString([(5, 5), (5, 5)])
+        off = ya._offset_line(degenerate, 5.0, 20, 20)
+        assert off is not None
+
+    def test_sample_dem_out_of_bounds_returns_default(self, tmp_path):
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        assert ya._sample_dem(1.0e9, 1.0e9, 42.0) == 42.0
+
+    def test_get_cultivation_runs_uses_fallback_keyline(self, tmp_path):
+        """When contour tracing yields nothing (elevation off the DEM), the run
+        builder still returns guides via the straight fallback keyline."""
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+        kp = dict(kp)
+        kp["elevation"] = 1.0e6  # no contour at this level → fallback path
+        runs = ya.get_cultivation_runs(kp, n_runs=1)
+        assert any(r["line_type"] == "keyline" for r in runs)
+
+
+# ---------------------------------------------------------------------------
+# Maths-audit regressions
+# ---------------------------------------------------------------------------
+
+class TestMathsAuditRegressions:
+    def test_fallback_keyline_runs_along_the_contour_not_down_the_fall_line(
+            self, tmp_path):
+        """KPA-33: the fallback direction was −∇z in map space — the fall line.
+
+        On a south-facing slope (elevation falling as row increases) the contour
+        runs east-west. The old (−dz_dc, dz_dr) drew it north-south, 90° out.
+        """
+        dem = np.fromfunction(lambda r, c: 100.0 - r * 2.0, (20, 20))
+        dem_path = _write_dem(str(tmp_path / "south.tif"), dem)
+        ya = YeomansKeylineAnalysis(dem_path)
+        (x0, y0), (x1, y1) = ya._fallback_keyline(10, 10)
+        assert abs(x1 - x0) > 0
+        assert abs(y1 - y0) == pytest.approx(0.0, abs=1e-6)   # runs east-west
+
+    def test_valley_width_is_measured_near_the_western_edge(self, tmp_path):
+        """KPA-21: `break` on nc < 0 stopped the scan on its FIRST iteration.
+
+        The scan starts 200 columns left of centre, so any candidate within 200
+        columns of the west edge reported width 0 m — which maximises the
+        acc/(width+1) dam score and dragged pond sites to the raster's left edge.
+        """
+        dem = np.full((30, 30), 50.0, dtype="float32")
+        dem_path = _write_dem(str(tmp_path / "flat.tif"), dem)
+        acc_path = _make_acc(str(tmp_path / "acc.tif"), (30, 30))
+        dla = DrainageLineAnalysis(dem_path, acc_path)
+        near_edge = dla._valley_cross_width(15, 2, 60.0)
+        mid = dla._valley_cross_width(15, 15, 60.0)
+        assert near_edge > 0
+        assert near_edge == pytest.approx(mid)   # uniform ground → same width
+
+    def test_ridges_narrower_than_six_cells_survive_thinning(self, tmp_path):
+        """KPA-14: three erosion passes delete anything ≤6 cells across."""
+        from terrainflow_assessment.modules.keypoint_analysis import (
+            _thin_to_centreline,
+        )
+        mask = np.zeros((20, 20), dtype=bool)
+        mask[10, 2:18] = True              # a one-cell-wide, 16-cell-long ridge
+        thinned = _thin_to_centreline(mask)
+        assert thinned.any()
+        assert thinned.sum() >= 12         # length preserved, not annihilated
+
+    def test_thalweg_profile_ignores_nodata_instead_of_calling_it_sea_level(
+            self, tmp_path):
+        """NEW-W8-01: substituting 0.0 m for NaN puts a full-terrain-height cliff
+        in the profile, and the keypoint is the argmax of its 2nd derivative."""
+        dem = np.fromfunction(lambda r, c: 100.0 - r * 2.0, (30, 30))
+        clean = YeomansKeylineAnalysis(
+            _write_dem(str(tmp_path / "clean.tif"), dem)).find_keypoint()
+        holed = dem.copy()
+        holed[15, :] = np.nan
+        pitted = YeomansKeylineAnalysis(
+            _write_dem(str(tmp_path / "holed.tif"), holed)).find_keypoint()
+        if clean is not None and pitted is not None:
+            # A single nodata row must not relocate the keypoint to it.
+            assert pitted["elevation"] > 0.0

@@ -44,10 +44,36 @@ Only add/modify what's asked — no drive-by refactors of working code.
 - **Deploy to QGIS:** `deploy.ps1` (copies `terrainflow_assessment/` into the QGIS profile;
   then disable + re-enable the plugin in QGIS Plugin Manager to reload). No zip needed.
 - **Tests:** `python -m pytest tests/` (target Python 3.9). `pyproject.toml` sets a 95%
-  coverage gate on pure-Python `modules/`; the `qgis/*` Qt/QGIS layer is omitted (untestable
-  outside a live QGIS runtime — verify it with a manual smoke test in QGIS instead).
+  coverage gate on pure-Python `modules/`; the `qgis/*` Qt/QGIS layer is omitted from that
+  gate — it is covered by the real-QGIS harness below instead.
 - **Lint:** `ruff check terrainflow_assessment/`. CI (`.github/workflows/ci.yml`) runs ruff +
   pytest + a grep-gate against deprecated QGIS APIs on every push.
+
+## Real-QGIS testing (`tests_qgis/`) — run this after touching `qgis/`, `panel.py` or `map_tools/`
+
+`pytest tests/` replaces `qgis.core`/`qgis.gui` with mocks, so it never executes the
+controllers, renderers, workers or map tools. `tests_qgis/` boots a genuine QgsApplication
+(offscreen), builds the real panel and controllers, and drives them through real panel
+signals and real mouse events. It lives **outside** `terrainflow_assessment/` on purpose —
+only that folder is deployed or zipped, so none of it can reach a shipped build.
+
+```powershell
+.\run_qgis_tests.ps1              # 39 checks, headless, ~2-4 min. Exit code gates.
+.\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
+.\run_qgis_tests.ps1 -Snapshot    # store current screenshots as the visual baseline
+.\run_qgis_gui_shot.ps1           # load in real QGIS, screenshot the window, quit
+```
+
+- Needs QGIS's own Python; the scripts find it. **Not in CI** (no QGIS on the runner) —
+  these are local, pre-deploy commands.
+- `checks_slow.py` is quarantined (its `recommend_ponds` check does not terminate) and runs
+  only when named: `.\run_qgis_tests.ps1 slow`.
+- Renders the real panel/dialogs/canvas to PNGs in `tests_qgis/_shots/` — **open them**;
+  that is how the UI gets verified. Rendering is deterministic, so `-Snapshot` before a
+  change makes the next run report exactly which images moved.
+- `tests_qgis/README.md` explains the fixture, the visual-diff workflow, and several
+  non-obvious traps (offscreen Qt loads no fonts; `QTest.mouseMove`/`mouseDClick` do not
+  behave like real input; `saveAsImage` omits rubber bands). Read it before extending.
 
 ## Docs
 

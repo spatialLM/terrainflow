@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pytest
 
+from terrainflow_assessment.modules.earthwork_design import capacity_breakdown
 from terrainflow_assessment.modules.reporting import (
     BaselineReport,
     ComparisonResult,
@@ -583,7 +584,7 @@ def _balance(**kwargs):
         total_cut_m3=320.0,
         total_fill_m3=180.0,
         per_feature=[
-            {"name": "Swale 1", "inflow_m3": 500.0, "stored_m3": 400.0,
+            {"name": "Swale 1", "total_inflow_m3": 500.0, "stored_m3": 400.0,
              "capacity_m3": 450.0, "fill_pct": 88.9, "overflowed": False},
         ],
     )
@@ -642,7 +643,7 @@ class TestFormatLiveAssessment:
 
     def test_overflowed_feature_flagged_full(self):
         r = _balance(per_feature=[
-            {"name": "Basin 1", "inflow_m3": 900.0, "stored_m3": 300.0,
+            {"name": "Basin 1", "total_inflow_m3": 900.0, "stored_m3": 300.0,
              "capacity_m3": 300.0, "fill_pct": 100.0, "overflowed": True},
         ])
         html = format_live_assessment(r, have_flow=True)
@@ -650,7 +651,7 @@ class TestFormatLiveAssessment:
 
     def test_fill_pct_100_flagged_even_without_overflow_flag(self):
         r = _balance(per_feature=[
-            {"name": "Basin 1", "inflow_m3": 300.0, "stored_m3": 300.0,
+            {"name": "Basin 1", "total_inflow_m3": 300.0, "stored_m3": 300.0,
              "capacity_m3": 300.0, "fill_pct": 100.0, "overflowed": False},
         ])
         html = format_live_assessment(r, have_flow=True)
@@ -664,7 +665,7 @@ class TestFormatLiveAssessment:
 
     def test_no_flow_missing_capacity_key_defaults_zero(self):
         r = _balance(per_feature=[
-            {"name": "Swale 1", "inflow_m3": 0.0, "stored_m3": 0.0,
+            {"name": "Swale 1", "total_inflow_m3": 0.0, "stored_m3": 0.0,
              "fill_pct": 0.0, "overflowed": False},
         ])
         html = format_live_assessment(r, have_flow=False)
@@ -679,3 +680,163 @@ class TestFormatLiveAssessment:
         assert "Capacity 900 m³" in html
         assert "Cut 320" in html and "Fill 180" in html
         assert "Analytical estimate" in html
+
+
+class TestVerificationSeparatesTheThreeGaps:
+    """Δ must isolate burn error from resolution and freeboard.
+
+    The old single delta summed all three, which is why "Verified · Δ −38%" told the
+    user nothing they could act on.
+    """
+
+    BREAKDOWN = {
+        "Swale 2": {
+            "design": 112.0, "geometric": 140.0, "rasterisable": 187.0,
+            "freeboard_m3": 28.0, "resolution_penalty_m3": 47.0,
+        },
+    }
+
+    def _build(self, terrain, breakdowns=None):
+        from terrainflow_assessment.modules.reporting import build_verification
+        return build_verification(
+            analytic_by_name={"Swale 2": 112.0},
+            terrain_by_name={"Swale 2": terrain},
+            baseline_total_m3=0.0,
+            earthworks_total_m3=terrain,
+            min_dims={"Swale 2": 1.0},
+            cell_size=1.0,
+            breakdowns=breakdowns,
+        )
+
+    def test_delta_measures_the_burn_against_what_the_grid_can_hold(self):
+        v = self._build(183.0, self.BREAKDOWN)
+        # 183 measured vs 187 representable → a small, honest burn delta.
+        assert v.delta_pct == pytest.approx(-2.1, abs=0.2)
+
+    def test_the_same_burn_looked_terrible_against_the_design_figure(self):
+        """Without the breakdown the delta reverts to design capacity — +63%."""
+        v = self._build(183.0, breakdowns=None)
+        assert v.delta_pct > 50
+
+    def test_per_feature_row_carries_all_four_numbers(self):
+        row = self._build(183.0, self.BREAKDOWN).per_feature[0]
+        assert row["analytic_m3"] == pytest.approx(112.0)
+        assert row["geometric_m3"] == pytest.approx(140.0)
+        assert row["rasterisable_m3"] == pytest.approx(187.0)
+        assert row["terrain_m3"] == pytest.approx(183.0)
+        assert row["freeboard_m3"] == pytest.approx(28.0)
+        assert row["resolution_penalty_m3"] == pytest.approx(47.0)
+
+    def test_a_large_resolution_penalty_is_named_in_the_caveats(self):
+        v = self._build(183.0, self.BREAKDOWN)
+        assert any("Swale 2" in c and "grid represents it" in c for c in v.caveats)
+
+    def test_a_small_resolution_penalty_is_not_flagged(self):
+        small = {"Swale 2": {"design": 112.0, "geometric": 140.0,
+                             "rasterisable": 143.0, "freeboard_m3": 28.0,
+                             "resolution_penalty_m3": 3.0}}
+        v = self._build(142.0, small)
+        assert not any("grid represents it" in c for c in v.caveats)
+
+    def test_the_delta_caveat_states_what_is_being_compared(self):
+        v = self._build(183.0, self.BREAKDOWN)
+        assert any("burn issue" in c for c in v.caveats)
+
+    def test_sub_cell_feature_still_makes_no_volume_claim(self):
+        from terrainflow_assessment.modules.reporting import build_verification
+        v = build_verification(
+            analytic_by_name={"Swale 9": 50.0},
+            terrain_by_name={"Swale 9": 40.0},
+            baseline_total_m3=0.0, earthworks_total_m3=40.0,
+            min_dims={"Swale 9": 0.3}, cell_size=1.0,
+        )
+        assert v.per_feature[0]["routing_only"] is True
+        assert v.per_feature[0]["terrain_m3"] is None
+
+
+class TestBarrierImpoundedVerification:
+    """A dam holds water against the terrain, not inside a drawn cross-section.
+
+    Field report: a dam whose burn matched its design exactly (2,148 m³ against
+    2,148 m³) reported Δ +1712%, because it was pushed through the trapezoid path —
+    geometric came back 0, and the delta was measured against whatever a channel of
+    that width would rasterise to.
+    """
+
+    class _Dam:
+        type, depth, width = "dam", 3.0, 4.0
+        bottom_width_m, batter_run_m, companion_berm = 4.0, 0.0, False
+        geometry = None
+        capacity_m3 = 2148.0
+
+    def test_a_dam_is_flagged_as_barrier_impounded(self):
+        b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
+        assert b["barrier_impounded"] is True
+
+    def test_its_three_design_columns_collapse_to_one_number(self):
+        """There is no drawn section to rasterise, so claiming a resolution penalty
+        or a freeboard split would invent a comparison that was never made."""
+        b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
+        assert b["geometric"] == b["rasterisable"] == b["design"] == 2148.0
+        assert b["freeboard_m3"] == 0.0
+        assert b["resolution_penalty_m3"] == 0.0
+
+    def test_a_dam_that_burns_to_its_design_reads_zero_delta(self):
+        b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
+        v = build_verification({"Dam 2": 2148.0}, {"Dam 2": 2148.0}, 0.0, 2148.0,
+                               min_dims={"Dam 2": 20.0}, cell_size=1.0,
+                               breakdowns={"Dam 2": b})
+        assert v.per_feature[0]["delta_pct"] == pytest.approx(0.0, abs=0.5)
+
+    def test_a_dam_that_misses_still_shows_it(self):
+        """The flag must not become a way of always reporting success."""
+        b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
+        v = build_verification({"Dam 2": 2148.0}, {"Dam 2": 1074.0}, 0.0, 1074.0,
+                               min_dims={"Dam 2": 20.0}, cell_size=1.0,
+                               breakdowns={"Dam 2": b})
+        assert v.per_feature[0]["delta_pct"] == pytest.approx(-50.0, abs=0.5)
+
+    def test_a_swale_is_unaffected(self):
+        """The flag keys off "no analytic section", so a type that has one must keep
+        its freeboard and resolution split intact."""
+        class _Line:
+            length = 100.0
+
+        class _Swale:
+            type, depth, width = "swale", 0.5, 2.0
+            bottom_width_m, batter_run_m, companion_berm = 1.0, 0.0, False
+            geometry = _Line()
+            capacity_m3 = 100.0
+
+        b = capacity_breakdown(_Swale(), cell_size=1.0, n_cells=200)
+        assert b["barrier_impounded"] is False
+        assert b["geometric"] > 0
+        assert b["freeboard_m3"] != 0.0
+
+
+class TestLiveAssessmentAgainstRealBalanceOutput:
+    """RPT-07: the reader subscripted `inflow_m3`; water_balance never emits it.
+
+    Every render with flow data raised KeyError. The fixtures in this file had been
+    written to match the reader rather than the producer, so the two agreed with each
+    other and with nothing that ships. This test drives the real producer.
+    """
+
+    def test_renders_a_real_water_balance_result(self):
+        from terrainflow_assessment.modules.simulation import EarthworkStore
+        from terrainflow_assessment.modules.water_balance import run_water_balance
+
+        store = EarthworkStore(
+            name="Swale 1", ew_type="swale", capacity_m3=450.0, area_m2=120.0,
+            infiltration_rate_mm_hr=0.0, id="ew-1", elevation=100.0,
+        )
+        store.inflow_m3 = 400.0
+
+        result = run_water_balance([store], duration_hr=1.0, total_runoff_m3=1000.0)
+        row = result.per_feature[0]
+        assert "total_inflow_m3" in row
+        assert "inflow_m3" not in row       # the key the reader used to subscript
+
+        html = format_live_assessment(result, have_flow=True)
+        assert "Swale 1" in html
+        assert "400 → 400 m³" in html

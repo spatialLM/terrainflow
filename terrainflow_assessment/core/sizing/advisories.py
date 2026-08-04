@@ -37,8 +37,12 @@ SOIL_MAX_GRADE_PCT: dict[str, float] = {
     "Clay":       2.0,
 }
 
-# Curve numbers by soil texture (AMC II) — mirror of SCSRunoff.SOIL_REFERENCE.
-# Used to infer the soil group from an entered CN for the cross-check.
+# Curve numbers by soil texture (AMC II) — mirror of SCSRunoff.SOIL_REFERENCE, kept
+# duplicated so core/sizing stays free of a modules/ import. TR-55 Table 2-2, pasture
+# in GOOD hydrologic condition; see the provenance note on SCSRunoff.SOIL_REFERENCE.
+# Used only to infer the soil group from an entered CN for the cross-check, so the
+# condition assumption costs nothing here: it is a nearest-match lookup, not a runoff
+# figure. Any edit to one table must be mirrored in the other.
 _SOIL_CN: dict[str, int] = {
     "Sand":       39,
     "Sandy loam": 49,

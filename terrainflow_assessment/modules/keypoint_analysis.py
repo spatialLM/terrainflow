@@ -16,7 +16,37 @@ import warnings
 
 import numpy as np
 import rasterio
+from shapely.affinity import translate
 from shapely.geometry import LineString
+
+
+def _thin_to_centreline(mask):
+    """Reduce a boolean ridge mask to single-cell-wide centrelines.
+
+    Skeletonisation, not erosion. Erosion shrinks a shape from every side at once, so
+    three passes with a 3×3 structure delete any ridge six cells or fewer across
+    outright and retreat the ends of the survivors by about three cells — and what is
+    left is a thinner blob, not a centreline. On a 1 m DEM that silently discards every
+    ridge under ~6 m wide, which is most of them. ``skeletonize`` preserves each
+    component's topology and length instead.
+
+    Falls back to the historical erosion only when scikit-image is unavailable.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return mask
+    try:
+        from skimage.morphology import skeletonize
+    except Exception:
+        from scipy.ndimage import binary_erosion
+        thinned = mask.copy()
+        for _ in range(3):
+            eroded = binary_erosion(thinned, structure=np.ones((3, 3)))
+            if not eroded.any():
+                break
+            thinned = eroded
+        return thinned
+    return np.asarray(skeletonize(mask), dtype=bool)
 
 
 class DrainageLineAnalysis:
@@ -41,16 +71,25 @@ class DrainageLineAnalysis:
     # ---------------------------------------------------------------------- helpers
 
     def _rc_to_xy(self, row, col):
-        x = self.transform.c + col * self.transform.a + self.cell_w / 2
-        y = self.transform.f + row * self.transform.e + self.cell_h / 2
+        """Map coordinates of the CENTRE of cell (row, col).
+
+        ``transform.e`` is negative, so the half-cell offset that centres the sample
+        must follow it downward — ``(row + 0.5) * e``. Adding ``+cell_h/2`` instead put
+        every keypoint, ridgeline and pond site one full cell north of its own cell,
+        and disagreed with the identical conversion used by the thalweg/keyline path.
+        """
+        x = self.transform.c + (col + 0.5) * self.transform.a
+        y = self.transform.f + (row + 0.5) * self.transform.e
         return float(x), float(y)
 
     def _compute_slope_deg(self):
-        """Slope in degrees, computed once and cached."""
+        """Slope in degrees, computed once and cached.
+
+        Uses the shared Horn's-method helper so contour, keypoint and slope-raster
+        tools all agree numerically (was a bespoke 2-cell gradient here)."""
         if self._slope_deg is None:
-            dem_safe = np.where(np.isnan(self.dem), 0.0, self.dem)
-            dy, dx = np.gradient(dem_safe, self.cell_h, self.cell_w)
-            self._slope_deg = np.degrees(np.arctan(np.sqrt(dx ** 2 + dy ** 2)))
+            from .dem_loader import slope_degrees
+            self._slope_deg = slope_degrees(self.dem, self.cell_w, self.cell_h)
         return self._slope_deg
 
     def _order_pixels(self, rc_list):
@@ -91,17 +130,23 @@ class DrainageLineAnalysis:
 
     def find_keypoints(self, min_acc_cells=500, n_keypoints=5, boundary_mask=None):
         """
-        Find Yeomans keypoints — valley inflection points where slope transitions
-        from steep to gentle.  The keypoint marks where the effective water-retention
-        zone begins along a drainage line.
+        Find candidate valley water-retention points — gentle valley cells carrying a
+        large catchment, spread across the site.
+
+        NOTE: this is a *heuristic proxy*, not the strict Yeomans keypoint. It scores
+        "big catchment on gentle ground" rather than the steep→gentle inflection of a
+        valley long-profile. It is well suited to seeding pond/dam-site candidates
+        (see :meth:`recommend_pond_sites`). The strict single Yeomans keypoint (the
+        long-profile inflection) is computed by
+        :meth:`YeomansKeylineAnalysis.find_keypoint` and drives the keyline feature.
 
         Algorithm
         ---------
         1.  Identify valley cells (accumulation >= min_acc_cells).
         2.  Smooth slope to remove pixel-level noise.
         3.  Within valleys, score each cell by high accumulation (large catchment) /
-            low smoothed slope (gentle angle). The highest score = best keypoint.
-        4.  Iteratively select keypoints with a minimum spatial separation so they
+            low smoothed slope (gentle angle). The highest score = best candidate.
+        4.  Iteratively select points with a minimum spatial separation so they
             span the full elevation range of the site.
 
         Returns list of dicts: {x, y, elevation, slope_deg, catchment_ha, label,
@@ -113,12 +158,19 @@ class DrainageLineAnalysis:
         acc = self.acc
         rows, cols = acc.shape
 
-        # Smooth slope over ~10 m neighbourhood (min 3×3 window)
+        # Smooth slope over ~10 m neighbourhood (min 3×3 window). NaN-aware: slope is
+        # NaN over nodata, and a plain uniform_filter would smear that NaN across the
+        # whole window and from there into every keypoint score.
         win = max(3, int(10.0 / self.cell_size) | 1)  # keep odd
-        slope_smooth = uniform_filter(slope.astype("float32"), size=win)
+        valid_slope = np.isfinite(slope)
+        slope_sum = uniform_filter(
+            np.where(valid_slope, slope, 0.0).astype("float32"), size=win)
+        slope_cnt = uniform_filter(valid_slope.astype("float32"), size=win)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            slope_smooth = np.where(slope_cnt > 0, slope_sum / slope_cnt, np.nan)
 
-        # Valley cells: significant upstream area
-        valley = acc >= min_acc_cells
+        # Valley cells: significant upstream area, and terrain we actually know about
+        valley = (acc >= min_acc_cells) & np.isfinite(slope_smooth)
         if not valley.any():
             return []
 
@@ -201,7 +253,12 @@ class DrainageLineAnalysis:
 
         TPI = cell elevation − neighbourhood mean elevation.
         Cells with high TPI and very low flow accumulation (acc ≤ 2) are ridge cells.
-        These are thinned morphologically and vectorised into polylines.
+        These are thinned to centrelines and vectorised into polylines.
+
+        ``tpi_window`` is a **cell** count, so the landform scale it responds to
+        depends on the DEM's resolution — 15 cells is 15 m on a 1 m grid and 75 m on a
+        5 m grid. That is deliberate (it keeps the cost fixed) but it means the ridge
+        set is not comparable between DEMs of different resolution.
 
         Parameters
         ----------
@@ -211,17 +268,24 @@ class DrainageLineAnalysis:
 
         Returns list of dicts: {geometry (LineString), length_m, mean_elevation, label}
         """
-        from scipy.ndimage import binary_erosion, uniform_filter
         from scipy.ndimage import label as nd_label
+        from scipy.ndimage import uniform_filter
 
-        dem_safe = np.where(np.isnan(self.dem), float(np.nanmean(self.dem)), self.dem)
+        # Neighbourhood mean over the VALID cells only. Substituting the whole-DEM mean
+        # for nodata dragged the local mean toward it for every cell within half a window
+        # of a hole, fabricating a ridge line all the way around the data boundary — the
+        # one place users most often clip to (a property edge).
+        valid = np.isfinite(self.dem)
+        filled = np.where(valid, self.dem, 0.0).astype("float64")
+        sum_filter = uniform_filter(filled, size=tpi_window)
+        count_filter = uniform_filter(valid.astype("float64"), size=tpi_window)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            neighbourhood_mean = np.where(count_filter > 0,
+                                          sum_filter / count_filter, np.nan)
+        tpi = np.where(valid, filled - neighbourhood_mean, np.nan)
 
-        neighbourhood_mean = uniform_filter(dem_safe.astype("float64"),
-                                            size=tpi_window).astype("float32")
-        tpi = dem_safe - neighbourhood_mean
-
-        valid = ~np.isnan(self.dem)
-        ridge_raw = (tpi > min_tpi_m) & (self.acc <= 2) & valid
+        with np.errstate(invalid="ignore"):
+            ridge_raw = (tpi > min_tpi_m) & (self.acc <= 2) & valid
 
         # Remove 1-cell border (often artefacts)
         ridge_raw[[0, -1], :] = False
@@ -234,14 +298,7 @@ class DrainageLineAnalysis:
         if not ridge_raw.any():
             return []
 
-        # Thin by repeated erosion (3 passes maximum; stop if nothing left)
-        skeleton = ridge_raw.copy()
-        for _ in range(3):
-            eroded = binary_erosion(skeleton, structure=np.ones((3, 3)))
-            if not eroded.any():
-                break
-            skeleton = eroded
-
+        skeleton = _thin_to_centreline(ridge_raw)
         if not skeleton.any():
             skeleton = ridge_raw
 
@@ -286,7 +343,9 @@ class DrainageLineAnalysis:
         For each keypoint, recommend a dam/pond location just downstream where the
         valley is at its narrowest (smallest cross-sectional width at dam crest).
 
-        The dam crest elevation is set at keypoint elevation + 2 m.
+        The trial dam crest used to measure valley width is set 2 m above the
+        *candidate cell's own* elevation — not above the keypoint's, as this once
+        claimed. The two differ by the fall between keypoint and dam site.
 
         Returns list of dicts: {x, y, elevation, catchment_ha, dam_width_m,
                                  keypoint, label}
@@ -362,8 +421,14 @@ class DrainageLineAnalysis:
         count = 0
         for dc in range(-200, 201):
             nc = col + dc
-            if nc < 0 or nc >= cols:
-                break
+            if nc < 0:
+                # The scan STARTS 200 columns to the left, so breaking here stopped it
+                # on its first iteration for any candidate within 200 columns of the
+                # west edge — width 0 m, which maximises the acc/(width+1) dam score
+                # and pulled every pond-site recommendation to the raster's left edge.
+                continue
+            if nc >= cols:
+                break                    # dc only increases — nothing further is in range
             if np.isnan(self.dem[row, nc]):
                 continue
             if self.dem[row, nc] <= fill_elev:
@@ -447,8 +512,9 @@ class YeomansKeylineAnalysis:
     """
     True Yeomans keyline design.
 
-    1. Extract the primary thalweg (highest-accumulation D8 path from source
-       to outlet).
+    1. Extract the primary thalweg (highest-accumulation path from source to
+       outlet, walked on elevation + accumulation rather than on the flow-direction
+       codes — see :meth:`_trace_thalweg`).
     2. Sample DEM elevations along the thalweg at even spacing.
     3. Smooth the long-profile with a Savitzky–Golay filter.
     4. Detect the keypoint = location of maximum positive second derivative
@@ -463,7 +529,10 @@ class YeomansKeylineAnalysis:
     dem_path : str
         Path to a projected DEM GeoTIFF.
     fdir_path : str or None
-        Pre-computed D8 flow-direction raster (pysheds ESRI encoding).
+        Pre-computed flow-direction raster. Requested from pysheds as D-infinity
+        (continuous radians), so it is NOT the ESRI D8 code set this once claimed;
+        the thalweg walk does not read it, and any future consumer must handle the
+        radian encoding rather than casting it to integer codes.
         If None the flow direction is computed internally from the DEM.
     acc_path : str or None
         Pre-computed flow accumulation raster.  If None it is computed
@@ -504,7 +573,7 @@ class YeomansKeylineAnalysis:
 
         fdir_arr, acc_arr = self._ensure_flow_data()
 
-        # Primary thalweg = D8 path traced upstream from the outlet
+        # Primary thalweg = drainage path traced upstream from the outlet
         # (the cell with maximum accumulation).
         outlet_r, outlet_c = np.unravel_index(
             int(np.argmax(acc_arr)), acc_arr.shape
@@ -513,17 +582,26 @@ class YeomansKeylineAnalysis:
         if len(thalweg) < 5:
             return None
 
-        # Elevation profile and arc-length vector along thalweg
-        elevs = [
-            float(self.dem[r, c]) if not np.isnan(self.dem[r, c]) else 0.0
-            for r, c in thalweg
-        ]
-        arc = [0.0]
+        # Elevation profile and arc-length vector along thalweg. Nodata cells are
+        # dropped and bridged by interpolation, never substituted with 0.0 m: a single
+        # sea-level stand-in on a 300 m hillside is a 300 m cliff in the profile, and
+        # the keypoint is the argmax of its *second* derivative — so one nodata cell
+        # could capture the answer outright.
+        arc_all = [0.0]
         for i in range(1, len(thalweg)):
             dr = thalweg[i][0] - thalweg[i - 1][0]
             dc = thalweg[i][1] - thalweg[i - 1][1]
-            arc.append(arc[-1] + (dr ** 2 + dc ** 2) ** 0.5 * self.cell_size)
-        total_len = arc[-1]
+            arc_all.append(arc_all[-1] + (dr ** 2 + dc ** 2) ** 0.5 * self.cell_size)
+        total_len = arc_all[-1]
+
+        arc, elevs = [], []
+        for s, (r, c) in zip(arc_all, thalweg):
+            z = float(self.dem[r, c])
+            if np.isfinite(z):
+                arc.append(s)
+                elevs.append(z)
+        if len(arc) < 5:
+            return None            # too little real ground along the thalweg to read
 
         # Resample to regular spacing: min(5×cell_size, 10 m)
         spacing = min(5.0 * self.cell_size, 10.0)
@@ -561,74 +639,65 @@ class YeomansKeylineAnalysis:
             "arc_length_m": round(kp_s, 1),
         }
 
-    def get_cultivation_runs(self, keypoint, n_runs=3, cross_grade=1 / 500):
+    def get_cultivation_runs(self, keypoint, n_runs=3, cross_grade=1 / 500,
+                             spacing_m=None):
         """
-        Generate cultivation run polylines centred on *keypoint*.
+        Generate the Yeomans keyline + parallel cultivation guides.
 
-        Each run is a line through the keypoint's map position that follows
-        the local contour direction but slopes at *cross_grade* (rise over
-        run) so water is guided gently across the hillside.
+        Per Yeomans' method (``The Keyline Plan``, 1954) the **keyline** is the
+        on-contour line through the keypoint — it follows the valley shape at the
+        keypoint elevation. **Cultivation guides** are geometric *parallel offsets*
+        of that keyline, above and below. Because a parallel offset of a curved
+        valley contour is not itself a contour, the guides drift off-contour
+        automatically, moving water from the wet valley floor toward the drier
+        ridge (the purpose of keyline cultivation). The drift is emergent from
+        parallelism, so no artificial cross-grade is imposed on the geometry;
+        ``cross_grade`` is retained as advisory metadata (the intended slight
+        irrigation guide-grade) and echoed on every run.
 
         Parameters
         ----------
         keypoint : dict
             Output from :meth:`find_keypoint`.
         n_runs : int
-            Number of runs above/below the keypoint elevation (total runs
-            returned = 2 × n_runs + 1).
+            Number of guides above/below the keyline (total = 2 × n_runs + 1).
         cross_grade : float
-            Desired cross-grade (e.g. 1/500 = 0.002).
+            Advisory guide-grade metadata (e.g. 1/500 = 0.002).
+        spacing_m : float or None
+            Horizontal spacing between parallel guides (implement/plough width).
+            Defaults to ``max(3.0, 5·cell_size)``.
 
         Returns
         -------
         list of dict
-            Each dict has keys ``elevation``, ``geometry`` (shapely
-            LineString with Z coordinates), ``cross_grade``,
-            ``line_type`` ("keyline" | "cultivation_upper" |
+            Each dict has keys ``elevation`` (mean DEM elevation along the guide),
+            ``geometry`` (shapely 3D LineString, Z sampled from the DEM),
+            ``cross_grade``, ``line_type`` ("keyline" | "cultivation_upper" |
             "cultivation_lower").
         """
-        spacing_m = 5.0 * self.cell_size  # vertical spacing between runs
         kr, kc = keypoint["row"], keypoint["col"]
-        rows, cols = self.dem.shape
-
-        # Contour direction = perpendicular to the steepest-descent vector.
-        # Approximate steepest descent from DEM gradient at keypoint.
-        r0, r1 = max(0, kr - 1), min(rows - 1, kr + 1)
-        c0, c1 = max(0, kc - 1), min(cols - 1, kc + 1)
-        dz_dr = (float(self.dem[r1, kc]) - float(self.dem[r0, kc])) / (
-            (r1 - r0) * self.cell_h
-        ) if r1 > r0 else 0.0
-        dz_dc = (float(self.dem[kr, c1]) - float(self.dem[kr, c0])) / (
-            (c1 - c0) * self.cell_w
-        ) if c1 > c0 else 0.0
-
-        # Contour direction (perpendicular to gradient): (-dz_dc, dz_dr)
-        cx, cy = -dz_dc, dz_dr
-        mag = (cx ** 2 + cy ** 2) ** 0.5 or 1.0
-        cx, cy = cx / mag, cy / mag  # unit vector along contour
-
-        kx, ky = self._rc_to_xy(kr, kc)
         base_elev = keypoint["elevation"]
-        half_len = min(cols, rows) * self.cell_size / 2.0
+        if spacing_m is None:
+            spacing_m = max(3.0, 5.0 * self.cell_size)
+
+        # Master keyline = the contour at the keypoint elevation (valley shape).
+        keyline_xy = self._trace_keyline(base_elev, kr, kc)
+        if keyline_xy is None or len(keyline_xy) < 2:
+            keyline_xy = self._fallback_keyline(kr, kc)
+        base_line = LineString(keyline_xy)
 
         results = []
-        offsets = list(range(-n_runs, n_runs + 1))
-        for offset in offsets:
-            elev = round(base_elev + offset * spacing_m, 2)
+        for offset in range(-n_runs, n_runs + 1):
+            if offset == 0:
+                line2d = base_line
+            else:
+                line2d = self._offset_line(base_line, offset * spacing_m, kr, kc)
+            if line2d is None or line2d.is_empty or line2d.length <= 0:
+                continue
 
-            # Build run line: extend half_len in each contour direction,
-            # applying cross_grade drop along the run.
-            # The grade drops in the direction of increasing contour distance
-            # from the centre point.
-            pts = []
-            for frac in np.linspace(-1.0, 1.0, max(10, int(half_len))):
-                dist = frac * half_len
-                px = kx + cx * dist
-                py = ky + cy * dist
-                pz = elev - abs(dist) * cross_grade  # symmetric drop from centre
-                pts.append((px, py, pz))
-
-            geom = LineString(pts)
+            pts3d, mean_elev = self._sample_z(line2d, base_elev)
+            if len(pts3d) < 2:
+                continue
 
             if offset == 0:
                 line_type = "keyline"
@@ -638,13 +707,123 @@ class YeomansKeylineAnalysis:
                 line_type = "cultivation_lower"
 
             results.append({
-                "elevation": elev,
-                "geometry": geom,
+                "elevation": round(mean_elev, 2),
+                "geometry": LineString(pts3d),
                 "cross_grade": cross_grade,
                 "line_type": line_type,
             })
 
         return results
+
+    # ------------------------------------------------------------------
+    # Keyline geometry helpers
+    # ------------------------------------------------------------------
+
+    def _trace_keyline(self, elev, kr, kc):
+        """Trace the DEM contour at *elev* and return the polyline (list of x,y)
+        passing closest to the keypoint (kr, kc), or None if unavailable."""
+        try:
+            from skimage import measure
+        except Exception:
+            return None
+        # find_contours excludes NaN natively, leaving contours open where the data
+        # stops. Pre-filling nodata with elev−1e6 instead put a synthetic cliff around
+        # the hole, so marching squares closed every contour along the data boundary —
+        # and the keyline could then snap to that artefact instead of the real contour.
+        dem = np.asarray(self.dem, dtype="float64")
+        try:
+            contours = measure.find_contours(dem, float(elev))
+        except Exception:
+            return None
+        best, best_d = None, float("inf")
+        for path in contours:
+            if len(path) < 2:
+                continue
+            # Distance in METRES: rows and columns are not interchangeable units on a
+            # non-square grid, so comparing raw row²+col² picked the wrong component.
+            dy = (path[:, 0] - kr) * self.cell_h
+            dx = (path[:, 1] - kc) * self.cell_w
+            d = float(np.min(dy ** 2 + dx ** 2))
+            if d < best_d:
+                best_d, best = d, path
+        if best is None:
+            return None
+        return [self._rc_to_xy(r, c) for r, c in best]
+
+    def _fallback_keyline(self, kr, kc):
+        """Straight contour-direction segment through the keypoint — used only if
+        contour tracing is unavailable (e.g. skimage missing or tiny DEM)."""
+        rows, cols = self.dem.shape
+        r0, r1 = max(0, kr - 1), min(rows - 1, kr + 1)
+        c0, c1 = max(0, kc - 1), min(cols - 1, kc + 1)
+        dz_dr = ((float(self.dem[r1, kc]) - float(self.dem[r0, kc]))
+                 / ((r1 - r0) * self.cell_h)) if r1 > r0 else 0.0
+        dz_dc = ((float(self.dem[kr, c1]) - float(self.dem[kr, c0]))
+                 / ((c1 - c0) * self.cell_w)) if c1 > c0 else 0.0
+        # Map space, not index space: x grows with column but y grows with *decreasing*
+        # row (transform.e < 0), so ∇z = (dz_dc, −dz_dr) and the contour runs
+        # perpendicular to it, (−∂z/∂y, ∂z/∂x) = (dz_dr, dz_dc). The old (−dz_dc, dz_dr)
+        # was −∇z — the fall line, i.e. 90° off the contour, so on a south-facing slope
+        # the fallback keyline was drawn N-S where it should run E-W.
+        cx, cy = dz_dr, dz_dc
+        mag = (cx ** 2 + cy ** 2) ** 0.5 or 1.0
+        cx, cy = cx / mag, cy / mag
+        kx, ky = self._rc_to_xy(kr, kc)
+        half_len = min(cols, rows) * self.cell_size / 2.0
+        return [(kx - cx * half_len, ky - cy * half_len),
+                (kx + cx * half_len, ky + cy * half_len)]
+
+    def _offset_line(self, line, signed_dist, kr, kc):
+        """Parallel offset of *line* by *signed_dist* (metres). Prefers shapely's
+        offset_curve (constant perpendicular spacing); falls back to translating
+        the line along the keypoint gradient so a guide is always produced."""
+        off = None
+        try:
+            off = line.offset_curve(signed_dist)
+        except Exception:
+            try:
+                side = "left" if signed_dist >= 0 else "right"
+                off = line.parallel_offset(abs(signed_dist), side)
+            except Exception:
+                off = None
+        if off is not None and not off.is_empty:
+            if off.geom_type == "MultiLineString":
+                off = max(off.geoms, key=lambda g: g.length)
+            if off.length > 0:
+                return off
+        # Fallback: translate along the (down-slope) gradient direction.
+        rows, cols = self.dem.shape
+        r0, r1 = max(0, kr - 1), min(rows - 1, kr + 1)
+        c0, c1 = max(0, kc - 1), min(cols - 1, kc + 1)
+        dz_dr = ((float(self.dem[r1, kc]) - float(self.dem[r0, kc]))
+                 / ((r1 - r0) * self.cell_h)) if r1 > r0 else 0.0
+        dz_dc = ((float(self.dem[kr, c1]) - float(self.dem[kr, c0]))
+                 / ((c1 - c0) * self.cell_w)) if c1 > c0 else 1.0
+        gmag = (dz_dr ** 2 + dz_dc ** 2) ** 0.5 or 1.0
+        # map dx/dy from column/row gradient; row increases downward (transform.e<0)
+        ux, uy = dz_dc / gmag, -dz_dr / gmag
+        return translate(line, xoff=ux * signed_dist, yoff=uy * signed_dist)
+
+    def _sample_z(self, line, base_elev):
+        """Sample DEM elevation along *line* → list of (x, y, z) plus mean z."""
+        total = line.length
+        n = max(2, int(total / max(self.cell_size, 1e-6)))
+        pts, elevs = [], []
+        for i in range(n + 1):
+            p = line.interpolate(total * i / n)
+            z = self._sample_dem(p.x, p.y, base_elev)
+            pts.append((p.x, p.y, z))
+            elevs.append(z)
+        return pts, (float(np.mean(elevs)) if elevs else base_elev)
+
+    def _sample_dem(self, x, y, default):
+        col = int((x - self.transform.c) / self.transform.a)
+        row = int((y - self.transform.f) / self.transform.e)
+        if 0 <= row < self.dem.shape[0] and 0 <= col < self.dem.shape[1]:
+            v = self.dem[row, col]
+            if not np.isnan(v):
+                return float(v)
+        return float(default)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -666,8 +845,10 @@ class YeomansKeylineAnalysis:
         from pysheds.grid import Grid
 
         if self._fdir_path and self._acc_path:
+            # float32, not int32: a supplied raster may be dinf radians as easily as
+            # D8 codes, and truncating the former loses the direction entirely.
             with rasterio.open(self._fdir_path) as src:
-                self._fdir_arr = src.read(1).astype("int32")
+                self._fdir_arr = src.read(1).astype("float32")
             with rasterio.open(self._acc_path) as src:
                 self._acc_arr = src.read(1).astype("float32")
             return self._fdir_arr, self._acc_arr
@@ -705,7 +886,14 @@ class YeomansKeylineAnalysis:
             except (TypeError, AttributeError):
                 acc = grid.accumulation(fdir)
 
-            self._fdir_arr = np.array(fdir, dtype="int32")
+            # Keep the flow direction in its native encoding. Under "dinf" this is a
+            # continuous angle in radians, and casting it to int32 collapsed every
+            # direction to 0–6 while turning NaN into a garbage integer (a warning at
+            # every call). Nothing reads it today — _trace_thalweg walks elevation and
+            # accumulation — but a future consumer must get the real values, and must
+            # check `dinf_routing` before treating them as D8 codes.
+            self._fdir_arr = np.asarray(fdir, dtype="float32")
+            self.dinf_routing = _routing == "dinf"
             self._acc_arr = np.array(acc, dtype="float32")
         finally:
             os.unlink(tmp_path)

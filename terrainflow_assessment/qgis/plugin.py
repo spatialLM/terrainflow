@@ -16,6 +16,7 @@ from terrainflow_assessment.qgis.adapters.project import ProjectAdapter
 from terrainflow_assessment.qgis.controllers._state import PluginState
 from terrainflow_assessment.qgis.controllers.baseline import BaselineController
 from terrainflow_assessment.qgis.controllers.contour import ContourController
+from terrainflow_assessment.qgis.controllers.design_file import DesignFileController
 from terrainflow_assessment.qgis.controllers.earthworks import EarthworksController
 from terrainflow_assessment.qgis.controllers.reporting import ReportingController
 from terrainflow_assessment.qgis.controllers.simulation import SimulationController
@@ -50,6 +51,21 @@ class TerrainFlowAssessmentPlugin:
     def unload(self):
         self._iface.removeToolBarIcon(self._action)
         self._iface.removePluginMenu("TerrainFlow", self._action)
+        if getattr(self, "_persistence_wired", False):
+            try:
+                instance = self._project.instance()
+                instance.writeProject.disconnect(self._on_write_project)
+                instance.readProject.disconnect(self._on_read_project)
+            except Exception:
+                pass
+            self._persistence_wired = False
+        # The per-session scratch directory is never reused; leaving it behind grows
+        # the temp folder by a DEM's worth of rasters every run.
+        try:
+            import shutil
+            shutil.rmtree(self._state.output_dir, ignore_errors=True)
+        except Exception:
+            pass
         if self.panel:
             self._iface.removeDockWidget(self.panel)
             self.panel = None
@@ -71,8 +87,36 @@ class TerrainFlowAssessmentPlugin:
         self._earthworks = EarthworksController(*args)
         self._simulation = SimulationController(*args)
         self._reporting = ReportingController(*args)
+        self._design_file = DesignFileController(*args)
 
         self._wire_signals()
+        self._wire_project_persistence()
+
+    def _wire_project_persistence(self):
+        """Save/restore the earthwork design with the QGIS project.
+
+        Earthworks were previously session-only — closing QGIS discarded the whole
+        design with no warning and no way to recover it.
+        """
+        try:
+            instance = self._project.instance()
+            instance.writeProject.connect(self._on_write_project)
+            instance.readProject.connect(self._on_read_project)
+            self._persistence_wired = True
+        except Exception as exc:
+            self._persistence_wired = False
+            print(f"TerrainFlow Assessment — project persistence unavailable: {exc}")
+
+    def _on_write_project(self, *_args):
+        self._earthworks.save_to_project()
+        self._earthworks.save_rainfall_data()
+
+    def _on_read_project(self, *_args):
+        # Rainfall data first: the earthworks' time-of-concentration figures read the
+        # 2-year depth from it, so restoring it afterwards would leave the first
+        # assessment computed without it.
+        self._earthworks.load_rainfall_data()
+        self._earthworks.load_from_project()
 
     def _wire_signals(self):
         p = self.panel
@@ -87,6 +131,9 @@ class TerrainFlowAssessmentPlugin:
         p.boundary_changed.connect(bl.on_boundary_changed)
         p.analysis_area_changed.connect(bl.on_analysis_area_changed)
         p.earthworks_area_changed.connect(bl.on_earthworks_area_changed)
+        p.draw_boundary_requested.connect(lambda: bl.draw_area("boundary"))
+        p.draw_analysis_area_requested.connect(lambda: bl.draw_area("analysis"))
+        p.draw_earthworks_area_requested.connect(lambda: bl.draw_area("earthworks"))
 
         # Baseline
         p.run_baseline_requested.connect(bl.run_baseline)
@@ -96,14 +143,22 @@ class TerrainFlowAssessmentPlugin:
         p.query_ponding_requested.connect(ew.activate_ponding_query)
         p.toggle_slope_class_requested.connect(ew.toggle_slope_class)
         p.toggle_slope_arrows_requested.connect(ew.toggle_slope_arrows)
+        p.toggle_slope_vectors_requested.connect(ew.toggle_slope_vectors)
 
         # Contour
         p.run_contour_analysis_requested.connect(ct.run_contour_analysis)
         p.select_top5_contours_requested.connect(ct.select_top5_contours)
         p.find_segments_requested.connect(ct.run_segment_analysis)
+        p.show_inflow_bands_requested.connect(ct.show_inflow_bands)
+        p.clear_analysis_requested.connect(ct.clear_analysis)
         p.generate_simple_contours_requested.connect(ct.generate_simple_contours)
         p.run_keypoint_analysis_requested.connect(ct.run_keypoint_analysis)
         p.recommend_ponds_requested.connect(ct.run_recommend_ponds)
+        p.keypoint_result_activated.connect(ct.zoom_to_point)
+        p.segment_activated.connect(ct.highlight_segment)
+        p.run_keyline_requested.connect(ct.run_keyline_analysis)
+        p.draw_keyline_requested.connect(ct.activate_draw_keyline)
+        p.convert_keyline_to_swale_requested.connect(ew.create_swale_from_keyline)
 
         # Earthworks drawing — registry-driven: the panel emits the type key and
         # the controller resolves the right map tool from the type's geometry.
@@ -113,13 +168,41 @@ class TerrainFlowAssessmentPlugin:
         p.run_earthworks_requested.connect(ew.run_with_earthworks)
         p.reshape_earthworks_requested.connect(ew.activate_edit_earthwork_vertices)
 
+        # Overflow routing: where a feature spills, and what it spills into.
+        p.place_spillway_requested.connect(ew.activate_place_spillway)
+        p.connect_earthworks_requested.connect(ew.activate_connect_earthworks)
+        p.choose_design_intensity_requested.connect(ew.choose_design_intensity)
+        p.edit_rainfall_data_requested.connect(ew.edit_rainfall_data)
+        p.earthwork_selected.connect(ew.highlight_selected_earthwork)
+
         # Earthworks table buttons
         p._ew_edit_btn.clicked.connect(ew.edit_selected_earthwork)
         p._ew_delete_btn.clicked.connect(ew.delete_selected_earthwork)
         p._ew_toggle_btn.clicked.connect(ew.toggle_selected_earthwork)
 
+        # Direct-catchment layer (one colour per earthwork)
+        p.toggle_catchment_layer_requested.connect(ew.toggle_catchment_layer)
+
+        # Throughflow gradient (blue per-cell water volume)
+        p.toggle_throughflow_requested.connect(bl.set_throughflow_visible)
+        p.throughflow_scale_changed.connect(bl.set_throughflow_scale)
+
         # Live analytical assessment — recompute when storm/soil inputs change
         p.analysis_inputs_changed.connect(ew._recompute_live_assessment)
+
+        # A successful baseline re-scores whatever earthworks already exist. Normally
+        # they are drawn after a baseline, but a restored design file reverses that order,
+        # leaving features with no catchment labels until terrain results arrive.
+        bl.baseline_finished.connect(ew._recompute_live_assessment)
+
+        # Portable design files. The design-file controller hands restored payloads to
+        # whichever controller owns them rather than calling across directly.
+        df = self._design_file
+        p.save_design_requested.connect(df.save_design)
+        p.open_design_requested.connect(df.open_design)
+        df.earthworks_payload_ready.connect(ew.restore_earthworks_from_json)
+        df.idf_payload_ready.connect(ew.restore_rainfall_from_json)
+        df.baseline_rerun_requested.connect(bl.run_baseline)
 
         # Simulation
         p.run_simulation_requested.connect(sim.run_simulation)

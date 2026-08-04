@@ -9,13 +9,21 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
     bresenham            — integer cells along a straight segment
     line_cells           — connected, in-bounds cell path along a polyline
     enforce_monotonic_path — breach a strictly-downhill invert along a carved path
+    level_invert         — excavate a footprint to a flat floor below its spill level
+    battered_invert      — stepped approximation of battered walls
+    rasterisable_capacity — storage the grid can actually represent (resolution penalty)
+    steep_ground_warning — advisory when a level floor over-excavates one end
     sub_cell_warning     — advisory when a feature is narrower than one cell
     ponding_resolution_warning — advisory when a DEM exceeds the ponding memory cap
 
 Design rules baked in (spec §3):
-* Conveyances get a **connected, monotonic downhill 1-cell path** by breaching
-  (``enforce_monotonic_path``), not naive deep incision — so depression-filling
-  can't erase the drain and flow actually reaches the outlet.
+* **Storage features get a level floor** (``level_invert``), referenced to their
+  natural pour point, so a basin or swale holds its design volume on sloping ground
+  instead of the wedge a constant-depth translation leaves behind.
+* Conveyances — and only conveyances — get a **connected, monotonic downhill 1-cell
+  path** by breaching (``enforce_monotonic_path``), so depression-filling can't erase
+  the drain and flow actually reaches the outlet. Applying this to a swale guaranteed
+  an outlet and therefore near-zero ponding, which is why swales no longer use it.
 * The empty-mask no-op (a sub-cell buffer rasterises to nothing) is fixed by a
   **nearest-cell snap**: ``line_cells`` always yields the in-bounds cells the line
   passes through, which the burner incises directly when the area mask is empty.
@@ -118,6 +126,105 @@ def enforce_monotonic_path(dem, path_cells, min_drop: float = 1e-3):
         out[rc] = target
         running = target
     return out
+
+
+def level_invert(dem, mask, depth: float, spill_elev: float):
+    """Excavate *mask* to a **flat floor** at ``spill_elev − depth``.
+
+    Returns a copy of *dem* in which every masked cell sits at or below the floor —
+    ``np.minimum``, so ground already lower than the floor is never raised and the
+    burn can only ever cut.
+
+    This replaces a constant-depth offset (``dem[mask] -= depth``), which translated
+    the existing terrain downward and so preserved its slope. A translated basin only
+    holds water up to its lowest rim, and on sloping ground that is far less than its
+    design volume — measured on a 400 m² × 1.5 m basin (600 m³ nominal): 600 m³ held
+    on flat ground, 390 m³ at 5% slope, 210 m³ at 10%. A level floor holds 600 m³ at
+    every slope, which is what the analytic prism claims, so the two tiers agree.
+
+    Referencing the floor to *spill_elev* (the natural pour point — the lowest rim
+    cell) rather than to the ground directly above it is what makes the pond fill
+    evenly to the level at which it would actually overflow.
+    """
+    import numpy as np
+
+    out = dem.copy()
+    if mask is None or not mask.any():
+        return out
+    floor = spill_elev - depth
+    out[mask] = np.minimum(out[mask], floor)
+    return out
+
+
+def battered_invert(dem, step_masks, spill_elev: float):
+    """Excavate nested *step_masks* to a stepped approximation of battered walls.
+
+    ``step_masks`` is an ordered list of ``(mask, depth)`` pairs, outermost/shallowest
+    first, as produced by successively shrinking the footprint. Each step is levelled
+    to ``spill_elev − depth`` deepest-last, so the deeper inner steps win. This is how
+    a trapezoidal or battered section is represented on a grid — the walls become
+    stairs, and how well they approximate the true batter is exactly what
+    :func:`rasterisable_capacity` reports.
+    """
+    out = dem.copy()
+    for mask, depth in sorted(step_masks, key=lambda pair: pair[1]):
+        out = level_invert(out, mask, depth, spill_elev)
+    return out
+
+
+def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
+                          top_width: float, bottom_width: float, cell_size: float):
+    """Storage the burned raster can actually represent, in m³.
+
+    The design geometry and the grid rarely agree, and the difference is not an
+    error — it is the resolution penalty, and it is usually **positive**. A 2.0 m
+    swale with 1:1 batters has a 0.75 m²/m trapezoidal section, but on a 1 m grid the
+    sloping walls cannot be represented: it burns as a 2-cell rectangular trench at
+    1.0 m²/m, a third more. A sub-metre feature is widened to one whole cell, likewise.
+
+    Reporting this separately is what lets the Verify stage compare like with like:
+    measured ponding against *this* number isolates burn correctness, while the gap
+    between this and the true geometric volume is the honest cost of the cell size.
+
+    A footprint wide enough to hold the batter (roughly three cells) keeps its
+    trapezoidal section; anything narrower collapses to the rectangle the grid can
+    hold.
+    """
+    if n_cells <= 0 or depth <= 0 or cell_area <= 0:
+        return 0.0
+    if cell_size > 0 and top_width < 3.0 * cell_size:
+        # Too narrow for the walls to be resolved — a flat-bottomed trench.
+        return n_cells * cell_area * depth
+    mean_width = (top_width + max(0.0, bottom_width)) / 2.0
+    if top_width <= 0:
+        return n_cells * cell_area * depth
+    return n_cells * cell_area * depth * (mean_width / top_width)
+
+
+def steep_ground_warning(name: str, relief: float, depth: float,
+                         cut_m3=None, storage_m3=None):
+    """Advisory when a level floor means cutting deeper than the design depth.
+
+    A level floor is hydraulically right at any slope — it fills evenly to its spill
+    level and holds its design volume. The cost is excavation: if the footprint falls
+    further across than the feature is deep, the uphill end is cut deeper than asked
+    for, and on a 10% slope that can be ~70% more earth moved for the same storage.
+    The user should be told in cubic metres, not warned off in the abstract.
+    """
+    if relief is None or depth <= 0 or relief <= depth:
+        return None
+    msg = (
+        f"'{name}': the footprint falls {relief:.1f} m across, more than its "
+        f"{depth:.1f} m design depth. A level floor means cutting up to {relief:.1f} m "
+        f"at the uphill end"
+    )
+    if cut_m3 and storage_m3:
+        msg += f" — {cut_m3:,.0f} m³ of excavation for {storage_m3:,.0f} m³ of storage"
+    msg += (
+        ". Consider a smaller footprint, terracing into two features, or a dam wall "
+        "on the low side."
+    )
+    return msg
 
 
 def sub_cell_warning(name: str, min_dimension, cell_size: float):

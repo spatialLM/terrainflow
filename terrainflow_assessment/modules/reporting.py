@@ -183,7 +183,11 @@ def format_live_assessment(result, have_flow):
         rows = []
         for f in r.per_feature:
             if have_flow:
-                detail = f"{f['inflow_m3']:,.0f} → {f['stored_m3']:,.0f} m³"
+                # water_balance emits direct_/upstream_/total_inflow_m3 — there is no
+                # bare 'inflow_m3', and subscripting one crashed this row whenever flow
+                # data was present. Total inflow is the figure this row means.
+                inflow = f.get("total_inflow_m3", 0.0)
+                detail = f"{inflow:,.0f} → {f['stored_m3']:,.0f} m³"
                 if f["overflowed"] or f["fill_pct"] >= 100:
                     status = (
                         f"<span style='color:{_LIVE_MID};font-weight:bold;'>⚠ full</span>"
@@ -266,8 +270,14 @@ def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0
     return per_name, unattributed
 
 
+# A per-feature gap between the drawn geometry and what the grid can represent,
+# beyond this fraction, is worth naming explicitly in the table.
+_RESOLUTION_CAVEAT_THRESHOLD = 0.10
+
+
 def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
-                       earthworks_total_m3, min_dims, cell_size):
+                       earthworks_total_m3, min_dims, cell_size,
+                       breakdowns=None):
     """Assemble the terrain-vs-analytic verification (site headline + per-feature).
 
     Site terrain-derived storage = ``earthworks_total − baseline_total`` (floored ≥0) —
@@ -275,33 +285,79 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     ``min_dimension`` below ``cell_size`` is flagged ``routing_only`` and gets no
     independent volume claim (spec §4): sub-cell features validate placement/routing
     only, not storage.
+
+    ``breakdowns`` maps each key to
+    :func:`~terrainflow_assessment.modules.earthwork_design.capacity_breakdown`. When
+    supplied, the delta is measured against what the **grid can represent**
+    (``rasterisable``) rather than the design capacity, which is what makes it
+    interpretable: a non-zero delta then means the burn is wrong, and nothing else.
+
+    Three unrelated gaps used to be summed into one percentage — a genuine burn error,
+    the grid's distortion of the drawn shape, and the freeboard allowance the user
+    chose. That is why a headline of "Verified · Δ −38%" carried no actionable meaning.
+    Each is now reported separately:
+
+    ``design`` → ``geometric``     the freeboard allowance (a choice)
+    ``geometric`` → ``rasterisable`` the resolution penalty (the cell size)
+    ``rasterisable`` → ``terrain``   the burn (the only real error term)
     """
+    breakdowns = breakdowns or {}
+
+    def _reference(key, fallback):
+        b = breakdowns.get(key)
+        if b and b.get("rasterisable"):
+            return float(b["rasterisable"])
+        return float(fallback)
+
     analytic_total = float(sum(analytic_by_name.values()))
+    reference_total = float(sum(
+        _reference(k, v) for k, v in analytic_by_name.items()
+    ))
     terrain_total = max(0.0, earthworks_total_m3 - baseline_total_m3)
-    delta_m3 = terrain_total - analytic_total
-    delta_pct = (delta_m3 / analytic_total * 100.0) if analytic_total > 0 else 0.0
+    delta_m3 = terrain_total - reference_total
+    delta_pct = (delta_m3 / reference_total * 100.0) if reference_total > 0 else 0.0
 
     per_feature = []
+    resolution_flagged = []
     for name, analytic_m3 in analytic_by_name.items():
         min_dim = min_dims.get(name)
         routing_only = min_dim is not None and cell_size > 0 and min_dim < cell_size
+        b = breakdowns.get(name) or {}
+        reference = _reference(name, analytic_m3)
+
         if routing_only:
             terrain_m3 = None
             feat_delta_pct = None
         else:
             terrain_m3 = float(terrain_by_name.get(name, 0.0))
             feat_delta_pct = (
-                (terrain_m3 - analytic_m3) / analytic_m3 * 100.0 if analytic_m3 > 0 else None
+                (terrain_m3 - reference) / reference * 100.0 if reference > 0 else None
             )
+
+        geometric = float(b.get("geometric", analytic_m3))
+        penalty = float(b.get("resolution_penalty_m3", 0.0))
+        if geometric > 0 and abs(penalty) / geometric > _RESOLUTION_CAVEAT_THRESHOLD:
+            resolution_flagged.append((name, penalty / geometric * 100.0))
+
         per_feature.append({
             "name": name,
-            "analytic_m3": float(analytic_m3),
-            "terrain_m3": terrain_m3,
-            "delta_pct": feat_delta_pct,
+            "analytic_m3": float(analytic_m3),          # design (with freeboard)
+            "geometric_m3": geometric,                   # the drawn shape
+            "rasterisable_m3": reference,                # what this grid can hold
+            "terrain_m3": terrain_m3,                    # what the burn produced
+            "delta_pct": feat_delta_pct,                 # terrain vs rasterisable
+            "freeboard_m3": float(b.get("freeboard_m3", 0.0)),
+            "resolution_penalty_m3": penalty,
             "routing_only": routing_only,
+            # A dam impounds against the terrain rather than a drawn section, so its
+            # three "design" columns are one number and only Measured is independent.
+            "barrier_impounded": bool(b.get("barrier_impounded", False)),
         })
 
     caveats = [
+        "Δ compares measured terrain storage against what a "
+        f"{cell_size:.2f} m grid can represent — so a non-zero Δ is a burn issue, not "
+        "a resolution or freeboard effect.",
         "Terrain volume is attributed by connected depression ∩ footprint — the site "
         "total is robust; per-feature figures are indicative for adjacent features.",
         "Terrain total includes barrier-impounded storage (e.g. dams) that has no "
@@ -309,6 +365,11 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         "Sub-cell features (narrower than one DEM cell) are validated for placement and "
         "routing only, not independent storage volume.",
     ]
+    for name, pct in resolution_flagged[:3]:
+        caveats.append(
+            f"{name}: the grid represents it {pct:+.0f}% differently from the drawn "
+            f"shape — its cross-section is too fine for a {cell_size:.2f} m cell."
+        )
 
     return VerificationResult(
         analytic_total_m3=analytic_total,

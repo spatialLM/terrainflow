@@ -34,6 +34,7 @@ class FlowAnalysis:
     def __init__(self):
         self.grid = None
         self.dem = None
+        self.conditioned = None
         self.fdir = None
         self.acc = None
         self.crs = None
@@ -81,6 +82,10 @@ class FlowAnalysis:
             breached = self.grid.fill_depressions(pit_filled)
 
         inflated = self.grid.resolve_flats(breached)
+        # Keep the conditioned surface: it is what flow_graph derives its D8 pointers
+        # from. Steepest descent on this array is provably acyclic (pits filled,
+        # depressions breached, flats resolved), unlike rounding the D-infinity angles.
+        self.conditioned = inflated
 
         try:
             self.fdir = self.grid.flowdir(inflated, routing=routing)
@@ -96,6 +101,7 @@ class FlowAnalysis:
         result = {
             "flow_direction": self.fdir,
             "flow_accumulation": self.acc,
+            "conditioned_dem": inflated,
         }
 
         if runoff_weights is not None:
@@ -144,31 +150,46 @@ class FlowAnalysis:
         runoff_m = runoff_mm / 1000.0
         return np.array(self.acc, dtype="float32") * runoff_m * cell_area_m2
 
-    def get_boundary_exit_points(self, boundary_path, accumulation_threshold,
-                                 runoff_mm, duration_hours):
+    def get_boundary_exit_points(self, boundary_path, min_flow_ls,
+                                 runoff_mm, duration_hours, volume_raster=None):
         """
-        Find significant flow exit points on the site boundary.
+        Find flow exit points where the drainage network crosses the site boundary.
 
-        Each exit point dict contains:
-          x, y, accumulation, volume_m3, flow_ls, label
+        An exit is a boundary crossing carrying at least *min_flow_ls* litres per
+        second (event-average). A **physical L/s criterion** is used instead of a
+        raw upstream-cell count so the threshold is scale-appropriate: a small
+        permaculture plot and a large catchment use the same meaningful number.
 
-        ``volume_m3`` is the total runoff volume that passed through the exit
-        over the analysis period (acc_cells × cell_area × runoff_m).
+        Robust to D-infinity flow splitting: the per-cell flow raster is 3×3
+        max-pooled before sampling the boundary, so a channel whose accumulation is
+        spread across adjacent near-boundary cells still registers its true peak
+        flow at the crossing (otherwise each split cell can fall under the threshold
+        and the crossing disappears).
+
+        Each exit point dict contains: x, y, flow_ls, volume_m3, label.
 
         Parameters
         ----------
         boundary_path : str
-        accumulation_threshold : int
+        min_flow_ls : float — minimum event-average flow (L/s) for an exit to show
         runoff_mm : float
         duration_hours : float
+        volume_raster : ndarray or None — per-cell runoff volume (m³) over the
+            event; when None it is derived as acc × cell_area × runoff_m (exact for
+            a spatially-uniform storm).
 
-        Returns list of dicts.
+        Returns list of dicts sorted by flow_ls descending.
         """
         import geopandas as gpd
         from rasterio.features import rasterize
+        from scipy.ndimage import maximum_filter
 
         if self.acc is None:
             raise RuntimeError("Run flow analysis first.")
+
+        duration_s = duration_hours * 3600.0
+        if duration_s <= 0:
+            return []
 
         gdf = gpd.read_file(boundary_path)
         gdf = gdf.to_crs(self.crs.to_wkt())
@@ -184,55 +205,72 @@ class FlowAnalysis:
             [(line, 1) for line in boundary_lines],
             out_shape=self.grid.shape,
             transform=self.transform,
-            fill=0, dtype="uint8",
+            fill=0, all_touched=True, dtype="uint8",
         ).astype(bool)
 
-        acc_array = np.array(self.acc)
-        exit_mask = boundary_mask & (acc_array > accumulation_threshold)
+        cell_w = abs(self.transform.a)
+        cell_h = abs(self.transform.e)
+        cell_area_m2 = cell_w * cell_h
+        runoff_m = runoff_mm / 1000.0
+
+        # Per-cell runoff volume passing each cell over the event (m³), → L/s.
+        if volume_raster is not None:
+            vol = np.array(volume_raster, dtype="float64")
+        else:
+            vol = np.array(self.acc, dtype="float64") * cell_area_m2 * runoff_m
+        flow_ls = vol * 1000.0 / duration_s
+        # Recover D-infinity-split channels: peak flow in each cell's 3×3 window.
+        flow_ls_pooled = maximum_filter(flow_ls, size=3)
+
+        exit_mask = boundary_mask & (flow_ls_pooled >= min_flow_ls)
         rows, cols = np.where(exit_mask)
         if len(rows) == 0:
             return []
 
-        cell_w = abs(self.transform.a)
-        cell_h = abs(self.transform.e)
-        xs = self.transform.c + cols * self.transform.a + cell_w / 2
-        ys = self.transform.f + rows * self.transform.e + cell_h / 2
-        accs = acc_array[rows, cols]
+        # Cell-centre coordinates ((row/col + 0.5) handles the negative y pixel size).
+        xs = self.transform.c + (cols + 0.5) * self.transform.a
+        ys = self.transform.f + (rows + 0.5) * self.transform.e
+        flows = flow_ls_pooled[rows, cols]
 
-        # Cluster — keep highest-acc cell per 20-cell radius
+        # Group qualifying boundary cells into crossings: seed at the highest-flow
+        # cell, absorb every not-yet-used cell within ~20 cells, and place the exit
+        # at the crossing's FLOW-WEIGHTED centroid so the marker sits on the channel
+        # thread — not at a corner of the max-pooled plateau (which a spatial
+        # tie-break would pick).
         min_dist = cell_w * 20
-        candidates = sorted(zip(accs, xs, ys), reverse=True)
-        kept = []
-        for acc, x, y in candidates:
-            too_close = any(
-                ((x - kx) ** 2 + (y - ky) ** 2) < min_dist ** 2
-                for _, kx, ky in kept
-            )
-            if not too_close:
-                kept.append((acc, x, y))
-
-        cell_area_m2 = cell_w * cell_h
-        runoff_m = runoff_mm / 1000.0
-        duration_s = duration_hours * 3600.0
+        order = list(np.argsort(flows)[::-1])
+        used = np.zeros(len(flows), dtype=bool)
 
         results = []
-        for i, (acc, x, y) in enumerate(kept):
-            volume_m3 = acc * cell_area_m2 * runoff_m
-            flow_ls = (volume_m3 * 1000.0 / duration_s) if duration_s > 0 else 0
+        for i in order:
+            if used[i]:
+                continue
+            dx = xs - xs[i]
+            dy = ys - ys[i]
+            near = (~used) & (dx * dx + dy * dy < min_dist ** 2)
+            used[near] = True
+            w = flows[near]
+            if w.sum() > 0:
+                cx = float(np.average(xs[near], weights=w))
+                cy = float(np.average(ys[near], weights=w))
+            else:
+                cx = float(xs[near].mean())
+                cy = float(ys[near].mean())
+            peak = float(w.max())
+            volume_m3 = peak * duration_s / 1000.0
             results.append({
-                "x": float(x),
-                "y": float(y),
-                "accumulation": int(acc),
+                "x": cx,
+                "y": cy,
+                "flow_ls": round(peak, 2),
                 "volume_m3": round(volume_m3, 1),
-                "flow_ls": round(flow_ls, 1),
-                "label": f"Exit {i + 1}",
+                "label": "",
             })
 
-        results.sort(key=lambda r: r["volume_m3"], reverse=True)
+        results.sort(key=lambda r: r["flow_ls"], reverse=True)
         for i, r in enumerate(results):
             r["label"] = (
-                f"Exit {i + 1}: {r['volume_m3']:,.0f} m³ over event "
-                f"| avg {r['flow_ls']:,.1f} L/s"
+                f"Exit {i + 1}: {r['flow_ls']:,.1f} L/s "
+                f"({r['volume_m3']:,.0f} m³ over event)"
             )
 
         return results

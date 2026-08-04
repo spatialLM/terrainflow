@@ -12,6 +12,13 @@ shapely==2.1.2
 pysheds==0.5
 scipy>=1.7,<2
 geopandas>=0.14           # used by several tests for vector fixtures/assertions
+# Production dependency, not just a test one: contour_analysis imports it unguarded for
+# marching squares, and keypoint_analysis for ridge skeletonisation. It was undeclared
+# here, so a clean install passed and then failed the contour tests. No upper bound —
+# find_contours and skeletonize are long-stable, and pinning risks fighting whatever the
+# QGIS image already ships. 0.18 is the floor: from there find_contours excludes NaN
+# natively, which is what stops fabricated contours along a clip boundary.
+scikit-image>=0.18
 
 # Linting / formatting
 ruff>=0.4.0

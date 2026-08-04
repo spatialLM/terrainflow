@@ -317,7 +317,7 @@ class TestBoundaryExitPoints:
         fa.run()
         pts = fa.get_boundary_exit_points(boundary_gpkg, 5, 10.0, 1.0)
         for p in pts:
-            for key in ("x", "y", "accumulation", "volume_m3", "flow_ls", "label"):
+            for key in ("x", "y", "flow_ls", "volume_m3", "label"):
                 assert key in p
 
     def test_empty_when_threshold_too_high(self, sloped_dem, boundary_gpkg):
@@ -347,14 +347,44 @@ class TestBoundaryExitPoints:
         pts = fa.get_boundary_exit_points(line_path, 5, 10.0, 1.0)
         assert pts == []
 
-    def test_zero_duration_gives_zero_flow_ls(self, sloped_dem, boundary_gpkg):
+    def test_zero_duration_returns_empty(self, sloped_dem, boundary_gpkg):
         from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
         fa = FlowAnalysis()
         fa.load_dem(sloped_dem)
         fa.run()
-        pts = fa.get_boundary_exit_points(boundary_gpkg, 5, 10.0, 0.0)
+        # Zero duration → flow rate undefined → no exits.
+        assert fa.get_boundary_exit_points(boundary_gpkg, 5, 10.0, 0.0) == []
+
+    def test_lower_threshold_reveals_at_least_as_many(self, sloped_dem, boundary_gpkg):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        low = fa.get_boundary_exit_points(boundary_gpkg, 0.0, 10.0, 1.0)
+        high = fa.get_boundary_exit_points(boundary_gpkg, 10**9, 10.0, 1.0)
+        assert len(low) >= len(high)
+        assert high == []
+
+    def test_all_exits_meet_flow_threshold(self, sloped_dem, boundary_gpkg):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        pts = fa.get_boundary_exit_points(boundary_gpkg, 0.1, 10.0, 1.0)
         for p in pts:
-            assert p["flow_ls"] == 0
+            assert p["flow_ls"] >= 0.1
+
+    def test_volume_raster_override(self, sloped_dem, boundary_gpkg):
+        import numpy as np
+
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        vol = np.array(fa.acc, dtype="float64") * 0.5  # arbitrary per-cell volume (m³)
+        pts = fa.get_boundary_exit_points(
+            boundary_gpkg, 0.0, 10.0, 1.0, volume_raster=vol)
+        assert isinstance(pts, list)
 
 
 # ---------------------------------------------------------------------------

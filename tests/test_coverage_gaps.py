@@ -149,13 +149,15 @@ class TestBuildStoresFromEarthworks:
         stores = build_stores_from_earthworks([ew], soil_name="Loam")
         assert len(stores) == 0
 
-    def test_zero_capacity_excluded(self):
+    def test_zero_capacity_kept_as_a_routing_node(self):
+        """A storage-less feature still intercepts and redirects water."""
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
 
         ew = self._ew("S1")
         ew.capacity_m3 = 0.0
         stores = build_stores_from_earthworks([ew], soil_name="Loam")
-        assert len(stores) == 0
+        assert len(stores) == 1
+        assert stores[0].capacity_m3 == 0.0
 
     def test_store_names_match_earthworks(self):
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks

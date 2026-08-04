@@ -1,13 +1,15 @@
 """
 tool_menu.py — Felt-style earthwork tool menu.
 
-Registry-driven rows (icon · name · shortcut), grouped Storage / Flow control,
+Registry-driven rows (icon · name), grouped Storage / Flow control,
 with the swale's three draw modes as an inline segmented control. Replaces the
 grid of coloured buttons in the Earthwork Design stage.
 
 Emits:
   draw_swale_requested(mode)      — 'contour' | 'full_contour' | 'freehand'
   draw_earthwork_requested(key)   — any non-swale registry key
+  place_spillway_requested(kind)  — 'outflow' | 'inflow' spillway placement
+  connect_earthworks_requested()  — route one feature's overflow into another
 """
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -27,13 +29,36 @@ from terrainflow_assessment.core.registry.earthwork_types import all_types
 _GLYPH = {
     "swale": "∿", "basin": "▢", "dam": "▮", "berm": "⌒", "diversion": "↘",
 }
-_SHORTCUT = {"swale": "S", "basin": "B", "dam": "D", "berm": "M", "diversion": "V"}
 _SWALE_MODES = (("contour", "Segment"), ("full_contour", "Contour"), ("freehand", "Free"))
+
+# Overflow routing rows. Deliberately NOT registry types: `_ensure_ew_layers`
+# iterates all_types(), so a registry entry here would conjure a map layer, a burn
+# method and a capacity path for something that is not an earthwork at all.
+_CONNECTION_ROWS = (
+    ("outflow", "▽", "#1273b5", "Outflow Spillway",
+     "Click the map to site where the selected feature OVERFLOWS.\n"
+     "Its crest is then read from the ground there rather than typed.\n"
+     "This is the weir sized to pass the peak flow."),
+    ("inflow", "▲", "#2e7d55", "Inflow Spillway",
+     "Click the map to site where water ENTERS the selected feature\n"
+     "from upslope. A separate structure with a separate job: an inlet is\n"
+     "protected against the incoming jet cutting the bank, rather than\n"
+     "sized to pass a peak.\n\n"
+     "Routed overflow is drawn to this point, so placing it makes the\n"
+     "connection follow the ground rather than run centroid to centroid."),
+    ("connect", "⇢", "#5f7176", "Route Overflow",
+     "Click the feature that overflows, then the one it flows into.\n"
+     "The link is drawn from the source's outflow spillway to the target's\n"
+     "inflow spillway where both are placed.\n"
+     "A link that would close a loop is refused."),
+)
 
 
 class EarthworkToolMenu(QWidget):
     draw_swale_requested = pyqtSignal(str)
     draw_earthwork_requested = pyqtSignal(str)
+    place_spillway_requested = pyqtSignal(str)   # 'outflow' | 'inflow'
+    connect_earthworks_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +78,9 @@ class EarthworkToolMenu(QWidget):
             lay.addWidget(self._tool_group(control, types))
         if other:
             lay.addWidget(self._tool_group(other, types))
+
+        lay.addWidget(self._group_label("CONNECTIONS — ROUTE OVERFLOW"))
+        lay.addWidget(self._connection_group())
 
     # ------------------------------------------------------------------ build
 
@@ -104,11 +132,61 @@ class EarthworkToolMenu(QWidget):
         if key == "swale":
             h.addWidget(self._swale_modes())
         else:
-            h.addWidget(self._shortcut_badge(_SHORTCUT.get(key, "")))
             # Whole row is the click target for single-tool types.
             row.mousePressEvent = lambda _e, k=key: self.draw_earthwork_requested.emit(k)
             row.setCursor(Qt.CursorShape.PointingHandCursor)
         return row
+
+    def _connection_group(self):
+        """Hand-built rows for the two overflow-routing tools.
+
+        Same row anatomy as the registry-driven groups so the menu reads as one
+        list, but built by hand because these emit parameterless signals rather
+        than a type key.
+        """
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { border: 1px solid #dde4e5; border-radius: 7px; background: #ffffff; }"
+        )
+        col = QVBoxLayout(frame)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        emitters = {
+            "outflow": lambda: self.place_spillway_requested.emit("outflow"),
+            "inflow": lambda: self.place_spillway_requested.emit("inflow"),
+            "connect": self.connect_earthworks_requested.emit,
+        }
+        for i, (key, glyph, colour, label, tip) in enumerate(_CONNECTION_ROWS):
+            row = QFrame()
+            border = "" if i == len(_CONNECTION_ROWS) - 1 else "border-bottom: 1px solid #eef1f0;"
+            row.setStyleSheet(
+                f"QFrame {{ {border} background: transparent; }} "
+                "QFrame:hover { background: #f6f8f8; }"
+            )
+            h = QHBoxLayout(row)
+            h.setContentsMargins(9, 5, 9, 5)
+            h.setSpacing(9)
+
+            chip = QLabel(glyph)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setFixedSize(22, 22)
+            chip.setStyleSheet(
+                f"background: {colour}; color: white; border-radius: 5px;"
+                " font-size: 12px; font-weight: bold;"
+            )
+            h.addWidget(chip)
+
+            name = QLabel(label)
+            name.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #22302e;")
+            name.setToolTip(tip)
+            h.addWidget(name)
+            h.addStretch(1)
+
+            row.setToolTip(tip)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.mousePressEvent = lambda _e, fn=emitters[key]: fn()
+            col.addWidget(row)
+        return frame
 
     def _swale_modes(self):
         seg = QFrame()
@@ -130,11 +208,3 @@ class EarthworkToolMenu(QWidget):
             b.clicked.connect(lambda _=False, m=mode: self.draw_swale_requested.emit(m))
             hb.addWidget(b)
         return seg
-
-    def _shortcut_badge(self, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "font-size: 10px; color: #8fa0a4; border: 1px solid #dde4e5;"
-            " border-radius: 3px; padding: 0 5px;"
-        )
-        return lbl

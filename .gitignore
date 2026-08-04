@@ -30,3 +30,7 @@ plugin/plugin/
 /*.qpj
 /*.sbn
 /*.sbx
+
+# Test-harness screenshots (tests_qgis/ Tier 2) - regenerated every run
+tests_qgis/_shots/
+tests_qgis/_shots_baseline/
