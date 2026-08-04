@@ -523,3 +523,4 @@ class PluginHarness:
         from qgis.core import QgsProject
 
         return sorted(lyr.name() for lyr in QgsProject.instance().mapLayers().values())
+

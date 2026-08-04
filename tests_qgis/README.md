@@ -126,10 +126,21 @@ byte-identical images — so a pixel diff carries no antialiasing noise and can 
 trusted.
 
 ```powershell
-.\run_qgis_tests.ps1 -Snapshot     # 1. capture "before" into _shots_baseline/
-#                                    2. make your change
-.\run_qgis_tests.ps1               # 3. the summary lists what moved
+.\run_qgis_tests.ps1               # 1. what moved since the last accepted baseline?
+#                                    2. open the changed PNGs; is that what you meant?
+.\run_qgis_tests.ps1 -Accept       # 3. yes -> make them the new reference (instant)
 ```
+
+Or let it ask: `-Prompt` runs, lists any changed images and asks whether to accept them.
+`-Snapshot` is the same acceptance but bundled into a run. `-Accept` re-uses the
+screenshots already on disk, so it takes no time at all.
+
+**Unaccepted changes escalate.** `_shots_baseline/diff_state.json` records which images
+differ and for how many consecutive runs; from the second run on, the summary nags with
+the streak count. This exists because the real failure mode is not a wrong baseline, it
+is an *ignored* one — the same names scroll past every run, you learn to skip them, and
+the next genuine regression hides in the list. Reverting the change clears the state on
+its own; nothing to tidy up.
 
 Output looks like:
 

@@ -900,14 +900,26 @@ class EarthworksController:
             if not n:
                 return 0
 
-            self._panel.refresh_earthwork_list(manager.get_all())
-            self._refresh_ew_layer()
-            self._refresh_spillway_layer()
-            # Both are safe before a baseline exists: catchment labelling needs the flow
-            # graph and quietly does nothing without it, and the live assessment already
-            # has a no-flow branch that reports geometry only.
-            self.recompute_catchments()
-            self._recompute_live_assessment()
+            # Each refresh stands alone. Run as one block, a failure in the table refresh
+            # skipped the map layers entirely — the design came back listed and scored but
+            # invisible on the canvas, which reads as "the earthworks did not load" even
+            # though they had. Partial UI beats a design that is present but undrawable.
+            #
+            # recompute_catchments and the live assessment are both safe before a baseline
+            # exists: labelling needs the flow graph and quietly does nothing without it,
+            # and the assessment has a no-flow branch that reports geometry only.
+            for step in (
+                lambda: self._panel.refresh_earthwork_list(manager.get_all()),
+                self._refresh_ew_layer,
+                self._refresh_spillway_layer,
+                self.recompute_catchments,
+                self._recompute_live_assessment,
+            ):
+                try:
+                    step()
+                except Exception as exc:
+                    print(f"TerrainFlow Assessment — restore step failed: {exc}")
+
             if source:
                 self._iface.messageBar().pushInfo(
                     "TerrainFlow Assessment",
@@ -2446,18 +2458,20 @@ class EarthworksController:
         the layer being rebuilt on every edit, and does not disturb whatever the user
         has selected for their own purposes.
         """
+        from qgis.core import QgsWkbTypes
         from qgis.gui import QgsRubberBand
 
         band = getattr(self, "_selection_band", None)
         if band is None:
-            from qgis.core import QgsWkbTypes
-            geom_type = QgsWkbTypes.LineGeometry
-            band = QgsRubberBand(self._canvas, geom_type)
+            band = QgsRubberBand(self._canvas, QgsWkbTypes.LineGeometry)
             band.setColor(QColor(46, 125, 85, 220))
             band.setWidth(4)
             self._selection_band = band
 
-        band.reset(band.geometryType())
+        # Reset to the type the band was built with. `band.geometryType()` does not exist
+        # on QgsRubberBand and raised AttributeError on every selection change — polygon
+        # footprints are highlighted via their boundary, so this is a line band throughout.
+        band.reset(QgsWkbTypes.LineGeometry)
         if index is None:
             self._canvas.refresh()
             return

@@ -377,7 +377,35 @@ class DesignFileController(QObject):
         except Exception as exc:
             raise DesignFileError(f"The DEM could not be loaded: {exc}") from exc
         self._state.invalidate_flow_cache()
-        self._state.baseline_result = None
+        self._clear_derived_results()
+
+    def _clear_derived_results(self):
+        """Drop every result carried over from whatever was open before.
+
+        A design file stores inputs only, so nothing derived in this session describes the
+        design being opened. Left in place, the previous run's verification delta and
+        reports stay on screen — the scorecard shows a green "Verified" chip and the Verify
+        stage a tick, for a design that has not been analysed once. That is precisely the
+        stale-state-looking-authoritative failure this format exists to avoid, so the
+        restore clears it and lets the stages re-earn their ticks.
+        """
+        state = self._state
+        state.baseline_result = None
+        state.earthworks_result = None
+        state.sim_result = None
+        state.baseline_report = None
+        state.post_report = None
+        state.comparison = None
+        state.verification = None
+        state.verified_delta_pct = None
+        state.edits_since_verify = None
+
+        # The stepper ticks are the visible half of the same claim.
+        for stage in ("baseline", "analysis", "design", "verify", "report"):
+            try:
+                self._panel.mark_stage(stage, "todo")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ Site areas
 
@@ -464,8 +492,16 @@ class DesignFileController(QObject):
         if code != QgsVectorFileWriter.NoError:
             raise DesignFileError(f"Could not write the {kind} area: {result}")
 
-        written = QgsVectorLayer(f"{target}|layername={kind}", f"{kind.title()} (design)",
-                                 "ogr")
+        # Named for what they are — site *areas*. Calling the earthworks-area polygon
+        # "Earthworks (design)" put it next to the real earthworks group in the layer
+        # tree, where it read as the restored earthworks themselves.
+        label = {
+            "boundary": "Site boundary (from design)",
+            "analysis": "Analysis area (from design)",
+            "earthworks": "Earthworks area (from design)",
+        }.get(kind, f"{kind.title()} area (from design)")
+
+        written = QgsVectorLayer(f"{target}|layername={kind}", label, "ogr")
         return written if written.isValid() else None
 
     def _dem_crs(self):

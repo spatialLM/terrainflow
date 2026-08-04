@@ -20,6 +20,12 @@ HERE = Path(__file__).resolve().parent
 SHOTS_DIR = HERE / "_shots"
 BASELINE_DIR = HERE / "_shots_baseline"
 
+# Records which images last differed and for how many consecutive runs, so the
+# reminder can escalate. A baseline that stays stale is worse than no baseline:
+# the same names scroll past every run, get tuned out, and a real regression
+# hides among them.
+DIFF_STATE = BASELINE_DIR / "diff_state.json"
+
 
 def shots_dir():
     SHOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -144,6 +150,41 @@ def describe(path):
     }
 
 
+def _read_diff_state():
+    import json
+
+    try:
+        return json.loads(DIFF_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"names": [], "runs": 0}
+
+
+def _write_diff_state(names):
+    """Record the outstanding difference, incrementing the streak if unchanged."""
+    import json
+
+    previous = _read_diff_state()
+    if not names:
+        clear_diff_state()
+        return 0
+
+    runs = previous.get("runs", 0) + 1 if previous.get("names") == names else 1
+    baseline_dir().mkdir(parents=True, exist_ok=True)
+    DIFF_STATE.write_text(
+        json.dumps({"names": names, "runs": runs}, indent=2), encoding="utf-8"
+    )
+    return runs
+
+
+def clear_diff_state():
+    try:
+        DIFF_STATE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 def snapshot_baseline():
     """Copy the current shots to _shots_baseline/ as the comparison point.
 
@@ -160,6 +201,8 @@ def snapshot_baseline():
     for png in sorted(src.glob("*.png")):
         shutil.copy2(png, dst / png.name)
         names.append(png.name)
+
+    clear_diff_state()      # accepted: the streak starts over
     return names
 
 
@@ -236,11 +279,27 @@ def print_comparison(rows):
     for row in new:
         print(f"  NEW       {row['name']}  (no baseline to compare)")
 
-    if not changed and not new:
+    outstanding = sorted(r["name"] for r in changed + new)
+    runs = _write_diff_state(outstanding)
+
+    if not outstanding:
         print("  every image is pixel-identical to the baseline")
-    if changed or new:
-        print(f"\n  baseline: {BASELINE_DIR}")
-        print(f"  current:  {SHOTS_DIR}")
+        return
+
+    print(f"\n  baseline: {BASELINE_DIR}")
+    print(f"  current:  {SHOTS_DIR}")
+    print("\n  Look at the changed image(s). If that is the change you intended,")
+    print("  accept them as the new reference:")
+    print("\n      .\\run_qgis_tests.ps1 -Accept        (no re-run, just accept)")
+    print("      .\\run_qgis_tests.ps1 -Snapshot      (re-run, then accept)")
+
+    if runs >= 2:
+        print(
+            f"\n  ** REMINDER: the same {len(outstanding)} image(s) have differed from "
+            f"the baseline for {runs} runs in a row. **"
+        )
+        print("  Accept them or investigate — until then this section is noise, and a")
+        print("  genuine regression will hide among the names you have learned to skip.")
 
 
 def assert_rendered(path, context="", min_colours=8, max_dominant=0.995):

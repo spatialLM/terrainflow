@@ -4,14 +4,20 @@
 #
 #   .\run_qgis_tests.ps1              # everything
 #   .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
-#   .\run_qgis_tests.ps1 -Snapshot    # store this run's screenshots as the baseline
+#   .\run_qgis_tests.ps1 -Snapshot    # run, then store the screenshots as the baseline
+#   .\run_qgis_tests.ps1 -Accept      # accept the screenshots already on disk (no re-run)
+#   .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept any changes
 #
-# Visual-diff workflow: -Snapshot before a change, then run again after it, and the
-# summary lists exactly which screenshots moved. A changed image is reported, never
-# treated as a failure.
+# Visual-diff workflow: the summary lists exactly which screenshots moved. A changed
+# image is reported, never treated as a failure. Use -Prompt if you would otherwise
+# forget to accept them; the reminder escalates on its own after two stale runs.
 #
 # Override the interpreter with $env:TERRAINFLOW_QGIS_PYTHON if QGIS lives elsewhere.
-param([switch]$Snapshot)
+param(
+    [switch]$Snapshot,
+    [switch]$Accept,
+    [switch]$Prompt
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -45,5 +51,32 @@ $runnerArgs = @($args)
 if ($Snapshot) { $runnerArgs += '--snapshot' }
 
 Write-Host "QGIS Python: $QgisPython"
+
+if ($Accept) {
+    # Accept what is already on disk; nothing is re-run.
+    & $QgisPython $Runner '--accept'
+    exit $LASTEXITCODE
+}
+
 & $QgisPython $Runner @runnerArgs
-exit $LASTEXITCODE
+$exitCode = $LASTEXITCODE
+
+if ($Prompt -and -not $Snapshot) {
+    $stateFile = Join-Path $PSScriptRoot 'tests_qgis\_shots_baseline\diff_state.json'
+    if (Test-Path $stateFile) {
+        $state = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $names = @($state.names)
+        if ($names.Count -gt 0) {
+            Write-Host ""
+            foreach ($n in $names) { Write-Host "  changed: $n" }
+            $answer = Read-Host "Accept these $($names.Count) image(s) as the new baseline? [y/N]"
+            if ($answer -match '^\s*(y|yes)\s*$') {
+                & $QgisPython $Runner '--accept'
+            } else {
+                Write-Host "Left as-is. Accept later with: .\run_qgis_tests.ps1 -Accept"
+            }
+        }
+    }
+}
+
+exit $exitCode

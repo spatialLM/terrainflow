@@ -58,9 +58,10 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # 39 checks, headless, ~2-4 min. Exit code gates.
+.\run_qgis_tests.ps1              # 44 checks, headless, ~2-4 min. Exit code gates.
 .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
-.\run_qgis_tests.ps1 -Snapshot    # store current screenshots as the visual baseline
+.\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
+.\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
 .\run_qgis_gui_shot.ps1           # load in real QGIS, screenshot the window, quit
 ```
 
@@ -69,8 +70,11 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
 - `checks_slow.py` is quarantined (its `recommend_ponds` check does not terminate) and runs
   only when named: `.\run_qgis_tests.ps1 slow`.
 - Renders the real panel/dialogs/canvas to PNGs in `tests_qgis/_shots/` — **open them**;
-  that is how the UI gets verified. Rendering is deterministic, so `-Snapshot` before a
-  change makes the next run report exactly which images moved.
+  that is how the UI gets verified. Rendering is deterministic, so a plain run reports
+  exactly which images a change moved. A changed image is information, not a failure.
+- **Accept a deliberate UI change or the diff rots into noise.** Look at the image, then
+  `-Accept` it. Unaccepted differences nag with an escalating reminder that counts the
+  consecutive runs, because a stale baseline hides the next real regression.
 - `tests_qgis/README.md` explains the fixture, the visual-diff workflow, and several
   non-obvious traps (offscreen Qt loads no fonts; `QTest.mouseMove`/`mouseDClick` do not
   behave like real input; `saveAsImage` omits rubber bands). Read it before extending.

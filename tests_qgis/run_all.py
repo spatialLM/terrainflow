@@ -192,6 +192,13 @@ def main(argv):
             timeout_s = int(arg.split("=", 1)[1])
         elif arg == "--snapshot":
             snapshot = True
+        elif arg == "--accept":
+            # Accept the screenshots already on disk, without re-running anything.
+            from _shots import BASELINE_DIR, snapshot_baseline
+
+            names = snapshot_baseline()
+            print(f"Baseline updated: {len(names)} image(s) -> {BASELINE_DIR}")
+            return 0
         elif not arg.startswith("-"):
             patterns.append(arg)
 
