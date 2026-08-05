@@ -65,6 +65,9 @@ class VerificationResult:
     unattributed_m3: float = 0.0         # terrain ponding not tied to any feature footprint
     per_feature: list[dict] = field(default_factory=list)  # {name, analytic_m3, terrain_m3|None, delta_pct|None, routing_only}
     caveats: list[str] = field(default_factory=list)
+    # None when baseline ponding was subtracted; otherwise why it could not be, in
+    # which case every terrain figure still carries the water that ponded naturally.
+    baseline_uncorrected: Optional[str] = None
 
 
 @dataclass

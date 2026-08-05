@@ -208,6 +208,18 @@ class VerificationTable(QWidget):
         sub_cell = len(rows) - len([r for r in rows if not r.get("routing_only")])
 
         bits = []
+
+        # Leads, because it invalidates every other sentence below it: without the
+        # baseline subtraction each measured figure includes water that ponded there
+        # naturally, so a feature in a hollow reads high and the delta is not a burn
+        # error at all.
+        uncorrected = getattr(result, "baseline_uncorrected", None)
+        if uncorrected:
+            bits.append(
+                f"Measured storage still includes natural ponding: {uncorrected}. "
+                f"Deltas below overstate storage for any feature sitting in ground "
+                f"that already ponds."
+            )
         if real:
             worst = max(real, key=lambda r: abs(r["delta_pct"]))
             worst_pct = worst["delta_pct"]

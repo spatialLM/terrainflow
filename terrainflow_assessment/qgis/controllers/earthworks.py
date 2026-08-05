@@ -2837,6 +2837,15 @@ class EarthworksController:
             msg += "\n" + self.verification_sentence(v)
         self._panel.set_earthworks_complete(msg)
 
+        # A skipped baseline subtraction inflates every measured figure by whatever
+        # ponded there naturally, so it cannot be left to the table alone.
+        if v is not None and getattr(v, "baseline_uncorrected", None):
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"Measured storage is not corrected for natural ponding: "
+                f"{v.baseline_uncorrected}."
+            )
+
         # Per-feature breakdown in the Verify stage. The chip carries one site-wide
         # delta, which cannot distinguish a burn error from the freeboard allowance.
         cell = self._state.dem_info.cell_size_m if self._state.dem_info else 1.0
@@ -2917,19 +2926,38 @@ class EarthworksController:
             return None
 
         # Baseline ponding (absent → zeros; only used if it aligns to the same grid).
+        #
+        # This fallback used to be silent on all three of its paths, and the cost was
+        # a wrong number presented as a verified one: without the subtraction, water
+        # that ponded naturally is counted as earthwork storage. A dam sitting in a
+        # hollow that already held ~555 m³ reported +77% against its design, with
+        # nothing on screen to say the correction had been skipped — and the swales,
+        # cut into slopes that pond nothing, all verified clean and made it look like
+        # a dam-specific fault. Name the reason and let the caller surface it.
         bl_pond = np.zeros(shape, dtype="float64")
+        bl_uncorrected = None
         bl_pond_path = (self._state.baseline_result or {}).get("ponding")
-        if bl_pond_path and os.path.exists(bl_pond_path):
+        if not bl_pond_path or not os.path.exists(bl_pond_path):
+            bl_uncorrected = ("no baseline ponding raster is available. Run the "
+                              "Baseline stage first")
+        else:
             try:
                 with rasterio.open(bl_pond_path) as src:
                     arr = src.read(1).astype("float64")
                     bnd = src.nodata
-                if arr.shape == shape:
+                if arr.shape != shape:
+                    bl_uncorrected = (
+                        f"the baseline ponding raster is {arr.shape[1]}×{arr.shape[0]} "
+                        f"but the earthworks raster is {shape[1]}×{shape[0]}. Re-run "
+                        f"the Baseline stage at the current extent"
+                    )
+                else:
                     if bnd is not None:
                         arr[arr == bnd] = 0.0
                     bl_pond = np.clip(arr, 0.0, None)
-            except Exception:
-                pass
+            except Exception as exc:
+                bl_uncorrected = (f"the baseline ponding raster could not be read "
+                                  f"({exc})")
 
         diff = np.clip(ew_pond - bl_pond, 0.0, None)
 
@@ -2986,6 +3014,9 @@ class EarthworksController:
             min_dims, cell_size, breakdowns=breakdowns,
         )
         result.unattributed_m3 = unattributed
+        # None when the subtraction was applied; a reason string when every measured
+        # figure still carries whatever ponded there naturally.
+        result.baseline_uncorrected = bl_uncorrected
         return result
 
     def _load_burned_dem_layer(self):
