@@ -13,6 +13,10 @@ from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 _WATER = "#1273b5"
 _SOAKED = "#79b8dd"
+
+# Under this, natural ponding is a handful of grid-noise cells and the line would be
+# clutter rather than context.
+_NATURAL_PONDING_FLOOR = 10.0
 _LEAVES = "#c6d1d3"
 
 
@@ -88,6 +92,16 @@ class Scorecard(QWidget):
         self._legend_lbl.setStyleSheet("font-size: 10px; color: #5f7176;")
         lay.addWidget(self._legend_lbl)
 
+        # Natural ponding sits below the band rather than inside it: the band is an
+        # event-routing result (water routed into earthworks) and this is a static
+        # depression-fill of the bare terrain. Two different models — showing them as
+        # adjacent segments would imply an arithmetic that does not hold.
+        self._natural_lbl = QLabel("")
+        self._natural_lbl.setStyleSheet("font-size: 10px; color: #8fa0a4;")
+        self._natural_lbl.setWordWrap(True)
+        self._natural_lbl.setVisible(False)
+        lay.addWidget(self._natural_lbl)
+
         self.show_empty()
 
     # ------------------------------------------------------------------ API
@@ -128,6 +142,25 @@ class Scorecard(QWidget):
             f"&nbsp;&nbsp;<span style='color:{_LEAVES};'>{sw}</span> "
             f"{leaves_m3:,.0f} m³ leaves site"
         )
+
+    def set_natural_ponding(self, volume_m3):
+        """Water the bare land already holds, before any earthwork.
+
+        The headline credits only what the design captures — runoff that never reaches
+        an earthwork counts as leaving the site, whether or not it would settle in a
+        hollow first. That is the right default (it is the design being scored, not the
+        landscape), but it makes the score conservative in a way nothing on screen
+        admitted to. ``None`` or a negligible volume hides the line.
+        """
+        if not volume_m3 or volume_m3 < _NATURAL_PONDING_FLOOR:
+            self._natural_lbl.setVisible(False)
+            self._natural_lbl.setText("")
+            return
+        self._natural_lbl.setText(
+            f"A further {volume_m3:,.0f} m³ ponds naturally on this site before any "
+            f"earthwork. The score above counts only what your design captures."
+        )
+        self._natural_lbl.setVisible(True)
 
     def set_verified(self, text, fresh, tooltip=""):
         """The verified-vs-design chip.

@@ -280,7 +280,7 @@ _RESOLUTION_CAVEAT_THRESHOLD = 0.10
 
 def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
                        earthworks_total_m3, min_dims, cell_size,
-                       breakdowns=None):
+                       breakdowns=None, existing_by_name=None):
     """Assemble the terrain-vs-analytic verification (site headline + per-feature).
 
     Site terrain-derived storage = ``earthworks_total − baseline_total`` (floored ≥0) —
@@ -303,8 +303,19 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     ``design`` → ``geometric``     the freeboard allowance (a choice)
     ``geometric`` → ``rasterisable`` the resolution penalty (the cell size)
     ``rasterisable`` → ``terrain``   the burn (the only real error term)
+
+    ``existing_by_name`` is the *baseline* ponding attributed to the same footprints —
+    water already sitting there before any earthwork. Every other figure here is
+    marginal (what the design adds), which is the right default for a before/after
+    tool, but it leaves a fair question unanswered for a feature built in a hollow:
+    a dam reported at 726 m³ may sit in ground already holding 555 m³, so the pool
+    the owner actually sees is 1,281 m³. Carrying ``existing_m3`` and ``total_m3``
+    alongside lets the table say all three rather than make the reader choose which
+    one "storage" meant. ``total = existing + terrain`` by construction, so the three
+    can never disagree.
     """
     breakdowns = breakdowns or {}
+    existing_by_name = existing_by_name or {}
 
     def _reference(key, fallback):
         b = breakdowns.get(key)
@@ -327,6 +338,7 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         routing_only = min_dim is not None and cell_size > 0 and min_dim < cell_size
         b = breakdowns.get(name) or {}
         reference = _reference(name, analytic_m3)
+        existing = float(existing_by_name.get(name, 0.0))
 
         if routing_only:
             terrain_m3 = None
@@ -355,6 +367,11 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
             # A dam impounds against the terrain rather than a drawn section, so its
             # three "design" columns are one number and only Measured is independent.
             "barrier_impounded": bool(b.get("barrier_impounded", False)),
+            # Water already ponding here before any earthwork, and the pool actually
+            # standing on the ground afterwards. terrain_m3 remains the marginal figure
+            # every delta is measured against — these two only add context.
+            "existing_m3": existing,
+            "total_m3": None if terrain_m3 is None else terrain_m3 + existing,
         })
 
     caveats = [

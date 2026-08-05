@@ -41,10 +41,11 @@ from terrainflow_assessment.modules.earthwork_design import (
     calculate_capacity,
 )
 from terrainflow_assessment.modules.swale_design import contour_to_swale_geometry
+from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
-class EarthworksController:
+class EarthworksController(G.LayerTreeMixin):
     def __init__(self, state, panel, project, iface, canvas):
         self._state = state
         self._panel = panel
@@ -314,7 +315,7 @@ class EarthworksController:
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.DRAWN)
             self._state.spillway_layer_id = layer.id()
         except Exception as exc:
             print(f"TerrainFlow Assessment — spillway layer error: {exc}")
@@ -843,6 +844,32 @@ class EarthworksController:
             return np.clip(arr, 0.0, None)
         except Exception:
             return None
+
+    def _natural_ponding_m3(self):
+        """Water the bare terrain already holds, from the baseline ponding raster.
+
+        Context for the scorecard, not an input to it: the headline scores the design
+        only, so runoff that never reaches an earthwork is counted as leaving the site
+        whether or not it would settle in a hollow first. Returns 0.0 when there is no
+        baseline raster to read — the caller hides the line rather than guessing.
+        """
+        path = (self._state.baseline_result or {}).get("ponding")
+        if not path or not os.path.exists(path):
+            return 0.0
+        try:
+            import numpy as np
+            import rasterio
+
+            from terrainflow_assessment.modules.reporting import raster_ponding_volume
+            with rasterio.open(path) as src:
+                arr = src.read(1).astype("float64")
+                nodata = src.nodata
+                cell_area = abs(src.transform.a * src.transform.e)
+            if nodata is not None:
+                arr[arr == nodata] = 0.0
+            return float(raster_ponding_volume(np.clip(arr, 0.0, None), cell_area))
+        except Exception:
+            return 0.0
 
     # ---------------------------------------------------------------- Live analytical assessment
 
@@ -1832,7 +1859,7 @@ class EarthworksController:
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.DRAWN)
             self._state.stress_points_layer_id = layer.id()
         except Exception as exc:
             print(f"TerrainFlow Assessment — stress points layer error: {exc}")
@@ -2200,6 +2227,7 @@ class EarthworksController:
                 self._panel.update_scorecard(
                     result.capture_pct, stored,
                     result.total_infiltration_m3, result.site_exit_m3,
+                    natural_ponding_m3=self._natural_ponding_m3(),
                 )
             elif result is not None:
                 self._panel.scorecard_no_flow(result.total_capacity_m3)
@@ -2380,7 +2408,7 @@ class EarthworksController:
                 symbol.appendSymbolLayer(arrow)
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.DRAWN)
             self._state.connections_layer_id = layer.id()
         except Exception as exc:
             print(f"TerrainFlow Assessment — connections layer error: {exc}")
@@ -2440,7 +2468,7 @@ class EarthworksController:
                 return
             layer.setRenderer(
                 QgsPalettedRasterRenderer(layer.dataProvider(), 1, classes))
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.DESIGN)
             self._state.catchment_labels_layer_id = layer.id()
             self._canvas.refresh()
         except Exception as exc:
@@ -2536,10 +2564,7 @@ class EarthworksController:
         from qgis.PyQt.QtGui import QFont
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
-        root = self._project.instance().layerTreeRoot()
-        self._state.ew_group = (
-            root.findGroup("Earthworks") or root.insertGroup(0, "Earthworks")
-        )
+        self._state.ew_group = self.group_for(G.DRAWN)
 
         # Registry-driven: the type registry is the single source of layer styling
         # (matching the panel's draw-button colours); a future register_type() gets
@@ -2602,7 +2627,9 @@ class EarthworksController:
             layer.setLabelsEnabled(True)
 
             self._project.instance().addMapLayer(layer, False)
-            self._state.ew_group.addLayer(layer)
+            node = self._state.ew_group.addLayer(layer)
+            if node is not None:
+                node.setExpanded(False)
             self._state.ew_layers[ew_type] = layer
 
     # ---------------------------------------------------------------- Earthwork symbology
@@ -3006,12 +3033,18 @@ class EarthworksController:
             return None
 
         terrain_by_name, unattributed = attribute_ponding_volume(diff, cell_area, footprints)
+        # Water already standing here before any earthwork, over the same footprints —
+        # so a feature built in a hollow can report what it adds, what was already
+        # there, and the pool that ends up on the ground. One extra region-labelling
+        # pass; the flood it depends on has already run.
+        existing_by_name, _ = attribute_ponding_volume(bl_pond, cell_area, footprints)
         baseline_total = raster_ponding_volume(bl_pond, cell_area)
         earthworks_total = raster_ponding_volume(ew_pond, cell_area)
 
         result = build_verification(
             analytic_by_name, terrain_by_name, baseline_total, earthworks_total,
             min_dims, cell_size, breakdowns=breakdowns,
+            existing_by_name=existing_by_name,
         )
         result.unattributed_m3 = unattributed
         # None when the subtraction was applied; a reason string when every measured
@@ -3022,9 +3055,9 @@ class EarthworksController:
     def _load_burned_dem_layer(self):
         """Add the burned (Strategy-C) DEM to the layer panel so the carve/ridge is visible.
 
-        Placed at the bottom of the layer tree (it is a backdrop, not a result overlay)
-        and registered under the earthworks layer group so it shows/hides with the
-        'with earthworks' toggle. Silently skips if the burn produced no valid raster.
+        Placed at the bottom of the Design group (it is a backdrop, not a result
+        overlay) and registered under the earthworks layer ids so it shows/hides with
+        the 'with earthworks' toggle. Silently skips if the burn produced no valid raster.
         """
         path = self._state.modified_dem_path
         if not path or not os.path.exists(path):
@@ -3033,9 +3066,7 @@ class EarthworksController:
         layer = QgsRasterLayer(path, "Earthworks — Burned DEM")
         if not layer.isValid():
             return
-        project = self._project.instance()
-        project.addMapLayer(layer, False)          # don't auto-add to legend top
-        project.layerTreeRoot().addLayer(layer)     # append at the bottom instead
+        self.place(layer, G.DESIGN)
         ids = list(getattr(self._state, "earthworks_layer_ids", None) or [])
         ids.append(layer.id())
         self._state.earthworks_layer_ids = ids
@@ -3132,11 +3163,8 @@ class EarthworksController:
         if layer.isValid():
             self._apply_slope_class_ramp(layer)
             layer.setOpacity(0.6)
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.ANALYSIS, visible=checked)
             self._state.slope_class_layer_id = layer.id()
-            node = self._project.instance().layerTreeRoot().findLayer(layer)
-            if node:
-                node.setItemVisibilityChecked(checked)
             self._canvas.refresh()
 
     def _apply_slope_class_ramp(self, layer):
@@ -3215,7 +3243,7 @@ class EarthworksController:
             layer.updateExtents()
 
             layer.setRenderer(QgsSingleSymbolRenderer(self._flow_line_symbol()))
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.ANALYSIS)
             self._state.slope_arrows_layer_id = layer.id()
             self._canvas.refresh()
 
@@ -3314,7 +3342,7 @@ class EarthworksController:
                 QgsSymbolLayer.PropertySize,
                 QgsProperty.fromExpression('3 + min("slope_deg" / 5.0, 5)'))
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.ANALYSIS)
             self._state.slope_vectors_layer_id = layer.id()
             self._canvas.refresh()
 

@@ -47,6 +47,11 @@ _BAD = "#c0392b"
 _DELTA_GOOD = 5.0
 _DELTA_WARN = 15.0
 
+# Below this, pre-existing ponding is a stray cell or two of grid noise and saying
+# "1 m³ was already ponding there" would be more distracting than informative. A
+# feature genuinely built into a hollow clears it by orders of magnitude.
+_EXISTING_PONDING_FLOOR = 10.0
+
 _HEADERS = ("Feature", "Design", "Geometric", "At grid", "Measured", "Δ")
 
 _QSS = f"""
@@ -250,6 +255,20 @@ class VerificationTable(QWidget):
             bits.append(
                 f"Above that, {pct:+.0f}% on {name} is grid resolution, and the "
                 f"site-wide −20% between Design and Geometric is your freeboard.")
+
+        # Every figure in the table is marginal — what the design adds. For a feature
+        # built into ground that already ponds, that under-describes the pool someone
+        # standing there would see, so name all three: existing, added, total.
+        for r in rows:
+            existing = r.get("existing_m3") or 0.0
+            total = r.get("total_m3")
+            if existing < _EXISTING_PONDING_FLOOR or total is None:
+                continue
+            bits.append(
+                f"{r.get('name', 'This feature')} holds {total:,.0f} m³ in total — "
+                f"{existing:,.0f} m³ was already ponding there, and it adds "
+                f"{r.get('terrain_m3') or 0.0:,.0f} m³."
+            )
 
         if sub_cell:
             bits.append(

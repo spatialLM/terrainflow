@@ -501,6 +501,60 @@ class TestBuildVerification:
         assert by_name["S2"]["terrain_m3"] is None
         assert by_name["S2"]["delta_pct"] is None
 
+    def test_existing_ponding_is_carried_and_totals_add_up(self):
+        """Dam 5 from the field design: 555 m³ already there, 726 m³ added, 1,281 total.
+
+        Every other figure in the table is marginal, which under-describes the pool
+        someone standing at the dam would see. total = existing + terrain by
+        construction so the three numbers cannot drift apart.
+        """
+        v = build_verification(
+            analytic_by_name={"Dam 5": 726.0, "Swale 1": 261.0},
+            terrain_by_name={"Dam 5": 726.0, "Swale 1": 416.0},
+            baseline_total_m3=1212.0,
+            earthworks_total_m3=7233.0,
+            min_dims={"Dam 5": 2.0, "Swale 1": 1.0},
+            cell_size=1.0,
+            existing_by_name={"Dam 5": 555.0},
+        )
+        by_name = {f["name"]: f for f in v.per_feature}
+        assert by_name["Dam 5"]["existing_m3"] == pytest.approx(555.0)
+        assert by_name["Dam 5"]["total_m3"] == pytest.approx(1281.0)
+        assert by_name["Dam 5"]["terrain_m3"] == pytest.approx(726.0)   # still marginal
+
+        # A swale cut into a slope ponds nothing beforehand: total collapses onto added.
+        assert by_name["Swale 1"]["existing_m3"] == pytest.approx(0.0)
+        assert by_name["Swale 1"]["total_m3"] == pytest.approx(416.0)
+
+    def test_existing_ponding_defaults_to_zero_when_not_supplied(self):
+        v = build_verification(
+            analytic_by_name={"S1": 200.0},
+            terrain_by_name={"S1": 180.0},
+            baseline_total_m3=0.0,
+            earthworks_total_m3=180.0,
+            min_dims={"S1": 1.0},
+            cell_size=1.0,
+        )
+        feat = v.per_feature[0]
+        assert feat["existing_m3"] == pytest.approx(0.0)
+        assert feat["total_m3"] == pytest.approx(180.0)
+
+    def test_sub_cell_feature_has_no_total_to_claim(self):
+        """No measured volume means no total either — inventing one would be precision
+        the grid does not have."""
+        v = build_verification(
+            analytic_by_name={"S2": 100.0},
+            terrain_by_name={"S2": 90.0},
+            baseline_total_m3=0.0,
+            earthworks_total_m3=90.0,
+            min_dims={"S2": 0.3},
+            cell_size=1.0,
+            existing_by_name={"S2": 40.0},
+        )
+        feat = v.per_feature[0]
+        assert feat["terrain_m3"] is None
+        assert feat["total_m3"] is None
+
     def test_zero_analytic_total_no_divide(self):
         v = build_verification(
             analytic_by_name={"S1": 0.0},

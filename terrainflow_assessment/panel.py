@@ -73,6 +73,9 @@ class AssessmentPanel(QDockWidget):
     boundary_changed = pyqtSignal(object)     # QgsVectorLayer or None
     analysis_area_changed = pyqtSignal(object)
     earthworks_area_changed = pyqtSignal(object)
+    # The site name heads the output layer group, so a name typed after the first
+    # run has to reach the layer tree (see _groups.rename_default_site).
+    site_name_changed = pyqtSignal(str)
     # Draw-on-canvas requests for the three polygon area pickers (for QGIS novices)
     draw_boundary_requested = pyqtSignal()
     draw_analysis_area_requested = pyqtSignal()
@@ -465,13 +468,63 @@ class AssessmentPanel(QDockWidget):
         self._duration_spin.setToolTip(H.DURATION)
         rf_grid.addWidget(self._duration_spin, 1, 1)
 
-        rf_grid.addWidget(self._label("Soil Type"), 2, 0)
+        # Asked immediately after the storm itself, and before anything it governs:
+        # the three methods want different inputs, and the rows below are shown or
+        # hidden to match (see _sync_basis_controls). Asking for a curve number and a
+        # runoff coefficient side by side, only one of which is ever read, was the
+        # single most confusing thing on this panel.
+        #
+        # Which depth of water everything downstream works from — the analysis
+        # rasters as well as earthwork sizing. It belongs with the storm inputs
+        # because it IS a statement about the storm, and having Analysis and Design
+        # quote different depths for the same event would be indefensible.
+        rf_grid.addWidget(self._label("Runoff Calculation Method"), 2, 0)
+        self._sizing_basis_combo = QComboBox()
+        self._sizing_basis_combo.addItems([
+            "Runoff coefficient (Lancaster)",
+            "Total rainfall (most conservative)",
+            "Surface runoff (SCS-CN)",
+        ])
+        self._sizing_basis_combo.setToolTip(H.RUNOFF_METHOD)
+        self._sizing_basis_combo.currentIndexChanged.connect(self._on_basis_changed)
+        rf_grid.addWidget(self._sizing_basis_combo, 2, 1)
+
+        # Lancaster's surface table drives the coefficient; the spin stays editable so
+        # a measured or locally-derived value can be typed straight in.
+        from terrainflow_assessment.modules.catchment import (
+            DEFAULT_RUNOFF_COEFFICIENT,
+            LANCASTER_COEFFICIENTS,
+        )
+        from terrainflow_assessment.modules.peak_flow import DEFAULT_PEAK_INTENSITY_MM_HR
+        surface_lbl = self._label("Surface")
+        rf_grid.addWidget(surface_lbl, 3, 0)
+        self._runoff_surface_combo = QComboBox()
+        for label, (typical, lo, hi, src) in LANCASTER_COEFFICIENTS.items():
+            tag = "" if src == "lancaster" else "  ·  design default"
+            self._runoff_surface_combo.addItem(
+                f"{label} — {typical:.2f}  ({lo:.2f}–{hi:.2f}){tag}", typical)
+        self._runoff_surface_combo.addItem("Custom", None)
+        self._runoff_surface_combo.setToolTip(H.RUNOFF_SURFACE)
+        rf_grid.addWidget(self._runoff_surface_combo, 3, 1)
+
+        coeff_lbl = self._label("Runoff coefficient (C)")
+        rf_grid.addWidget(coeff_lbl, 4, 0)
+        self._runoff_coeff_spin = QDoubleSpinBox()
+        self._runoff_coeff_spin.setRange(0.01, 1.0)
+        self._runoff_coeff_spin.setSingleStep(0.05)
+        self._runoff_coeff_spin.setDecimals(2)
+        self._runoff_coeff_spin.setValue(DEFAULT_RUNOFF_COEFFICIENT)
+        self._runoff_coeff_spin.setToolTip(H.RUNOFF_COEFFICIENT)
+        rf_grid.addWidget(self._runoff_coeff_spin, 4, 1)
+
+        soil_lbl = self._label("Soil Type")
+        rf_grid.addWidget(soil_lbl, 5, 0)
         self._soil_combo = QComboBox()
         for name in ["Sand", "Sandy loam", "Loam", "Clay loam", "Clay"]:
             self._soil_combo.addItem(name)
         self._soil_combo.setCurrentText("Loam")
         self._soil_combo.setToolTip(H.SOIL_TYPE)
-        rf_grid.addWidget(self._soil_combo, 2, 1)
+        rf_grid.addWidget(self._soil_combo, 5, 1)
 
         # Ground condition moves the curve number further than soil texture does — on
         # sand, Good is CN 39 and Poor is 68 — and it was previously assumed to be Good
@@ -481,7 +534,8 @@ class AssessmentPanel(QDockWidget):
             DEFAULT_GROUND_CONDITION,
             GROUND_CONDITIONS,
         )
-        rf_grid.addWidget(self._label("Ground condition"), 3, 0)
+        ground_lbl = self._label("Ground condition")
+        rf_grid.addWidget(ground_lbl, 6, 0)
         self._ground_condition_combo = QComboBox()
         for key, (label, meaning) in GROUND_CONDITIONS.items():
             self._ground_condition_combo.addItem(label, key)
@@ -491,61 +545,33 @@ class AssessmentPanel(QDockWidget):
         self._ground_condition_combo.setCurrentIndex(
             list(GROUND_CONDITIONS).index(DEFAULT_GROUND_CONDITION))
         self._ground_condition_combo.setToolTip(H.GROUND_CONDITION)
-        rf_grid.addWidget(self._ground_condition_combo, 3, 1)
+        rf_grid.addWidget(self._ground_condition_combo, 6, 1)
 
-        rf_grid.addWidget(self._label("Curve Number (CN)"), 4, 0)
+        cn_lbl = self._label("Curve Number (CN)")
+        rf_grid.addWidget(cn_lbl, 7, 0)
         self._cn_spin = QSpinBox()
         self._cn_spin.setRange(1, 100)
         self._cn_spin.setValue(61)
         self._cn_spin.setToolTip(H.CURVE_NUMBER)
-        rf_grid.addWidget(self._cn_spin, 4, 1)
+        rf_grid.addWidget(self._cn_spin, 7, 1)
 
-        rf_grid.addWidget(self._label("Moisture Condition"), 5, 0)
+        moisture_lbl = self._label("Moisture Condition")
+        rf_grid.addWidget(moisture_lbl, 8, 0)
         self._moisture_combo = QComboBox()
         self._moisture_combo.addItems(["normal", "dry", "wet"])
         self._moisture_combo.setToolTip(H.MOISTURE)
-        rf_grid.addWidget(self._moisture_combo, 5, 1)
+        rf_grid.addWidget(self._moisture_combo, 8, 1)
 
-        # Which depth of water everything downstream works from — the analysis
-        # rasters as well as earthwork sizing. It belongs with the storm inputs
-        # because it IS a statement about the storm, and having Analysis and Design
-        # quote different depths for the same event would be indefensible.
-        rf_grid.addWidget(self._label("Runoff Calculation Method"), 6, 0)
-        self._sizing_basis_combo = QComboBox()
-        self._sizing_basis_combo.addItems([
-            "Runoff coefficient (Lancaster)",
-            "Total rainfall (most conservative)",
-            "Surface runoff (SCS-CN)",
-        ])
-        self._sizing_basis_combo.setToolTip(H.RUNOFF_METHOD)
-        self._sizing_basis_combo.currentIndexChanged.connect(self._on_basis_changed)
-        rf_grid.addWidget(self._sizing_basis_combo, 6, 1)
-
-        # Lancaster's surface table drives the coefficient; the spin stays editable so
-        # a measured or locally-derived value can be typed straight in.
-        from terrainflow_assessment.modules.catchment import (
-            DEFAULT_RUNOFF_COEFFICIENT,
-            LANCASTER_COEFFICIENTS,
-        )
-        from terrainflow_assessment.modules.peak_flow import DEFAULT_PEAK_INTENSITY_MM_HR
-        rf_grid.addWidget(self._label("Surface"), 7, 0)
-        self._runoff_surface_combo = QComboBox()
-        for label, (typical, lo, hi, src) in LANCASTER_COEFFICIENTS.items():
-            tag = "" if src == "lancaster" else "  ·  design default"
-            self._runoff_surface_combo.addItem(
-                f"{label} — {typical:.2f}  ({lo:.2f}–{hi:.2f}){tag}", typical)
-        self._runoff_surface_combo.addItem("Custom", None)
-        self._runoff_surface_combo.setToolTip(H.RUNOFF_SURFACE)
-        rf_grid.addWidget(self._runoff_surface_combo, 7, 1)
-
-        rf_grid.addWidget(self._label("Runoff coefficient (C)"), 8, 0)
-        self._runoff_coeff_spin = QDoubleSpinBox()
-        self._runoff_coeff_spin.setRange(0.01, 1.0)
-        self._runoff_coeff_spin.setSingleStep(0.05)
-        self._runoff_coeff_spin.setDecimals(2)
-        self._runoff_coeff_spin.setValue(DEFAULT_RUNOFF_COEFFICIENT)
-        self._runoff_coeff_spin.setToolTip(H.RUNOFF_COEFFICIENT)
-        rf_grid.addWidget(self._runoff_coeff_spin, 8, 1)
+        # Label and field together, because hiding a field but not its label leaves
+        # a caption pointing at the row beneath it.
+        self._basis_rows = {
+            "coefficient": [(surface_lbl, self._runoff_surface_combo),
+                            (coeff_lbl, self._runoff_coeff_spin)],
+            "runoff": [(soil_lbl, self._soil_combo),
+                       (ground_lbl, self._ground_condition_combo),
+                       (cn_lbl, self._cn_spin),
+                       (moisture_lbl, self._moisture_combo)],
+        }
 
         # Peak intensity — sizes overflow structures, and cannot be derived from the
         # depth/duration above. 120 mm in 2 h and in 24 h are identical storage and a
@@ -1206,18 +1232,37 @@ class AssessmentPanel(QDockWidget):
         for spin in (self._rainfall_spin, self._duration_spin, self._cn_spin):
             spin.valueChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
             spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
+        self._runoff_coeff_spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
+        self._sizing_basis_combo.currentIndexChanged.connect(
+            lambda *_: self._refresh_storm_chip())
         for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo,
                       self._ground_condition_combo):
             combo.currentTextChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
         self._site_name_edit.textChanged.connect(
             lambda text: self._head_site_lbl.setText(text.strip() or "Unnamed Site")
         )
+        self._site_name_edit.editingFinished.connect(
+            lambda: self.site_name_changed.emit(self.site_name))
         self._refresh_storm_chip()
+
+    @property
+    def runoff_basis_tag(self):
+        """The one number the chosen method is calibrated by — ``C0.40`` / ``CN61``.
+
+        Quoting a curve number while the method is Lancaster would advertise a
+        value the assessment never reads and the user was never shown.
+        """
+        basis = self.sizing_basis
+        if basis == "coefficient":
+            return f"C{self._runoff_coeff_spin.value():.2f}"
+        if basis == "runoff":
+            return f"CN{self._cn_spin.value()}"
+        return "all-rain"
 
     def _refresh_storm_chip(self):
         self._storm_chip.setText(
             f"{self._rainfall_spin.value():.0f} mm · "
-            f"{self._duration_spin.value():.0f} h · CN {self._cn_spin.value()} ▾"
+            f"{self._duration_spin.value():.0f} h · {self.runoff_basis_tag} ▾"
         )
 
     # ---------------------------------------------------------------- Section 6: Simulation
@@ -1506,9 +1551,16 @@ class AssessmentPanel(QDockWidget):
         """Update the live analytical assessment readout (design-tier, no burn)."""
         self._live_assessment_lbl.setText(html)
 
-    def update_scorecard(self, capture_pct, stored_m3, soaked_m3, leaves_m3):
-        """Feed the persistent scorecard with the live balance."""
+    def update_scorecard(self, capture_pct, stored_m3, soaked_m3, leaves_m3,
+                         natural_ponding_m3=None):
+        """Feed the persistent scorecard with the live balance.
+
+        *natural_ponding_m3* is context rather than part of the balance — it comes from
+        a depression-fill of the bare terrain, not the event routing the band shows, so
+        the scorecard prints it below the band instead of inside it.
+        """
         self._scorecard.set_balance(capture_pct, stored_m3, soaked_m3, leaves_m3)
+        self._scorecard.set_natural_ponding(natural_ponding_m3)
 
     def scorecard_empty(self, message=None):
         if message:
@@ -1839,10 +1891,18 @@ class AssessmentPanel(QDockWidget):
         self._on_basis_changed()
 
     def _sync_basis_controls(self):
-        """Only the coefficient basis has a coefficient to set."""
-        active = self.sizing_basis == "coefficient"
-        self._runoff_surface_combo.setEnabled(active)
-        self._runoff_coeff_spin.setEnabled(active)
+        """Show only the inputs the chosen method actually reads.
+
+        Hidden rather than greyed out: a disabled Curve Number still reads as a
+        number this assessment depends on. Total rainfall asks for neither set —
+        every millimetre that falls is routed, so there is nothing to calibrate.
+        """
+        basis = self.sizing_basis
+        for key, rows in self._basis_rows.items():
+            visible = key == basis
+            for label, widget in rows:
+                label.setVisible(visible)
+                widget.setVisible(visible)
 
     def _on_basis_changed(self, _index=None):
         """The basis drives the baseline rasters too, so a run made under the old
