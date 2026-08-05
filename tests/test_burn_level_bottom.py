@@ -194,16 +194,35 @@ class TestBatteredInvert:
 
 class TestRasterisableCapacity:
     def test_a_narrow_channel_collapses_to_a_rectangle(self):
-        """Below ~3 cells across, the grid cannot hold the batter at all."""
+        """Below ~3 cells across, the grid cannot hold the batter at all.
+
+        The batter run is deliberately non-zero: it is the *width* that defeats the
+        grid here, and the assertion is worthless if the batter gate short-circuits
+        it first.
+        """
         v = rasterisable_capacity(200, 1.0, 0.5, top_width=2.0,
-                                  bottom_width=1.0, cell_size=1.0)
+                                  bottom_width=1.0, cell_size=1.0, batter_run=0.5)
         assert v == pytest.approx(200 * 1.0 * 0.5)     # full-depth trench
 
     def test_a_wide_feature_keeps_its_trapezoid(self):
         v = rasterisable_capacity(1000, 1.0, 0.5, top_width=10.0,
-                                  bottom_width=8.0, cell_size=1.0)
+                                  bottom_width=8.0, cell_size=1.0, batter_run=1.0)
         assert v < 1000 * 1.0 * 0.5                     # batter is represented
         assert v == pytest.approx(1000 * 0.5 * (9.0 / 10.0))
+
+    def test_an_unbattered_feature_stays_rectangular_however_wide(self):
+        """No batter run means the burner levelled a flat floor — a rectangle.
+
+        Regression for the field-test finding: a 3.00 m swale on a 1.00 m DEM cleared
+        the three-cell width test and was discounted by ``mean_width/top_width`` (2/3),
+        so ``Measured`` read a flat +50% against ``At grid`` on every such swale while
+        the burn was in fact correct. ``batter_run_m`` is 0 on a drawn swale, and
+        ``DEMBurner`` only calls ``battered_invert`` when it is positive.
+        """
+        v = rasterisable_capacity(500, 1.0, 1.0, top_width=3.0,
+                                  bottom_width=1.0, cell_size=1.0, batter_run=0.0)
+        assert v == pytest.approx(500 * 1.0 * 1.0)      # not 2/3 of it
+        assert v != pytest.approx(500 * 1.0 * 1.0 * (2.0 / 3.0))
 
     def test_the_resolution_penalty_is_positive_for_a_narrow_swale(self):
         """A 2 m 1:1 swale burns as a trench holding a third more than its trapezoid.
@@ -213,7 +232,7 @@ class TestRasterisableCapacity:
         resolution penalty the Verify table reports rather than blaming on the burn.
         """
         geometric = (2.0 + 1.0) / 2.0 * 0.5 * 100       # 0.75 m² × 100 m = 75 m³
-        raster = rasterisable_capacity(200, 1.0, 0.5, 2.0, 1.0, 1.0)
+        raster = rasterisable_capacity(200, 1.0, 0.5, 2.0, 1.0, 1.0, batter_run=0.5)
         assert raster > geometric
         assert raster == pytest.approx(100.0)
         assert raster / geometric == pytest.approx(4 / 3, rel=0.01)

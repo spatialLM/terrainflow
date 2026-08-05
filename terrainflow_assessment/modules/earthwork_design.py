@@ -775,6 +775,7 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None):
         raster = rasterisable_capacity(
             n_cells, cell_size ** 2, ew.depth,
             ew.width, getattr(ew, "bottom_width_m", ew.width), cell_size,
+            batter_run=_as_float(getattr(ew, "batter_run_m", 0.0)),
         )
     else:
         raster = geometric

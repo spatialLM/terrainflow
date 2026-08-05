@@ -173,7 +173,8 @@ def battered_invert(dem, step_masks, spill_elev: float):
 
 
 def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
-                          top_width: float, bottom_width: float, cell_size: float):
+                          top_width: float, bottom_width: float, cell_size: float,
+                          batter_run: float = 0.0):
     """Storage the burned raster can actually represent, in m³.
 
     The design geometry and the grid rarely agree, and the difference is not an
@@ -186,19 +187,35 @@ def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
     measured ponding against *this* number isolates burn correctness, while the gap
     between this and the true geometric volume is the honest cost of the cell size.
 
-    A footprint wide enough to hold the batter (roughly three cells) keeps its
-    trapezoidal section; anything narrower collapses to the rectangle the grid can
-    hold.
+    Two conditions must *both* hold before the trapezoidal section survives to the
+    grid, because this figure is only meaningful if it describes the same hole the
+    burner actually cut:
+
+    * ``batter_run > 0`` — the burner steps its walls (``battered_invert``) only when
+      the feature carries a batter run; otherwise it levels a flat floor at full depth
+      (``level_invert``), which is a rectangle however wide the footprint is.
+    * The footprint is wide enough (roughly three cells) to hold those steps; anything
+      narrower collapses to the rectangle the grid can hold.
+
+    Discounting for a batter that was never cut is how a correctly-burned 3.00 m swale
+    on a 1.00 m DEM came to report ``Measured`` 50% above ``At grid``: the trapezoid
+    branch scaled the reference by ``mean_width/top_width`` (2/3 for a 3 m/1 m section)
+    while the burn had laid down a full-depth rectangle. The ground was right and the
+    yardstick was wrong.
     """
     if n_cells <= 0 or depth <= 0 or cell_area <= 0:
         return 0.0
+    rectangular = n_cells * cell_area * depth
+    if not batter_run or batter_run <= 0:
+        # No batter was cut — a flat floor at full depth is a rectangular trench.
+        return rectangular
     if cell_size > 0 and top_width < 3.0 * cell_size:
         # Too narrow for the walls to be resolved — a flat-bottomed trench.
-        return n_cells * cell_area * depth
-    mean_width = (top_width + max(0.0, bottom_width)) / 2.0
+        return rectangular
     if top_width <= 0:
-        return n_cells * cell_area * depth
-    return n_cells * cell_area * depth * (mean_width / top_width)
+        return rectangular
+    mean_width = (top_width + max(0.0, bottom_width)) / 2.0
+    return rectangular * (mean_width / top_width)
 
 
 def steep_ground_warning(name: str, relief: float, depth: float,

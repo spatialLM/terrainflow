@@ -215,6 +215,15 @@ class VerificationTable(QWidget):
                 bits.append(
                     f"The burn reproduces what a {cell_size_m:.2f} m grid can hold, to "
                     f"within {abs(worst_pct):.0f}% on every feature.")
+            elif worst.get("barrier_impounded"):
+                # A dam has no at-grid figure to be "off" — the column reads "—". Its
+                # reference is a flooded-volume calculation, so the channel wording
+                # below would describe a comparison that was never made.
+                bits.append(
+                    f"{worst['name']} is {worst_pct:+.0f}% off its flooded-volume "
+                    f"calculation — it impounds against the terrain, so there is no "
+                    f"grid figure to compare it with. That gap is between the burn and "
+                    f"the calculation, not resolution or freeboard.")
             else:
                 bits.append(
                     f"{worst['name']} is {worst_pct:+.0f}% off what a "
