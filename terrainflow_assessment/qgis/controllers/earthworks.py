@@ -22,7 +22,6 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
     QgsTextFormat,
-    QgsUnitTypes,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -42,6 +41,7 @@ from terrainflow_assessment.modules.earthwork_design import (
 )
 from terrainflow_assessment.modules.swale_design import contour_to_swale_geometry
 from terrainflow_assessment.qgis.controllers import _groups as G
+from terrainflow_assessment.qgis.controllers import _symbols as S
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
@@ -2636,7 +2636,7 @@ class EarthworksController(G.LayerTreeMixin):
                 QgsProperty.fromExpression(
                     'CASE WHEN "is_user_link" = 1 THEN \'solid\' ELSE \'dash\' END'),
             )
-            arrow = self._arrow_line_layer(QColor(20, 90, 160, 220), 1.6)
+            arrow = S.arrow_line_layer(QColor(20, 90, 160, 220), 1.6)
             if arrow is not None:
                 symbol.appendSymbolLayer(arrow)
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
@@ -2868,143 +2868,9 @@ class EarthworksController(G.LayerTreeMixin):
     # ---------------------------------------------------------------- Earthwork symbology
 
     def _build_ew_symbol(self, cfg, enabled=True):
-        """Rich per-type canvas symbol. Casing (white underlay) for legibility on any
-        background, a per-type line signature (dam ticks / diversion flow arrows /
-        berm + diversion dash patterns), and a greyed dashed variant when disabled.
-        Every embellishment is best-effort — on any failure it degrades to a plain
-        coloured symbol so layer creation never breaks."""
-        from qgis.PyQt.QtGui import QColor
-
-        base = QColor(cfg.style[1])
-        try:
-            main_w = float(cfg.style[2])
-        except (TypeError, ValueError):
-            main_w = 2.0
-        colour = base if enabled else QColor("#9aa4a2")
-
-        if cfg.geom_type == "Polygon":
-            return self._build_ew_fill(colour, enabled, main_w)
-        return self._build_ew_line(cfg.key, colour, enabled, main_w)
-
-    def _build_ew_fill(self, colour, enabled, main_w):
-        from qgis.core import QgsFillSymbol, QgsSimpleFillSymbolLayer
-        from qgis.PyQt.QtCore import Qt
-        from qgis.PyQt.QtGui import QColor
-        try:
-            rgba = QColor(colour.red(), colour.green(), colour.blue(), 45 if enabled else 22)
-            fl = QgsSimpleFillSymbolLayer(rgba)
-            fl.setStrokeColor(colour)
-            fl.setStrokeWidth(0.7 if enabled else 0.4)
-            if not enabled:
-                fl.setStrokeStyle(Qt.PenStyle.DashLine)
-            return QgsFillSymbol([fl])
-        except Exception:
-            return QgsFillSymbol.createSimple(
-                {"style": "no", "outline_color": colour.name(), "outline_width": str(main_w)}
-            )
-
-    def _build_ew_line(self, key, colour, enabled, main_w):
-        from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
-        from qgis.PyQt.QtCore import Qt
-        from qgis.PyQt.QtGui import QColor
-        try:
-            layers = []
-            if enabled:
-                # Casing (white underlay) scales with the real width so it always
-                # wraps the coloured band; +0.6 m total ≈ 0.3 m of white each side.
-                casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
-                casing.setWidth(main_w + 0.9)   # fallback only if width_m is NULL/0
-                casing.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
-                casing.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyStrokeWidth,
-                    QgsProperty.fromExpression('"width_m" + 0.6'),
-                )
-                casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-                casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                layers.append(casing)
-
-            # Main line: when enabled, its width is the earthwork's real ground
-            # width (data-defined from the width_m attribute, in map metres) so the
-            # band reads as the true dimension and scales with zoom. Disabled stays
-            # a thin greyed mm dashed line — an "inactive" cue, not a true-scale band.
-            main = QgsSimpleLineSymbolLayer(colour)
-            main.setWidth(main_w if enabled else max(0.4, main_w * 0.6))
-            main.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-            main.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            if enabled:
-                main.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
-                main.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyStrokeWidth,
-                    QgsProperty.fromField("width_m"),
-                )
-            # Diversion keeps a solid base line — the flow-arrow ribbon below carries
-            # the direction signal. Disabled + berm read as dashed.
-            if not enabled or key == "berm":
-                main.setPenStyle(Qt.PenStyle.DashLine)
-            layers.append(main)
-
-            if enabled and key == "diversion":
-                # Flow-direction ribbon on top of the real-width base line — a
-                # fixed-mm decorative accent (QgsArrowSymbolLayer follows the drawn
-                # line, so direction is unambiguous). Skipped if unavailable.
-                arrow = self._arrow_line_layer(colour, main_w)
-                if arrow is not None:
-                    layers.append(arrow)
-
-            if enabled and key == "dam":
-                # Embankment/barrier look: short white dashes across the wall
-                # (marker-free, so it always renders).
-                hatch = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
-                hatch.setWidth(max(0.6, main_w * 0.55))
-                hatch.setPenCapStyle(Qt.PenCapStyle.FlatCap)
-                try:
-                    hatch.setUseCustomDashPattern(True)
-                    hatch.setCustomDashVector([1.4, 2.6])  # dash, gap (mm)
-                except Exception:
-                    hatch.setPenStyle(Qt.PenStyle.DotLine)
-                layers.append(hatch)
-
-            if enabled:
-                # Thin fixed-mm centreline so the feature stays visible when the
-                # real-width band is sub-pixel at low zoom; it disappears into the
-                # band once zoomed in.
-                pin = QgsSimpleLineSymbolLayer(colour)
-                pin.setWidth(0.5)   # millimetres — constant on screen
-                pin.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-                pin.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                layers.append(pin)
-
-            return QgsLineSymbol(layers)
-        except Exception:
-            return QgsLineSymbol.createSimple(
-                {"color": colour.name(), "width": str(main_w),
-                 "capstyle": "round", "joinstyle": "round"}
-            )
-
-    def _arrow_line_layer(self, colour, main_w):
-        """Flow-direction ribbon along a line — repeated arrowheads pointing in the
-        drawn (downhill) direction, via QgsArrowSymbolLayer. Returns None on failure."""
-        from qgis.core import QgsArrowSymbolLayer, QgsFillSymbol
-        try:
-            arrow = QgsArrowSymbolLayer()
-            shaft = max(0.7, main_w * 0.55)
-            for name, val in (
-                ("setArrowWidth", shaft),
-                ("setArrowStartWidth", shaft),
-                ("setArrowHeadLength", 3.4),
-                ("setArrowHeadThickness", 3.4),
-            ):
-                if hasattr(arrow, name):
-                    getattr(arrow, name)(val)
-            if hasattr(arrow, "setIsRepeated"):
-                arrow.setIsRepeated(True)   # multiple arrowheads down the line
-            fill = QgsFillSymbol.createSimple(
-                {"color": colour.name(), "outline_style": "no"}
-            )
-            arrow.setSubSymbol(fill)
-            return arrow
-        except Exception:
-            return None
+        """Per-type canvas symbol. Lives in ``_symbols.py`` — see that module for the
+        metres-vs-millimetres rule the whole visual grammar hangs off."""
+        return S.earthwork_symbol(cfg, enabled)
 
     def _refresh_ew_layer(self):
         self._ensure_ew_layers()
