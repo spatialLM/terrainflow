@@ -2137,7 +2137,6 @@ class EarthworksController(G.LayerTreeMixin):
 
         feats = []
         try:
-            from qgis.core import QgsMarkerSymbol
 
             for ew in self._state.earthwork_manager.get_all():
                 if not ew.enabled or ew.type not in ("swale", "diversion"):
@@ -2173,12 +2172,7 @@ class EarthworksController(G.LayerTreeMixin):
             pr.addFeatures(feats)
             layer.updateExtents()
 
-            symbol = QgsMarkerSymbol.createSimple({
-                "name": "equilateral_triangle", "size": "4.5",
-                "color": "#b9770e", "outline_color": "#ffffff",
-                "outline_width": "0.4",
-            })
-            layer.renderer().setSymbol(symbol)
+            layer.renderer().setSymbol(S.stress_symbol())
 
             settings = S.point_label_settings(
                 "label",
@@ -2671,6 +2665,23 @@ class EarthworksController(G.LayerTreeMixin):
         parts.append("Analytical estimate — verify with Re-analyse.")
         return "  ·  ".join(parts)
 
+    @staticmethod
+    def _point_on(ew):
+        """A point that is actually *on* the feature, for anchoring a link.
+
+        The centroid of a curved swale is off in the field beside it, so a link
+        falling back to a centroid starts in mid-air — one of the "lines at odd
+        angles" complaints. Midpoint along the line, or a guaranteed-interior
+        point for a polygon.
+        """
+        geom = ew.geometry
+        try:
+            if geom.type() == QgsWkbTypes.PolygonGeometry:
+                return geom.pointOnSurface().asPoint()
+            return geom.interpolate(geom.length() / 2.0).asPoint()
+        except Exception:
+            return geom.centroid().asPoint()
+
     def _refresh_connections_layer(self, result, routing):
         """Draw the resolved overflow links on the map as arrows between features.
 
@@ -2686,7 +2697,7 @@ class EarthworksController(G.LayerTreeMixin):
             self._state.connections_layer_id = None
             return
         try:
-            from qgis.core import QgsLineSymbol, QgsPointXY
+            from qgis.core import QgsPointXY
 
             by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
             per = {f["id"]: f for f in result.per_feature}
@@ -2697,15 +2708,28 @@ class EarthworksController(G.LayerTreeMixin):
                 tgt = by_id.get(tgt_id) if tgt_id else None
                 row = per.get(src_id, {})
                 volume = float(row.get("overflow_m3", 0.0) or 0.0)
-                if src is None or volume <= 0:
-                    continue          # nothing actually flows along this link
+                is_user = bool(routing.is_user.get(src_id))
+                if src is None:
+                    continue
+                # A link the user drew is part of the design and must be visible
+                # whether or not this particular storm fills it — "Swale 1 now
+                # overflows into Swale 2" succeeded in the field log, and then
+                # nothing appeared on the map, which read as the tool not working.
+                #
+                # Auto-resolved links still need volume: resolve_targets writes an
+                # edge for EVERY store, so drawing them all unconditionally would
+                # put a line on every earthwork on the site.
+                if not is_user and volume <= 0:
+                    continue
                 # Anchor to the real structures where they exist. A centroid-to-
                 # centroid line says two features are linked; an outflow-to-inflow
                 # line says *where* the water crosses, which is the thing you go and
                 # build. Falls back to centroids so an unplaced pair still draws.
-                start = self._spillway_point(src, "spillway")                     or src.geometry.centroid().asPoint()
+                start = (self._spillway_point(src, "spillway")
+                         or self._point_on(src))
                 if tgt is not None:
-                    end = self._spillway_point(tgt, "inflow_spillway")                         or tgt.geometry.centroid().asPoint()
+                    end = (self._spillway_point(tgt, "inflow_spillway")
+                           or self._point_on(tgt))
                 else:
                     end = self._downslope_exit_point(src)
                     if end is None:
@@ -2739,23 +2763,7 @@ class EarthworksController(G.LayerTreeMixin):
             pr.addFeatures(feats)
             layer.updateExtents()
 
-            symbol = QgsLineSymbol.createSimple({"width": "0.7", "capstyle": "round"})
-            sl = symbol.symbolLayer(0)
-            sl.setColor(QColor(20, 90, 160, 220))
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyStrokeWidth,
-                QgsProperty.fromExpression(
-                    '0.6 + min("overflow_m3" / 200.0, 2.4)'),
-            )
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyStrokeStyle,
-                QgsProperty.fromExpression(
-                    'CASE WHEN "is_user_link" = 1 THEN \'solid\' ELSE \'dash\' END'),
-            )
-            arrow = S.flow_arrow_layer(QColor(20, 90, 160, 220))
-            if arrow is not None:
-                symbol.appendSymbolLayer(arrow)
-            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+            layer.setRenderer(QgsSingleSymbolRenderer(S.connection_symbol()))
 
             self.place(layer, G.DRAWN)
             self._state.connections_layer_id = layer.id()
@@ -2882,6 +2890,12 @@ class EarthworksController(G.LayerTreeMixin):
         except Exception:
             return None
 
+    # How far a "leaves site" stub runs, in ground metres. Previously this was a
+    # fixed 40 D8 cells, which is 40 m on a 1 m DEM and 200 m on a 5 m one — the
+    # same code drew a tick on one survey and a line across the paddock on
+    # another. Length should mean a distance, not a cell count.
+    _EXIT_STUB_M = 40.0
+
     def _downslope_exit_point(self, ew):
         """Where a terminal feature's overflow heads — a short stub down the flow path."""
         try:
@@ -2892,8 +2906,10 @@ class EarthworksController(G.LayerTreeMixin):
             next_flat = self._state.flow_next
             cols = meta["shape"][1]
             transform = meta["transform"]
+            cell_m = abs(float(transform.a)) or 1.0
+            steps = max(4, int(round(self._EXIT_STUB_M / cell_m)))
             cur = int(start)
-            for _ in range(40):           # a short, legible stub, not the whole path
+            for _ in range(steps):        # a short, legible stub, not the whole path
                 nxt = int(next_flat[cur])
                 if nxt == cur:
                     break

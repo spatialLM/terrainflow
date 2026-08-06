@@ -518,6 +518,64 @@ def spillway_symbol():
     return symbol
 
 
+def connection_symbol():
+    """An overflow link: an annotation, drawn like one.
+
+    These were the heaviest ink on the map — up to 3 mm of saturated dark blue
+    spanning the whole canvas, with Qt's dash length scaling off the pen width so
+    a loaded link became a train of fat lozenges. They outweighed the structures
+    they describe, and with no working arrowhead they read as linear *features*
+    rather than as links between two things.
+
+    So: fixed weight, receding colour, one clear arrowhead, and a white casing so
+    it survives imagery. Volume no longer drives thickness — the Live Assessment
+    panel states it in cubic metres, which is a better channel for a number than
+    line width, and that encoding is exactly why these lines dominated.
+    """
+    from qgis.core import QgsSimpleLineSymbolLayer
+
+    slate = QColor(58, 96, 140, 205)
+
+    casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 200))
+    casing.setWidth(1.7)                       # millimetres
+    casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+
+    line = QgsSimpleLineSymbolLayer(slate)
+    line.setWidth(0.9)
+    line.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+    # Solid where the user drew the link, dashed where analysis inferred it, so
+    # "I decided this" and "the ground decided this" are distinguishable. Both mm,
+    # so the dash cannot scale itself apart when zooming.
+    line.setDataDefinedProperty(
+        QgsSymbolLayer.PropertyStrokeStyle,
+        QgsProperty.fromExpression(
+            'CASE WHEN "is_user_link" = 1 THEN \'solid\' ELSE \'dash\' END'),
+    )
+
+    symbol = QgsLineSymbol([casing, line])
+    arrow = flow_arrow_layer(slate, size_mm=3.0, interval_mm=14.0)
+    if arrow is not None:
+        symbol.appendSymbolLayer(arrow)
+    return symbol
+
+
+def stress_symbol():
+    """A stress point — where a feature overtops.
+
+    A circle with a dark ring, not the amber triangle it used to be: at a glance
+    that triangle was hard to tell from a spillway marker, and the two mean very
+    different things. A stress point marks a station, not a dimension, so it
+    stays fixed in millimetres.
+    """
+    from qgis.core import QgsMarkerSymbol
+
+    return QgsMarkerSymbol.createSimple({
+        "name": "circle", "size": "4.4",
+        "color": "#e8a33d",
+        "outline_color": "#7a4a05", "outline_width": "0.7",
+    })
+
+
 def flow_arrow_layer(colour, size_mm=2.6, interval_mm=8.0):
     """A repeating flow-direction arrow ribbon, in millimetres.
 

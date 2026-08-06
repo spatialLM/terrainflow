@@ -677,6 +677,103 @@ def check_reshape_keeps_the_spillway_on_its_feature(dem_path):
                 f"after reshaping, the spillway sits {gap:.1f} m off its feature")
 
 
+# ---------------------------------------------------------------- connections
+
+def _connections_layer():
+    from qgis.core import QgsProject, QgsVectorLayer
+    return next(
+        (lyr for lyr in QgsProject.instance().mapLayers().values()
+         if isinstance(lyr, QgsVectorLayer) and lyr.name() == "Overflow connections"),
+        None,
+    )
+
+
+def check_user_link_draws_even_when_it_carries_no_volume(dem_path):
+    """A link the user drew is part of the design and must appear.
+
+    The field log reads "Swale 1 now overflows into Swale 2" — the link
+    registered — and then nothing appeared on the map, which read as Route
+    Overflow being broken. The cause was a render-time skip of any edge carrying
+    zero volume for the current storm.
+
+    The count is asserted exactly, not as "at least one". resolve_targets writes
+    an edge for EVERY store, so a rule that simply drew them all would put a line
+    on every earthwork on the site — passing a >=1 assertion while being wrong.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        a = h.add_earthwork("swale", geometry=line_across_valley(row=40))
+        b = h.add_earthwork("swale", geometry=line_across_valley(row=70))
+        c = h.add_earthwork("swale", geometry=line_across_valley(row=100))
+        # Give the source enough storage that this storm never fills it, so its
+        # link carries zero volume. That is the case the old rule dropped, and
+        # the case the field report hit.
+        a.capacity_m3 = 5_000_000.0
+        a.capacity_l = a.capacity_m3 * 1000.0
+        h.plugin._earthworks._refresh_ew_layer()
+
+        # One deliberate link; c is left unlinked.
+        h.plugin._earthworks.on_connection_made(a.id, b.id)
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("user link")
+
+        layer = _connections_layer()
+        if layer is None:
+            raise AssertionError("a user-drawn link produced no connections layer")
+
+        drawn = [(f["from_name"], f["to_name"], f["is_user_link"], f["overflow_m3"])
+                 for f in layer.getFeatures()]
+        if not any(d[0] == a.name and d[2] == 1 for d in drawn):
+            raise AssertionError(
+                f"the user's link from {a.name} was not drawn — got {drawn}")
+
+        # The other half of the rule, stated directly rather than as a count:
+        # an inferred link only earns a line by carrying water. resolve_targets
+        # writes an edge for every store, so without this a line appears on every
+        # earthwork on the site.
+        idle = [d for d in drawn if d[2] == 0 and (d[3] or 0) <= 0]
+        if idle:
+            raise AssertionError(
+                f"inferred links with no flow were drawn anyway — {idle}")
+        assert c is not None
+
+
+def check_connections_do_not_outweigh_the_earthworks(dem_path):
+    """A link annotates the design; it must not be the heaviest ink on the map.
+
+    These were up to 3 mm of saturated blue spanning the canvas, thicker than the
+    structures they describe, with volume driving the width. Fixed weight now,
+    and the check is on the symbol rather than on pixels because the failure mode
+    is "someone re-adds a data-defined width".
+    """
+    from qgis.core import QgsSimpleLineSymbolLayer, QgsSymbolLayer
+
+    from terrainflow_assessment.qgis.controllers import _symbols as S
+
+    with PluginHarness(dem_path):
+        symbol = S.connection_symbol()
+        widths = []
+        for i in range(symbol.symbolLayerCount()):
+            sl = symbol.symbolLayer(i)
+            if not isinstance(sl, QgsSimpleLineSymbolLayer):
+                continue        # arrowhead markers are sized, not stroked
+            widths.append(sl.width())
+            prop = sl.dataDefinedProperties().property(
+                QgsSymbolLayer.PropertyStrokeWidth)
+            if prop is not None and prop.isActive():
+                raise AssertionError(
+                    "connection stroke width is data-defined again — volume belongs "
+                    "in the Live Assessment panel, not in line thickness"
+                )
+        if not widths:
+            raise AssertionError("the connection symbol has no stroked line layer")
+        if max(widths) > 2.0:
+            raise AssertionError(
+                f"connection line is {max(widths)} mm — heavier than the design it "
+                "annotates"
+            )
+
+
 def _press_at(h, point):
     """A synthetic left-click at a map coordinate."""
     from qgis.PyQt.QtCore import QEvent, QPoint, Qt
