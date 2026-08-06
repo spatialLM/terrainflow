@@ -27,18 +27,177 @@ from __future__ import annotations
 from qgis.core import (
     QgsFillSymbol,
     QgsLineSymbol,
+    QgsPalLayerSettings,
     QgsProperty,
     QgsSimpleFillSymbolLayer,
     QgsSimpleLineSymbolLayer,
     QgsSymbolLayer,
+    QgsTextBufferSettings,
+    QgsTextFormat,
     QgsUnitTypes,
 )
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QFont
 
 # Greyed-out stand-in for a disabled earthwork. Not in the registry because it is a
 # UI state, not a feature type.
 DISABLED_COLOUR = "#9aa4a2"
+
+# Label priorities. When PAL runs out of room it drops the low numbers first, so
+# identity ("Swale 1") outlives detail ("outflow · 70.07 m").
+PRIORITY_EARTHWORK = 7
+PRIORITY_STRESS = 5
+PRIORITY_SPILLWAY = 4
+
+# Above these denominators the text is noise rather than information. Geometry is
+# never suppressed — only labels.
+MAX_SCALE_POINT_LABEL = 5000.0
+MAX_SCALE_CONNECTION_LABEL = 8000.0
+
+
+# ---------------------------------------------------------------- labels
+
+def label_colour(hex_or_qcolour):
+    """Darken a type colour until it is readable as text.
+
+    The map's colour grammar ties a feature to its panel chip, so labels keep the
+    type hue rather than going flat black. But #00BCD4 cyan at 9 pt over a white
+    halo is roughly 1.5:1 contrast — the hue has to come down about 40% in
+    luminance before it is text rather than decoration.
+    """
+    c = QColor(hex_or_qcolour) if not isinstance(hex_or_qcolour, QColor) else QColor(hex_or_qcolour)
+    h, s, v, a = c.getHsv()
+    return QColor.fromHsv(h, min(255, int(s * 1.1)), max(0, int(v * 0.6)), a)
+
+
+def label_format(colour, size_pt=9.0, halo=True, bold=True):
+    """The one place text formatting is built.
+
+    ``QgsTextFormat.setFont()`` silently discards a QFont's point size — the trap
+    already documented at ``baseline.py:472-474`` and the reason earthwork labels
+    have been rendering at the 10 pt default instead of the intended 8. Size must
+    go through ``setSize()`` + ``setSizeUnit()``. Routing every caller through
+    here is what stops that recurring at the next call site.
+
+    The halo is not optional in practice: over aerial imagery, unbuffered text
+    dissolves into canopy.
+    """
+    fmt = QgsTextFormat()
+    font = QFont()
+    font.setBold(bold)
+    fmt.setFont(font)
+    fmt.setSize(float(size_pt))
+    fmt.setSizeUnit(QgsUnitTypes.RenderPoints)
+    fmt.setColor(QColor(colour) if not isinstance(colour, QColor) else colour)
+    if halo:
+        buf = QgsTextBufferSettings()
+        buf.setEnabled(True)
+        buf.setColor(QColor(255, 255, 255))
+        buf.setSize(1.0)
+        fmt.setBuffer(buf)
+    return fmt
+
+
+def _placement(name):
+    """Resolve a placement enum across the 3.22 → 3.40 rename, newest spelling first."""
+    from qgis.core import Qgis
+    enum = getattr(Qgis, "LabelPlacement", None)
+    if enum is not None and hasattr(enum, name):
+        return getattr(enum, name)
+    return getattr(QgsPalLayerSettings, name)
+
+
+def line_label_settings(field_or_expr, fmt, is_expression=False,
+                        priority=PRIORITY_EARTHWORK):
+    """Labels that follow a line.
+
+    The default placement is ``AroundPoint``, which is a *point* arrangement: on a
+    LineString layer it yields no label at all. That single unset property is why
+    no swale, berm, dam or diversion drain has ever carried a name on the map.
+    ``Curved`` follows the alignment; ``Line`` is the straight-text equivalent.
+    """
+    s = QgsPalLayerSettings()
+    s.fieldName = field_or_expr
+    s.isExpression = is_expression
+    s.enabled = True
+    s.setFormat(fmt)
+    s.placement = _placement("Curved")
+    s.dist = 2.0            # lift the text off the band so it does not sit in the ink
+    s.priority = priority
+
+    # Let the text run past the ends of a short line rather than be dropped.
+    # Without this, zooming out silently loses the name of whichever feature is
+    # shortest on screen: at 1:10,000 an 80 m drain is ~30 px, far less than
+    # "Diversion 5" needs, and PAL discards it while its longer neighbours keep
+    # theirs. Losing labels in an order that tracks nothing the user can see is
+    # worse than a little overhang.
+    try:
+        ls = s.lineSettings()
+        ls.setOverrunDistance(25.0)
+        ls.setOverrunDistanceUnit(QgsUnitTypes.RenderMillimeters)
+        s.setLineSettings(ls)
+    except Exception:
+        pass
+    return s
+
+
+def polygon_label_settings(field_or_expr, fmt, is_expression=False,
+                           priority=PRIORITY_EARTHWORK):
+    """Labels inside a footprint. A basin already reads as an area, so horizontal
+    text at the centroid is clearer than text bent around the ring."""
+    s = QgsPalLayerSettings()
+    s.fieldName = field_or_expr
+    s.isExpression = is_expression
+    s.enabled = True
+    s.setFormat(fmt)
+    s.placement = _placement("Horizontal")
+    s.priority = priority
+    return s
+
+
+def earthwork_label_settings(cfg, colour_hex):
+    """Name + storage metric for a drawn earthwork, e.g. "Swale 1 · 140 m³".
+
+    Type is carried by the symbol's colour and signature, so it is not repeated
+    in the text.
+    """
+    expr = (
+        "\"name\" || CASE WHEN \"capacity_m3\" > 0 THEN "
+        "' · ' || format_number(\"capacity_m3\", 0) || ' m³' ELSE '' END"
+    )
+    fmt = label_format(label_colour(colour_hex), size_pt=9.0)
+    if cfg.geom_type == "Polygon":
+        return polygon_label_settings(expr, fmt, is_expression=True)
+    return line_label_settings(expr, fmt, is_expression=True)
+
+
+def point_label_settings(field_or_expr, fmt, is_expression=False,
+                         priority=PRIORITY_SPILLWAY, max_scale=None):
+    """Labels anchored above a marker.
+
+    Mirrors ``baseline.py``'s exit-point configuration — the one labelling setup in
+    the plugin that has always demonstrably rendered.
+    """
+    s = QgsPalLayerSettings()
+    s.fieldName = field_or_expr
+    s.isExpression = is_expression
+    s.enabled = True
+    s.setFormat(fmt)
+    s.placement = _placement("OverPoint")
+    try:
+        s.quadOffset = QgsPalLayerSettings.QuadrantAbove
+    except AttributeError:
+        pass
+    s.yOffset = 2.0
+    s.dist = 2.5
+    s.priority = priority
+    if max_scale:
+        s.scaleVisibility = True
+        # "minimum" is the smallest denominator (most zoomed in) at which the label
+        # shows; "maximum" is the largest. Zoomed out past max_scale, text goes.
+        s.minimumScale = float(max_scale)
+        s.maximumScale = 0.0
+    return s
 
 
 # ---------------------------------------------------------------- earthwork symbols

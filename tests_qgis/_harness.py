@@ -463,6 +463,56 @@ class PluginHarness:
         self.canvas.waitWhileRendering()
         return layers
 
+    def set_scale(self, denominator, centre=None, size=(1200, 900)):
+        """Pin the canvas to a named map scale, e.g. 1:2500.
+
+        sync_canvas() frames a layer's extent, which makes the resulting scale a
+        side effect of the fixture's size. Anything asserting *scale-dependent*
+        behaviour — a millimetre signature staying constant, a metres band
+        halving — has to pin the scale explicitly instead.
+
+        The canvas is resized first, and that is not optional: an unshown canvas
+        sits at roughly 100x30 px, so a pinned 1:2500 would frame about 60 m and
+        almost nothing would be in view. Same default size as save_canvas(), so a
+        pinned scale and a screenshot of it agree.
+        """
+        from qgis.PyQt.QtCore import QCoreApplication
+
+        if size:
+            self.canvas.resize(*size)
+            self.canvas.window().show()
+            self.canvas.show()
+            for _ in range(3):
+                QCoreApplication.processEvents()
+        if centre is not None:
+            self.canvas.setCenter(centre)
+        self.canvas.zoomScale(float(denominator))
+        self.canvas.refresh()
+        self.canvas.waitWhileRendering()
+        return self.canvas.scale()
+
+    def labels_drawn(self):
+        """{layer_id: sorted set of label texts} actually placed on the canvas.
+
+        Asserting on the labelling engine's own output rather than on pixels: it
+        says *which* label was placed and where, and does not move when
+        anti-aliasing or a font substitution does.
+
+        Texts are de-duplicated because curved placement reports one position per
+        character group — a single "Swale 1" comes back seven times.
+        """
+        results = self.canvas.labelingResults()
+        if results is None:
+            return {}
+        try:
+            positions = results.labelsWithinRect(self.canvas.extent())
+        except Exception:
+            return {}
+        out = {}
+        for pos in positions:
+            out.setdefault(pos.layerID, set()).add(pos.labelText)
+        return {k: sorted(v) for k, v in out.items()}
+
     def _install_global_iface(self):
         """Point the global qgis.utils.iface — and its existing captures — at the stub.
 

@@ -117,8 +117,13 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
   `-Accept` it. Unaccepted differences nag with an escalating reminder that counts the
   consecutive runs, because a stale baseline hides the next real regression.
 - `tests_qgis/README.md` explains the fixture, the visual-diff workflow, and several
-  non-obvious traps (offscreen Qt loads no fonts; `QTest.mouseMove`/`mouseDClick` do not
-  behave like real input; `saveAsImage` omits rubber bands). Read it before extending.
+  non-obvious traps (`QTest.mouseMove`/`mouseDClick` do not behave like real input;
+  `saveAsImage` omits rubber bands). Read it before extending.
+- Offscreen Qt **does** render text — `_harness.py` points `QT_QPA_FONTDIR` at the system
+  fonts, which restores ~233 families. Labels are therefore verifiable headlessly; glyph
+  shapes still differ from live QGIS, so judge layout/colour/content here and *type* from
+  `run_qgis_gui_shot.ps1`. (Qt registers zero families *without* that env var — which is
+  what the old "offscreen Qt loads no fonts" note meant.)
 
 ## Docs
 

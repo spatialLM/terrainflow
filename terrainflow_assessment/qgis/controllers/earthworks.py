@@ -14,14 +14,12 @@ from qgis.core import (
     QgsFeature,
     QgsField,
     QgsGeometry,
-    QgsPalLayerSettings,
     QgsProperty,
     QgsRasterLayer,
     QgsRasterShader,
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
-    QgsTextFormat,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -282,11 +280,14 @@ class EarthworksController(G.LayerTreeMixin):
                     continue
                 crest = sp.crest_elevation
                 width = sp.width_m or 0.0
-                bits = [f"{ew.name} {kind}"]
+                # The parent earthwork now carries its own name label, so repeating
+                # it here just stacks two labels on the same spot (three, where an
+                # inflow and an outflow sit close together).
+                bits = [kind]
                 if crest is not None:
                     bits.append(f"{crest:.2f} m")
                 if kind == "outflow" and width > 0:
-                    bits.append(f"{width:.1f} m wide")
+                    bits.append(f"{width:.1f} m")
                 f = QgsFeature()
                 f.setGeometry(geom)
                 f.setAttributes([
@@ -317,12 +318,12 @@ class EarthworksController(G.LayerTreeMixin):
                     "CASE WHEN \"kind\" = 'inflow' THEN 0 ELSE 180 END"))
             layer.renderer().setSymbol(symbol)
 
-            settings = QgsPalLayerSettings()
-            settings.fieldName = "label"
-            fmt = QgsTextFormat()
-            fmt.setSize(8)
-            settings.setFormat(fmt)
-            settings.placement = QgsPalLayerSettings.AroundPoint
+            settings = S.point_label_settings(
+                "label",
+                S.label_format(QColor(30, 60, 90), size_pt=8.5),
+                priority=S.PRIORITY_SPILLWAY,
+                max_scale=S.MAX_SCALE_POINT_LABEL,
+            )
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
@@ -2065,12 +2066,12 @@ class EarthworksController(G.LayerTreeMixin):
             })
             layer.renderer().setSymbol(symbol)
 
-            settings = QgsPalLayerSettings()
-            settings.fieldName = "label"
-            fmt = QgsTextFormat()
-            fmt.setSize(8)
-            settings.setFormat(fmt)
-            settings.placement = QgsPalLayerSettings.AroundPoint
+            settings = S.point_label_settings(
+                "label",
+                S.label_format(QColor(120, 70, 10), size_pt=8.5),
+                priority=S.PRIORITY_STRESS,
+                max_scale=S.MAX_SCALE_POINT_LABEL,
+            )
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
@@ -2793,8 +2794,7 @@ class EarthworksController(G.LayerTreeMixin):
     # ---------------------------------------------------------------- Earthwork layers
 
     def _ensure_ew_layers(self):
-        from qgis.core import QgsRuleBasedRenderer, QgsTextBufferSettings
-        from qgis.PyQt.QtGui import QFont
+        from qgis.core import QgsRuleBasedRenderer
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
         self._state.ew_group = self.group_for(G.DRAWN)
@@ -2835,27 +2835,7 @@ class EarthworksController(G.LayerTreeMixin):
             )
             layer.setRenderer(QgsRuleBasedRenderer(root_rule))
 
-            text_fmt = QgsTextFormat()
-            font = QFont()
-            font.setBold(True)
-            font.setPointSize(8)
-            text_fmt.setFont(font)
-            text_fmt.setColor(QColor(color_hex))
-            buf = QgsTextBufferSettings()
-            buf.setEnabled(True)
-            buf.setColor(QColor(255, 255, 255))
-            buf.setSize(1.2)
-            text_fmt.setBuffer(buf)
-            lbl = QgsPalLayerSettings()
-            # Name + storage metric (e.g. "Swale 1 · 140 m³"). Type is carried by
-            # the symbol signature + colour, so it's not repeated in the label.
-            lbl.fieldName = (
-                "\"name\" || CASE WHEN \"capacity_m3\" > 0 THEN "
-                "' · ' || format_number(\"capacity_m3\", 0) || ' m³' ELSE '' END"
-            )
-            lbl.isExpression = True
-            lbl.enabled = True
-            lbl.setFormat(text_fmt)
+            lbl = S.earthwork_label_settings(cfg, color_hex)
             layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
             layer.setLabelsEnabled(True)
 
