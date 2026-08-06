@@ -64,6 +64,14 @@ _ORDER = {
     "design": ["drawn", "rerun"],
 }
 
+# Subgroups that must sit ABOVE their parent's loose layers rather than below.
+# The general rule (a subgroup tucks under its parent's plain layers) is right for
+# supplementary output like Contour Analysis under Analysis. It is wrong for the
+# drawn design: the catchment raster is a loose Design-stage layer at alpha 150,
+# and when it is created before the Drawn Earthworks group, every swale, dam and
+# basin renders underneath a translucent wash.
+_ABOVE_LOOSE = {"drawn"}
+
 DEFAULT_SITE_NAME = "Unnamed Site"
 
 
@@ -130,7 +138,7 @@ def _insert_index(parent, parent_key, key):
     """
     order = _ORDER.get(parent_key, [])
     want = order.index(key) if key in order else len(order)
-    groups_only = parent_key is None
+    groups_only = parent_key is None or key in _ABOVE_LOOSE
     idx = 0
     for i, child in enumerate(parent.children()):
         if _is_group(child):
@@ -191,6 +199,72 @@ def add_layer(project, layer, path=SITE, site_name="", tag="",
     return node
 
 
+def reorder(project, order, path=SITE, site_name="", tag=""):
+    """Re-stack a group's layers to a declared order, top of the legend first.
+
+    Needed because the annotation layers — spillways, stress points, overflow
+    connections — are destroyed and rebuilt on every refresh, and ``addLayer``
+    appends. Appended means bottom of the group, and bottom of the group means
+    painted *underneath*: a spillway sited correctly on a swale was drawn beneath
+    that swale's band and was invisible, while a spillway sited wrongly (out in a
+    paddock, over nothing) was the only one you could see. The map was showing the
+    mistakes and hiding the correct work.
+
+    ``at_top=True`` alone cannot fix it: the three layers refresh independently, so
+    whichever refreshed last would win. The order has to be reasserted, not seeded.
+
+    *order* is a list of layer names. ``"__earthworks__"`` stands for every layer
+    not otherwise named, keeping the five earthwork bands together as one block
+    wherever it appears. Names not present are skipped.
+    """
+    from qgis.core import QgsLayerTreeLayer
+
+    grp = group(project, path, site_name, tag)
+
+    # Direct children only. findLayers() recurses, and removing a node that
+    # actually lives in a nested group leaves the clone behind as a duplicate —
+    # which then multiplies on every refresh until the tree is large enough to
+    # stall rendering.
+    children = [n for n in grp.children() if isinstance(n, QgsLayerTreeLayer)]
+    if len(children) < 2:
+        return grp
+
+    by_name = {}
+    for node in children:
+        layer = node.layer()
+        if layer is not None:
+            by_name.setdefault(layer.name(), []).append(node)
+
+    named = {name for name in order if name != "__earthworks__"}
+    rest = [n for name, ns in by_name.items() if name not in named for n in ns]
+
+    sequence = []
+    for name in order:
+        if name == "__earthworks__":
+            sequence.extend(rest)
+        else:
+            sequence.extend(by_name.get(name, []))
+
+    if len(sequence) != len(children):     # something unaccounted for — leave it alone
+        return grp
+    if [n.layer().id() for n in sequence] == [n.layer().id() for n in children]:
+        return grp                          # already in order; don't churn the tree
+
+    # A QgsLayerTreeLayer cannot be reparented, so rebuild from layer ids:
+    # drop every child, then re-add in the wanted order.
+    ids = [n.layer().id() for n in sequence]
+    for node in children:
+        grp.removeChildNode(node)
+    for layer_id in ids:
+        layer = project.instance().mapLayer(layer_id)
+        if layer is None:
+            continue
+        node = grp.addLayer(layer)
+        if node is not None:
+            node.setExpanded(False)
+    return grp
+
+
 def clear_group(project, path=SITE, site_name="", tag=""):
     """Drop every layer inside the group at *path*, keeping the group itself.
 
@@ -231,6 +305,13 @@ class LayerTreeMixin:
             site_name=getattr(self._panel, "site_name", ""),
             tag=getattr(self._state, "run_tag", ""),
             visible=visible, at_top=at_top,
+        )
+
+    def restack(self, order, path=SITE):
+        return reorder(
+            self._project, order, path,
+            site_name=getattr(self._panel, "site_name", ""),
+            tag=getattr(self._state, "run_tag", ""),
         )
 
     def group_for(self, path=SITE):

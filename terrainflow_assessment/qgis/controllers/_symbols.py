@@ -43,6 +43,63 @@ from qgis.PyQt.QtGui import QColor, QFont
 # UI state, not a feature type.
 DISABLED_COLOUR = "#9aa4a2"
 
+# --- the metres/millimetres split, as numbers -------------------------------
+#
+# BAND_* is ground truth: the coloured band is exactly top_width_m, so measuring it
+# off the screen gives the real footprint. BAND_MIN_MM stops it disappearing when
+# that footprint goes sub-pixel — without it a 2 m swale renders 0 px at 1:15,000
+# (measured), which is why a fixed-mm "pin" used to be drawn over the top.
+#
+# CASING_* is legibility, not dimension. It is the white outline that keeps a band
+# readable over aerial imagery. It sits outside the band and is not read as
+# earthwork, which is what makes the +0.6 m acceptable while the band itself stays
+# exact.
+#
+# Note for anyone tempted by a screen-constant halo: `@map_scale` is NOT available
+# in a symbol-layer data-defined expression on 3.40. It evaluates to NULL and QGIS
+# silently falls back to the static width, which looks like it works. Verified by
+# rendering a 99 m static fallback: `DD = 10` gives 10 m, `DD = @map_scale/1000`
+# gives 99 m.
+BAND_MIN_MM = 0.6
+CASING_ADD_M = 0.6
+CASING_MIN_MM = 1.8
+
+BAND_EXPR = 'coalesce("width_m", 0)'
+CASING_EXPR = f'coalesce("width_m", 0) + {CASING_ADD_M}'
+
+# --- per-type signature ------------------------------------------------------
+#
+# Deliberately a local table rather than new fields on EarthworkTypeConfig: the
+# registry is owned by other work, and colour/nominal width still come from it, so
+# the panel's draw-button chips stay in step automatically.
+#
+# Intervals are millimetres, which is the whole point — marker cadence becomes a
+# function of how long the line is *on screen*, not of how many vertices the draw
+# tool happened to emit. That is what makes a signature survive zooming.
+SIG_NONE = "none"
+SIG_ARROW = "arrow"       # direction of flow along the line
+SIG_TICKS = "ticks"       # barrier: hachures straddling the crest
+SIG_CHEVRON = "chevron"   # barrier with a protected side: hachures on one side
+
+_GRAMMAR = {
+    # key         signature     interval mm   size mm
+    "swale":     (SIG_NONE,     0.0,  0.0),
+    "berm":      (SIG_CHEVRON,  4.5,  2.6),
+    "dam":       (SIG_TICKS,    3.0,  2.2),
+    "diversion": (SIG_ARROW,    8.0,  2.6),
+    "basin":     (SIG_NONE,     0.0,  0.0),
+}
+
+
+def signature_for(key):
+    return _GRAMMAR.get(key, (SIG_NONE, 0.0, 0.0))
+
+
+# Render order inside the Drawn Earthworks group, top of the legend first (and so
+# painted last / on top). Annotation over structure: a spillway sits ON a swale and
+# must be visible; a connection line annotates the design and must never occlude it.
+DRAW_ORDER = ("Stress points", "Spillways", "__earthworks__", "Overflow connections")
+
 # Label priorities. When PAL runs out of room it drops the low numbers first, so
 # identity ("Swale 1") outlives detail ("outflow · 70.07 m").
 PRIORITY_EARTHWORK = 7
@@ -221,87 +278,106 @@ def earthwork_symbol(cfg, enabled=True):
 
 
 def earthwork_fill_symbol(colour, enabled, main_w):
+    """Basin footprint. The polygon is already true to the ground, so this is the
+    one type where dimensional fidelity comes free and the work is all contrast:
+    at 17.6% alpha over aerial imagery the basin was the faintest thing on the map.
+    A slightly stronger fill plus a white-cased edge fixes that without hiding the
+    ponding raster underneath.
+    """
     try:
-        rgba = QColor(colour.red(), colour.green(), colour.blue(), 45 if enabled else 22)
-        fl = QgsSimpleFillSymbolLayer(rgba)
-        fl.setStrokeColor(colour)
-        fl.setStrokeWidth(0.7 if enabled else 0.4)
+        rgba = QColor(colour.red(), colour.green(), colour.blue(), 52 if enabled else 24)
+        fill = QgsSimpleFillSymbolLayer(rgba)
+        fill.setStrokeStyle(Qt.PenStyle.NoPen)      # the edge is its own layer
+
+        # Stroke-only fill layers: a QgsFillSymbol holds fill layers, so an outline
+        # is a fill layer with no brush rather than a line layer.
+        casing = QgsSimpleFillSymbolLayer(QColor(0, 0, 0, 0))
+        casing.setBrushStyle(Qt.BrushStyle.NoBrush)
+        casing.setStrokeColor(QColor(255, 255, 255, 220))
+        casing.setStrokeWidth(1.6)                  # millimetres
+        casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        edge = QgsSimpleFillSymbolLayer(QColor(0, 0, 0, 0))
+        edge.setBrushStyle(Qt.BrushStyle.NoBrush)
+        edge.setStrokeColor(colour)
+        edge.setStrokeWidth(0.7 if enabled else 0.5)
+        edge.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
         if not enabled:
-            fl.setStrokeStyle(Qt.PenStyle.DashLine)
-        return QgsFillSymbol([fl])
+            edge.setStrokeStyle(Qt.PenStyle.DashLine)
+
+        symbol = QgsFillSymbol([fill])
+        symbol.appendSymbolLayer(casing)
+        symbol.appendSymbolLayer(edge)
+        return symbol
     except Exception:
         return QgsFillSymbol.createSimple(
             {"style": "no", "outline_color": colour.name(), "outline_width": str(main_w)}
         )
 
 
+def _clamped(layer, min_mm):
+    """Give a metres-in-map-units width a minimum on-screen size."""
+    from qgis.core import QgsMapUnitScale
+    try:
+        scale = QgsMapUnitScale()
+        scale.minSizeMMEnabled = True
+        scale.minSizeMM = min_mm
+        layer.setWidthMapUnitScale(scale)
+    except Exception:
+        pass
+    return layer
+
+
 def earthwork_line_symbol(key, colour, enabled, main_w):
     try:
         layers = []
+
+        # --- casing: white outline, legibility only (see CASING_* above) ------
+        casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
+        casing.setWidth(main_w + CASING_ADD_M)     # static fallback, metres
+        casing.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+        casing.setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeWidth,
+            QgsProperty.fromExpression(CASING_EXPR),
+        )
+        casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        _clamped(casing, CASING_MIN_MM)
+        layers.append(casing)
+
+        # --- band: the real ground width, always -----------------------------
+        # Disabled features keep their true width too. "Off" is a colour
+        # statement; shrinking the band would make it a dimensional lie, and a
+        # disabled earthwork is still that many metres wide.
+        band = QgsSimpleLineSymbolLayer(colour)
+        band.setWidth(main_w)
+        band.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+        band.setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeWidth,
+            QgsProperty.fromExpression(BAND_EXPR),
+        )
+        band.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        band.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        _clamped(band, BAND_MIN_MM)
+        layers.append(band)
+
+        # --- signature: millimetres, so it survives zoom ----------------------
         if enabled:
-            # Casing (white underlay) scales with the real width so it always
-            # wraps the coloured band; +0.6 m total ≈ 0.3 m of white each side.
-            casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
-            casing.setWidth(main_w + 0.9)   # fallback only if width_m is NULL/0
-            casing.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
-            casing.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyStrokeWidth,
-                QgsProperty.fromExpression('"width_m" + 0.6'),
-            )
-            casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-            casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            layers.append(casing)
-
-        # Main line: when enabled, its width is the earthwork's real ground
-        # width (data-defined from the width_m attribute, in map metres) so the
-        # band reads as the true dimension and scales with zoom. Disabled stays
-        # a thin greyed mm dashed line — an "inactive" cue, not a true-scale band.
-        main = QgsSimpleLineSymbolLayer(colour)
-        main.setWidth(main_w if enabled else max(0.4, main_w * 0.6))
-        main.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-        main.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        if enabled:
-            main.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
-            main.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyStrokeWidth,
-                QgsProperty.fromField("width_m"),
-            )
-        # Diversion keeps a solid base line — the flow-arrow ribbon below carries
-        # the direction signal. Disabled + berm read as dashed.
-        if not enabled or key == "berm":
-            main.setPenStyle(Qt.PenStyle.DashLine)
-        layers.append(main)
-
-        if enabled and key == "diversion":
-            # Flow-direction ribbon on top of the real-width base line — a
-            # fixed-mm decorative accent (QgsArrowSymbolLayer follows the drawn
-            # line, so direction is unambiguous). Skipped if unavailable.
-            arrow = arrow_line_layer(colour, main_w)
-            if arrow is not None:
-                layers.append(arrow)
-
-        if enabled and key == "dam":
-            # Embankment/barrier look: short white dashes across the wall
-            # (marker-free, so it always renders).
-            hatch = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
-            hatch.setWidth(max(0.6, main_w * 0.55))
-            hatch.setPenCapStyle(Qt.PenCapStyle.FlatCap)
-            try:
-                hatch.setUseCustomDashPattern(True)
-                hatch.setCustomDashVector([1.4, 2.6])  # dash, gap (mm)
-            except Exception:
-                hatch.setPenStyle(Qt.PenStyle.DotLine)
-            layers.append(hatch)
-
-        if enabled:
-            # Thin fixed-mm centreline so the feature stays visible when the
-            # real-width band is sub-pixel at low zoom; it disappears into the
-            # band once zoomed in.
-            pin = QgsSimpleLineSymbolLayer(colour)
-            pin.setWidth(0.5)   # millimetres — constant on screen
-            pin.setPenCapStyle(Qt.PenCapStyle.RoundCap)
-            pin.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            layers.append(pin)
+            sig, interval_mm, size_mm = signature_for(key)
+            if sig != SIG_NONE:
+                marker = _signature_layer(sig, colour, interval_mm, size_mm)
+                if marker is not None:
+                    layers.append(marker)
+        else:
+            # The one dash in the grammar, and it means exactly one thing: off.
+            # It rides on a millimetre layer, never on the metres band — Qt scales
+            # dash length with pen width, so a dash on the band is ground-
+            # referenced and dissolves into detached capsules as you zoom.
+            off = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 210))
+            off.setWidth(0.9)                     # millimetres
+            off.setPenStyle(Qt.PenStyle.DashLine)
+            off.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+            layers.append(off)
 
         return QgsLineSymbol(layers)
     except Exception:
@@ -311,27 +387,88 @@ def earthwork_line_symbol(key, colour, enabled, main_w):
         )
 
 
-def arrow_line_layer(colour, main_w):
-    """Flow-direction ribbon along a line — repeated arrowheads pointing in the
-    drawn (downhill) direction, via QgsArrowSymbolLayer. Returns None on failure."""
-    from qgis.core import QgsArrowSymbolLayer
+def _signature_layer(sig, colour, interval_mm, size_mm):
+    """The per-type mark that rides on top of the band, in millimetres.
+
+    Replaces QgsArrowSymbolLayer outright rather than repairing it. That class was
+    being driven through setArrowHeadLength/setArrowHeadThickness, which do not
+    exist on it (the real API is setHeadLength/setHeadThickness) — hasattr-guarded,
+    so the calls silently no-opped and every arrowhead stayed at the 1.5 mm
+    default. It also defaults isCurved=True, bowing the ribbon off the alignment,
+    and its sub-symbol was the same colour as the band underneath it. Repairing
+    the method names would have fixed one of those three.
+
+    A marker line placed at a millimetre interval has none of those problems and
+    gives a constant on-screen cadence for free. Returns None on failure, so a
+    missing API degrades to a plain band rather than breaking the layer.
+    """
+    from qgis.core import (
+        QgsHashedLineSymbolLayer,
+        QgsMarkerLineSymbolLayer,
+        QgsMarkerSymbol,
+    )
     try:
-        arrow = QgsArrowSymbolLayer()
-        shaft = max(0.7, main_w * 0.55)
-        for name, val in (
-            ("setArrowWidth", shaft),
-            ("setArrowStartWidth", shaft),
-            ("setArrowHeadLength", 3.4),
-            ("setArrowHeadThickness", 3.4),
-        ):
-            if hasattr(arrow, name):
-                getattr(arrow, name)(val)
-        if hasattr(arrow, "setIsRepeated"):
-            arrow.setIsRepeated(True)   # multiple arrowheads down the line
-        fill = QgsFillSymbol.createSimple(
-            {"color": colour.name(), "outline_style": "no"}
-        )
-        arrow.setSubSymbol(fill)
-        return arrow
+        if sig in (SIG_TICKS, SIG_CHEVRON):
+            # Hachures, the conventional embankment mark. Dam ticks straddle the
+            # crest; berm ticks are offset so they fall on one side only, which is
+            # what distinguishes "barrier" from "barrier with a protected side".
+            #
+            # Berms deliberately do NOT get a marker sitting on the band: white
+            # markers along a green band read as a dashed line, and dashed already
+            # means disabled. One cue, one meaning.
+            hashed = QgsHashedLineSymbolLayer()
+            _set_interval(hashed, interval_mm)
+            hashed.setHashLength(size_mm)
+            hashed.setHashLengthUnit(QgsUnitTypes.RenderMillimeters)
+            hashed.setHashAngle(90)          # across the crest, not along it
+            if sig == SIG_CHEVRON:
+                hashed.setOffset(size_mm / 2.0)
+                hashed.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+            sub = QgsLineSymbol.createSimple({
+                "color": "255,255,255,235", "width": "0.4",
+                "capstyle": "flat",
+            })
+            hashed.setSubSymbol(sub)
+            hashed.setAverageAngleLength(4.0)
+            return hashed
+
+        marker_line = QgsMarkerLineSymbolLayer()
+        _set_interval(marker_line, interval_mm)
+        marker_line.setRotateSymbols(True)
+        # White fill with a coloured edge: an orange arrow on an orange band is
+        # invisible, which is what the old ribbon did.
+        sub = QgsMarkerSymbol.createSimple({
+            "name": "filled_arrowhead", "size": str(size_mm),
+            "color": "255,255,255,235",
+            "outline_color": colour.name(), "outline_width": "0.3",
+            "angle": "0",
+        })
+        marker_line.setSubSymbol(sub)
+        return marker_line
     except Exception:
         return None
+
+
+def flow_arrow_layer(colour, size_mm=2.6, interval_mm=8.0):
+    """A repeating flow-direction arrow ribbon, in millimetres.
+
+    The one arrow idiom in the plugin: earthwork signatures and overflow
+    connections use the same mechanism, so direction always reads the same way.
+    """
+    return _signature_layer(SIG_ARROW, colour, interval_mm, size_mm)
+
+
+def _set_interval(layer, interval_mm):
+    """Interval placement, across the 3.22 → 3.40 enum rename."""
+    from qgis.core import Qgis, QgsTemplatedLineSymbolLayerBase
+    layer.setInterval(interval_mm)
+    layer.setIntervalUnit(QgsUnitTypes.RenderMillimeters)
+    placement = getattr(
+        getattr(Qgis, "MarkerLinePlacement", None), "Interval", None
+    )
+    if placement is None:
+        placement = QgsTemplatedLineSymbolLayerBase.Interval
+    if hasattr(layer, "setPlacements"):
+        layer.setPlacements(placement)
+    else:
+        layer.setPlacement(placement)

@@ -329,6 +329,7 @@ class EarthworksController(G.LayerTreeMixin):
 
             self.place(layer, G.DRAWN)
             self._state.spillway_layer_id = layer.id()
+            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — spillway layer error: {exc}")
 
@@ -2077,6 +2078,7 @@ class EarthworksController(G.LayerTreeMixin):
 
             self.place(layer, G.DRAWN)
             self._state.stress_points_layer_id = layer.id()
+            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — stress points layer error: {exc}")
 
@@ -2637,13 +2639,14 @@ class EarthworksController(G.LayerTreeMixin):
                 QgsProperty.fromExpression(
                     'CASE WHEN "is_user_link" = 1 THEN \'solid\' ELSE \'dash\' END'),
             )
-            arrow = S.arrow_line_layer(QColor(20, 90, 160, 220), 1.6)
+            arrow = S.flow_arrow_layer(QColor(20, 90, 160, 220))
             if arrow is not None:
                 symbol.appendSymbolLayer(arrow)
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
             self.place(layer, G.DRAWN)
             self._state.connections_layer_id = layer.id()
+            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — connections layer error: {exc}")
 
@@ -2839,11 +2842,13 @@ class EarthworksController(G.LayerTreeMixin):
             layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
             layer.setLabelsEnabled(True)
 
-            self._project.instance().addMapLayer(layer, False)
-            node = self._state.ew_group.addLayer(layer)
-            if node is not None:
-                node.setExpanded(False)
+            # Through place(), not addMapLayer + addLayer by hand — CLAUDE.md's
+            # rule, and this was the one spot in the controller sidestepping it.
+            # Same resulting tree position; the restack below owns ordering.
+            self.place(layer, G.DRAWN)
             self._state.ew_layers[ew_type] = layer
+
+        self.restack(S.DRAW_ORDER, G.DRAWN)
 
     # ---------------------------------------------------------------- Earthwork symbology
 
