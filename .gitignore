@@ -35,5 +35,9 @@ plugin/plugin/
 tests_qgis/_shots/
 tests_qgis/_shots_baseline/
 
-# GDAL statistics sidecars — regenerated whenever a raster is read
+# GDAL statistics sidecars ï¿½ regenerated whenever a raster is read
 *.aux.xml
+
+# QGIS writes a style database beside whatever profile it boots with; the check
+# runner boots one per module, so these appear wherever the tests were run from.
+symbology-style.db
