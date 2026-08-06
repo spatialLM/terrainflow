@@ -449,6 +449,75 @@ def _signature_layer(sig, colour, interval_mm, size_mm):
         return None
 
 
+def spillway_symbol():
+    """A spillway drawn as the weir it is: a crest bar at the built width, lying
+    square across the feature, with a chevron showing which way water goes.
+
+    The bar is in map metres, so a 0.5 m sill and a 6 m emergency weir stop
+    drawing identically — the built width was previously carried only as label
+    text and had no geometric expression at all. It is clamped at both ends: a
+    narrow weir must stay findable when zoomed out, and a wide one must not
+    swamp the feature it notches.
+
+    The chevron stays in millimetres. Direction is identity, not dimension.
+    """
+    from qgis.core import (
+        Qgis,
+        QgsMapUnitScale,
+        QgsMarkerLineSymbolLayer,
+        QgsMarkerSymbol,
+    )
+
+    kind_colour = "CASE WHEN \"kind\" = 'inflow' THEN '#2e7d55' ELSE '#1273b5' END"
+
+    casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
+    casing.setWidth(1.6)                       # millimetres
+    casing.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+
+    bar = QgsSimpleLineSymbolLayer(QColor("#1273b5"))
+    bar.setWidth(0.9)
+    bar.setPenCapStyle(Qt.PenCapStyle.FlatCap)
+    bar.setDataDefinedProperty(
+        QgsSymbolLayer.PropertyStrokeColor, QgsProperty.fromExpression(kind_colour))
+    try:
+        scale = QgsMapUnitScale()
+        scale.minSizeMMEnabled = True
+        scale.minSizeMM = 0.9
+        scale.maxSizeMMEnabled = True
+        scale.maxSizeMM = 2.4
+        bar.setWidthMapUnitScale(scale)
+    except Exception:
+        pass
+
+    symbol = QgsLineSymbol([casing, bar])
+
+    # Chevron at the middle of the bar, turned to face across it: out of the
+    # feature for an outflow, into it for an inflow.
+    try:
+        chevron = QgsMarkerLineSymbolLayer()
+        placement = getattr(
+            getattr(Qgis, "MarkerLinePlacement", None), "CentralPoint", None)
+        if placement is not None and hasattr(chevron, "setPlacements"):
+            chevron.setPlacements(placement)
+        chevron.setRotateSymbols(True)
+        sub = QgsMarkerSymbol.createSimple({
+            "name": "filled_arrowhead", "size": "3.2",
+            "color": "#1273b5",
+            "outline_color": "#ffffff", "outline_width": "0.4",
+        })
+        sub.symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.PropertyFillColor, QgsProperty.fromExpression(kind_colour))
+        sub.symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.PropertyAngle,
+            QgsProperty.fromExpression(
+                "CASE WHEN \"kind\" = 'inflow' THEN 180 ELSE 0 END"))
+        chevron.setSubSymbol(sub)
+        symbol.appendSymbolLayer(chevron)
+    except Exception:
+        pass
+    return symbol
+
+
 def flow_arrow_layer(colour, size_mm=2.6, interval_mm=8.0):
     """A repeating flow-direction arrow ribbon, in millimetres.
 

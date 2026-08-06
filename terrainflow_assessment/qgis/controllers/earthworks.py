@@ -14,6 +14,7 @@ from qgis.core import (
     QgsFeature,
     QgsField,
     QgsGeometry,
+    QgsPointXY,
     QgsProperty,
     QgsRasterLayer,
     QgsRasterShader,
@@ -22,6 +23,7 @@ from qgis.core import (
     QgsSymbolLayer,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
+    QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QMetaType, Qt
 from qgis.PyQt.QtGui import QColor
@@ -186,10 +188,16 @@ class EarthworksController(G.LayerTreeMixin):
         from terrainflow_assessment.map_tools.place_point_tool import PlacePointTool
 
         kind = "inflow" if kind == "inflow" else "outflow"
-        tool = PlacePointTool(self._canvas, snap_raster_path=self._state.dem_path)
+        tool = PlacePointTool(
+            self._canvas,
+            snap_raster_path=self._state.dem_path,
+            constrain_to=self._spillway_constraint(ew),
+        )
         tool.point_placed.connect(
             lambda pt, elev, ew_id=ew.id, k=kind:
                 self._on_spillway_placed(ew_id, pt, elev, kind=k))
+        tool.rejected.connect(
+            lambda dist, name=ew.name, k=kind: self._on_spillway_rejected(dist, name, k))
         tool.cancelled.connect(self._on_draw_cancelled)
         self._canvas.setMapTool(tool)
         prompt = ("Click where water ENTERS {name} from upslope."
@@ -198,6 +206,81 @@ class EarthworksController(G.LayerTreeMixin):
         self._iface.messageBar().pushInfo(
             "TerrainFlow Assessment",
             prompt.format(name=ew.name) + " Esc to cancel.",
+        )
+
+    # Beyond this, a recorded point is not describing a place on the feature —
+    # it predates constrained placement, or the feature has since been reshaped
+    # somewhere else entirely.
+    _SILL_ORPHAN_TOLERANCE_M = 5.0
+
+    def _spillway_sill(self, ew, point_geom, width_m):
+        """The crest bar for a spillway: a segment of the built width, lying
+        square across the feature at the recorded point.
+
+        Returns ``(QgsGeometry, bearing_rad)``, or ``None`` when the point is not
+        on the feature — which is a statement worth making rather than papering
+        over, since it means the crest was sized from the wrong ground.
+        """
+        from terrainflow_assessment.modules.plan_geometry import perpendicular_sill
+
+        target = self._spillway_constraint(ew)
+        if target is None:
+            return None
+        try:
+            pt = point_geom.asPoint()
+            distance_sq, closest, after, _side = target.closestSegmentWithContext(pt)
+            if closest is None:
+                return None
+            if float(distance_sq) ** 0.5 > self._SILL_ORPHAN_TOLERANCE_M:
+                return None
+
+            polyline = target.asPolyline()
+            if not polyline:
+                parts = target.asMultiPolyline()
+                polyline = parts[0] if parts else []
+            if len(polyline) < 2:
+                return None
+
+            # closestSegmentWithContext reports the vertex *after* the segment.
+            result = perpendicular_sill(
+                polyline, max(0, int(after) - 1),
+                (closest.x(), closest.y()), width_m,
+            )
+            if result is None:
+                return None
+            (x1, y1), (x2, y2), bearing = result
+            geom = QgsGeometry.fromPolylineXY(
+                [QgsPointXY(x1, y1), QgsPointXY(x2, y2)])
+            return geom, bearing
+        except Exception:
+            return None
+
+    @staticmethod
+    def _spillway_constraint(ew):
+        """The geometry a spillway for *ew* must sit on.
+
+        For a basin that is the rim, not the floor: a spillway is a notch in the
+        edge the water leaves over, and a point in the middle of the polygon is
+        not a place you can build one.
+        """
+        geom = getattr(ew, "geometry", None)
+        if geom is None or geom.isEmpty():
+            return None
+        try:
+            if geom.type() == QgsWkbTypes.PolygonGeometry:
+                boundary = QgsGeometry(geom.constGet().boundary())
+                return boundary if not boundary.isEmpty() else geom
+        except Exception:
+            pass
+        return geom
+
+    def _on_spillway_rejected(self, distance_m, name, kind):
+        """Refuse an off-feature click, and say so in the words the ask used."""
+        label = "Inflow" if kind == "inflow" else "Outflow"
+        self._iface.messageBar().pushWarning(
+            "TerrainFlow Assessment",
+            f"{label} spillway must be placed on the feature selected — {name}. "
+            f"That click was {distance_m:.1f} m away. Click on the drawn feature.",
         )
 
     def place_spillway_for(self, index, kind="outflow"):
@@ -259,10 +342,8 @@ class EarthworksController(G.LayerTreeMixin):
         if not placed:
             return
         try:
-            from qgis.core import QgsMarkerSymbol
-
             crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
-            layer = QgsVectorLayer(f"Point?crs={crs}", "Spillways", "memory")
+            layer = QgsVectorLayer(f"LineString?crs={crs}", "Spillways", "memory")
             pr = layer.dataProvider()
             pr.addAttributes([
                 QgsField("name", QMetaType.QString),
@@ -270,16 +351,30 @@ class EarthworksController(G.LayerTreeMixin):
                 QgsField("crest_m", QMetaType.Double),
                 QgsField("width_m", QMetaType.Double),
                 QgsField("kind", QMetaType.QString),
+                QgsField("bearing", QMetaType.Double),
             ])
             layer.updateFields()
 
             feats = []
             for ew, sp, kind in placed:
-                geom = QgsGeometry.fromWkt(sp.point_wkt)
-                if geom is None or geom.isEmpty():
+                point = QgsGeometry.fromWkt(sp.point_wkt)
+                if point is None or point.isEmpty():
                     continue
                 crest = sp.crest_elevation
                 width = sp.width_m or 0.0
+                sill = self._spillway_sill(ew, point, width)
+                if sill is None:
+                    # The recorded point is nowhere near its feature — an older
+                    # design placed before placement was constrained. Drawing a
+                    # crest bar across unrelated ground would assert a structure
+                    # that does not exist, so draw nothing and say why.
+                    self._iface.messageBar().pushWarning(
+                        "TerrainFlow Assessment",
+                        f"{ew.name}'s {kind} spillway is not on the feature and was "
+                        "not drawn. Place it again to fix it.",
+                    )
+                    continue
+                geom, bearing = sill
                 # The parent earthwork now carries its own name label, so repeating
                 # it here just stacks two labels on the same spot (three, where an
                 # inflow and an outflow sit close together).
@@ -293,6 +388,7 @@ class EarthworksController(G.LayerTreeMixin):
                 f.setAttributes([
                     ew.name, " · ".join(bits),
                     float(crest) if crest is not None else None, float(width), kind,
+                    float(bearing),
                 ])
                 feats.append(f)
             if not feats:
@@ -300,23 +396,7 @@ class EarthworksController(G.LayerTreeMixin):
             pr.addFeatures(feats)
             layer.updateExtents()
 
-            # An outflow points down (water leaving), an inflow points up (water
-            # arriving) — so the two read apart at a glance without the label.
-            symbol = QgsMarkerSymbol.createSimple({
-                "name": "triangle", "size": "4.0",
-                "color": "#1273b5", "outline_color": "#ffffff",
-                "outline_width": "0.4",
-            })
-            sl = symbol.symbolLayer(0)
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyFillColor,
-                QgsProperty.fromExpression(
-                    "CASE WHEN \"kind\" = 'inflow' THEN '#2e7d55' ELSE '#1273b5' END"))
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyAngle,
-                QgsProperty.fromExpression(
-                    "CASE WHEN \"kind\" = 'inflow' THEN 0 ELSE 180 END"))
-            layer.renderer().setSymbol(symbol)
+            layer.renderer().setSymbol(S.spillway_symbol())
 
             settings = S.point_label_settings(
                 "label",
@@ -790,11 +870,44 @@ class EarthworksController(G.LayerTreeMixin):
                 bottom_width=getattr(ew, "bottom_width_m", None),
                 batter_run=getattr(ew, "batter_run_m", None),
             )
+        self._resnap_spillways(ew)
         self._panel.update_earthwork_in_list(idx, ew.summary())
         self._refresh_ew_layer()
+        self._refresh_spillway_layer()
         self.recompute_catchments()
         self._recompute_live_assessment()
         self._mark_design_edit()
+
+    def _resnap_spillways(self, ew):
+        """Keep a spillway on its feature after the feature has been reshaped.
+
+        Dragging a vertex moves the alignment out from under any spillway on it,
+        and for a diversion drain _orient_downhill can reverse the vertex order —
+        which flips the local tangent, and with it the sill's perpendicular and
+        the chevron's direction. Neither shows up until someone looks closely at
+        a design they have already signed off.
+
+        Only the point is moved, and only onto the nearest place on the new
+        alignment; crest, width and freeboard are design decisions and stay put.
+        """
+        target = self._spillway_constraint(ew)
+        if target is None:
+            return
+        for attr in ("spillway", "inflow_spillway"):
+            sp = getattr(ew, attr, None)
+            if sp is None or not sp.point_wkt:
+                continue
+            try:
+                geom = QgsGeometry.fromWkt(sp.point_wkt)
+                if geom is None or geom.isEmpty():
+                    continue
+                _dist_sq, closest, _after, _side = \
+                    target.closestSegmentWithContext(geom.asPoint())
+                if closest is not None:
+                    sp.point_wkt = QgsGeometry.fromPointXY(
+                        QgsPointXY(closest)).asWkt()
+            except Exception:
+                continue
 
     # ---------------------------------------------------------------- Verified-vs-design tracking
 

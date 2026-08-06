@@ -503,6 +503,194 @@ def check_drawn_group_sits_above_loose_design_layers(dem_path):
             )
 
 
+# ---------------------------------------------------------------- spillways
+
+def _swale_and_tool(h, kind="outflow"):
+    """A swale, and the constrained place-point tool armed for it."""
+    ew = _one_swale(h, width_m=2.0)
+    h.plugin._earthworks.activate_place_spillway(kind=kind, index=0)
+    return ew, h.canvas.mapTool()
+
+
+def check_spillway_off_feature_is_refused(dem_path):
+    """A click nowhere near the feature must be refused, and say so.
+
+    This is not a tidiness rule. _on_spillway_placed samples the DEM at the point
+    it is given and binds the crest to it, so an off-feature click sizes the weir
+    from unrelated ground — the freeboard, head and required width all descend
+    from a hillside the water never reaches. The field report that opened this
+    work shows exactly that: an outflow for Swale 1 sitting out on its own.
+    """
+    from qgis.core import QgsPointXY
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.prepare_canvas_for_input()
+        ew, tool = _swale_and_tool(h)
+        assert tool is not None, "no map tool was armed"
+
+        far = ew.geometry.interpolate(ew.geometry.length() / 2).asPoint()
+        off = QgsPointXY(far.x(), far.y() + 120.0)      # 120 m off the alignment
+        tool.canvasPressEvent(_press_at(h, off))
+
+        if getattr(ew, "spillway", None) is not None:
+            raise AssertionError("an off-feature click was accepted")
+        if not any("must be placed on the feature" in str(w) for w in h.bar.warnings):
+            raise AssertionError(
+                f"no warning naming the rule — warnings were {h.bar.warnings}")
+        if h.canvas.mapTool() is not tool:
+            raise AssertionError(
+                "the tool disarmed after a mis-click; a near miss should cost one "
+                "more click, not a trip back through the menu")
+
+
+def check_spillway_near_feature_snaps_onto_it(dem_path):
+    """A near click is snapped onto the alignment, and the crest is read there.
+
+    Sampling at the snapped point rather than the raw click is the correctness
+    half of the fix — otherwise the recorded location and the elevation behind
+    it describe two different places.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.prepare_canvas_for_input()
+        ew, tool = _swale_and_tool(h)
+
+        on = ew.geometry.interpolate(ew.geometry.length() / 2).asPoint()
+        near = QgsPointXY(on.x(), on.y() + h.canvas.mapUnitsPerPixel() * 3)
+        tool.canvasPressEvent(_press_at(h, near))
+
+        sp = getattr(ew, "spillway", None)
+        if sp is None or not sp.point_wkt:
+            raise AssertionError("a click 3 px off the feature was refused")
+
+        placed = QgsGeometry.fromWkt(sp.point_wkt)
+        if ew.geometry.distance(placed) > 0.01:
+            raise AssertionError(
+                f"the recorded point is {ew.geometry.distance(placed):.3f} m off the "
+                "feature — it was stored unsnapped"
+            )
+
+
+def check_spillway_sill_is_drawn_at_the_built_width(dem_path):
+    """The crest is drawn as a bar of the built width, square across the feature.
+
+    Before this, Spillway.width_m existed only as label text: a 0.5 m sill and a
+    6 m emergency weir drew as the same 4 mm triangle at every scale.
+    """
+    import math
+
+    from qgis.core import QgsProject, QgsVectorLayer
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = _one_swale(h, width_m=2.0)
+        mid = ew.geometry.interpolate(ew.geometry.length() / 2).asPoint()
+
+        for width in (0.8, 6.0):
+            ew.spillway = None
+            h.plugin._earthworks._on_spillway_placed(ew.id, mid, 12.0, kind="outflow")
+            ew.spillway.width_m = width
+            h.plugin._earthworks._refresh_spillway_layer()
+            h.assert_no_errors(f"spillway at {width} m")
+
+            layer = next(
+                (lyr for lyr in QgsProject.instance().mapLayers().values()
+                 if isinstance(lyr, QgsVectorLayer) and lyr.name() == "Spillways"), None)
+            assert layer is not None, "no Spillways layer"
+            feat = next(layer.getFeatures(), None)
+            assert feat is not None, "the Spillways layer is empty"
+
+            geom = feat.geometry()
+            if geom.type() != 1:                     # LineGeometry
+                raise AssertionError("the spillway is not drawn as a line")
+            if abs(geom.length() - width) > width * 0.02:
+                raise AssertionError(
+                    f"sill is {geom.length():.2f} m for a {width} m weir")
+
+            pts = geom.asPolyline()
+            sill = math.atan2(pts[1].y() - pts[0].y(), pts[1].x() - pts[0].x())
+            ew_pts = ew.geometry.asPolyline()
+            align = math.atan2(ew_pts[1].y() - ew_pts[0].y(),
+                               ew_pts[1].x() - ew_pts[0].x())
+            off = abs((sill - align) % math.pi - math.pi / 2)
+            if off > math.radians(5):
+                raise AssertionError(
+                    f"sill is {math.degrees(off):.1f}° off square to the feature")
+
+
+def check_basin_spillway_must_sit_on_the_rim(dem_path):
+    """A spillway inside a basin's footprint is refused.
+
+    A spillway is a notch in the rim water leaves over. A point in the middle of
+    the polygon is not somewhere you can build one, so the constraint is the
+    boundary rather than the fill.
+    """
+    from qgis.core import QgsPointXY
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.prepare_canvas_for_input()
+        ew = h.add_earthwork("basin", geometry=_basin_polygon(h, side=80))
+        h.plugin._earthworks._refresh_ew_layer()
+        h.plugin._earthworks.activate_place_spillway(kind="outflow", index=0)
+        tool = h.canvas.mapTool()
+        assert tool is not None, "no map tool was armed for the basin"
+
+        centre = ew.geometry.centroid().asPoint()
+        tool.canvasPressEvent(_press_at(h, QgsPointXY(centre)))
+
+        if getattr(ew, "spillway", None) is not None:
+            raise AssertionError(
+                "a spillway was accepted in the middle of the basin floor")
+
+
+def check_reshape_keeps_the_spillway_on_its_feature(dem_path):
+    """Dragging a vertex must not leave the spillway floating.
+
+    The alignment moves out from under the spillway, and for a diversion drain
+    _orient_downhill can reverse the vertex order — flipping the sill's
+    perpendicular and the chevron's direction. Nothing about that is visible
+    until someone inspects a design they have already signed off.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = _one_swale(h, width_m=2.0)
+        mid = ew.geometry.interpolate(ew.geometry.length() / 2).asPoint()
+        h.plugin._earthworks._on_spillway_placed(ew.id, mid, 12.0, kind="outflow")
+        assert ew.spillway is not None and ew.spillway.point_wkt
+
+        pts = ew.geometry.asPolyline()
+        moved = QgsGeometry.fromPolylineXY(
+            [QgsPointXY(p.x(), p.y() + 60.0) for p in pts])
+        h.plugin._earthworks._on_vertex_edit_finished(0, moved)
+        h.assert_no_errors("reshape with a spillway attached")
+
+        placed = QgsGeometry.fromWkt(ew.spillway.point_wkt)
+        gap = ew.geometry.distance(placed)
+        if gap > 0.01:
+            raise AssertionError(
+                f"after reshaping, the spillway sits {gap:.1f} m off its feature")
+
+
+def _press_at(h, point):
+    """A synthetic left-click at a map coordinate."""
+    from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+    from qgis.PyQt.QtGui import QMouseEvent
+
+    pixel = h.canvas.getCoordinateTransform().transform(point)
+    return QMouseEvent(
+        QEvent.MouseButtonPress,
+        QPoint(int(pixel.x()), int(pixel.y())),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
 def check_point_labels_have_a_halo(dem_path):
     """Spillway and stress-point text must carry a buffer.
 
