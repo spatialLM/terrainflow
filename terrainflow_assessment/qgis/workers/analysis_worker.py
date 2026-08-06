@@ -188,8 +188,12 @@ class AnalysisWorker(QThread):
             except Exception:
                 pass
 
-        # Per-area outflow: sum the boundary crossings for each area polygon so the
-        # user sees how much water leaves the site / analysis / earthworks areas.
+        # Per-area outflow, reported as two distinct figures because they answer two
+        # different questions. ``volume_m3``/``flow_ls`` sum only the crossings drawn on
+        # the map, so they move when the user changes "Show exits above (L/s)";
+        # ``total_volume_m3``/``total_flow_ls`` measure the whole flux across the polygon
+        # and are independent of that threshold. Conflating them made the readout look
+        # like a site total when it was only ever the sum of the visible markers.
         area_outflow = {}
         for key, path in (("site", self.boundary_path),
                           ("analysis", self.analysis_area_path),
@@ -201,13 +205,22 @@ class AnalysisWorker(QThread):
                     path, self.exit_flow_ls, runoff_mm, self.duration_hours,
                     volume_raster=exit_vol,
                 )
-                area_outflow[key] = {
+                entry = {
                     "volume_m3": round(sum(p["volume_m3"] for p in pts), 1),
                     "flow_ls": round(sum(p["flow_ls"] for p in pts), 2),
                     "n_exits": len(pts),
                 }
             except Exception:
+                continue
+            try:
+                total = fa.boundary_outflow_total(
+                    path, runoff_mm, self.duration_hours, volume_raster=exit_vol,
+                )
+                entry["total_volume_m3"] = total["volume_m3"]
+                entry["total_flow_ls"] = total["flow_ls"]
+            except Exception:
                 pass
+            area_outflow[key] = entry
 
         self.progress.emit(75, "Delineating catchments...")
         catchments = []
@@ -221,12 +234,19 @@ class AnalysisWorker(QThread):
 
         self.progress.emit(90, "Computing ponding...")
         ponding_path = None
+        ponded_volume_m3 = None
         try:
             from terrainflow_assessment.modules.earthwork_design import DEMBurner
+            from terrainflow_assessment.modules.reporting import raster_ponding_volume
             burner = DEMBurner(self.dem_path)
             ponding = burner.get_ponding_layer(burner.original)
             ponding_path = os.path.join(self.output_dir, f"ponding_{self.label}.tif")
             burner.save(ponding, ponding_path)
+            # Clipped to the domain so the figure describes the site, not whatever else
+            # the DEM happens to cover. get_ponding_layer resamples back to native shape,
+            # so cell_area_m2 is the right multiplier even when it downsampled to compute.
+            ponded_volume_m3 = round(
+                raster_ponding_volume(np.where(domain, ponding, 0.0), cell_area_m2), 1)
         except Exception:
             pass
 
@@ -261,6 +281,7 @@ class AnalysisWorker(QThread):
             "runoff_volume_m3": (runoff_mm / 1000.0) * domain_area_m2,
             "exit_points": exit_points,
             "area_outflow": area_outflow,
+            "ponded_volume_m3": ponded_volume_m3,
             "catchments": catchments,
         })
 

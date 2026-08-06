@@ -434,15 +434,21 @@ class PluginHarness:
         return ew
 
     def sync_canvas(self, extent_layer=None):
-        """Put the project's layers on the canvas, in layer-tree order.
+        """Put the project's *checked* layers on the canvas, in layer-tree order.
 
         In live QGIS a QgsLayerTreeMapCanvasBridge does this; the harness builds a
         bare canvas, so rendering a screenshot means wiring it up explicitly.
+
+        Unchecked layers are excluded, exactly as the bridge excludes them. Taking
+        layerOrder() alone renders layers the user has switched off — and since
+        Throughflow ships unchecked precisely because it covers the whole map, that
+        put an opaque wash over every canvas screenshot and hid what was under it.
         """
         from qgis.core import QgsProject
 
         root = QgsProject.instance().layerTreeRoot()
-        layers = [lyr for lyr in root.layerOrder() if lyr is not None]
+        checked = set(root.checkedLayers())
+        layers = [lyr for lyr in root.layerOrder() if lyr is not None and lyr in checked]
         self.canvas.setLayers(layers)
 
         target = extent_layer if extent_layer is not None else self.dem_layer

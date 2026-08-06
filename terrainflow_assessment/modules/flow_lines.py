@@ -1,11 +1,10 @@
 """
-flow_lines.py — downslope flow streamlines traced from a DEM.
+flow_lines.py — the downslope slope field sampled from a DEM.
 
-Replaces the fixed grid of slope-direction arrows with smooth curved flowlines:
-seed a regular grid of start points and, from each, step in the steepest-descent
-direction (from the DEM gradient) cell by cell until the path leaves the grid,
-reaches flat/pit ground, or hits a step cap. The result reads as the path water
-would take across the slope.
+Samples a regular ground-spaced grid and reports, at each sample, the direction
+of steepest descent and how steep the ground is there. Rendered as hachures —
+short tapered strokes pointing downhill — this reads as the direction water runs
+and how hard it runs, without covering the map the way a full overlay does.
 
 Routing-agnostic — it follows the DEM surface gradient directly, so it does not
 depend on the pysheds D8/D-infinity flow-direction encoding.
@@ -33,94 +32,6 @@ def _terrain_gradient(dem, cell_w, cell_h):
     """
     gy, gx = np.gradient(np.asarray(dem, dtype="float64"), cell_h, cell_w)
     return gy, gx
-
-
-def trace_flow_lines(dem_path, seed_spacing_m=60.0, max_steps=400,
-                     min_grad=1e-4, min_length_m=None, return_slope=False):
-    """
-    Trace downslope flowlines across a DEM.
-
-    Parameters
-    ----------
-    dem_path : str — projected DEM GeoTIFF
-    seed_spacing_m : float — spacing between seed start points (m)
-    max_steps : int — maximum cells a single line may traverse
-    min_grad : float — stop when the local gradient magnitude (m/m, dimensionless)
-        falls below this (flat ground / pit)
-    min_length_m : float or None — drop lines shorter than this (default:
-        1.5 × seed_spacing_m, so only lines that actually travel are kept)
-    return_slope : bool — when True, return dicts carrying the mean ground slope
-        (degrees) along each line so the line can be coloured by steepness.
-
-    Returns
-    -------
-    return_slope False → list of shapely LineString (map coordinates)
-    return_slope True  → list of {"geometry": LineString, "mean_slope_deg": float}
-    """
-    with rasterio.open(dem_path) as src:
-        dem = src.read(1).astype("float64")
-        transform = src.transform
-        nodata = src.nodata
-    if nodata is not None:
-        dem[dem == nodata] = np.nan
-
-    rows, cols = dem.shape
-    cell_w = abs(transform.a)
-    cell_h = abs(transform.e)
-    cell_size = (cell_w + cell_h) / 2.0
-    if min_length_m is None:
-        min_length_m = 1.5 * seed_spacing_m
-
-    # Ground gradient (m per m) — direction and steepness.
-    gy, gx = _terrain_gradient(dem, cell_w, cell_h)
-
-    seed_step = max(1, int(round(seed_spacing_m / cell_size)))
-
-    def _to_xy(col, row):
-        x = transform.c + (col + 0.5) * transform.a
-        y = transform.f + (row + 0.5) * transform.e
-        return float(x), float(y)
-
-    out = []
-    for r0 in range(seed_step // 2, rows, seed_step):
-        for c0 in range(seed_step // 2, cols, seed_step):
-            if np.isnan(dem[r0, c0]):
-                continue
-            r, c = float(r0), float(c0)
-            pts = [_to_xy(c, r)]
-            slopes = []
-            for _ in range(max_steps):
-                ri, ci = int(round(r)), int(round(c))
-                if not (0 <= ri < rows and 0 <= ci < cols):
-                    break
-                if np.isnan(dem[ri, ci]):
-                    break
-                # Steepest descent = negative gradient (row, col components).
-                d_row = -gy[ri, ci]
-                d_col = -gx[ri, ci]
-                mag = (d_row ** 2 + d_col ** 2) ** 0.5
-                if not np.isfinite(mag) or mag < min_grad:
-                    break  # flat ground, a pit, or the edge of the data — flow stops
-                # mag is a dimensionless ground gradient → slope is arctan(mag).
-                slopes.append(np.degrees(np.arctan(mag)))
-                r += d_row / mag
-                c += d_col / mag
-                if not (0 <= r < rows and 0 <= c < cols):
-                    break
-                pts.append(_to_xy(c, r))
-
-            if len(pts) < 2:
-                continue
-            line = LineString(pts)
-            if line.length < min_length_m:
-                continue
-            if return_slope:
-                mean_slope = float(np.mean(slopes)) if slopes else 0.0
-                out.append({"geometry": line, "mean_slope_deg": round(mean_slope, 1)})
-            else:
-                out.append(line)
-
-    return out
 
 
 def slope_vectors(dem_path, spacing_m=50.0, min_slope_deg=0.5):
@@ -177,4 +88,47 @@ def slope_vectors(dem_path, spacing_m=50.0, min_slope_deg=0.5):
                 "angle_deg": round(bearing, 1),
                 "slope_deg": round(slope_deg, 1),
             })
+    return out
+
+
+def hachure_segments(dem_path, spacing_m=30.0, min_slope_deg=0.5,
+                     length_fraction=0.7):
+    """
+    Sample the slope field as short downhill line segments, ready to draw as hachures.
+
+    A hachure is drawn, not coloured — the stroke runs downhill and thickens with
+    steepness, so a renderer needs a *line* to taper along rather than the point a
+    rotated arrow marker sits on. Each segment starts at the sample point and runs
+    ``length_fraction × spacing_m`` in the downslope direction, so neighbouring
+    strokes stay clear of one another at any spacing.
+
+    Parameters
+    ----------
+    dem_path : str
+    spacing_m : float — ground spacing between hachures (m). Fixed distance, not a
+        cell count, so the field reads the same on a 0.5 m LiDAR grid and an 8 m DEM.
+    min_slope_deg : float — skip near-flat ground below this slope. Flat ground
+        having no hachures is the convention, not a gap in the data.
+    length_fraction : float — segment length as a fraction of ``spacing_m``.
+
+    Returns
+    -------
+    list of {"geometry": LineString, "slope_deg": float} — the LineString running
+    from the sample point downhill, in the DEM's map CRS.
+    """
+    seg_len = spacing_m * length_fraction
+    out = []
+    for v in slope_vectors(dem_path, spacing_m=spacing_m,
+                           min_slope_deg=min_slope_deg):
+        # Bearing is a compass angle (0 = north, clockwise); map dx/dy invert that.
+        theta = np.radians(v["angle_deg"])
+        dx = seg_len * np.sin(theta)
+        dy = seg_len * np.cos(theta)
+        out.append({
+            "geometry": LineString([
+                (v["x"], v["y"]),
+                (v["x"] + float(dx), v["y"] + float(dy)),
+            ]),
+            "slope_deg": v["slope_deg"],
+        })
     return out

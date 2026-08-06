@@ -1,11 +1,11 @@
-"""Tests for modules/flow_lines.trace_flow_lines."""
+"""Tests for modules/flow_lines — the sampled slope field and its hachures."""
 
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import LineString
 
-from terrainflow_assessment.modules.flow_lines import slope_vectors, trace_flow_lines
+from terrainflow_assessment.modules.flow_lines import hachure_segments, slope_vectors
 
 
 def _write_dem(path, data, cell=1.0, nodata=None):
@@ -25,64 +25,6 @@ def _write_dem(path, data, cell=1.0, nodata=None):
 def _planar_slope(n=60):
     # Elevation decreases with row → consistent downhill (toward +y/south edge).
     return np.fromfunction(lambda r, c: 100.0 - r * 1.0, (n, n)).astype("float32")
-
-
-class TestTraceFlowLines:
-    def test_sloped_dem_produces_lines(self, tmp_path):
-        path = _write_dem(tmp_path / "slope.tif", _planar_slope())
-        lines = trace_flow_lines(path, seed_spacing_m=10.0)
-        assert isinstance(lines, list)
-        assert len(lines) >= 1
-        assert all(isinstance(g, LineString) for g in lines)
-        assert all(len(g.coords) >= 2 for g in lines)
-
-    def test_flat_dem_no_lines(self, tmp_path):
-        path = _write_dem(tmp_path / "flat.tif", np.full((40, 40), 50.0))
-        assert trace_flow_lines(path, seed_spacing_m=10.0) == []
-
-    def test_min_length_filter(self, tmp_path):
-        path = _write_dem(tmp_path / "slope2.tif", _planar_slope())
-        long_only = trace_flow_lines(path, seed_spacing_m=10.0, min_length_m=1e6)
-        assert long_only == []
-
-    def test_nodata_seeds_skipped(self, tmp_path):
-        data = _planar_slope()
-        data[:10, :] = -9999.0
-        path = _write_dem(tmp_path / "nd.tif", data, nodata=-9999.0)
-        lines = trace_flow_lines(path, seed_spacing_m=10.0)
-        # Still traces from valid seeds without error.
-        assert isinstance(lines, list)
-
-    def test_max_steps_caps_length(self, tmp_path):
-        path = _write_dem(tmp_path / "slope4.tif", _planar_slope())
-        capped = trace_flow_lines(path, seed_spacing_m=10.0, max_steps=3,
-                                  min_length_m=0.0)
-        # Each line traverses at most max_steps cells → few vertices.
-        assert all(len(g.coords) <= 4 for g in capped)
-
-    def test_all_nodata_returns_empty(self, tmp_path):
-        data = np.full((30, 30), -9999.0, dtype="float32")
-        path = _write_dem(tmp_path / "allnd.tif", data, nodata=-9999.0)
-        assert trace_flow_lines(path, seed_spacing_m=10.0) == []
-
-    def test_lines_head_downhill(self, tmp_path):
-        """A traced line should end at lower elevation than it starts."""
-        path = _write_dem(tmp_path / "slope3.tif", _planar_slope())
-        lines = trace_flow_lines(path, seed_spacing_m=15.0)
-        assert lines
-        g = max(lines, key=lambda ln: ln.length)
-        # Elevation decreases with row → y decreases downhill (from_origin: y at
-        # top is largest). Descent moves toward smaller y.
-        assert g.coords[-1][1] < g.coords[0][1]
-
-    def test_return_slope_carries_mean_slope(self, tmp_path):
-        path = _write_dem(tmp_path / "slope5.tif", _planar_slope())
-        recs = trace_flow_lines(path, seed_spacing_m=15.0, return_slope=True)
-        assert recs
-        for r in recs:
-            assert isinstance(r["geometry"], LineString)
-            # 1 m drop over 1 m cell ≈ 45°.
-            assert 30.0 <= r["mean_slope_deg"] <= 50.0
 
 
 class TestSlopeVectors:
@@ -107,6 +49,11 @@ class TestSlopeVectors:
         assert isinstance(vecs, list)
         assert all(not np.isnan(v["slope_deg"]) for v in vecs)
 
+    def test_all_nodata_returns_empty(self, tmp_path):
+        data = np.full((30, 30), -9999.0, dtype="float32")
+        path = _write_dem(tmp_path / "sv_allnd.tif", data, nodata=-9999.0)
+        assert slope_vectors(path, spacing_m=10.0) == []
+
     def test_bearing_points_downhill_south(self, tmp_path):
         """Elevation falls toward +row (south) → downslope bearing ≈ 180°."""
         path = _write_dem(tmp_path / "sv_slope2.tif", _planar_slope())
@@ -117,11 +64,39 @@ class TestSlopeVectors:
         assert all(150 <= v["angle_deg"] <= 210 for v in vecs)
 
 
-class TestTraceIntoNodata:
-    def test_line_stops_at_interior_nodata(self, tmp_path):
-        # Slope downhill toward a nodata band in the lower half → lines stop there.
-        data = _planar_slope()
-        data[40:, :] = -9999.0
-        path = _write_dem(tmp_path / "interior_nd.tif", data, nodata=-9999.0)
-        lines = trace_flow_lines(path, seed_spacing_m=10.0, min_length_m=0.0)
-        assert isinstance(lines, list)
+class TestHachureSegments:
+    def test_segments_are_two_point_lines(self, tmp_path):
+        path = _write_dem(tmp_path / "h_slope.tif", _planar_slope())
+        segs = hachure_segments(path, spacing_m=10.0)
+        assert segs
+        for s in segs:
+            assert isinstance(s["geometry"], LineString)
+            assert len(s["geometry"].coords) == 2
+            assert s["slope_deg"] >= 0.5
+
+    def test_length_follows_spacing_fraction(self, tmp_path):
+        """Segment length is a fixed fraction of the ground spacing, so hachures
+        never touch their neighbours regardless of what spacing is asked for."""
+        path = _write_dem(tmp_path / "h_len.tif", _planar_slope())
+        segs = hachure_segments(path, spacing_m=10.0, length_fraction=0.7)
+        assert segs
+        assert all(abs(s["geometry"].length - 7.0) < 1e-6 for s in segs)
+
+    def test_spacing_controls_density(self, tmp_path):
+        path = _write_dem(tmp_path / "h_dens.tif", _planar_slope())
+        coarse = hachure_segments(path, spacing_m=20.0)
+        fine = hachure_segments(path, spacing_m=5.0)
+        assert len(fine) > len(coarse)
+
+    def test_segments_run_downhill(self, tmp_path):
+        """The stroke must start uphill and end downhill — the taper depends on it."""
+        path = _write_dem(tmp_path / "h_dir.tif", _planar_slope())
+        segs = hachure_segments(path, spacing_m=15.0)
+        assert segs
+        for s in segs:
+            (_, y0), (_, y1) = s["geometry"].coords
+            assert y1 < y0  # elevation falls toward smaller y on this DEM
+
+    def test_flat_dem_no_hachures(self, tmp_path):
+        path = _write_dem(tmp_path / "h_flat.tif", np.full((30, 30), 7.0))
+        assert hachure_segments(path, spacing_m=10.0) == []

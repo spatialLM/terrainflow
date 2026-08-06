@@ -388,6 +388,101 @@ class TestBoundaryExitPoints:
 
 
 # ---------------------------------------------------------------------------
+# boundary_outflow_total
+# ---------------------------------------------------------------------------
+
+class TestBoundaryOutflowTotal:
+    def test_raises_before_run(self, boundary_gpkg):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        with pytest.raises(RuntimeError, match="Run flow analysis first"):
+            fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+
+    def test_returns_both_keys(self, sloped_dem, boundary_gpkg):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        total = fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+        assert set(total) == {"volume_m3", "flow_ls"}
+        assert total["volume_m3"] > 0
+
+    def test_zero_duration_returns_zero(self, sloped_dem, boundary_gpkg):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        assert fa.boundary_outflow_total(boundary_gpkg, 10.0, 0.0) == {
+            "volume_m3": 0.0, "flow_ls": 0.0}
+
+    def test_no_polygon_returns_zero(self, sloped_dem, tmp_path):
+        from shapely.geometry import LineString
+
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        line_gdf = gpd.GeoDataFrame(
+            {"geometry": [LineString([(0, 0), (10, 10)])]}, crs="EPSG:32632")
+        line_path = str(tmp_path / "line_only.gpkg")
+        line_gdf.to_file(line_path, driver="GPKG")
+
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        assert fa.boundary_outflow_total(line_path, 10.0, 1.0)["volume_m3"] == 0.0
+
+    def test_counts_each_flow_path_once(self, sloped_dem, boundary_gpkg):
+        """Only the last inside-cell of a path contributes, not every boundary cell.
+
+        ``sloped_dem`` drops 2 m per row southward against 0.5 m laterally, so every
+        cell drains due south. ``boundary_gpkg`` covers a 21x21 block of cell centres
+        (rows 2-22, cols 2-22), so exactly the 21 cells of its bottom row drain to a
+        cell outside it. With 1 m³ on every cell the total is therefore 21 m³ — a
+        per-boundary-cell sum would instead count the whole southern edge repeatedly.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        ones = np.ones((25, 25), dtype="float64")
+        total = fa.boundary_outflow_total(
+            boundary_gpkg, 10.0, 1.0, volume_raster=ones)
+        assert total["volume_m3"] == pytest.approx(21.0)
+        # 21 m³ over one hour, in L/s.
+        assert total["flow_ls"] == pytest.approx(21.0 * 1000.0 / 3600.0, rel=1e-3)
+
+    def test_independent_of_exit_threshold(self, sloped_dem, boundary_gpkg):
+        """The total is a property of the storm; the exit sum is a display artefact."""
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        total = fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)["volume_m3"]
+
+        def exit_sum(threshold):
+            pts = fa.get_boundary_exit_points(boundary_gpkg, threshold, 10.0, 1.0)
+            return sum(p["volume_m3"] for p in pts)
+
+        assert exit_sum(0.0) > exit_sum(10 ** 9) == 0.0
+        assert fa.boundary_outflow_total(
+            boundary_gpkg, 10.0, 1.0)["volume_m3"] == total
+
+    def test_total_exceeds_thresholded_exit_sum(self, sloped_dem, boundary_gpkg):
+        """The regression this method exists for: the exit sum under-reports.
+
+        Every crossing contributes only its single peak cell, so summing the markers
+        loses the rest of the flux even with the threshold wide open.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        pts = fa.get_boundary_exit_points(boundary_gpkg, 0.0, 10.0, 1.0)
+        exit_sum = sum(p["volume_m3"] for p in pts)
+        total = fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)["volume_m3"]
+        assert total > exit_sum
+
+
+# ---------------------------------------------------------------------------
 # get_catchment_polygons + _find_boundary_outlets
 # ---------------------------------------------------------------------------
 

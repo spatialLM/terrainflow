@@ -1,6 +1,7 @@
 """Contour analysis, Processing integration, and the keypoint/keyline paths."""
 
 from _harness import PluginHarness
+from qgis.PyQt.QtCore import Qt
 
 
 def check_contour_analysis_requires_baseline(dem_path):
@@ -63,6 +64,290 @@ def check_select_top5_and_clear(dem_path):
         h.panel.clear_analysis_requested.emit()
         h.assert_no_errors("clear analysis")
         assert not h.state.contour_features, "clear_analysis left contour features behind"
+
+
+def check_contour_tick_hides_it_on_the_map(dem_path):
+    """Unticking a row must actually take that contour off the canvas.
+
+    The checkbox was decorative — nothing connected it to the layer — so this
+    asserts the rendered feature count, not just that a signal fired.
+    """
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        layer = QgsProject.instance().mapLayer(h.state.contour_layer_id)
+        assert layer is not None, "no contour layer to filter"
+        before = layer.featureCount()
+        assert before > 1, "need more than one contour to test hiding one"
+
+        rows = h.panel._contour_list
+        assert rows.count() > 1, "contour list did not populate"
+        rows.item(0).setCheckState(Qt.Unchecked)
+        h.assert_no_errors("untick a contour")
+
+        assert layer.featureCount() == before - 1, (
+            f"unticking a row left {layer.featureCount()} of {before} contours "
+            "drawn — the checkbox is not reaching the layer"
+        )
+        assert not h.state.contour_features[0].selected, (
+            "the tick did not reach the ContourFeature, so it will not scope "
+            "Select Top Swales or the gradient either"
+        )
+
+        rows.item(0).setCheckState(Qt.Checked)
+        assert layer.featureCount() == before, "re-ticking did not restore the contour"
+
+
+def check_top_swales_respects_unticked_contours(dem_path):
+    """"Best N" means best N of what is still ticked, not of everything."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        h.panel._top_n_spin.setValue(3)
+        h.panel.select_top5_contours_requested.emit()
+        h.assert_no_errors("select top swales")
+        full = [f.rank for f in h.state.top_contour_features]
+        assert len(full) == 3, f"expected 3 top swales, got {len(full)}"
+
+        # Drop the current best one and re-select: it must fall out of the answer.
+        best = h.state.contour_features[0]
+        h.panel._contour_list.item(0).setCheckState(Qt.Unchecked)
+        h.panel.select_top5_contours_requested.emit()
+        h.assert_no_errors("select top swales after untick")
+
+        picked = h.state.top_contour_features
+        assert len(picked) == 3, f"expected 3 top swales, got {len(picked)}"
+        assert all(f is not best for f in picked), (
+            "an unticked contour was still chosen as a top swale"
+        )
+
+
+def check_inflow_gradient_scopes_to_top_swales(dem_path):
+    """The gradient grades the top-N pick once one exists, not the whole site."""
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        h.panel.show_inflow_bands_requested.emit(True)
+        h.assert_no_errors("inflow gradient, unscoped")
+        unscoped = QgsProject.instance().mapLayer(h.state.inflow_bands_layer_id)
+        assert unscoped is not None, "no inflow gradient layer"
+        n_unscoped = unscoped.featureCount()
+        h.panel.show_inflow_bands_requested.emit(False)
+
+        h.panel._top_n_spin.setValue(2)
+        h.panel.select_top5_contours_requested.emit()
+        h.panel.show_inflow_bands_requested.emit(True)
+        h.assert_no_errors("inflow gradient, scoped to top swales")
+
+        scoped = QgsProject.instance().mapLayer(h.state.inflow_bands_layer_id)
+        assert scoped is not None, "no scoped inflow gradient layer"
+        assert scoped.featureCount() < n_unscoped, (
+            f"scoping to the top 2 swales still graded {scoped.featureCount()} of "
+            f"{n_unscoped} stretches — the scope is not being applied"
+        )
+
+
+def check_inflow_bands_are_legible_over_imagery(dem_path):
+    """Every inflow view must vary line *width*, opaquely, not just colour.
+
+    This is the whole legibility fix: over aerial imagery a colour step can be
+    wiped out by sunlit grass or tree shadow, so width carries the ordering and a
+    white halo separates the line from whatever is under it. A future tidy-up that
+    collapses the bands back to one width would silently undo it.
+    """
+    from qgis.core import QgsGraduatedSymbolRenderer, QgsProject
+
+    def _core(symbol):
+        """The coloured core line — last symbol layer, since a halo is inserted
+        beneath at index 0. symbol.width() would report the halo instead."""
+        return symbol.symbolLayer(symbol.symbolLayerCount() - 1)
+
+    def _band_widths(renderer, what):
+        assert isinstance(renderer, QgsGraduatedSymbolRenderer), (
+            f"{what}: expected banded rendering, got {type(renderer).__name__}"
+        )
+        widths, seen_halo = [], []
+        for rng in renderer.ranges():
+            sym = rng.symbol()
+            widths.append(_core(sym).width())
+            seen_halo.append(sym.symbolLayerCount() > 1)
+            assert _core(sym).color().alpha() == 255, (
+                f"{what}: a translucent band — that is what was illegible over "
+                "imagery; quiet bands recede by being thin, not faint"
+            )
+        return widths, seen_halo
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.panel.show_inflow_bands_requested.emit(True)
+        h.assert_no_errors("inflow gradient")
+
+        grad = QgsProject.instance().mapLayer(h.state.inflow_bands_layer_id)
+        widths, halos = _band_widths(grad.renderer(), "inflow gradient")
+        assert widths == sorted(widths), f"band widths are not ascending: {widths}"
+        assert max(widths) >= 3 * min(widths), (
+            f"band widths {widths} are too close to read apart over imagery"
+        )
+        assert all(halos), "inflow gradient bands have no white halo beneath them"
+
+        # The candidate contours draw the same lines — two renderings of one line
+        # is what made the gradient unreadable, so they step aside while it is up.
+        node = QgsProject.instance().layerTreeRoot().findLayer(h.state.contour_layer_id)
+        assert node is not None and not node.itemVisibilityChecked(), (
+            "the candidate contour layer is still drawn under the gradient"
+        )
+        h.panel.show_inflow_bands_requested.emit(False)
+        assert node.itemVisibilityChecked(), (
+            "turning the gradient off did not bring the candidate contours back"
+        )
+
+        # Same contract for the peak-inflow overlay inside the swale segments,
+        # minus the halo — the green core is its backdrop there.
+        h.panel.find_segments_requested.emit()
+        h.panel._segment_gradient_check.setChecked(True)
+        h.assert_no_errors("segment inflow overlay")
+        seg_grad = QgsProject.instance().mapLayer(h.state.segment_gradient_layer_id)
+        seg_widths, _ = _band_widths(seg_grad.renderer(), "segment overlay")
+        assert seg_widths == sorted(seg_widths), (
+            f"segment band widths are not ascending: {seg_widths}"
+        )
+        # ...and they have to fit inside the green verdict outline.
+        segs = QgsProject.instance().mapLayer(h.state.segment_layer_id)
+        green = _core(segs.renderer().symbol()).width()
+        assert max(seg_widths) < green, (
+            f"widest overlay band {max(seg_widths)} covers the {green} green outline"
+        )
+
+
+def check_inflow_scale_modes_all_band(dem_path):
+    """Every scale option produces a usable banding, including on real terrain."""
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        combo = h.panel._inflow_scale_combo
+        assert combo.itemText(0) == "Natural", (
+            "Natural should lead the scale list so it is the default the list and "
+            f"the map agree on, got {combo.itemText(0)!r}"
+        )
+        h.panel.show_inflow_bands_requested.emit(True)
+        for i in range(combo.count()):
+            combo.setCurrentIndex(i)
+            h.assert_no_errors(f"inflow scale {combo.itemText(i)}")
+            grad = QgsProject.instance().mapLayer(h.state.inflow_bands_layer_id)
+            assert grad is not None, f"{combo.itemText(i)}: no gradient layer"
+            assert grad.featureCount() > 0, f"{combo.itemText(i)}: empty gradient"
+            for rng in getattr(grad.renderer(), "ranges", list)():
+                assert rng.upperValue() >= rng.lowerValue(), (
+                    f"{combo.itemText(i)}: inverted band "
+                    f"{rng.lowerValue()}–{rng.upperValue()}"
+                )
+
+
+def check_contour_row_selection_reaches_the_map(dem_path):
+    """Clicking a row selects that contour on the map, and the reverse."""
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        layer = QgsProject.instance().mapLayer(h.state.contour_layer_id)
+        assert layer is not None, "no contour layer"
+
+        h.panel._contour_list.item(1).setSelected(True)
+        h.assert_no_errors("select a contour row")
+        selected = layer.selectedFeatures()
+        assert len(selected) == 1, (
+            f"selecting one row selected {len(selected)} map features"
+        )
+        assert int(selected[0]["cid"]) == 1, "the wrong contour was selected"
+
+        # Map → table: pick a different feature the way the Select Features tool
+        # would, and the matching row should highlight.
+        target = next(f for f in layer.getFeatures() if int(f["cid"]) == 3)
+        layer.selectByIds([target.id()])
+        rows = [item.data(Qt.UserRole)
+                for item in h.panel._contour_list.selectedItems()]
+        assert rows == [3], f"map selection highlighted rows {rows}, expected [3]"
+
+
+def check_segment_inflow_gradient(dem_path):
+    """The peak-inflow overlay draws inside the segments, keeping the outline."""
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.panel.find_segments_requested.emit()
+        h.assert_no_errors("segment analysis")
+        assert h.state.segment_features, "no segments to grade"
+
+        h.panel._segment_gradient_check.setChecked(True)
+        h.assert_no_errors("segment inflow gradient on")
+
+        grad = QgsProject.instance().mapLayer(h.state.segment_gradient_layer_id)
+        assert grad is not None, "no segment gradient layer created"
+        assert grad.featureCount() > 0, "segment gradient layer is empty"
+
+        # The green/amber outline stays — the gradient goes inside it, not over it.
+        segs = QgsProject.instance().mapLayer(h.state.segment_layer_id)
+        assert segs is not None, "the recommended segments layer was replaced"
+        assert segs.featureCount() == len(h.state.segment_features)
+
+        h.panel._segment_gradient_check.setChecked(False)
+        h.assert_no_errors("segment inflow gradient off")
+        assert h.state.segment_gradient_layer_id is None, (
+            "turning the overlay off left its layer behind"
+        )
+
+
+def check_contour_bands_are_value_based(dem_path):
+    """Candidate contours are banded by inflow value, not by rank position."""
+    from qgis.core import QgsGraduatedSymbolRenderer, QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        breaks = h.state.contour_breaks
+        assert len(breaks) >= 3, f"expected natural-breaks boundaries, got {breaks}"
+        assert breaks == sorted(breaks), f"breaks are not ascending: {breaks}"
+
+        layer = QgsProject.instance().mapLayer(h.state.contour_layer_id)
+        renderer = layer.renderer()
+        assert isinstance(renderer, QgsGraduatedSymbolRenderer), (
+            f"expected a value-graduated renderer, got {type(renderer).__name__}"
+        )
+        assert renderer.classAttribute() == "inflow_m3", (
+            f"contours are banded on {renderer.classAttribute()!r}, not the inflow value"
+        )
+        assert len(renderer.ranges()) == len(breaks) - 1
+
+        # Every contour has to fall in a band; a feature outside every range would
+        # simply not draw.
+        for feat in layer.getFeatures():
+            value = feat["inflow_m3"]
+            assert any(r.lowerValue() <= value <= r.upperValue()
+                       for r in renderer.ranges()), (
+                f"contour with inflow {value} falls outside every band {breaks}"
+            )
 
 
 def check_segment_analysis(dem_path):

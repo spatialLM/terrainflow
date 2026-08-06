@@ -327,6 +327,57 @@ before exposing any zone-painting UI, or the per-feature numbers go quietly wron
 
 ---
 
+## 10. Spillway follow-ons deferred from the review pass (2026-08-06)
+
+Four things surfaced while answering the spillway review questions and building the
+Design-stage Spillways list. Each is real; none belonged in that pass.
+
+**(a) Sample the rim from the burned DEM.** `_spillway_datums` takes `pour_point` on the
+*pre-earthwork* conditioned DEM, so a swale's companion berm is invisible to it — while
+`_burn_swale` raises the berm *before* taking its own pour point, and `calculate_capacity`
+credits it as extra section. The rim is therefore the odd one out, and understates the
+containing level for a bermed swale.
+
+Deliberately not "add the berm height to the rim": the berm is built on the downhill side
+only, so where the natural low point is at an *end* it raises nothing, and crediting it
+would claim headroom the ground may not have — the unsafe direction. There are also four
+different berm-height derivations in the codebase (declared section, excavated volume ÷
+berm cells, the capacity credit, and the dialog's call without `bottom_width`), so any
+estimate-based fix would put the crest band on a fifth basis. The honest fix is to sample
+the rim from `state.modified_dem_path` once a burn exists, which needs a story for what
+the rim means before the first burn.
+
+*Revisit trigger:* users report crest bands that feel too tight on bermed swales, or the
+burned/analytic freeboard figures are seen to disagree.
+
+**(b) Clamp a map-placed crest into its band.** `_on_spillway_placed` calls `bind_crest`
+without `band=`, so unlike the dialog path a clicked point is not held inside
+`rim − head − freeboard`. Not a safe one-liner: on a **dam** the rim is
+`ew.crest_elevation` (the wall) while the clicked elevation is sampled from ground under
+the wall, so clamping could move a crest by metres. The placement tool also samples the
+**raw** DEM (`state.dem_path`) while the rim comes from the **conditioned** one, so the
+two are not on the same surface to begin with. Fix both together or neither.
+
+**(c) Unticking the spillway group discards a placed location.**
+`ew.spillway = dlg.get_spillway()` runs unconditionally, and `get_spillway()` returns
+`None` when the group is unticked — taking `point_wkt` with it. Pre-existing and
+previously invisible; the Spillways list now makes a sited row blank out, so it will get
+reported as new. Wants a confirm-before-clear, or to preserve the location separately.
+
+**(d) An auto width is derived state and probably should not be persisted.** It now
+genuinely tracks (`_refresh_auto_spillway_widths`), but it is written during
+`_recompute_live_assessment`, which restore also runs — so opening an old project rewrites
+every auto width without `_mark_design_edit`, and the next save stores numbers the user
+never chose. Self-healing, but silent. Not persisting it at all would dissolve that, at
+the cost of a schema change and a new source for the map label's width.
+
+*Revisit trigger:* any report of a design file changing on open, or (d) alongside the next
+`Spillway` schema change.
+
+---
+
 _Last updated alongside the Design-tab correctness rework (2026-07-28): direct-catchment
 water balance, level-bottom burn, verification split into design / geometric /
-rasterisable / measured. Spillways and peak-flow sizing added 2026-07-30._
+rasterisable / measured. Spillways and peak-flow sizing added 2026-07-30; per-type
+spillway policy, the two-mode head/width model and the Design-stage Spillways review
+added 2026-08-06._

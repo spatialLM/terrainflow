@@ -12,9 +12,13 @@ calculate_capacity   — storage capacity from geometry + dimensions
 calculate_cut_volume — excavation volume (for reporting)
 calculate_fill_volume— material placed (for reporting)
 calculate_diversion_discharge — Manning's discharge for diversion drains
-calculate_spillway_width      — broad-crested weir sizing
+calculate_spillway_width      — broad-crested weir sizing (head chosen → width)
+head_for_width                — the same weir equation inverted (width built → head)
+effective_head_m              — which of those two applies, decided in one place
 Spillway             — designed overflow point (crest, head, width, location)
 spillway_datum       — crest elevations a feature can physically offer
+spillway_policy      — per-type freeboard / head / head band, from the registry
+effective_freeboard_m — the freeboard in force: stored override, else type policy
 bind_crest           — two-way crest ↔ drop-below-rim binding
 spillway_validity    — plain-language problems with a proposed spillway
 berm_height_estimate          — companion berm height from swale volume
@@ -184,12 +188,43 @@ def _pond_touches_edge(pond, eps=1e-6):
 #
 # 0.30 m is the NRCS Conservation Practice Standard 378 (Pond) minimum: "a minimum of
 # 1.0 feet of freeboard between design high-water-flow elevation in the auxiliary
-# spillway and the top of the settled embankment". The previous 0.15 m was half that.
+# spillway and the top of the settled embankment".
+#
+# Read that quote carefully: it is an *embankment* standard. It measures to the top of a
+# built wall, and it exists because overtopping a wall breaches it. A cut contour swale
+# has no embankment — its containment is undisturbed ground, and its failure mode is
+# water leaving at an unarmoured point rather than a wall giving way. Applying this
+# figure to a 0.5 m swale spends 0.60 m of a 0.50 m dig before any head is added, which
+# reports the most ordinary swale in the plugin as impossible.
+#
+# So this stays the *embankment* number — the default for dams, basins and any
+# unrecognised type — and per-type values live in the registry. See spillway_policy.
 SPILLWAY_MIN_FREEBOARD_M = 0.30
 
 # Head range that broad-crested weir practice treats as ordinary. Outside it the
-# weir formula still holds; it simply stops being a routine design.
+# weir formula still holds; it simply stops being a routine design. Embankment default;
+# per-type bands live in the registry (a swale's is lower, or it would warn always).
 SPILLWAY_TYPICAL_HEAD_M = (0.20, 0.50)
+
+
+def spillway_policy(ew_type):
+    """Per-type spillway design policy — ``(freeboard_m, head_m, head_band)``.
+
+    Freeboard and head are not one number across types: see the comment on
+    :data:`SPILLWAY_MIN_FREEBOARD_M` for why an embankment figure does not describe a
+    cut channel. The values live in the type registry, which is the one-file home of
+    per-type policy; this resolves them and falls back to the embankment figures for an
+    unrecognised type, which is the conservative direction.
+    """
+    try:
+        cfg = get_type(ew_type)
+    except KeyError:
+        return (SPILLWAY_MIN_FREEBOARD_M, 0.30, SPILLWAY_TYPICAL_HEAD_M)
+    return (
+        getattr(cfg, "spillway_freeboard_m", SPILLWAY_MIN_FREEBOARD_M),
+        getattr(cfg, "spillway_head_m", 0.30),
+        getattr(cfg, "spillway_head_band", SPILLWAY_TYPICAL_HEAD_M),
+    )
 
 # Elevation comparisons are made to the millimetre. Without this a crest clamped
 # to exactly the highest value spillway_datum offers reports as *insufficient*,
@@ -208,15 +243,24 @@ class Spillway:
     actually supplies: an absolute crest typed without reference to it is
     unanchored, and a drop is meaningless without it.
 
-    ``auto`` means the crest tracks the rim as the DEM or the footprint changes,
-    rather than staying where it was first computed.
+    ``auto`` means a crest seeded from the ground is still the tool's rather than the
+    user's, so placing the spillway on the map may re-read it from the DEM. It does
+    **not** re-derive the crest when the DEM or the footprint changes: the only reader
+    is ``_on_spillway_placed``, and a saved crest is otherwise re-clamped into the band
+    only when the dialog next opens.
     """
 
     def __init__(self, crest_elevation=None, drop_below_rim_m=None, head_m=0.30,
-                 width_m=0.0, point_wkt=None, auto=True, width_auto=True):
+                 width_m=0.0, point_wkt=None, auto=True, width_auto=True,
+                 freeboard_m=None):
         self.crest_elevation = crest_elevation
         self.drop_below_rim_m = drop_below_rim_m
         self.head_m = head_m
+        # Clear height demanded below the rim. ``None`` inherits the feature type's
+        # policy (see spillway_policy) rather than freezing today's number into the
+        # saved design — the same "None means take the site/type default" convention
+        # Earthwork.soil_name uses. A stored value is a deliberate user override.
+        self.freeboard_m = freeboard_m
         self.width_m = width_m        # width as BUILT (or tracking, while width_auto)
         # Whether the built width tracks the computed requirement. Separate from
         # ``auto`` (which tracks the crest against the rim) because a user who has
@@ -227,7 +271,7 @@ class Spillway:
 
     _SERIAL_FIELDS = (
         "crest_elevation", "drop_below_rim_m", "head_m", "width_m",
-        "width_auto", "point_wkt", "auto",
+        "width_auto", "point_wkt", "auto", "freeboard_m",
     )
 
     def to_dict(self):
@@ -248,6 +292,19 @@ class Spillway:
             return "no crest set"
         sited = "" if self.point_wkt else " · not sited"
         return f"crest {self.crest_elevation:.2f} m · {self.width_m:.1f} m wide{sited}"
+
+
+def effective_freeboard_m(spillway, ew_type):
+    """The freeboard actually in force — a stored override, else the type's policy.
+
+    ``Spillway.freeboard_m`` is ``None`` on anything not deliberately overridden
+    (including every design saved before the field existed), so the type policy is the
+    normal answer and the stored value is the exception.
+    """
+    override = getattr(spillway, "freeboard_m", None) if spillway is not None else None
+    if override is not None:
+        return max(0.0, float(override))
+    return spillway_policy(ew_type)[0]
 
 
 def spillway_datum(rim_elevation, invert_elevation=None, head_m=0.30,
@@ -309,11 +366,23 @@ def bind_crest(rim_elevation, crest=None, drop=None, band=None):
 
 def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
                       head_m=0.30, min_freeboard_m=SPILLWAY_MIN_FREEBOARD_M,
-                      width_m=None, required_width_m=None):
+                      width_m=None, required_width_m=None,
+                      standard_freeboard_m=None, typical_head_m=None,
+                      feature_length_m=None):
     """Plain-language problems with a proposed spillway; empty list means fine.
 
     Every message quotes the numbers it is objecting to, because "invalid" on its
     own gives the user nothing to act on.
+
+    *min_freeboard_m* is the margin actually in force — a type default, or a user
+    override. *standard_freeboard_m* is what that type's policy asks for, supplied
+    separately so a deliberate reduction can be named as a reduction; omit it and no
+    such objection is raised. *typical_head_m* is the type's ordinary head band,
+    defaulting to the embankment one. *feature_length_m* enables the "this weir does
+    not fit on this feature" check; omit it and that check is skipped.
+
+    All three are optional and default to the previous behaviour exactly, so existing
+    callers are unaffected.
     """
     problems = []
     if crest_elevation is None or rim_elevation is None:
@@ -343,7 +412,26 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
             f"({float(invert_elevation):.2f} m) — the feature would hold nothing."
         )
 
-    lo, hi = SPILLWAY_TYPICAL_HEAD_M
+    # A freeboard the user has cut below what this type asks for. Said plainly and
+    # allowed: on stable ground a shallower margin can be a real decision. Zero is
+    # not — it means the design nappe reaches the containing ground, so the spillway
+    # stops being the control and the choice of where to overflow is given up.
+    if standard_freeboard_m is not None:
+        standard = max(0.0, float(standard_freeboard_m))
+        if freeboard <= 0 < standard:
+            problems.append(
+                "Freeboard is zero — at design head the water surface reaches the "
+                "surrounding ground, so it will leave there too and the spillway stops "
+                f"being the control. This type is designed for {standard:.2f} m."
+            )
+        elif freeboard < standard - _ELEV_EPS:
+            problems.append(
+                f"Freeboard {freeboard:.2f} m is under the {standard:.2f} m this type "
+                f"is designed for. That margin is what keeps the overflow at the place "
+                f"you armoured rather than at whichever point of the rim is lowest."
+            )
+
+    lo, hi = typical_head_m if typical_head_m is not None else SPILLWAY_TYPICAL_HEAD_M
     if head > 0 and not (lo <= head <= hi):
         problems.append(
             f"Head of {head:.2f} m is outside the usual {lo:.2f}–{hi:.2f} m range. "
@@ -356,6 +444,21 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
             problems.append(
                 f"Built width {float(width_m):.1f} m is under the "
                 f"{float(required_width_m):.1f} m the design flow needs at this head."
+            )
+
+    # Does the weir fit the thing it is cut into? Required width grows without bound
+    # with the flow, and the usual way that happens is someone adding features upslope
+    # long after this one was sized. Compared against the feature's whole characteristic
+    # length — a deliberately generous test, so it catches nonsense rather than nagging
+    # a wide basin. A weir as wide as the entire feature is not a spillway.
+    if (feature_length_m is not None and required_width_m is not None
+            and required_width_m > 0 and float(feature_length_m) > 0):
+        if float(required_width_m) > float(feature_length_m):
+            problems.append(
+                f"This needs a {float(required_width_m):.1f} m weir, but the feature is "
+                f"only {float(feature_length_m):.1f} m long — it cannot pass its own "
+                f"design flow. Split the catchment upslope, add storage above it, or "
+                f"design for more head."
             )
 
     return problems
@@ -953,6 +1056,77 @@ def calculate_spillway_width(peak_flow_m3s, head_m, weir_coeff=BROAD_CRESTED_WEI
     if head_m <= 0 or peak_flow_m3s <= 0:
         return 0.0
     return round(peak_flow_m3s / (weir_coeff * head_m ** 1.5), 2)
+
+
+def head_for_width(peak_flow_m3s, width_m, weir_coeff=BROAD_CRESTED_WEIR_C):
+    """How deep the water actually runs over a weir of *width_m* — the inverse.
+
+    ``H = (Q / (C·L))^(2/3)``, the same weir equation solved the other way. Which
+    direction applies is a question about the design, not the physics: while the width
+    is still free the head is chosen and the width follows
+    (:func:`calculate_spillway_width`); once a width is committed the head is whatever
+    the flow makes it, and that is this.
+
+    It is the number the freeboard has to be checked against in that case. A width
+    committed under one flow and then asked to pass a larger one does not fail by
+    "being too narrow" in any way the user can act on — it fails by standing the water
+    deeper than planned and eating the margin under the rim.
+
+    Returns ``None`` for non-positive input, deliberately *not* the ``0.0`` its sibling
+    returns: a head of zero is a physically meaningful reading (nothing is flowing) and
+    must not be confused with "these inputs say nothing".
+
+    Note this is not an exact numerical inverse of :func:`calculate_spillway_width`,
+    which rounds its answer to a centimetre — round-tripping a rounded width returns a
+    head a few millimetres off. Callers must not feed that back into an elevation
+    comparison; where the width is auto-tracked the head *is* the design head by
+    construction and this function should not be called at all.
+    """
+    if width_m is None or peak_flow_m3s is None:
+        return None
+    if width_m <= 0 or peak_flow_m3s <= 0:
+        return None
+    return (peak_flow_m3s / (weir_coeff * width_m)) ** (2.0 / 3.0)
+
+
+def effective_head_m(head_m, peak_flow_m3s=None, width_m=None, width_auto=True,
+                     weir_coeff=BROAD_CRESTED_WEIR_C):
+    """The head this design will actually stand at — the one freeboard is spent on.
+
+    Which of the two weir framings applies is decided here, once, so no caller has to
+    get it right twice:
+
+    * **Width still free** (``width_auto``) — the width is solved *from* the head, so
+      the head is the design head by construction. Nothing to invert.
+    * **Width committed and adequate** — a weir at or wider than the requirement passes
+      the flow at or below the design head, so the freeboard budget is already met.
+      Returning the design head is both correct and the conservative reading.
+    * **Width committed and short** — the water stands deeper than planned. *This* is
+      the case worth computing and worth warning about, and it is the only one where
+      :func:`head_for_width` is used.
+
+    Restricting the inverse to the deficient case is not merely tidy, it is required.
+    :func:`calculate_spillway_width` rounds to a centimetre, so inverting a width that
+    exactly matches the requirement returns a head a few millimetres *above* the design
+    head — enough to push ``rim − crest`` past ``head + freeboard`` and accuse a
+    freshly-seeded crest of a shortfall it does not have. Where the width is genuinely
+    short the difference is real (a 2 m weir asked to pass a 4 m flow stands 0.48 m deep
+    against a 0.30 m design), far beyond any rounding.
+
+    Returns ``head_m`` unchanged whenever there is not enough information to say more.
+    """
+    if head_m is None:
+        return None
+    if width_auto or width_m is None or peak_flow_m3s is None:
+        return head_m
+    if width_m <= 0 or peak_flow_m3s <= 0:
+        return head_m
+
+    required = calculate_spillway_width(peak_flow_m3s, head_m, weir_coeff=weir_coeff)
+    if required <= 0 or float(width_m) >= required:
+        return head_m
+    actual = head_for_width(peak_flow_m3s, width_m, weir_coeff=weir_coeff)
+    return head_m if actual is None else actual
 
 
 # ---------------------------------------------------------------------------

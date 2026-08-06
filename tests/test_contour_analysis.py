@@ -1,4 +1,6 @@
 """Tests for terrainflow_assessment/modules/contour_analysis.py"""
+import math
+
 import numpy as np
 import pytest
 import rasterio
@@ -817,6 +819,214 @@ class TestClassifyContourInflow:
             elevation=50.0, rank=1, length_m=0.4,
         )
         assert classify_contour_inflow([short], acc_path, cell_area_m2=1.0) == []
+
+    def test_source_id_defaults_to_position(self, tmp_path):
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0)
+        assert result and all(r["source_id"] == 0 for r in result)
+
+    def test_source_ids_stamped_from_caller(self, tmp_path):
+        """The caller's own ids reach every stretch, so a hidden contour's stretches
+        can be filtered out without reclassifying."""
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = classify_contour_inflow([feat], acc_path, cell_area_m2=1.0,
+                                         source_ids=[7])
+        assert result and all(r["source_id"] == 7 for r in result)
+
+    def test_grades_a_feature_without_a_rank(self, tmp_path):
+        """SwaleSegment has no ``rank`` — the same routine still grades it, which is
+        what lets the peak-inflow overlay reuse the contour gradient."""
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+
+        class _Rankless:
+            geometry = feat.geometry
+            elevation = 50.0
+
+        result = classify_contour_inflow([_Rankless()], acc_path, cell_area_m2=1.0)
+        assert result and all(r["contour_rank"] == 0 for r in result)
+
+
+# ---------------------------------------------------------------------------
+# natural_breaks / classify_by_breaks — value-based banding
+# ---------------------------------------------------------------------------
+
+class TestNaturalBreaks:
+    def test_returns_n_plus_one_ascending_boundaries(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        breaks = natural_breaks([1, 2, 3, 40, 41, 42, 900, 901], n_classes=3)
+        assert len(breaks) == 4
+        assert breaks == sorted(breaks)
+        assert breaks[0] == 1 and breaks[-1] == 901
+
+    def test_boundaries_land_on_the_gaps_in_the_values(self):
+        """The whole point over percentile bands: a tight cluster stays one band."""
+        from terrainflow_assessment.modules.contour_analysis import (
+            classify_by_breaks,
+            natural_breaks,
+        )
+        values = [10, 11, 12, 13, 500, 505, 9000]
+        breaks = natural_breaks(values, n_classes=3)
+        bands = [classify_by_breaks(v, breaks) for v in values]
+        assert bands == [0, 0, 0, 0, 1, 1, 2]
+
+    def test_empty_input(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        assert natural_breaks([]) == []
+        assert natural_breaks([None, float("nan"), float("inf")]) == []
+
+    def test_single_distinct_value(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        assert natural_breaks([5.0, 5.0, 5.0], n_classes=4) == [5.0, 5.0]
+
+    def test_classes_clamped_to_distinct_values(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        breaks = natural_breaks([1.0, 2.0], n_classes=4)
+        assert len(breaks) == 3  # 2 distinct values → at most 2 bands
+
+    def test_one_class_spans_the_range(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        assert natural_breaks([3.0, 7.0, 11.0], n_classes=1) == [3.0, 11.0]
+
+    def test_large_input_is_subsampled_not_refused(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        breaks = natural_breaks([float(i) for i in range(5000)], n_classes=4,
+                                max_sample=50)
+        assert len(breaks) == 5
+        assert breaks == sorted(breaks)
+        assert breaks[-1] == 4999.0
+
+    def test_non_numeric_entries_dropped(self):
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+        breaks = natural_breaks([1, "x", 2, None, 3, 100], n_classes=2)
+        assert breaks[0] == 1 and breaks[-1] == 100
+
+
+class TestClassBreaks:
+    """The one entry point every inflow display bands through."""
+
+    def test_natural_delegates_to_jenks(self):
+        from terrainflow_assessment.modules.contour_analysis import (
+            class_breaks,
+            natural_breaks,
+        )
+        values = [1, 2, 3, 40, 41, 900]
+        assert class_breaks(values, "natural", 3) == natural_breaks(values, 3)
+
+    def test_empty_input(self):
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        for mode in ("natural", "log", "linear", "quantile"):
+            assert class_breaks([], mode) == []
+            assert class_breaks([None, float("nan")], mode) == []
+
+    def test_single_value_in_every_mode(self):
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        for mode in ("natural", "log", "linear", "quantile"):
+            assert class_breaks([7.0, 7.0], mode, 4) == [7.0, 7.0], mode
+
+    def test_linear_is_evenly_spaced(self):
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        breaks = class_breaks([0.0, 10.0, 33.0, 64.0, 100.0], "linear", 4)
+        assert breaks == pytest.approx([0.0, 25.0, 50.0, 75.0, 100.0])
+
+    def test_bands_clamp_to_the_distinct_values_available(self):
+        """Two distinct values cannot honestly be shown as four bands."""
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        assert class_breaks([0.0, 100.0], "linear", 4) == pytest.approx(
+            [0.0, 50.0, 100.0])
+
+    def test_log_compresses_a_long_tail(self):
+        """The point of log: the low bands stay narrow when one value dominates."""
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        values = [0.0, 1.0, 5.0, 20.0, 10_000.0]
+        log_b = class_breaks(values, "log", 4)
+        lin_b = class_breaks(values, "linear", 4)
+        assert log_b[1] < lin_b[1], "log's first edge should sit well below linear's"
+        assert log_b == sorted(log_b)
+        assert log_b[-1] == 10_000.0
+
+    def test_log_tolerates_zero(self):
+        """Zero inflow is a real, common value — it must not push an edge to -inf."""
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        breaks = class_breaks([0.0, 0.0, 3.0, 250.0], "log", 4)
+        assert breaks[0] == 0.0
+        assert all(math.isfinite(b) for b in breaks)
+
+    def test_quantile_splits_by_count(self):
+        from terrainflow_assessment.modules.contour_analysis import (
+            class_breaks,
+            classify_by_breaks,
+        )
+        values = [float(i) for i in range(100)]
+        breaks = class_breaks(values, "quantile", 4)
+        counts = [0, 0, 0, 0]
+        for v in values:
+            counts[classify_by_breaks(v, breaks)] += 1
+        assert max(counts) - min(counts) <= 2, f"bands are uneven: {counts}"
+
+    def test_quantile_never_returns_a_descending_edge(self):
+        """A value common enough to span a whole band must not invert the edges."""
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+        breaks = class_breaks([0.0] * 90 + [1.0, 2.0, 3.0, 400.0], "quantile", 4)
+        assert breaks == sorted(breaks)
+
+    def test_every_mode_yields_usable_bands(self):
+        from terrainflow_assessment.modules.contour_analysis import (
+            class_breaks,
+            classify_by_breaks,
+        )
+        values = [0.0, 3.0, 3.5, 90.0, 91.0, 4000.0, 4200.0]
+        for mode in ("natural", "log", "linear", "quantile"):
+            breaks = class_breaks(values, mode, 4)
+            assert len(breaks) == 5, mode
+            assert breaks == sorted(breaks), mode
+            for v in values:
+                band = classify_by_breaks(v, breaks)
+                assert 0 <= band <= 3, (mode, v, band)
+
+
+class TestClassifyByBreaks:
+    def test_no_breaks_is_band_zero(self):
+        from terrainflow_assessment.modules.contour_analysis import classify_by_breaks
+        assert classify_by_breaks(5.0, []) == 0
+        assert classify_by_breaks(5.0, [1.0]) == 0
+
+    def test_none_value_is_band_zero(self):
+        from terrainflow_assessment.modules.contour_analysis import classify_by_breaks
+        assert classify_by_breaks(None, [0.0, 5.0, 10.0]) == 0
+
+    def test_out_of_range_values_clamp(self):
+        """Classifying against breaks from a subset must colour, not drop."""
+        from terrainflow_assessment.modules.contour_analysis import classify_by_breaks
+        breaks = [10.0, 20.0, 30.0]
+        assert classify_by_breaks(-99.0, breaks) == 0
+        assert classify_by_breaks(1e9, breaks) == 1
+
+    def test_value_on_a_boundary_takes_the_lower_band(self):
+        from terrainflow_assessment.modules.contour_analysis import classify_by_breaks
+        breaks = [0.0, 10.0, 20.0, 30.0]
+        assert classify_by_breaks(10.0, breaks) == 0
+        assert classify_by_breaks(10.1, breaks) == 1
+
+
+class TestContourFeatureInflow:
+    def test_inflow_is_none_without_runoff(self):
+        cf = _make_feature(peak_acc=1000.0)
+        cf.cell_area_m2 = 4.0
+        assert cf.inflow_m3 is None
+
+    def test_inflow_is_none_without_cell_area(self):
+        cf = _make_feature(peak_acc=1000.0)
+        cf.runoff_mm = 25.0
+        assert cf.inflow_m3 is None
+
+    def test_inflow_volume(self):
+        cf = _make_feature(peak_acc=1000.0)
+        cf.cell_area_m2 = 4.0
+        cf.runoff_mm = 25.0
+        assert cf.inflow_m3 == pytest.approx(1000.0 * 4.0 * 25.0 / 1000.0)
 
 
 # ---------------------------------------------------------------------------

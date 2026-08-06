@@ -25,6 +25,13 @@ class PluginState:
     output_dir: str = field(default_factory=lambda: tempfile.mkdtemp(prefix="tfa_"))
     ponding_raster_path: str | None = None
 
+    # ------------------------------------------------------------------ Layer tree
+    # Abbreviated run parameters ("120mm·24h·C0.40·1ha") shown on the stage groups.
+    # Frozen when Baseline runs, not read live from the panel: Analysis and Design
+    # outputs describe the storm that was actually routed, so nudging a spinner
+    # afterwards must not retag groups full of layers built under the old numbers.
+    run_tag: str = ""
+
     # ------------------------------------------------------------------ Analysis results
     baseline_result: dict | None = None
     earthworks_result: dict | None = None
@@ -35,7 +42,6 @@ class PluginState:
     earthworks_layer_ids: list[str] = field(default_factory=list)
     accumulation_layer_id: str | None = None
     slope_class_layer_id: str | None = None
-    slope_arrows_layer_id: str | None = None
     slope_vectors_layer_id: str | None = None
 
     # ------------------------------------------------------------------ Earthworks
@@ -79,12 +85,23 @@ class PluginState:
     # Result layers are held by ID (str), not object, so a deleted/swapped layer
     # resolves to None instead of a dead "wrapped C/C++ object" reference. See _layers.py.
     contour_features: list = field(default_factory=list)
+    # The subset "Select Top Swales" last produced. The inflow gradient scopes itself
+    # to this when set: grading every contour on the site answers a question nobody
+    # asked once the user has narrowed to the swales they are actually considering.
+    top_contour_features: list = field(default_factory=list)
+    # The SwaleSegments "Find Best Swale Segments" last produced — kept so the
+    # peak-inflow overlay can be toggled on without re-running the search.
+    segment_features: list = field(default_factory=list)
     usable_polygon: Any | None = None
     contour_layer_id: str | None = None
     top5_layer_id: str | None = None
     segment_layer_id: str | None = None
+    segment_gradient_layer_id: str | None = None
     simple_contour_layer_id: str | None = None
     inflow_bands_layer_id: str | None = None
+    # Natural-breaks boundaries the candidate contours are currently banded on, so
+    # the panel legend prints the same numbers the map is drawn with.
+    contour_breaks: list = field(default_factory=list)
 
     # ------------------------------------------------------------------ Keypoint analysis
     found_keypoints: list | None = None

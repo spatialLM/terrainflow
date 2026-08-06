@@ -13,7 +13,7 @@ AssessmentPanel is a QDockWidget structured as a pipeline workbench:
   Stages (one visible at a time, QStackedWidget)
     baseline — Data Input + Baseline Analysis (storm inputs + run button)
     analysis — Terrain Tools (ponding/slope/contours) + Contour & Keypoint
-    design   — Earthwork Design + Live Assessment
+    design   — Earthwork Design + Live Assessment + Spillways
     verify   — Fill Simulation (+ Re-analyse burn lives in design for now)
     report   — Report & Export
 """
@@ -50,6 +50,9 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.modules.contour_analysis import (
+    INFLOW_RAMP_HEX as _INFLOW_RAMP,
+)
 from terrainflow_assessment.modules.project_io import (
     INPUT_FIELDS,
     SIZING_BASIS_VALUES,
@@ -57,6 +60,22 @@ from terrainflow_assessment.modules.project_io import (
 )
 from terrainflow_assessment.qgis import help_text as H
 from terrainflow_assessment.qgis.widgets.run_button import RunButton
+
+# Block-drawing characters of rising height — the legend's stand-in for the line
+# width the map draws each band at. Rich text in a QLabel cannot vary stroke
+# weight, and a row of identical squares would say the bands differ only in
+# colour, which is the reading that made the old gradient unreadable.
+_BAND_GLYPHS = ("▂", "▄", "▆", "█")
+
+
+def _ramp_swatches(labels=None):
+    """The inflow ramp as coloured, thickening glyphs, optionally labelled."""
+    out = []
+    for i, hexcode in enumerate(_INFLOW_RAMP):
+        glyph = _BAND_GLYPHS[min(i, len(_BAND_GLYPHS) - 1)]
+        chip = f"<span style='color:{hexcode}'>{glyph}</span>"
+        out.append(f"{chip}&nbsp;{labels[i]}" if labels else chip)
+    return "&nbsp;&nbsp;".join(out) if labels else "".join(out)
 
 
 class AssessmentPanel(QDockWidget):
@@ -89,7 +108,6 @@ class AssessmentPanel(QDockWidget):
     threshold_changed = pyqtSignal()
     query_ponding_requested = pyqtSignal()
     toggle_slope_class_requested = pyqtSignal(bool)
-    toggle_slope_arrows_requested = pyqtSignal(bool)
     toggle_slope_vectors_requested = pyqtSignal(bool)
     toggle_throughflow_requested = pyqtSignal(bool)   # blue per-cell water gradient
     throughflow_scale_changed = pyqtSignal(str)
@@ -99,6 +117,14 @@ class AssessmentPanel(QDockWidget):
     select_top5_contours_requested = pyqtSignal()
     find_segments_requested = pyqtSignal()
     show_inflow_bands_requested = pyqtSignal(bool)   # colour contours by inflow share
+    show_segment_gradient_requested = pyqtSignal(bool)  # peak inflow inside each segment
+    # Which contours the user has ruled out → hide them and drop them from the
+    # analysis. Carries the *unticked* rows, not the ticked ones: the list caps its
+    # display at 50 rows, so "not in the ticked set" would silently rule out every
+    # contour past the cap.
+    contour_visibility_changed = pyqtSignal(object)  # list[int] of unticked row indices
+    # Which contour rows are highlighted → select the matching features on the map
+    contour_rows_selected = pyqtSignal(object)       # list[int] of selected row indices
     clear_analysis_requested = pyqtSignal()          # wipe analysis layers + state
     generate_simple_contours_requested = pyqtSignal()
     contour_layer_changed = pyqtSignal(object)
@@ -117,6 +143,10 @@ class AssessmentPanel(QDockWidget):
     run_earthworks_requested = pyqtSignal()
     reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
     place_spillway_requested = pyqtSignal(str)    # 'outflow' | 'inflow'
+    # Same, but naming the feature by row — the Spillways list has its own rows and
+    # should not have to reach through the flow network's selection to say which.
+    place_spillway_for_requested = pyqtSignal(int, str)   # index, kind
+    edit_earthwork_requested = pyqtSignal(int)            # index → properties dialog
     connect_earthworks_requested = pyqtSignal()   # route one feature's overflow to another
     choose_design_intensity_requested = pyqtSignal()  # open the peak-intensity comparison
     edit_rainfall_data_requested = pyqtSignal()       # enter the site's HIRDS table
@@ -232,6 +262,9 @@ class AssessmentPanel(QDockWidget):
     def _build_ui(self):
         self._stack = QStackedWidget()
         self._stage_layouts = {}
+        # Section header state, so a collapsed section can still carry a live note.
+        self._section_headers = {}
+        self._section_titles = {}
         for key, _label in self._STAGES:
             page, lay = self._make_stage_page()
             self._stack.addWidget(page)
@@ -253,6 +286,7 @@ class AssessmentPanel(QDockWidget):
         self._layout = self._stage_layouts["design"]
         self._build_section_earthworks()
         self._build_section_live_assessment()
+        self._build_section_spillways()
 
         self._layout = self._stage_layouts["verify"]
         self._build_section_verification()
@@ -301,16 +335,32 @@ class AssessmentPanel(QDockWidget):
         layout.setContentsMargins(10, 0, 10, 10)
         body.setVisible(not collapsed)
 
+        # The header text is rebuilt on every expand/collapse, so a suffix written onto
+        # the button directly would be wiped the first time the user closed the section.
+        # Keeping it in a dict the closure reads means a collapsed section can still
+        # report its state — which is the only way a collapsed section is worth having.
+        self._section_titles[title] = title
+
         def _toggle(checked):
             body.setVisible(checked)
-            header.setText(("▼  " if checked else "▶  ") + title)
+            header.setText(("▼  " if checked else "▶  ")
+                           + self._section_titles.get(title, title))
         header.toggled.connect(_toggle)
+        self._section_headers[title] = (header, _toggle)
         _toggle(not collapsed)
 
         outer.addWidget(header)
         outer.addWidget(body)
         self._layout.addWidget(frame)
         return layout
+
+    def set_section_note(self, title, note=""):
+        """Append a live state note to a section header, visible while collapsed."""
+        if title not in self._section_headers:
+            return
+        self._section_titles[title] = f"{title} — {note}" if note else title
+        header, toggle = self._section_headers[title]
+        toggle(header.isChecked())
 
     def _label(self, text, small=False):
         lbl = QLabel(text)
@@ -713,7 +763,8 @@ class AssessmentPanel(QDockWidget):
             ("#FFA500", "8–13°"),
             ("#FF6600", "13–18°"),
             ("#CC2200", "18–25°"),
-            ("#660000", ">25°"),
+            ("#660000", "25–50°"),
+            ("#3A0000", "≥50°"),
         ]:
             swatch = QLabel()
             swatch.setFixedSize(13, 13)
@@ -726,12 +777,6 @@ class AssessmentPanel(QDockWidget):
             slope_legend_layout.addWidget(lbl)
         slope_legend_layout.addStretch()
         lay.addWidget(slope_legend)
-
-        self._toggle_slope_arrows_btn = QPushButton("Show Flow Lines")
-        self._toggle_slope_arrows_btn.setCheckable(True)
-        self._toggle_slope_arrows_btn.setEnabled(False)
-        self._toggle_slope_arrows_btn.setToolTip(H.FLOW_LINES)
-        lay.addWidget(self._toggle_slope_arrows_btn)
 
         self._toggle_slope_vectors_btn = QPushButton("Show Slope Vectors")
         self._toggle_slope_vectors_btn.setCheckable(True)
@@ -772,13 +817,26 @@ class AssessmentPanel(QDockWidget):
         self._throughflow_scale_combo.setEnabled(False)
         flow_row.addWidget(self._throughflow_scale_combo)
 
-        flow_legend = QLabel(
-            "<span style='color:#c9e2f2;'>■</span> diffuse "
-            "<span style='color:#5aa9dd;'>■</span> gathering "
-            "<span style='color:#08246e;'>■</span> channel"
-        )
-        flow_legend.setStyleSheet("font-size: 10px; color: #5f7176;")
-        flow_row.addWidget(flow_legend)
+        # Keep in step with the ramp in controllers/baseline.py:apply_throughflow_ramp —
+        # these are its stop colours at full strength. The renderer fades the low end
+        # out with alpha so the map stays readable underneath; a key shows the hue, not
+        # the blend, so the swatches carry a border to keep the near-white one visible.
+        # The transparent "none" stop is deliberately not shown.
+        for hex_colour, lbl_text in [
+            ("#E2F0FA", "diffuse"),
+            ("#90C4E8", "gathering"),
+            ("#307ABE", "concentrated"),
+            ("#08246E", "channel"),
+        ]:
+            swatch = QLabel()
+            swatch.setFixedSize(10, 10)
+            swatch.setStyleSheet(
+                f"background-color: {hex_colour}; border: 1px solid #888;"
+            )
+            lbl = QLabel(lbl_text)
+            lbl.setStyleSheet("font-size: 10px; color: #5f7176;")
+            flow_row.addWidget(swatch)
+            flow_row.addWidget(lbl)
         flow_row.addStretch()
         lay.addLayout(flow_row)
 
@@ -789,7 +847,6 @@ class AssessmentPanel(QDockWidget):
         self._generate_contours_btn.clicked.connect(self.generate_simple_contours_requested)
         self._query_ponding_btn.clicked.connect(self.query_ponding_requested)
         self._toggle_slope_class_btn.toggled.connect(self.toggle_slope_class_requested)
-        self._toggle_slope_arrows_btn.toggled.connect(self.toggle_slope_arrows_requested)
         self._toggle_slope_vectors_btn.toggled.connect(self.toggle_slope_vectors_requested)
 
         self._update_channel_type_label()
@@ -851,21 +908,24 @@ class AssessmentPanel(QDockWidget):
         self._contour_list = QListWidget()
         self._contour_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._contour_list.setMinimumHeight(80)
+        self._contour_list.setToolTip(H.CONTOUR_LIST)
+        # Set while the map's selection is being mirrored onto the rows, so the
+        # rows don't turn round and re-select the map features they came from.
+        self._syncing_contour_rows = False
+        self._contour_list.itemChanged.connect(self._on_contour_item_changed)
+        self._contour_list.itemSelectionChanged.connect(self._on_contour_rows_selected)
         results_splitter.addWidget(self._contour_list)
 
         mid = QWidget()
         mid_lay = QVBoxLayout(mid)
         mid_lay.setContentsMargins(0, 0, 0, 0)
 
-        # Legend for the rank colour grammar used on the canvas layers.
-        legend = QLabel(
-            "Rank: <span style='color:#d4a600'>■</span> #1  "
-            "<span style='color:#ff6b00'>■</span> top 5  "
-            "<span style='color:#4a90d9'>■</span> top 10  "
-            "<span style='color:#9e9e9e'>■</span> rest"
-        )
-        legend.setStyleSheet("font-size: 10px; color: #7f8c8d;")
-        mid_lay.addWidget(legend)
+        # Legend for the inflow bands the candidate contours are drawn in. Filled
+        # with the run's actual break values by set_contour_legend().
+        self._contour_legend = QLabel(H.CONTOUR_LEGEND_EMPTY)
+        self._contour_legend.setStyleSheet("font-size: 10px; color: #7f8c8d;")
+        self._contour_legend.setToolTip(H.CONTOUR_LEGEND)
+        mid_lay.addWidget(self._contour_legend)
 
         top_n_row = QHBoxLayout()
         self._top_n_spin = QSpinBox()
@@ -887,27 +947,23 @@ class AssessmentPanel(QDockWidget):
         self._inflow_bands_btn.setToolTip(H.INFLOW_BANDS)
         inflow_row.addWidget(self._inflow_bands_btn, 1)
         self._inflow_scale_combo = QComboBox()
-        self._inflow_scale_combo.addItems(["Log", "Linear", "Quantile"])
+        # "Natural" first, and therefore the default: it is what the candidate
+        # contour bands use, so the list and the gradient agree out of the box.
+        self._inflow_scale_combo.addItems(["Natural", "Log", "Linear", "Quantile"])
         self._inflow_scale_combo.setToolTip(H.INFLOW_SCALE)
         self._inflow_scale_combo.setFixedWidth(90)
-        # Re-render live when the scale changes and the layer is showing.
-        self._inflow_scale_combo.currentIndexChanged.connect(
-            lambda _=0: self._inflow_bands_btn.isChecked()
-            and self.show_inflow_bands_requested.emit(True))
+        # Re-render live when the scale changes and either gradient is showing.
+        self._inflow_scale_combo.currentIndexChanged.connect(self._on_inflow_scale_changed)
         inflow_row.addWidget(self._inflow_scale_combo)
         mid_lay.addLayout(inflow_row)
 
-        # Inflow gradient legend — one continuous ramp, absolute m³, shared across
-        # all contours (see the layer's own legend for the m³ ranges).
-        band_legend = QLabel(
-            "Inflow m³ (low→high): "
-            "<span style='color:#2c7bb6'>■</span>"
-            "<span style='color:#00aac8'>■</span>"
-            "<span style='color:#78c346'>■</span>"
-            "<span style='color:#fdae61'>■</span>"
-            "<span style='color:#d7191c'>■</span>"
-        )
+        # Inflow gradient legend — four bands, absolute m³, shared across the
+        # contours in scope (see the layer's own legend for the m³ ranges). The
+        # swatches thicken with the bands because on the map width is the primary
+        # signal; a row of equal squares would misdescribe it.
+        band_legend = QLabel("Inflow m³ (low→high): " + _ramp_swatches())
         band_legend.setStyleSheet("font-size: 10px; color: #7f8c8d;")
+        band_legend.setToolTip(H.CONTOUR_LEGEND)
         mid_lay.addWidget(band_legend)
 
         # --- Segment analysis ---
@@ -970,6 +1026,12 @@ class AssessmentPanel(QDockWidget):
         self._find_segments_btn.setEnabled(False)
         self._find_segments_btn.setToolTip(H.FIND_SEGMENTS)
         mid_lay.addWidget(self._find_segments_btn)
+
+        self._segment_gradient_check = QCheckBox("Show peak inflow inside segments")
+        self._segment_gradient_check.setEnabled(False)
+        self._segment_gradient_check.setToolTip(H.SEGMENT_GRADIENT)
+        self._segment_gradient_check.setStyleSheet("font-size: 11px;")
+        mid_lay.addWidget(self._segment_gradient_check)
         results_splitter.addWidget(mid)
 
         # Segment results — click a row to highlight+zoom; ✓ holds / ⚠ needs overflow.
@@ -1083,6 +1145,7 @@ class AssessmentPanel(QDockWidget):
         self._top5_contours_btn.clicked.connect(self.select_top5_contours_requested)
         self._find_segments_btn.clicked.connect(self.find_segments_requested)
         self._inflow_bands_btn.toggled.connect(self.show_inflow_bands_requested)
+        self._segment_gradient_check.toggled.connect(self.show_segment_gradient_requested)
         self._clear_analysis_btn.clicked.connect(self.clear_analysis_requested)
         self._run_keypoint_btn.clicked.connect(self.run_keypoint_analysis_requested)
         self._recommend_ponds_btn.clicked.connect(self.recommend_ponds_requested)
@@ -1224,6 +1287,46 @@ class AssessmentPanel(QDockWidget):
         self._live_assessment_lbl.setWordWrap(True)
         self._live_assessment_lbl.setStyleSheet("font-size: 10.5px; color: #7f8c8d;")
         lay.addWidget(self._live_assessment_lbl)
+
+    _SPILLWAY_SECTION = "Spillways"
+
+    def _build_section_spillways(self):
+        """Overflow review, and where the outflows and inlets get sited.
+
+        Collapsed by default and in the Design stage rather than Verify: this is a
+        design decision you make *before* burning, and it is the pass you do once the
+        earthworks are laid out — not something to solve one feature at a time while
+        drawing them. The header carries its own state so a collapsed section still says
+        when something needs attention.
+        """
+        from terrainflow_assessment.qgis.widgets.spillway_table import SpillwayTable
+
+        lay = self._section(self._SPILLWAY_SECTION, collapsed=True)
+        self._spillway_empty = self._label(
+            "Draw a swale, basin or dam — each one is sized for the overflow it needs, "
+            "and updates as you add more.", small=True)
+        self._spillway_empty.setWordWrap(True)
+        self._spillway_empty.setStyleSheet("color: #8fa0a4; font-style: italic;")
+        lay.addWidget(self._spillway_empty)
+
+        self._spillway_table = SpillwayTable()
+        self._spillway_table.setToolTip(H.SPILLWAY_REVIEW_TABLE)
+        # Selecting here selects everywhere: activate_place_spillway and the action bar
+        # both read the flow network's selection, so a row click has to move that too or
+        # the two views quietly disagree about which feature is current.
+        self._spillway_table.feature_selected.connect(self._on_spillway_row_selected)
+        self._spillway_table.place_requested.connect(self.place_spillway_for_requested)
+        self._spillway_table.edit_requested.connect(self.edit_earthwork_requested)
+        lay.addWidget(self._spillway_table)
+
+    def _on_spillway_row_selected(self, index):
+        self.select_earthwork(index)
+
+    def set_spillway_review(self, rows, context=None):
+        """Populate the Spillways review (empty list clears it)."""
+        self._spillway_table.set_rows(rows, context)
+        self._spillway_empty.setVisible(not self._spillway_table.isVisible())
+        self.set_section_note(self._SPILLWAY_SECTION, self._spillway_table.summary())
 
     def _wire_input_change_signals(self):
         """Emit analysis_inputs_changed on any storm/soil input change (drives the live
@@ -1442,7 +1545,6 @@ class AssessmentPanel(QDockWidget):
         # Enable results tools after first successful baseline
         self._query_ponding_btn.setEnabled(True)
         self._toggle_slope_class_btn.setEnabled(True)
-        self._toggle_slope_arrows_btn.setEnabled(True)
         self._toggle_slope_vectors_btn.setEnabled(True)
         self._toggle_throughflow_btn.setEnabled(True)
         self._throughflow_scale_combo.setEnabled(True)
@@ -1455,8 +1557,15 @@ class AssessmentPanel(QDockWidget):
         if self._usable_area_combo.currentText() != text:
             self._usable_area_combo.setCurrentText(text)
 
-    def set_area_outflow(self, area_outflow):
-        """Show how much water leaves each defined area after baseline."""
+    def set_area_outflow(self, area_outflow, ponded_volume_m3=None):
+        """Show how much water leaves each defined area after baseline.
+
+        Each area reports two figures because they answer different questions: the
+        **total** crossing the boundary, which is fixed for a given storm, and the part
+        of it running through the exits currently drawn, which moves with the "Show
+        exits above (L/s)" threshold. Only ever showing the second made a filtered
+        subtotal look like a site total.
+        """
         if not area_outflow:
             self._area_outflow_lbl.setVisible(False)
             return
@@ -1467,16 +1576,31 @@ class AssessmentPanel(QDockWidget):
             d = area_outflow.get(key)
             if not d:
                 continue
-            rows.append(
-                f"<b>{labels[key]}:</b> {d['flow_ls']:,.1f} L/s "
-                f"({d['volume_m3']:,.0f} m³ over event, {d['n_exits']} exit"
-                f"{'s' if d['n_exits'] != 1 else ''})"
+            shown = (
+                f"{d['flow_ls']:,.1f} L/s ({d['volume_m3']:,.0f} m³) "
+                f"via {d['n_exits']} shown exit{'s' if d['n_exits'] != 1 else ''}"
             )
-        if rows:
-            self._area_outflow_lbl.setText("Water leaving —<br>" + "<br>".join(rows))
-            self._area_outflow_lbl.setVisible(True)
-        else:
+            total = d.get("total_volume_m3")
+            if total is None:
+                rows.append(f"<b>{labels[key]}:</b> {shown}")
+            else:
+                rows.append(
+                    f"<b>{labels[key]}:</b> {d.get('total_flow_ls', 0.0):,.1f} L/s "
+                    f"({total:,.0f} m³ over event) in total"
+                    f"<br><span style='color:#5b6b78;'>&nbsp;&nbsp;of which {shown}</span>"
+                )
+        if not rows:
             self._area_outflow_lbl.setVisible(False)
+            return
+        text = "Water leaving —<br>" + "<br>".join(rows)
+        if ponded_volume_m3:
+            text += (
+                f"<br><b>Water captured:</b> {ponded_volume_m3:,.0f} m³ "
+                f"ponding naturally on site"
+            )
+        self._area_outflow_lbl.setText(text)
+        self._area_outflow_lbl.setToolTip(H.AREA_OUTFLOW)
+        self._area_outflow_lbl.setVisible(True)
 
     def set_contour_progress(self, pct, msg):
         self._run_contour_btn.set_progress(pct, f"{msg} ({pct}%)")
@@ -1490,16 +1614,21 @@ class AssessmentPanel(QDockWidget):
 
     def clear_analysis_ui(self):
         """Reset the Analysis-tab widgets after the controller wipes the layers."""
+        self._contour_list.blockSignals(True)
         self._contour_list.clear()
+        self._contour_list.blockSignals(False)
         self._segment_list.clear()
         self._keypoint_list.clear()
         self._keypoint_status_lbl.setText("")
+        self._contour_legend.setText(H.CONTOUR_LEGEND_EMPTY)
         self._run_contour_btn.set_idle()
         self._find_segments_btn.set_idle()
         self._find_segments_btn.setEnabled(False)
         self._top5_contours_btn.setEnabled(False)
         self._inflow_bands_btn.setChecked(False)
         self._inflow_bands_btn.setEnabled(False)
+        self._segment_gradient_check.setChecked(False)
+        self._segment_gradient_check.setEnabled(False)
         self._run_keypoint_btn.set_idle()
         self._recommend_ponds_btn.set_idle()
         self._recommend_ponds_btn.setEnabled(False)
@@ -1510,6 +1639,7 @@ class AssessmentPanel(QDockWidget):
 
     def set_segment_complete(self):
         self._find_segments_btn.set_done()
+        self._segment_gradient_check.setEnabled(True)
 
     def set_keypoint_progress(self, pct, msg):
         self._run_keypoint_btn.set_progress(pct, f"{msg} ({pct}%)")
@@ -1572,11 +1702,86 @@ class AssessmentPanel(QDockWidget):
         self._scorecard.show_no_flow(capacity_m3)
 
     def set_contour_results(self, contours):
-        self._contour_list.clear()
-        for feat in contours[:50]:  # cap display at 50
-            item = QListWidgetItem(feat.label)
-            item.setCheckState(Qt.Checked)
-            self._contour_list.addItem(item)
+        # Blocked while filling: addItem fires itemChanged per row, and fifty
+        # "visibility changed" round-trips to the map is not what populating a
+        # list means.
+        self._contour_list.blockSignals(True)
+        try:
+            self._contour_list.clear()
+            for i, feat in enumerate(contours[:50]):  # cap display at 50
+                item = QListWidgetItem(feat.label)
+                item.setCheckState(Qt.Checked)
+                # Row → contour index, so a row survives the map round-trip even
+                # if the list is ever sorted or filtered.
+                item.setData(Qt.UserRole, i)
+                self._contour_list.addItem(item)
+        finally:
+            self._contour_list.blockSignals(False)
+
+    def set_contour_legend(self, breaks, unit="m³"):
+        """Show the inflow bands the candidate contours are actually drawn in.
+
+        *breaks* is the ascending boundary list from ``natural_breaks`` — the same
+        numbers the map is banded on, so the legend cannot describe a scheme the
+        canvas is not using.
+        """
+        if not breaks or len(breaks) < 3:
+            self._contour_legend.setText(H.CONTOUR_LEGEND_EMPTY)
+            return
+
+        def _short(v):
+            v = float(v)
+            if v >= 1_000_000:
+                return f"{v / 1_000_000:,.1f}M"
+            if v >= 10_000:
+                return f"{v / 1000:,.0f}k"
+            if v >= 1000:
+                return f"{v / 1000:,.1f}k"
+            return f"{v:,.0f}"
+
+        labels = [f"≤{_short(breaks[i + 1])}" for i in range(len(breaks) - 1)]
+        self._contour_legend.setText(f"Inflow {unit}: " + _ramp_swatches(labels))
+
+    def _on_contour_item_changed(self, _item):
+        """A tick changed — hand the controller the rows the user has ruled out."""
+        self.contour_visibility_changed.emit(self.unchecked_contour_rows())
+
+    def unchecked_contour_rows(self):
+        """Contour indices the user has unticked (see contour_visibility_changed)."""
+        return [
+            self._contour_list.item(i).data(Qt.UserRole)
+            for i in range(self._contour_list.count())
+            if self._contour_list.item(i).checkState() != Qt.Checked
+        ]
+
+    def _on_contour_rows_selected(self):
+        if self._syncing_contour_rows:
+            return
+        self.contour_rows_selected.emit([
+            item.data(Qt.UserRole) for item in self._contour_list.selectedItems()
+        ])
+
+    def select_contour_rows(self, indices):
+        """Highlight the rows for *indices*, without echoing the selection back.
+
+        Driven by the map side: picking a contour on the canvas should land on its
+        row, and the row highlight is the same one clicking the row produces.
+        """
+        wanted = set(indices or [])
+        self._syncing_contour_rows = True
+        try:
+            self._contour_list.clearSelection()
+            first = None
+            for i in range(self._contour_list.count()):
+                item = self._contour_list.item(i)
+                if item.data(Qt.UserRole) in wanted:
+                    item.setSelected(True)
+                    if first is None:
+                        first = item
+            if first is not None:
+                self._contour_list.scrollToItem(first)
+        finally:
+            self._syncing_contour_rows = False
 
     def set_keypoint_results(self, items):
         """Populate the clickable keypoint/pond result list.
@@ -1674,6 +1879,17 @@ class AssessmentPanel(QDockWidget):
 
     def get_selected_earthwork_index(self):
         return self._network.selected_index()
+
+    def select_earthwork(self, index):
+        """Make *index* the current feature everywhere, from any view.
+
+        The flow network owns the selection that ``get_selected_earthwork_index`` reads,
+        and both the action bar and spillway placement go through that. A second view
+        that set only its own selection would send those to whichever feature the
+        network happened to be on.
+        """
+        self._network.set_selected(index)
+        self.earthwork_selected.emit(index)
 
     def set_simulation_progress(self, pct, msg):
         self._sim_progress.setVisible(True)
@@ -1846,10 +2062,28 @@ class AssessmentPanel(QDockWidget):
         """Segment slope limit in degrees, or None when the filter is off."""
         return self._seg_max_slope_spin.value() if self._seg_slope_check.isChecked() else None
 
+    def _on_inflow_scale_changed(self, _index=0):
+        """Re-render whichever inflow view is on — both read the same scale."""
+        if self._inflow_bands_btn.isChecked():
+            self.show_inflow_bands_requested.emit(True)
+        if self._segment_gradient_check.isChecked():
+            self.show_segment_gradient_requested.emit(True)
+
     @property
     def inflow_scale_mode(self):
-        return {"Log": "log", "Linear": "linear", "Quantile": "quantile"}.get(
-            self._inflow_scale_combo.currentText(), "log")
+        return {"Natural": "natural", "Log": "log", "Linear": "linear",
+                "Quantile": "quantile"}.get(
+            self._inflow_scale_combo.currentText(), "natural")
+
+    @property
+    def inflow_bands_active(self):
+        """True while the contour inflow gradient is on the map."""
+        return self._inflow_bands_btn.isChecked()
+
+    @property
+    def segment_gradient_active(self):
+        """True while the peak-inflow overlay inside the swale segments is on."""
+        return self._segment_gradient_check.isChecked()
 
     @property
     def throughflow_scale_mode(self):

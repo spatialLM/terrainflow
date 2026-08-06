@@ -131,6 +131,7 @@ class TerrainFlowAssessmentPlugin:
         p.boundary_changed.connect(bl.on_boundary_changed)
         p.analysis_area_changed.connect(bl.on_analysis_area_changed)
         p.earthworks_area_changed.connect(bl.on_earthworks_area_changed)
+        p.site_name_changed.connect(bl.on_site_name_changed)
         p.draw_boundary_requested.connect(lambda: bl.draw_area("boundary"))
         p.draw_analysis_area_requested.connect(lambda: bl.draw_area("analysis"))
         p.draw_earthworks_area_requested.connect(lambda: bl.draw_area("earthworks"))
@@ -142,7 +143,6 @@ class TerrainFlowAssessmentPlugin:
         # Slope / ponding query
         p.query_ponding_requested.connect(ew.activate_ponding_query)
         p.toggle_slope_class_requested.connect(ew.toggle_slope_class)
-        p.toggle_slope_arrows_requested.connect(ew.toggle_slope_arrows)
         p.toggle_slope_vectors_requested.connect(ew.toggle_slope_vectors)
 
         # Contour
@@ -150,6 +150,9 @@ class TerrainFlowAssessmentPlugin:
         p.select_top5_contours_requested.connect(ct.select_top5_contours)
         p.find_segments_requested.connect(ct.run_segment_analysis)
         p.show_inflow_bands_requested.connect(ct.show_inflow_bands)
+        p.show_segment_gradient_requested.connect(ct.show_segment_gradient)
+        p.contour_visibility_changed.connect(ct.set_contour_visibility)
+        p.contour_rows_selected.connect(ct.highlight_contour_rows)
         p.clear_analysis_requested.connect(ct.clear_analysis)
         p.generate_simple_contours_requested.connect(ct.generate_simple_contours)
         p.run_keypoint_analysis_requested.connect(ct.run_keypoint_analysis)
@@ -170,6 +173,8 @@ class TerrainFlowAssessmentPlugin:
 
         # Overflow routing: where a feature spills, and what it spills into.
         p.place_spillway_requested.connect(ew.activate_place_spillway)
+        p.place_spillway_for_requested.connect(ew.place_spillway_for)
+        p.edit_earthwork_requested.connect(ew.edit_earthwork_at)
         p.connect_earthworks_requested.connect(ew.activate_connect_earthworks)
         p.choose_design_intensity_requested.connect(ew.choose_design_intensity)
         p.edit_rainfall_data_requested.connect(ew.edit_rainfall_data)

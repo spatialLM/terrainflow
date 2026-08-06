@@ -275,6 +275,99 @@ class FlowAnalysis:
 
         return results
 
+    def boundary_outflow_total(self, boundary_path, runoff_mm, duration_hours,
+                               volume_raster=None):
+        """Total water leaving the polygon in *boundary_path* over the event.
+
+        The companion to :meth:`get_boundary_exit_points`, and deliberately not built
+        from it. That method exists to **place markers**, so it drops crossings under a
+        user threshold, 3×3 max-pools to recover D-infinity splits, and collapses each
+        crossing to its single peak cell. Summing its results therefore under-reports
+        the real total — badly, on a site with many small crossings — and lowering the
+        threshold to zero would only add spurious crossings without fixing the peak-cell
+        collapse. This measures the flux instead, and applies **no threshold at all**.
+
+        Method: steepest-descent D8 pointers over the conditioned surface, via the same
+        ``flow_graph.d8_from_dem`` the catchment labelling uses. A cell counts as leaving
+        when it sits inside the polygon and the cell it drains into does not, so only the
+        last inside-cell of a flow path contributes and a channel crossing several
+        boundary cells is counted once rather than once per cell. Interior pits are
+        ponding rather than outflow and are excluded; a pit on the DEM edge is counted as
+        leaving, matching ``flow_graph``'s ``LABEL_EXIT`` convention.
+
+        Note this is water *leaving*, not runoff *generated* inside: flow that entered
+        from upstream terrain outside the polygon is included, which is what "water
+        leaving the site" should mean.
+
+        Returns ``{"volume_m3": float, "flow_ls": float}``.
+        """
+        import geopandas as gpd
+        from rasterio.features import rasterize
+
+        from terrainflow_assessment.modules.flow_graph import d8_from_dem
+
+        if self.acc is None:
+            raise RuntimeError("Run flow analysis first.")
+
+        empty = {"volume_m3": 0.0, "flow_ls": 0.0}
+        duration_s = duration_hours * 3600.0
+        if duration_s <= 0:
+            return empty
+
+        gdf = gpd.read_file(boundary_path)
+        gdf = gdf.to_crs(self.crs.to_wkt())
+        # Polygons only. A line has no interior, so "what leaves it" is meaningless —
+        # but rasterize() would happily burn cells along it and return a plausible
+        # number, which is worse than returning nothing.
+        polys = [
+            g for g in gdf.geometry
+            if g is not None and not g.is_empty
+            and g.geom_type in ("Polygon", "MultiPolygon")
+        ]
+        if not polys:
+            return empty
+
+        # all_touched=False so the mask is the polygon interior; a cell straddling the
+        # edge belongs outside, which keeps the inside→outside test unambiguous.
+        inside = rasterize(
+            [(g, 1) for g in polys],
+            out_shape=self.grid.shape,
+            transform=self.transform,
+            fill=0, all_touched=False, dtype="uint8",
+        ).astype(bool)
+        if not inside.any():
+            return empty
+
+        cell_w = abs(self.transform.a)
+        cell_h = abs(self.transform.e)
+        if volume_raster is not None:
+            vol = np.array(volume_raster, dtype="float64")
+        else:
+            vol = (np.array(self.acc, dtype="float64")
+                   * cell_w * cell_h * (runoff_mm / 1000.0))
+
+        surface = self.conditioned if self.conditioned is not None else self.dem
+        next_flat, is_sink = d8_from_dem(
+            np.asarray(surface, dtype="float64"),
+            cell_w=cell_w, cell_h=cell_h, nodata=self.nodata,
+        )
+
+        inside_flat = inside.ravel()
+        leaves = inside_flat & ~is_sink & ~inside_flat[next_flat]
+
+        # A pit on the DEM edge has nowhere lower to point, so it never registers as
+        # draining outward; flow_graph calls the grid edge an exit and so do we.
+        edge = np.zeros(inside.shape, dtype=bool)
+        edge[0, :] = edge[-1, :] = True
+        edge[:, 0] = edge[:, -1] = True
+        leaves |= inside_flat & is_sink & edge.ravel()
+
+        total_m3 = float(vol.ravel()[leaves].sum())
+        return {
+            "volume_m3": round(total_m3, 1),
+            "flow_ls": round(total_m3 * 1000.0 / duration_s, 2),
+        }
+
     def get_catchment_polygons(self, outlet_points=None, stream_threshold=500):
         """
         Delineate non-overlapping sub-catchment polygons.

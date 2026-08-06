@@ -27,16 +27,42 @@ from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QMessageBox
 
+from terrainflow_assessment.modules.contour_analysis import INFLOW_RAMP_HEX
+from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
 
+# Width, in mm, for the four inflow bands — the primary signal, not decoration.
+# Over aerial imagery width is the one channel the background cannot destroy: a
+# 4 mm line is obviously fatter than a 0.7 mm one whatever is underneath, whereas
+# a colour step can be wiped out by a sunlit paddock or a tree shadow. The ~6x
+# spread is deliberate; a subtle one is no better than colour alone.
+_INFLOW_BAND_WIDTHS = (0.7, 1.4, 2.5, 4.0)
 
-class ContourController:
+# Narrower ramp for the overlay drawn *inside* the swale segments, so the green
+# verdict outline still shows as a rim around the widest band.
+_SEGMENT_BAND_WIDTHS = (0.5, 1.0, 1.7, 2.5)
+
+# White halo under every banded line. Does the work colour cannot: it separates
+# the pale bands from sunlit grass and the dark bands from tree shadow, so one
+# style stays legible across a whole aerial photo.
+_INFLOW_CASING = QColor(255, 255, 255, 200)
+
+
+def _ramp_colour(i):
+    """Band *i* of the shared inflow ramp as a QColor (clamped to the ramp length)."""
+    return QColor(INFLOW_RAMP_HEX[max(0, min(i, len(INFLOW_RAMP_HEX) - 1))])
+
+
+class ContourController(G.LayerTreeMixin):
     def __init__(self, state, panel, project, iface, canvas):
         self._state = state
         self._panel = panel
         self._project = project
         self._iface = iface
         self._canvas = canvas
+        # Guards the table↔map selection loop: selecting rows selects features,
+        # which fires selectionChanged, which would select rows again.
+        self._syncing_selection = False
 
     # ---------------------------------------------------------------- Contour analysis
 
@@ -75,14 +101,42 @@ class ContourController:
                 min_length_m=self._panel.min_contour_length_m,
             )
             self._state.contour_features = contours
+            # A fresh run replaces the candidates, so anything derived from the old
+            # ones (the top-N subset, the segments the overlay grades, and the two
+            # gradients drawn from them) is stale. Dropping the gradient layers
+            # matters more than it looks: the gradient switches the candidate
+            # contours off while it is up, so a stale one left behind would keep
+            # the new candidates hidden.
+            self._state.top_contour_features = []
+            self._state.segment_features = []
+            for attr in ("inflow_bands_layer_id", "segment_gradient_layer_id"):
+                remove_layer(self._project, getattr(self._state, attr))
+                setattr(self._state, attr, None)
             self._panel.set_contour_complete()
             self._panel.set_contour_results(contours)
             self._display_contour_layer(contours)
+            self._panel.set_contour_legend(self._state.contour_breaks,
+                                           self._contour_value_unit())
         except Exception as exc:
             self._panel.set_contour_complete()
             self._iface.messageBar().pushCritical(
                 "TerrainFlow Assessment", f"Contour analysis failed: {exc}"
             )
+
+    def _contour_value(self, feat):
+        """The quantity the candidate contours are banded and ranked on.
+
+        Inflow volume when the storm and cell size are known — that is the number
+        on the panel row, so the map and the list band on the same figure. Raw
+        accumulation otherwise; the two are proportional, so the bands land in the
+        same places, only the legend units change.
+        """
+        inflow = feat.inflow_m3
+        return float(inflow) if inflow is not None else float(feat.peak_acc or 0.0)
+
+    def _contour_value_unit(self):
+        feats = self._state.contour_features
+        return "m³" if feats and feats[0].inflow_m3 is not None else "cells"
 
     def _display_contour_layer(self, contours):
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
@@ -90,26 +144,32 @@ class ContourController:
                                "Candidate Contour Swales", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
+            # cid ties a map feature back to its row in the panel list (and back
+            # again), which is what makes the two selections one selection.
+            QgsField("cid", QMetaType.Int),
             QgsField("elevation", QMetaType.Double),
             QgsField("rank", QMetaType.Int),
             QgsField("peak_acc", QMetaType.Double),
+            QgsField("inflow_m3", QMetaType.Double),
             QgsField("mean_slope", QMetaType.Double),
         ])
         layer.updateFields()
 
         feats = []
-        for feat in contours:
+        for i, feat in enumerate(contours):
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromWkt(feat.geometry.wkt))
-            f.setAttributes([feat.elevation, feat.rank or 0, feat.peak_acc, feat.mean_slope_deg])
+            f.setAttributes([i, feat.elevation, feat.rank or 0, feat.peak_acc,
+                             self._contour_value(feat), feat.mean_slope_deg])
             feats.append(f)
         pr.addFeatures(feats)
 
-        max_acc = max((c.peak_acc or 0) for c in contours) if contours else 1.0
-        self._apply_rank_style(layer, max_acc=max_acc)
+        self._apply_inflow_tier_style(layer, contours)
         remove_layer(self._project, self._state.contour_layer_id)
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.CONTOUR)
         self._state.contour_layer_id = layer.id()
+        self._connect_contour_selection(layer)
+        self._apply_contour_filter()
 
     def _reset_contour_map_tool(self):
         """Deactivate the active map tool if it is a contour-picking tool, so a
@@ -120,34 +180,178 @@ class ContourController:
         ):
             self._canvas.unsetMapTool(active)
 
-    def _apply_rank_style(self, layer, max_acc=None):
-        from qgis.core import QgsLineSymbol
-        color_expr = (
-            "CASE"
-            " WHEN \"rank\" = 1      THEN color_rgb(255,215,  0)"
-            " WHEN \"rank\" <= 5     THEN color_rgb(255,107,  0)"
-            " WHEN \"rank\" <= 10    THEN color_rgb( 74,144,217)"
-            " ELSE                       color_rgb(158,158,158)"
-            " END"
-        )
-        width_expr = (
-            "CASE"
-            " WHEN \"rank\" = 1   THEN 2.2"
-            " WHEN \"rank\" <= 5  THEN 1.6"
-            " WHEN \"rank\" <= 10 THEN 1.1"
-            " ELSE                     0.7"
-            " END"
-        )
-        symbol = QgsLineSymbol.createSimple({"width": "1.0", "capstyle": "round"})
-        symbol.symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.PropertyStrokeColor,
-            QgsProperty.fromExpression(color_expr),
-        )
-        symbol.symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.PropertyStrokeWidth,
-            QgsProperty.fromExpression(width_expr),
-        )
-        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    def _apply_inflow_tier_style(self, layer, contours):
+        """Band the candidate contours by inflow **value**, not by rank position.
+
+        Natural breaks over the inflow figures, coloured on the shared low→high
+        ramp. The old "#1 / top 5 / top 10 / rest" scheme banded by queue position:
+        it drew a fixed five contours orange whether the fifth carried nearly as
+        much water as the first or a twentieth of it, which is the opposite of what
+        the colour was being read to mean.
+        """
+        from terrainflow_assessment.modules.contour_analysis import natural_breaks
+
+        values = [self._contour_value(c) for c in contours]
+        breaks = natural_breaks(values, n_classes=len(INFLOW_RAMP_HEX))
+        self._state.contour_breaks = list(breaks)
+        unit = "m³" if contours and contours[0].inflow_m3 is not None else "cells"
+        self._apply_banded_renderer(layer, "inflow_m3", breaks, unit=unit)
+
+    @staticmethod
+    def _band_symbol(i, widths, casing):
+        """One band's line symbol: a coloured core over an optional white halo."""
+        from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+        from qgis.PyQt.QtCore import Qt as _Qt
+
+        width = widths[min(i, len(widths) - 1)]
+        symbol = QgsLineSymbol.createSimple({"capstyle": "round", "joinstyle": "round"})
+        symbol.setColor(_ramp_colour(i))
+        symbol.setWidth(width)
+        if casing:
+            halo = QgsSimpleLineSymbolLayer(_INFLOW_CASING)
+            halo.setWidth(width + casing)
+            halo.setPenCapStyle(_Qt.RoundCap)
+            halo.setPenJoinStyle(_Qt.RoundJoin)
+            symbol.insertSymbolLayer(0, halo)   # beneath the core
+        return symbol
+
+    @classmethod
+    def _apply_banded_renderer(cls, layer, attr, breaks, unit="m³",
+                               widths=_INFLOW_BAND_WIDTHS, casing=1.1):
+        """Band *layer* on *attr* using the shared ramp: colour **and** width.
+
+        Ranges are built explicitly rather than through ``createRenderer``, which
+        would re-derive its own classes from the layer — the point of passing
+        breaks in is that the candidate contours, the panel legend, the gradient
+        and the segment overlay are all drawn on the same boundaries.
+
+        Four bands, not sixteen. A sixteen-class ramp over a line on an aerial
+        photo is not readable: adjacent classes differ by a few percent of
+        lightness and the background varies far more than that between one metre
+        and the next. Four bands, each a distinct width, can be read at a glance.
+        """
+        from qgis.core import QgsGraduatedSymbolRenderer, QgsRendererRange
+
+        # Nothing to band (no features, or every one carrying the same figure) —
+        # one colour is what the data actually says.
+        if len(breaks) < 3:
+            layer.setRenderer(QgsSingleSymbolRenderer(
+                cls._band_symbol(len(INFLOW_RAMP_HEX) - 1, widths, casing)))
+            return
+
+        ranges = []
+        for i in range(len(breaks) - 1):
+            # Nudge every lower bound but the first so the ranges do not overlap on
+            # a shared boundary value (QGIS tests lower <= v <= upper per range).
+            lower = breaks[i] if i == 0 else breaks[i] + 1e-9
+            ranges.append(QgsRendererRange(
+                lower, breaks[i + 1], cls._band_symbol(i, widths, casing),
+                f"{breaks[i]:,.0f} – {breaks[i + 1]:,.0f} {unit}",
+            ))
+        layer.setRenderer(QgsGraduatedSymbolRenderer(attr, ranges))
+
+    # ------------------------------------------------------- Row ↔ map wiring
+
+    def _connect_contour_selection(self, layer):
+        """Mirror a map-side feature selection back onto the panel's contour rows."""
+        try:
+            layer.selectionChanged.connect(self._on_contour_layer_selection)
+        except Exception:
+            pass
+
+    def _on_contour_layer_selection(self, *_args):
+        if self._syncing_selection:
+            return
+        layer = resolve_layer(self._project, self._state.contour_layer_id)
+        if layer is None:
+            return
+        try:
+            cids = sorted(int(f["cid"]) for f in layer.selectedFeatures())
+        except Exception:
+            return
+        self._syncing_selection = True
+        try:
+            self._panel.select_contour_rows(cids)
+        finally:
+            self._syncing_selection = False
+
+    def set_contour_visibility(self, unticked_indices):
+        """Hide the contours the user has unticked — the checkboxes, made real.
+
+        The tick also decides what "Select Top Swales" and the inflow gradient work
+        from, so unticking a contour takes it out of the analysis, not just off
+        the screen.
+
+        Takes the *unticked* rows rather than the ticked ones because the panel
+        list caps its display at 50: a contour past the cap has no checkbox to
+        read, and inferring "unticked" from its absence would rule out every
+        contour the user never had the chance to see.
+        """
+        unticked = set(int(i) for i in unticked_indices)
+        for i, feat in enumerate(self._state.contour_features):
+            feat.selected = i not in unticked
+        self._apply_contour_filter()
+
+    def _visible_contour_filter(self, field):
+        """A QGIS filter expression on *field* hiding unticked contours ("" = all)."""
+        hidden = [i for i, f in enumerate(self._state.contour_features)
+                  if not getattr(f, "selected", True)]
+        if not hidden:
+            return ""
+        return f'"{field}" NOT IN ({",".join(str(i) for i in hidden)})'
+
+    def _apply_contour_filter(self):
+        """Push the tick state onto every layer that draws per-contour geometry.
+
+        The gradient carries the contour it came from, so it can be filtered by the
+        same expression instead of reclassified — unticking a contour should not
+        cost a pass over the accumulation raster.
+        """
+        for layer_id, field in (
+            (self._state.contour_layer_id, "cid"),
+            (self._state.inflow_bands_layer_id, "source_id"),
+        ):
+            layer = resolve_layer(self._project, layer_id)
+            if layer is None:
+                continue
+            try:
+                layer.setSubsetString(self._visible_contour_filter(field))
+            except Exception as exc:
+                print(f"TerrainFlow Assessment — contour visibility filter failed: {exc}")
+        self._canvas.refresh()
+
+    def highlight_contour_rows(self, indices):
+        """Select the map features for the rows the user picked in the list.
+
+        Uses the layer's own selection rather than a private rubber band, so the
+        highlight is the same object in both directions: clicking the contour on
+        the map with QGIS's Select Features tool ticks the row back.
+        """
+        layer = resolve_layer(self._project, self._state.contour_layer_id)
+        if layer is None:
+            return
+        wanted = set(int(i) for i in indices)
+        try:
+            ids, geoms = [], []
+            for f in layer.getFeatures():
+                if int(f["cid"]) in wanted:
+                    ids.append(f.id())
+                    geoms.append(QgsGeometry(f.geometry()))
+        except Exception:
+            return
+        self._syncing_selection = True
+        try:
+            layer.selectByIds(ids)
+        finally:
+            self._syncing_selection = False
+        # Flash a single pick — on a multi-row selection the flashes overlap into
+        # noise and the selection colour already carries it.
+        if len(geoms) == 1:
+            try:
+                self._canvas.flashGeometries(geoms)
+            except Exception:
+                pass
+        self._canvas.refresh()
 
     def select_top5_contours(self):
         if not self._state.contour_features:
@@ -156,12 +360,24 @@ class ContourController:
             )
             return
 
+        # Unticked contours are out of the running: "best 5" has to mean best five
+        # of the ones still on the table, or the tick achieves nothing.
+        candidates = [f for f in self._state.contour_features
+                      if getattr(f, "selected", True)]
+        if not candidates:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Every contour is unticked — tick at least one to select from.",
+            )
+            return
+
         top_n = self._panel.top_n
         ranked = sorted(
-            self._state.contour_features,
+            candidates,
             key=lambda f: f.peak_acc if f.peak_acc is not None else 0,
             reverse=True,
         )[:top_n]
+        self._state.top_contour_features = ranked
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
         remove_layer(self._project, self._state.top5_layer_id)
@@ -190,8 +406,19 @@ class ContourController:
             "color": "255,140,0", "width": "1.2", "capstyle": "round",
         })
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.CONTOUR)
         self._state.top5_layer_id = layer.id()
+
+        skipped = len(self._state.contour_features) - len(candidates)
+        msg = f"Top {len(ranked)} of {len(candidates)} candidate contour(s) selected."
+        if skipped:
+            msg += f" {skipped} unticked contour(s) excluded."
+        self._iface.messageBar().pushInfo("TerrainFlow Assessment", msg)
+
+        # The gradient scopes itself to this subset, so a narrower pick has to
+        # redraw it rather than leave the previous scope on screen.
+        if self._panel.inflow_bands_active:
+            self.show_inflow_bands(True)
 
     # ---------------------------------------------------------------- Clear / inflow bands
 
@@ -200,6 +427,7 @@ class ContourController:
         self._reset_contour_map_tool()
         proj = self._project.instance()
         for attr in ("contour_layer_id", "top5_layer_id", "segment_layer_id",
+                     "segment_gradient_layer_id",
                      "simple_contour_layer_id", "keyline_layer_id",
                      "drawn_keyline_layer_id", "inflow_bands_layer_id"):
             remove_layer(self._project, getattr(self._state, attr, None))
@@ -209,6 +437,9 @@ class ContourController:
             for lyr in proj.mapLayersByName(name):
                 proj.removeMapLayer(lyr)
         self._state.contour_features = []
+        self._state.top_contour_features = []
+        self._state.segment_features = []
+        self._state.contour_breaks = []
         self._state.found_keypoints = None
         self._state.keyline_master_geom = None
         self._state.keyline_master_coords = None
@@ -218,11 +449,34 @@ class ContourController:
         )
         self._canvas.refresh()
 
+    def _gradient_scope(self):
+        """Which contours the inflow gradient grades, and how to describe that.
+
+        The top-N pick when the user has made one: once they have narrowed to the
+        swales they are actually considering, grading every contour on the site
+        paints over the answer with a hundred lines nobody asked about. Falls back
+        to the ticked candidates before any pick has been made.
+
+        Returns (features, source_ids, description). *source_ids* are positions in
+        ``contour_features`` so the tick filter still reaches the stretches.
+        """
+        by_identity = {id(f): i for i, f in enumerate(self._state.contour_features)}
+        top = [f for f in self._state.top_contour_features
+               if getattr(f, "selected", True)]
+        if top:
+            return (top, [by_identity.get(id(f), -1) for f in top],
+                    f"top {len(top)} selected swale(s)")
+        ticked = [(i, f) for i, f in enumerate(self._state.contour_features)
+                  if getattr(f, "selected", True)]
+        return ([f for _, f in ticked], [i for i, _ in ticked],
+                f"{len(ticked)} ticked contour(s)")
+
     def show_inflow_bands(self, checked):
         """Toggle the along-contour inflow-share classification layer."""
         remove_layer(self._project, self._state.inflow_bands_layer_id)
         self._state.inflow_bands_layer_id = None
         if not checked:
+            self._show_candidate_contours(True)
             self._canvas.refresh()
             return
         if not self._state.contour_features:
@@ -236,54 +490,77 @@ class ContourController:
                 "TerrainFlow Assessment", "Run baseline analysis first."
             )
             return
+        features, source_ids, scope = self._gradient_scope()
+        if not features:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Nothing in scope — tick a contour, or run 'Select Top Swales'.",
+            )
+            return
         from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
         try:
             stretches = classify_contour_inflow(
-                self._state.contour_features, acc_path,
+                features, acc_path,
                 cell_area_m2=self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0,
                 runoff_mm=(self._state.baseline_result or {}).get("runoff_mm"),
                 duration_hr=self._panel.duration_hr,
+                source_ids=source_ids,
             )
-            self._display_inflow_gradient(stretches, self._panel.inflow_scale_mode)
+            self._display_inflow_gradient(stretches, self._panel.inflow_scale_mode,
+                                          scope=scope)
         except Exception as exc:
             self._iface.messageBar().pushCritical(
                 "TerrainFlow Assessment", f"Inflow classification failed: {exc}"
             )
 
-    def _display_inflow_gradient(self, stretches, scale="log"):
-        """Render contour stretches on one ramp keyed to the global inflow range,
+    def _show_candidate_contours(self, visible):
+        """Check/uncheck the candidate contour layer in the tree.
+
+        The gradient is drawn on exactly the same lines, so with both on you get
+        two renderings of one geometry — the wider candidate line fringing out from
+        under the gradient, and neither readable. The gradient answers the same
+        question in more detail, so while it is up the candidates step aside.
+        """
+        layer = resolve_layer(self._project, self._state.contour_layer_id)
+        if layer is None:
+            return
+        try:
+            node = self._project.instance().layerTreeRoot().findLayer(layer.id())
+        except Exception:
+            return
+        if node is not None:
+            node.setItemVisibilityChecked(bool(visible))
+
+    def _display_inflow_gradient(self, stretches, scale="natural", scope=""):
+        """Render contour stretches in four inflow bands keyed to the global range,
         so stretches are comparable across the whole map.
 
-        *scale* controls how colour maps to value:
-          "log"      — colour by log(inflow); compresses a skewed range so one
-                       extreme point doesn't flatten everything (default).
-          "linear"   — straight 0→max absolute scale.
-          "quantile" — equal count per colour (rank-based separation).
+        *scale* only decides where the four boundaries fall — see
+        :func:`contour_analysis.class_breaks`. The bands themselves are the shared
+        colour+width grammar, so this reads the same way as the candidate contours
+        and the segment overlay.
         """
-        import math
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
 
-        from qgis.core import (
-            QgsGradientColorRamp,
-            QgsGraduatedSymbolRenderer,
-            QgsLineSymbol,
-        )
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
         layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Contour Inflow (m³)", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
+            QgsField("source_id", QMetaType.Int),
             QgsField("inflow_m3", QMetaType.Double),
             QgsField("flow_ls", QMetaType.Double),
-            QgsField("inflow_log", QMetaType.Double),
         ])
         layer.updateFields()
         feats = []
+        values = []
         for s in stretches:
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromWkt(s["geometry"].wkt))
-            # Clamp before the log: a negative inflow would raise a math domain error
-            # here rather than anywhere the cause would be visible.
+            # Clamp: a negative inflow is not a thing, and it would drag the
+            # bottom boundary below zero where no band could reach it.
             inflow = max(0.0, float(s["inflow_m3"]))
-            f.setAttributes([inflow, float(s["flow_ls"]), math.log10(inflow + 1.0)])
+            values.append(inflow)
+            f.setAttributes([int(s.get("source_id", -1)), inflow, float(s["flow_ls"])])
             feats.append(f)
 
         if not feats:
@@ -295,70 +572,28 @@ class ContourController:
             return
         pr.addFeatures(feats)
 
-        base = QgsLineSymbol.createSimple({"width": "1.6", "capstyle": "round"})
-        # Continuous low→high ramp: blue → cyan → green → amber → red.
-        ramp = QgsGradientColorRamp(QColor(44, 123, 182), QColor(215, 25, 28))
-        try:
-            from qgis.core import QgsGradientStop
-            ramp.setStops([
-                QgsGradientStop(0.25, QColor(0, 170, 200)),
-                QgsGradientStop(0.50, QColor(120, 195, 70)),
-                QgsGradientStop(0.75, QColor(253, 174, 97)),
-            ])
-        except Exception:
-            pass
+        breaks = class_breaks(values, mode=scale, n_classes=len(INFLOW_RAMP_HEX))
+        self._apply_banded_renderer(layer, "inflow_m3", breaks)
 
-        if scale == "quantile":
-            attr, mode = "inflow_m3", QgsGraduatedSymbolRenderer.Quantile
-        elif scale == "linear":
-            attr, mode = "inflow_m3", QgsGraduatedSymbolRenderer.EqualInterval
-        else:  # log (default): even classes in log space, relabelled to m³
-            attr, mode = "inflow_log", QgsGraduatedSymbolRenderer.EqualInterval
+        # Above the candidate contours in the group; the candidates themselves are
+        # switched off, since this is the same geometry read in more detail.
+        self.place(layer, G.CONTOUR, at_top=True)
+        self._state.inflow_bands_layer_id = layer.id()
+        self._show_candidate_contours(False)
+        # Unticked contours stay hidden in the gradient too — it is the same
+        # geometry wearing a different colour.
+        self._apply_contour_filter()
 
-        # createRenderer cannot classify a degenerate range — every stretch carrying
-        # the same inflow, or a single stretch — and raises rather than returning
-        # something usable. That took out the whole Show Inflow Gradient action, and
-        # the traceback named the renderer rather than the data behind it.
-        values = {f.attribute(attr) for f in layer.getFeatures()}
-        renderer = None
-        if len(values) > 1:
-            try:
-                n_classes = min(16, len(values))
-                renderer = QgsGraduatedSymbolRenderer.createRenderer(
-                    layer, attr, n_classes, mode, base, ramp)
-            except Exception as exc:
-                print(f"TerrainFlow Assessment — inflow gradient classify failed: {exc}")
-                renderer = None
-        if renderer is None or not renderer.ranges():
-            # One colour is honest for one value; a 16-class ramp over it would
-            # invent a gradient that is not in the data.
-            from qgis.core import QgsSingleSymbolRenderer
-            layer.setRenderer(QgsSingleSymbolRenderer(base))
-            self._project.instance().addMapLayer(layer)
-            self._state.inflow_bands_layer_id = layer.id()
-            self._canvas.refresh()
+        if len(breaks) < 3:
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
                 "Contour inflow is uniform across the site, so there is no gradient "
                 "to band — shown in a single colour.",
             )
-            return
-
-        if scale not in ("quantile", "linear"):
-            # Relabel the log-space classes back to their m³ bounds so the legend
-            # stays readable in real units.
-            for i, rng in enumerate(renderer.ranges()):
-                lo = max(10 ** rng.lowerValue() - 1.0, 0.0)
-                hi = 10 ** rng.upperValue() - 1.0
-                try:
-                    renderer.updateRangeLabel(i, f"{lo:,.0f} – {hi:,.0f} m³")
-                except Exception:
-                    break
-
-        layer.setRenderer(renderer)
-        self._project.instance().addMapLayer(layer)
-        self._state.inflow_bands_layer_id = layer.id()
-        self._canvas.refresh()
+        elif scope:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment", f"Inflow gradient shown for the {scope}."
+            )
 
     def run_segment_analysis(self):
         if not self._state.contour_features:
@@ -395,9 +630,14 @@ class ContourController:
                 seg_max_slope_deg=self._panel.seg_max_slope_deg,
                 progress_callback=_progress,
             )
+            self._state.segment_features = segments
             self._panel.set_segment_complete()
             self._panel.set_segment_results(segments)
             self._display_swale_segments(segments)
+            # A new set of segments needs a new overlay, not the previous one
+            # sitting over geometry that has moved.
+            if self._panel.segment_gradient_active:
+                self.show_segment_gradient(True)
         except Exception as exc:
             self._panel.set_segment_complete()
             self._iface.messageBar().pushCritical(
@@ -405,7 +645,7 @@ class ContourController:
             )
 
     def _display_swale_segments(self, segments):
-        from qgis.core import QgsLineSymbol, QgsTextBufferSettings
+        from qgis.core import QgsTextBufferSettings
         from qgis.PyQt.QtGui import QFont
 
         if not segments:
@@ -445,24 +685,7 @@ class ContourController:
             feats.append(f)
         pr.addFeatures(feats)
 
-        # Distinct "swale" style: a white casing under a bold core coloured by
-        # whether the swale holds its inflow (green) or needs an overflow (amber),
-        # so it reads clearly as the recommended swale — separate from the thin
-        # ranked candidate contours and the slope-coloured flow lines.
-        from qgis.core import QgsSimpleLineSymbolLayer
-        from qgis.PyQt.QtCore import Qt as _Qt
-        color_expr = (
-            "CASE WHEN \"capped\" = 1 THEN color_rgb(230,126, 34)"
-            " ELSE color_rgb( 39,174, 96) END"
-        )
-        symbol = QgsLineSymbol.createSimple({"width": "1.8", "capstyle": "round"})
-        symbol.symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.PropertyStrokeColor, QgsProperty.fromExpression(color_expr))
-        casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 160))
-        casing.setWidth(3.6)
-        casing.setPenCapStyle(_Qt.RoundCap)
-        symbol.insertSymbolLayer(0, casing)  # draw casing beneath the core
-        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        self._style_swale_segments(layer, self._panel.segment_gradient_active)
 
         text_fmt = QgsTextFormat()
         font = QFont()
@@ -482,7 +705,7 @@ class ContourController:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
 
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.CONTOUR)
         self._state.segment_layer_id = layer.id()
         n_capped = sum(1 for s in segments if s.capped)
         msg = f"{len(segments)} swale segment(s) found. Top segment: {segments[0].label}"
@@ -492,6 +715,134 @@ class ContourController:
                 "consider a deeper/wider swale, a basin, or splitting the catchment."
             )
         self._iface.messageBar().pushSuccess("TerrainFlow Assessment", msg)
+
+    def _style_swale_segments(self, layer, gradient_on=False):
+        """Distinct "swale" style: a white casing under a bold core coloured by
+        whether the swale holds its inflow (green) or needs an overflow (amber),
+        so it reads clearly as the recommended swale — separate from the thin
+        ranked candidate contours and the slope-coloured flow lines.
+
+        With the peak-inflow overlay on, the core widens to 4.0 mm so the widest
+        gradient band (2.5 mm) still leaves ~0.75 mm of green showing either side.
+        The green/amber verdict is the point of this layer — where the water
+        concentrates is extra information about the same swale, so it is drawn
+        within the outline rather than in place of it. The green also acts as the
+        overlay's backdrop, which is why the gradient carries no white halo here.
+        """
+        from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+        from qgis.PyQt.QtCore import Qt as _Qt
+        color_expr = (
+            "CASE WHEN \"capped\" = 1 THEN color_rgb(230,126, 34)"
+            " ELSE color_rgb( 39,174, 96) END"
+        )
+        core_w, casing_w = (4.0, 5.6) if gradient_on else (1.8, 3.6)
+        symbol = QgsLineSymbol.createSimple({"width": str(core_w), "capstyle": "round"})
+        symbol.symbolLayer(0).setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeColor, QgsProperty.fromExpression(color_expr))
+        casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 190))
+        casing.setWidth(casing_w)
+        casing.setPenCapStyle(_Qt.RoundCap)
+        symbol.insertSymbolLayer(0, casing)  # draw casing beneath the core
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        layer.triggerRepaint()
+
+    def show_segment_gradient(self, checked):
+        """Toggle the peak-inflow gradient drawn inside the recommended segments.
+
+        A plain green outline says a swale belongs on this stretch of contour but
+        not *where along it* the water actually arrives — which is where the
+        crossing, the deepest section and any overflow want to go. Same ramp and
+        same numbers as the contour gradient, so the two read as one scheme.
+        """
+        remove_layer(self._project, self._state.segment_gradient_layer_id)
+        self._state.segment_gradient_layer_id = None
+
+        seg_layer = resolve_layer(self._project, self._state.segment_layer_id)
+        if seg_layer is not None:
+            self._style_swale_segments(seg_layer, checked)
+
+        if not checked:
+            self._canvas.refresh()
+            return
+        if not self._state.segment_features:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment", "Run 'Find Best Swale Segments' first."
+            )
+            return
+        acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
+        if not acc_path or not os.path.exists(acc_path):
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment", "Run baseline analysis first."
+            )
+            return
+
+        from terrainflow_assessment.modules.contour_analysis import classify_contour_inflow
+        try:
+            stretches = classify_contour_inflow(
+                self._state.segment_features, acc_path,
+                cell_area_m2=self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0,
+                runoff_mm=(self._state.baseline_result or {}).get("runoff_mm"),
+                duration_hr=self._panel.duration_hr,
+                # A swale segment is short, so the 3-sample window that suits a whole
+                # contour would reduce it to a couple of blocks.
+                window=2,
+            )
+        except Exception as exc:
+            self._iface.messageBar().pushCritical(
+                "TerrainFlow Assessment", f"Segment inflow classification failed: {exc}"
+            )
+            return
+        self._display_segment_gradient(stretches)
+
+    def _display_segment_gradient(self, stretches):
+        from terrainflow_assessment.modules.contour_analysis import class_breaks
+
+        if not stretches:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "No inflow found along the recommended segments to grade.",
+            )
+            return
+
+        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        layer = QgsVectorLayer(f"LineString?crs={crs_str}",
+                               "Swale Segment Inflow (m³)", "memory")
+        pr = layer.dataProvider()
+        pr.addAttributes([
+            QgsField("seg_rank",  QMetaType.Int),
+            QgsField("inflow_m3", QMetaType.Double),
+            QgsField("flow_ls",   QMetaType.Double),
+        ])
+        layer.updateFields()
+        feats = []
+        values = []
+        for s in stretches:
+            f = QgsFeature()
+            f.setGeometry(QgsGeometry.fromWkt(s["geometry"].wkt))
+            inflow = max(0.0, float(s["inflow_m3"]))
+            values.append(inflow)
+            f.setAttributes([int(s.get("source_id", -1)) + 1, inflow,
+                             float(s["flow_ls"])])
+            feats.append(f)
+        pr.addFeatures(feats)
+
+        # Same bands, same colours and the same width ordering as the contour
+        # gradient — the overlay is that scheme read at segment scale, not a second
+        # one. Narrower widths and no halo: it has to fit inside the green core,
+        # which is already doing the halo's job of separating it from the ground.
+        # Boundaries follow the same scale control as the contour gradient, so both
+        # views answer "how much" the same way.
+        self._apply_banded_renderer(
+            layer, "inflow_m3",
+            class_breaks(values, mode=self._panel.inflow_scale_mode,
+                         n_classes=len(INFLOW_RAMP_HEX)),
+            widths=_SEGMENT_BAND_WIDTHS, casing=None)
+
+        # Above the segments in the group, or the green core it belongs inside
+        # would be painted over it.
+        self.place(layer, G.CONTOUR, at_top=True)
+        self._state.segment_gradient_layer_id = layer.id()
+        self._canvas.refresh()
 
     def generate_simple_contours(self):
         if not self._state.dem_path:
@@ -525,7 +876,7 @@ class ContourController:
             from qgis.core import QgsLineSymbol
             symbol = QgsLineSymbol.createSimple({"color": "100,100,100", "width": "0.3"})
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.ANALYSIS)
             self._state.simple_contour_layer_id = layer.id()
 
         except Exception as exc:
@@ -806,7 +1157,7 @@ class ContourController:
                 "color": "150,90,30", "width": "1.6", "capstyle": "round",
             })
             layer.setRenderer(QgsSingleSymbolRenderer(sym))
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.KEYPOINT)
             self._state.drawn_keyline_layer_id = layer.id()
 
         f = QgsFeature()
@@ -888,7 +1239,7 @@ class ContourController:
         sl.setDataDefinedProperty(QgsSymbolLayer.PropertyStrokeStyle,
                                   QgsProperty.fromExpression(style_expr))
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.KEYPOINT)
         self._state.keyline_layer_id = layer.id()
 
         # Remember the master keyline so it can be converted to a swale.
@@ -917,7 +1268,7 @@ class ContourController:
         })
         kp_layer.setRenderer(QgsSingleSymbolRenderer(kp_sym))
         kp_layer.updateExtents()
-        self._project.instance().addMapLayer(kp_layer)
+        self.place(kp_layer, G.KEYPOINT)
 
     def _display_keypoints(self, keypoints):
         for lyr in self._project.instance().mapLayersByName("Keypoints"):
@@ -957,7 +1308,7 @@ class ContourController:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
         layer.updateExtents()
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.KEYPOINT)
 
     def _display_ridgelines(self, ridgelines):
         from qgis.core import QgsLineSymbol
@@ -986,7 +1337,7 @@ class ContourController:
         })
         layer.setRenderer(QgsSingleSymbolRenderer(sym))
         layer.updateExtents()
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.KEYPOINT)
 
     def _display_pond_sites(self, sites):
         for lyr in self._project.instance().mapLayersByName("Recommended Pond Sites"):
@@ -1027,4 +1378,4 @@ class ContourController:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
         layer.updateExtents()
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.KEYPOINT)

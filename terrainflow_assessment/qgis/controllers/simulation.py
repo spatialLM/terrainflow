@@ -31,11 +31,12 @@ from qgis.PyQt.QtCore import QMetaType, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.modules.catchment import SCSRunoff
+from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
 
 
-class SimulationController:
+class SimulationController(G.LayerTreeMixin):
     def __init__(self, state, panel, project, iface, canvas):
         self._state = state
         self._panel = panel
@@ -286,7 +287,7 @@ class SimulationController:
                 renderer = QgsSingleBandPseudoColorRenderer(
                     outline_layer.dataProvider(), 1, shader)
                 outline_layer.setRenderer(renderer)
-                self._project.instance().addMapLayer(outline_layer)
+                self.place(outline_layer, G.VERIFY)
                 self._state.sim_ponding_outline_layer_id = outline_layer.id()
         except Exception:
             pass
@@ -327,7 +328,7 @@ class SimulationController:
         layer = QgsRasterLayer(frame_path, "Ponding Fill")
         if layer.isValid():
             self._apply_ponding_ramp(layer)
-            self._project.instance().addMapLayer(layer)
+            self.place(layer, G.VERIFY)
             self._state.sim_ponding_frame_layer_id = layer.id()
 
     def _apply_ponding_ramp(self, layer):
@@ -422,7 +423,7 @@ class SimulationController:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
         layer.setLabelsEnabled(True)
 
-        self._project.instance().addMapLayer(layer)
+        self.place(layer, G.VERIFY)
         self._state.sim_fill_layer_id = layer.id()
 
     # ---------------------------------------------------------------- Frame display
@@ -449,7 +450,7 @@ class SimulationController:
                     else self._state.sim_global_max_cum
                 )
                 self._apply_stream_ramp(layer, global_max)
-                self._project.instance().addMapLayer(layer)
+                self.place(layer, G.VERIFY)
 
         time_labels = self._state.sim_result.get("time_labels", [])
         time_str = time_labels[idx] if idx < len(time_labels) else "—"

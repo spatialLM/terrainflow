@@ -34,6 +34,19 @@ derived_dims     : tuple[str, ...] — dims computed from the independent ones
                    (e.g. a channel's bottom_width follows top_width + side slope)
 soil_group       : str | None — default soil texture association, or None to use the
                    site soil. Keys the batter/grade advisories in core.sizing.advisories.
+
+Spillway policy fields (resolved by modules.earthwork_design.spillway_policy)
+-----------------------------------------------------------------------------
+spillway_freeboard_m : float — clear height required between the design nappe and the
+                   lowest containing ground, in metres. Per type because 0.30 m is an
+                   *embankment* standard (NRCS CPS-378) and a cut channel has no
+                   embankment; see the comment on the field.
+spillway_head_m  : float — default design head over the crest (m) for a fresh spillway.
+spillway_head_band : (min, max) — the head range this type treats as ordinary. Outside
+                   it the weir formula still holds, it simply stops being routine, so
+                   this drives an advisory and never a constraint. Per type, or a swale
+                   designed at its own default head would warn permanently — and an
+                   advisory that always fires is one the user learns to skip.
 """
 
 from __future__ import annotations
@@ -64,6 +77,17 @@ class EarthworkTypeConfig:
     independent_dims: tuple[str, ...] = ("depth", "top_width")
     derived_dims: tuple[str, ...] = ("bottom_width",)
     soil_group: str | None = None
+
+    # --- spillway policy (per-type; see modules.earthwork_design.spillway_policy) ---
+    # Freeboard and head are NOT one number across types. NRCS CPS-378's 0.30 m is a
+    # *pond embankment* figure — the margin between the design nappe and the top of a
+    # settled wall. A cut swale has no embankment to breach; its failure mode is water
+    # leaving somewhere unarmoured. Applying 0.30 m to a 0.5 m swale spends 60% of the
+    # dig before any head is added, which is how a tool teaches people to over-excavate.
+    # Defaults here are the embankment figures, so an unlisted type stays conservative.
+    spillway_freeboard_m: float = 0.30
+    spillway_head_m: float = 0.30
+    spillway_head_band: tuple[float, float] = (0.20, 0.50)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +125,13 @@ _add(EarthworkTypeConfig(
     independent_dims=("depth", "top_width"),
     derived_dims=("bottom_width",),
     soil_group=None,
+    # A swale spills over a low sill in its own bank, not over a dam wall. Both figures
+    # are half the embankment ones: at 0.15 + 0.15 the registry's default 0.5 m swale
+    # keeps a usable 0.20 m crest band, where 0.30 + 0.30 needs 0.60 m of a 0.50 m dig
+    # and reports the most ordinary swale in the plugin as impossible.
+    spillway_freeboard_m=0.15,
+    spillway_head_m=0.15,
+    spillway_head_band=(0.10, 0.30),
 ))
 
 _add(EarthworkTypeConfig(

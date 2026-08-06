@@ -555,6 +555,19 @@ class NetworkView(QWidget):
         self._chart.set_selected(self._selected_index)
         self._apply_mode()
 
+    def set_selected(self, index):
+        """Select *index* from outside, without re-announcing it.
+
+        Deliberately not ``_on_card_clicked``: that emits ``selection_changed``, and the
+        caller here is another view that has already reported the change. It also bails
+        early when the index is unchanged, which would leave a re-click from that view
+        doing nothing at all.
+        """
+        self._selected_index = index
+        for i, c in self._cards.items():
+            c.set_selected(i == index)
+        self._chart.set_selected(index)
+
     def clear_selection(self):
         self._selected_index = None
         for c in self._cards.values():

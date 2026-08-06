@@ -73,9 +73,6 @@ def check_overlay_toggles(dem_path):
         h.panel.toggle_slope_class_requested.emit(True)
         h.assert_no_errors("slope class on")
 
-        h.panel.toggle_slope_arrows_requested.emit(True)
-        h.assert_no_errors("slope arrows on")
-
         h.panel.toggle_slope_vectors_requested.emit(True)
         h.assert_no_errors("slope vectors on")
 
@@ -86,7 +83,6 @@ def check_overlay_toggles(dem_path):
 
         # ...and back off again, which is where dead-reference bugs surface.
         h.panel.toggle_slope_class_requested.emit(False)
-        h.panel.toggle_slope_arrows_requested.emit(False)
         h.panel.toggle_slope_vectors_requested.emit(False)
         h.panel.toggle_throughflow_requested.emit(False)
         h.assert_no_errors("overlays off")

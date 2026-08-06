@@ -6,14 +6,42 @@ Provides:
   filter_by_slope()         — reject contours where mean slope > max_slope_deg
   rank_by_flow_crossing()   — rank contours by peak flow accumulation crossing them
   clip_to_usable_area()     — clip contours to a user-defined usable polygon
+  natural_breaks()          — Jenks class boundaries over a set of inflow values
   ContourFeature            — lightweight container for a ranked contour
 """
 
 import logging
+import math
 
 import numpy as np
 
 _log = logging.getLogger(__name__)
+
+# Colour grammar shared by every "how much water arrives here" display: the ranked
+# candidate contours, the along-contour inflow gradient, and the peak-inflow overlay
+# inside the recommended swale segments.
+#
+# Read over aerial imagery, which is where this is actually used. Three rules come
+# out of that, and the first two overturn earlier attempts:
+#
+#  * **Opaque.** A near-transparent low end was tried for overlay-friendliness and
+#    is simply not visible against foliage — you cannot tell line from background.
+#    Quiet stretches recede by getting *thin* instead (see the width ramp in
+#    controllers/contour.py); a 0.7 mm hairline is unobtrusive and still legible,
+#    which a translucent wash is not.
+#  * **Chroma, not just lightness.** A single-hue light→dark ramp asks the eye to
+#    compare lightness against a background that has its own huge lightness range
+#    (sunlit grass to tree shadow), so the pale end vanished on grass and the dark
+#    end on shadow. This ramp keeps saturation high the whole way and darkens, so
+#    the two channels reinforce each other.
+#  * **No green, no brown.** Those are the imagery's own colours. Cyan→navy sits
+#    outside the aerial palette at every step, while staying one perceptual family
+#    so it still reads as one quantity rising rather than a rainbow's worth of
+#    categories.
+#
+# Lives here, beside the classification it colours, so the panel legend and the
+# renderers cannot drift apart — both import it.
+INFLOW_RAMP_HEX = ("#6fd8ef", "#1f9ed4", "#1b58b8", "#101a63")
 
 
 class ContourFeature:
@@ -45,13 +73,25 @@ class ContourFeature:
         self.selected = True   # user can deselect individual contours
 
     @property
+    def inflow_m3(self):
+        """Event runoff arriving at this contour's peak crossing, or None.
+
+        None rather than 0.0 when the cell size or runoff depth is unknown: those
+        are missing inputs, not a contour with no water on it, and a classifier
+        told 0.0 would rank an unmeasured contour as the driest on the site.
+        """
+        if self.cell_area_m2 and self.runoff_mm:
+            return self.peak_acc * self.cell_area_m2 * self.runoff_mm / 1000.0
+        return None
+
+    @property
     def label(self):
         rank_str = f"#{self.rank} " if self.rank else ""
         if self.cell_area_m2:
             area_ha = self.peak_acc * self.cell_area_m2 / 10_000
             area_str = f"{area_ha:,.1f} ha upslope"
-            if self.runoff_mm:
-                inflow_m3 = self.peak_acc * self.cell_area_m2 * self.runoff_mm / 1000.0
+            inflow_m3 = self.inflow_m3
+            if inflow_m3 is not None:
                 inflow_str = f" — {inflow_m3:,.0f} m³ inflow"
             else:
                 inflow_str = ""
@@ -328,6 +368,175 @@ def rank_by_flow_crossing(contours, acc_path, n_samples=50):
         feat.rank = i + 1
 
     return contours
+
+
+# ---------------------------------------------------------------------------
+# Value-based classification (natural breaks)
+# ---------------------------------------------------------------------------
+
+def natural_breaks(values, n_classes=4, max_sample=200):
+    """
+    Jenks natural-breaks boundaries over *values*.
+
+    Used to band candidate contours (and the inflow gradient) by how much water
+    actually arrives on them. Percentile-of-count bands were rejected for this:
+    "top 5 / top 10 / rest" says only where a contour sits in a queue, so at the
+    handful-of-swales counts this tool produces the bands land in arbitrary places
+    and two contours carrying 1,400 m³ and 90 m³ can end up one rank apart looking
+    equally good. Natural breaks put the boundaries where the gaps in the values
+    are, so a band means "this much water".
+
+    Parameters
+    ----------
+    values : iterable of float — the quantity to classify (non-finite entries and
+        None are dropped)
+    n_classes : int — target number of bands (clamped to the number of distinct
+        values available)
+    max_sample : int — Jenks is O(n²k); above this many values the input is
+        evenly subsampled over its sorted order before the boundaries are solved.
+        The boundaries move by a hair on huge inputs; the alternative is a
+        classification that takes seconds to draw a legend.
+
+    Returns
+    -------
+    list of float — ``n_classes + 1`` ascending boundaries ``[min, b1, …, max]``,
+    i.e. class *i* spans ``breaks[i] … breaks[i + 1]``. Empty list if there is
+    nothing finite to classify; ``[v, v]`` for a single distinct value.
+    """
+    clean = sorted(
+        float(v) for v in values
+        if v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+    )
+    if not clean:
+        return []
+
+    distinct = len(set(clean))
+    if distinct == 1:
+        return [clean[0], clean[0]]
+
+    k = max(1, min(int(n_classes), distinct))
+    if k == 1:
+        return [clean[0], clean[-1]]
+
+    data = clean
+    if len(data) > max_sample:
+        last = len(data) - 1
+        data = [data[round(i * last / (max_sample - 1))] for i in range(max_sample)]
+
+    n = len(data)
+    # mat1[l][j] — first index of the last class in the best j-class split of data[:l]
+    # mat2[l][j] — that split's total within-class variance
+    mat1 = [[0] * (k + 1) for _ in range(n + 1)]
+    mat2 = [[0.0] * (k + 1) for _ in range(n + 1)]
+    for j in range(1, k + 1):
+        mat1[1][j] = 1
+        mat2[1][j] = 0.0
+        for i in range(2, n + 1):
+            mat2[i][j] = float("inf")
+
+    for l in range(2, n + 1):  # noqa: E741 — l/m/i3/i4 keep the published Jenks names
+        s1 = s2 = w = 0.0
+        v = 0.0
+        for m in range(1, l + 1):
+            i3 = l - m + 1
+            val = data[i3 - 1]
+            s2 += val * val
+            s1 += val
+            w += 1
+            v = s2 - (s1 * s1) / w
+            i4 = i3 - 1
+            if i4 != 0:
+                for j in range(2, k + 1):
+                    if mat2[l][j] >= (v + mat2[i4][j - 1]):
+                        mat1[l][j] = i3
+                        mat2[l][j] = v + mat2[i4][j - 1]
+        mat1[l][1] = 1
+        mat2[l][1] = v
+
+    breaks = [0.0] * (k + 1)
+    breaks[0] = data[0]
+    breaks[k] = data[n - 1]
+    idx = n
+    for count in range(k, 1, -1):
+        breaks[count - 1] = data[int(mat1[idx][count]) - 2]
+        idx = int(mat1[idx][count]) - 1
+
+    # A degenerate run of identical values can hand back a non-ascending list,
+    # which would build a renderer with a negative-width class.
+    for i in range(1, k + 1):
+        if breaks[i] < breaks[i - 1]:
+            breaks[i] = breaks[i - 1]
+    return breaks
+
+
+def class_breaks(values, mode="natural", n_classes=4):
+    """Band boundaries for *values* under the user's chosen scale.
+
+    One entry point for every inflow display, so the candidate contours, the
+    along-contour gradient and the segment overlay are banded by the same code
+    and differ only in where the user asked the boundaries to fall.
+
+    mode:
+      "natural"  — Jenks; boundaries land on the gaps in the data (default)
+      "log"      — even bands in log10 space; keeps a long tail readable when one
+                   crossing dwarfs everything else
+      "linear"   — even bands from 0 to the maximum; a true absolute scale, but a
+                   single extreme value flattens the rest into one band
+      "quantile" — equal count per band; maximum separation, but a band becomes a
+                   rank rather than an amount
+
+    Returns the same ``n_classes + 1`` ascending boundary list as
+    :func:`natural_breaks`, or ``[]`` when there is nothing finite to band.
+    """
+    clean = sorted(
+        float(v) for v in values
+        if v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+    )
+    if not clean:
+        return []
+    if mode == "natural":
+        return natural_breaks(clean, n_classes=n_classes)
+
+    lo, hi = clean[0], clean[-1]
+    if lo == hi:
+        return [lo, lo]
+    k = max(1, min(int(n_classes), len(set(clean))))
+
+    if mode == "quantile":
+        last = len(clean) - 1
+        breaks = [clean[round(i * last / k)] for i in range(k)] + [hi]
+    elif mode == "log":
+        # +1 keeps a zero-inflow stretch (a real, common value) inside the domain
+        # rather than at -inf, which would collapse every other boundary.
+        log_lo, log_hi = math.log10(max(lo, 0.0) + 1.0), math.log10(hi + 1.0)
+        step = (log_hi - log_lo) / k
+        breaks = [10 ** (log_lo + i * step) - 1.0 for i in range(k)] + [hi]
+    else:  # linear
+        step = (hi - lo) / k
+        breaks = [lo + i * step for i in range(k)] + [hi]
+
+    # Equal-count banding repeats a boundary wherever a value is common enough to
+    # span one, which would build a zero-width band.
+    for i in range(1, len(breaks)):
+        if breaks[i] < breaks[i - 1]:
+            breaks[i] = breaks[i - 1]
+    return breaks
+
+
+def classify_by_breaks(value, breaks):
+    """Index of the band *value* falls in for a :func:`natural_breaks` list.
+
+    Values below the first boundary land in band 0 and values above the last in
+    the top band, so a feature classified against breaks computed from a subset
+    (or from an earlier run) is still coloured rather than dropped.
+    """
+    if not breaks or len(breaks) < 2 or value is None:
+        return 0
+    n_bands = len(breaks) - 1
+    for i in range(1, n_bands):
+        if value <= breaks[i]:
+            return i - 1
+    return n_bands - 1
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +968,8 @@ def find_swale_segments(contours, acc_path,
 
 
 def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
-                            duration_hr=0.0, window=3, progress_callback=None):
+                            duration_hr=0.0, window=3, progress_callback=None,
+                            source_ids=None):
     """
     Split each contour into short sub-segments carrying the **absolute** inflow
     that drains onto them, for a continuous, map-wide comparable gradient.
@@ -773,7 +983,10 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
 
     Parameters
     ----------
-    contours : list of ContourFeature
+    contours : list — anything carrying ``.geometry`` (a shapely LineString) and
+        ``.elevation``; ``.rank`` is used when present. ContourFeature and
+        SwaleSegment both qualify, so the recommended segments can be graded with
+        the same routine that grades the whole contours.
     acc_path : str — flow accumulation GeoTIFF
     cell_area_m2 : float
     runoff_mm : float or None — event runoff depth; needed to convert accumulation
@@ -781,12 +994,16 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
     duration_hr : float — storm duration (for the L/s rate)
     window : int — samples per emitted stretch (larger = coarser/smoother)
     progress_callback : callable(int, str) or None
+    source_ids : list of int or None — an id per input feature, stamped onto every
+        stretch it produced as ``source_id``. Lets a caller hide the stretches of a
+        contour the user unticked without reclassifying the whole site. Defaults to
+        the feature's position in *contours*.
 
     Returns
     -------
     list of dict: {geometry (sub-LineString), inflow_m3, flow_ls, acc,
-    contour_rank, elevation}. Also carries ``global_max_m3`` on every dict so the
-    renderer knows the shared upper bound.
+    contour_rank, elevation, source_id}. Also carries ``global_max_m3`` on every
+    dict so the renderer knows the shared upper bound.
     """
     import rasterio
     from shapely.ops import substring
@@ -811,6 +1028,7 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
     n = len(contours)
     for ci, feat in enumerate(contours):
         _p(5 + int(90 * ci / max(n, 1)), f"Classifying contour {ci + 1}/{n}…")
+        source_id = source_ids[ci] if source_ids is not None and ci < len(source_ids) else ci
         geom = feat.geometry
         total_len = geom.length
         if total_len < 1.0:
@@ -857,8 +1075,9 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
                 "acc": round(acc_val, 1),
                 "inflow_m3": round(inflow_m3, 1),
                 "flow_ls": round(flow_ls, 2),
-                "contour_rank": feat.rank or 0,
+                "contour_rank": getattr(feat, "rank", 0) or 0,
                 "elevation": feat.elevation,
+                "source_id": source_id,
             })
 
     # Stamp the shared global maximum so the renderer can scale one ramp to it.

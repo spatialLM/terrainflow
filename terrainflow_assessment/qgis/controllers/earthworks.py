@@ -26,7 +26,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QMetaType
+from qgis.PyQt.QtCore import QMetaType, Qt
 from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.core.registry.earthwork_types import all_types, get_type
@@ -156,22 +156,29 @@ class EarthworksController(G.LayerTreeMixin):
 
     # ---------------------------------------------------------------- Spillways
 
-    def activate_place_spillway(self, kind="outflow"):
-        """Site the selected feature's spillway by clicking the map.
+    def activate_place_spillway(self, kind="outflow", index=None):
+        """Site an earthwork's spillway by clicking the map.
 
         The crest is a design decision the dialog owns; *where* it sits is a
         decision about ground, so it is made on the ground. Placing it also pins the
         crest to a sampled elevation rather than a typed one.
+
+        *index* names the feature explicitly, which is how the Spillways list drives
+        this — it has its own rows and should not have to reach through the flow
+        network's selection to say which one it means. Left None the panel selection is
+        used, as the tool-menu rows have always done.
         """
-        idx = self._panel.get_selected_earthwork_index()
-        if idx is None:
+        if index is None:
+            index = self._panel.get_selected_earthwork_index()
+        idx = index
+        if idx is None or not (0 <= idx < len(self._state.earthwork_manager)):
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
                 "Select an earthwork in the list first, then place its spillway.",
             )
             return
         ew = self._state.earthwork_manager.get(idx)
-        if ew.type not in ("swale", "dam", "basin"):
+        if ew.type not in self.SPILLWAY_TYPES:
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
                 f"{ew.name} does not hold water, so it has nothing to spill.",
@@ -194,6 +201,10 @@ class EarthworksController(G.LayerTreeMixin):
             "TerrainFlow Assessment",
             prompt.format(name=ew.name) + " Esc to cancel.",
         )
+
+    def place_spillway_for(self, index, kind="outflow"):
+        """Slot for the Spillways list, which names the feature by row."""
+        self.activate_place_spillway(kind=kind, index=index)
 
     def _on_spillway_placed(self, ew_id, point, elevation, kind="outflow"):
         """Record the placed location, and seed the crest from the ground there."""
@@ -537,9 +548,23 @@ class EarthworksController(G.LayerTreeMixin):
     def _on_draw_cancelled(self):
         self._canvas.unsetMapTool(self._canvas.mapTool())
 
-    def edit_selected_earthwork(self):
-        idx = self._panel.get_selected_earthwork_index()
-        if idx is None:
+    def edit_earthwork_at(self, index):
+        """Open the properties dialog for a feature named by row.
+
+        Used by the Spillways list, which has its own rows and should not have to reach
+        through the flow network's selection to say which feature it means.
+        """
+        self.edit_selected_earthwork(index=index)
+
+    def edit_selected_earthwork(self, *, index=None):
+        """Open the properties dialog for the selected feature, or for *index*.
+
+        *index* is keyword-only on purpose: this is wired straight to the Edit button's
+        ``clicked`` signal, which emits a ``checked`` bool. Positionally that would bind
+        to the index and quietly edit feature 0 instead of the selected one.
+        """
+        idx = self._panel.get_selected_earthwork_index() if index is None else index
+        if idx is None or not (0 <= idx < len(self._state.earthwork_manager)):
             return
         ew = self._state.earthwork_manager.get(idx)
         from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
@@ -742,7 +767,7 @@ class EarthworksController(G.LayerTreeMixin):
                 bottom_width=getattr(ew, "bottom_width_m", None),
                 batter_run=getattr(ew, "batter_run_m", None),
             )
-        self._recompute_live_assessment()
+        self._recompute_live_assessment(geometry_settled=False)
 
     def _on_vertex_edit_finished(self, idx, geometry):
         """Exact tier on release / insert / delete: full capacity + layer + list."""
@@ -1546,6 +1571,178 @@ class EarthworksController(G.LayerTreeMixin):
         return coefficient_is_harvesting_grade(
             self._panel.sizing_basis, self._panel.runoff_coefficient)
 
+    SPILLWAY_TYPES = ("swale", "dam", "basin")
+
+    def _refresh_auto_spillway_widths(self):
+        """Keep every auto-tracking spillway width on its requirement.
+
+        ``width_auto`` promised this and never delivered it: the width was recomputed
+        only inside the modal properties dialog, so the stored figure — the one on the
+        map label, in the feature summary and in any review of the design — went stale
+        the moment the dialog closed and another feature was drawn. Worse,
+        :meth:`_check_spillway_capacity` skips auto widths on the grounds that they
+        track by definition, which was true of the intention and false of the object.
+
+        Outflows only. An inlet is a protected entry, not a weir; giving it a width from
+        the overflow formula would invent a design procedure that does not exist.
+        """
+        from terrainflow_assessment.modules.earthwork_design import (
+            calculate_spillway_width,
+            spillway_policy,
+        )
+
+        for ew in self._state.earthwork_manager.get_all():
+            spillway = getattr(ew, "spillway", None)
+            if spillway is None or not spillway.width_auto:
+                continue
+            total, _upstream = self._peak_flow_for(ew)
+            if not total or total <= 0:
+                continue
+            head = spillway.head_m or spillway_policy(ew.type)[1]
+            required = calculate_spillway_width(total, head)
+            # 0.0 means "these inputs say nothing" — no intensity, no catchment — not a
+            # spillway zero metres wide. Writing it through would persist that fiction.
+            if required > 0:
+                spillway.width_m = required
+
+    def _spillway_row(self, ew):
+        """One review row for *ew*, or None if this type has nothing to spill.
+
+        Built for every water-holding feature, **including those with no ``Spillway``
+        object yet**: the required width is a function of the terrain and the storm, not
+        of whether the user has ticked a box, and showing it before they commit is the
+        whole of "features auto-size their spillways as you add them".
+        """
+        from terrainflow_assessment.modules.earthwork_design import (
+            calculate_spillway_width,
+            effective_freeboard_m,
+            effective_head_m,
+            spillway_policy,
+            spillway_validity,
+        )
+
+        if ew.type not in self.SPILLWAY_TYPES:
+            return None
+
+        spillway = getattr(ew, "spillway", None)
+        inlet = getattr(ew, "inflow_spillway", None)
+        policy_freeboard, policy_head, head_band = spillway_policy(ew.type)
+
+        freeboard = effective_freeboard_m(spillway, ew.type)
+        target_head = (spillway.head_m if spillway is not None and spillway.head_m
+                       else policy_head)
+        width_auto = True if spillway is None else bool(spillway.width_auto)
+
+        row = {
+            "index": None,                    # filled by the caller; see _build_spillway_rows
+            "id": ew.id,
+            "name": ew.name,
+            "ew_type": ew.type,
+            "enabled": bool(ew.enabled),
+            "designed": spillway is not None,
+            "sited": bool(spillway is not None and spillway.point_wkt),
+            "inlet_sited": bool(inlet is not None and inlet.point_wkt),
+            "width_auto": width_auto,
+            "target_head_m": target_head,
+            "freeboard_min_m": freeboard,
+            "standard_freeboard_m": policy_freeboard,
+            "peak_flow_m3s": None,
+            "upstream_m3s": 0.0,
+            "required_width_m": None,
+            "built_width_m": None if spillway is None else (spillway.width_m or 0.0),
+            "actual_head_m": None,
+            "freeboard_m": None,
+            "crest_elevation": None if spillway is None else spillway.crest_elevation,
+            "rim_elevation": None,
+            "problems": [],
+            "state": "ok",
+        }
+
+        # A disabled feature is out of the catchment labelling entirely, so it has no
+        # flow and no meaningful sizing — say so rather than render a row of zeros that
+        # reads as a failure.
+        if not ew.enabled:
+            row["state"] = "disabled"
+            return row
+
+        total, upstream = self._peak_flow_for(ew)
+        row["peak_flow_m3s"], row["upstream_m3s"] = total, upstream
+        if not total or total <= 0:
+            row["state"] = "no_flow"
+            return row
+
+        row["required_width_m"] = calculate_spillway_width(total, target_head) or None
+        built = row["built_width_m"] if spillway is not None else row["required_width_m"]
+        row["actual_head_m"] = effective_head_m(
+            target_head, peak_flow_m3s=total, width_m=built, width_auto=width_auto)
+
+        rim, invert = self._spillway_datums(
+            ew.geometry, ew.type,
+            top_width_m=getattr(ew, "top_width_m", None),
+            depth=getattr(ew, "depth", None),
+            crest_elevation=getattr(ew, "crest_elevation", None),
+        )
+        row["rim_elevation"] = rim
+        if rim is not None and row["crest_elevation"] is not None:
+            row["freeboard_m"] = rim - row["crest_elevation"] - (row["actual_head_m"] or 0.0)
+
+        row["problems"] = spillway_validity(
+            row["crest_elevation"], rim, invert_elevation=invert,
+            head_m=row["actual_head_m"] or target_head,
+            min_freeboard_m=freeboard,
+            width_m=built, required_width_m=row["required_width_m"],
+            standard_freeboard_m=policy_freeboard,
+            typical_head_m=head_band,
+            feature_length_m=getattr(ew, "length_m", None),
+        )
+        if rim is None:
+            row["state"] = "no_datum"
+        elif row["problems"]:
+            row["state"] = "fail"
+        elif not row["designed"]:
+            row["state"] = "undesigned"
+        elif not row["sited"]:
+            row["state"] = "unsited"
+        return row
+
+    def _build_spillway_rows(self):
+        """Refresh the Design-stage spillway review.
+
+        Deliberately **not** called from :meth:`_recompute_live_assessment`: that runs on
+        every frame of a vertex drag, and each row samples the DEM through
+        ``_spillway_datums`` (a footprint rasterisation plus a rim scan). The same
+        reasoning already keeps time-of-concentration off that path. Geometry-dependent
+        work belongs on the discrete edits, where the geometry has actually settled.
+        """
+        try:
+            rows = []
+            for i, ew in enumerate(self._state.earthwork_manager.get_all()):
+                row = self._spillway_row(ew)
+                if row is not None:
+                    row["index"] = i
+                    rows.append(row)
+            self._panel.set_spillway_review(rows, self._spillway_context())
+        except Exception as exc:
+            import traceback
+            print(f"TerrainFlow Assessment — spillway review error: {exc}")
+            traceback.print_exc()
+
+    def _spillway_context(self):
+        """Facts the review footer needs that are not per-row."""
+        from terrainflow_assessment.modules.peak_flow import (
+            DEFAULT_PEAK_INTENSITY_MM_HR,
+        )
+
+        idf = getattr(self._state, "idf_table", None)
+        return {
+            "intensity_mm_hr": self._panel.peak_intensity_mm_hr,
+            "intensity_is_default": (
+                abs(self._panel.peak_intensity_mm_hr - DEFAULT_PEAK_INTENSITY_MM_HR)
+                < 1e-9),
+            "has_idf": bool(idf is not None and getattr(idf, "depths", None)),
+            "harvesting_coefficient": self._using_harvesting_coefficient(),
+        }
+
     def _check_spillway_capacity(self):
         """Warn where a *built* spillway no longer passes its design flow.
 
@@ -1553,9 +1750,17 @@ class EarthworksController(G.LayerTreeMixin):
         spillway becomes undersized is that someone added a feature upslope and
         routed more through it — a change made somewhere else entirely, which the
         user has no reason to connect to a structure they finished last week.
+
+        The Spillways list carries the same fact persistently; this stays because a list
+        is something you have to look at. This is the channel that reaches someone who
+        is not looking — so it only fires on the discrete edits, never per drag frame.
+        Auto widths are skipped, and now genuinely do track (see
+        :meth:`_refresh_auto_spillway_widths`), so the skip is finally true.
         """
         from terrainflow_assessment.modules.earthwork_design import (
             calculate_spillway_width,
+            head_for_width,
+            spillway_policy,
         )
 
         short = []
@@ -1566,15 +1771,25 @@ class EarthworksController(G.LayerTreeMixin):
             total, upstream = self._peak_flow_for(ew)
             if total is None or total <= 0:
                 continue
-            required = calculate_spillway_width(total, spillway.head_m or 0.30)
-            if required > (spillway.width_m or 0.0) + 0.01:
-                short.append((ew, spillway.width_m or 0.0, required, upstream))
+            head = spillway.head_m or spillway_policy(ew.type)[1]
+            required = calculate_spillway_width(total, head)
+            built = spillway.width_m or 0.0
+            if required > built + 0.01:
+                short.append((ew, built, required, head,
+                              head_for_width(total, built), upstream))
 
         if not short:
             return
         parts = []
-        for ew, built, required, upstream in short[:3]:
-            note = f"{ew.name}: built {built:.2f} m, now needs {required:.2f} m"
+        for ew, built, required, head, actual, upstream in short[:3]:
+            # Lead with what the water does, not with the shortfall in metres: "two
+            # metres short" is hard to act on, "it will run 18 cm deeper than you
+            # designed for" is the same fact in the units that decide the outcome.
+            if actual is not None:
+                note = (f"{ew.name}: at {built:.2f} m the water runs {actual:.2f} m "
+                        f"deep, not {head:.2f} m — needs {required:.2f} m")
+            else:
+                note = f"{ew.name}: built {built:.2f} m, now needs {required:.2f} m"
             if upstream > 0:
                 note += f" ({upstream * 1000:,.0f} L/s of that arrives from upslope)"
             parts.append(note)
@@ -2143,7 +2358,7 @@ class EarthworksController(G.LayerTreeMixin):
 
     # ---------------------------------------------------------------- Live assessment
 
-    def _recompute_live_assessment(self):
+    def _recompute_live_assessment(self, geometry_settled=True):
         """Design-tier: recompute the live analytical water balance → panel readout.
 
         Fast, no burn. Geometry metrics (capacity/cut/fill) always; storm capture %
@@ -2151,6 +2366,13 @@ class EarthworksController(G.LayerTreeMixin):
         cached catchment cell counts, so this stays responsive while dragging.
         Fires on every earthwork edit and storm/soil change; failures are swallowed so
         the readout never breaks the edit flow.
+
+        *geometry_settled* is False only on the throttled vertex-drag tier. Two things
+        wait for the release: the spillway review, because each of its rows samples the
+        DEM and doing that per feature at 12.5 Hz is exactly the cost this method's
+        docstring promises to avoid; and the undersized-spillway warning, because a
+        message bar that repaints on every mouse move is not a warning, it is a
+        flicker. Both are correct to defer — mid-drag geometry is not a design.
         """
         try:
             from terrainflow_assessment.modules.simulation import (
@@ -2203,6 +2425,15 @@ class EarthworksController(G.LayerTreeMixin):
             # Peak rates follow the same routing as the volumes, so a link the user
             # drew moves both the water and the spillway it has to pass.
             self.recompute_peak_flows(routing=routing)
+            # Auto widths follow the peak rates. Arithmetic over figures just computed,
+            # so it is safe on the drag path — unlike the review rows, which sample the
+            # DEM and are built on the discrete edits instead. Kept in its own guard:
+            # the outer handler would swallow a failure here along with the network
+            # repaint, the scorecard and everything else below it.
+            try:
+                self._refresh_auto_spillway_widths()
+            except Exception as exc:
+                print(f"TerrainFlow Assessment — auto spillway width error: {exc}")
             result = run_water_balance(
                 stores, duration_hr, total_runoff_m3,
                 uncaptured_m3=uncaptured_m3, routing=routing,
@@ -2219,7 +2450,9 @@ class EarthworksController(G.LayerTreeMixin):
             self._refresh_connections_layer(result, routing)
             self._panel.set_area_subtotals(self.compute_area_subtotals())
             self.refresh_stress_points_layer()
-            self._check_spillway_capacity()
+            if geometry_settled:
+                self._build_spillway_rows()
+                self._check_spillway_capacity()
 
             # Persistent scorecard (Workbench header) — blue means actual water.
             if result is not None and have_flow:
@@ -3176,108 +3409,13 @@ class EarthworksController(G.LayerTreeMixin):
             QgsColorRampShader.ColorRampItem(13, QColor("#FFA500"), "8–13°"),
             QgsColorRampShader.ColorRampItem(18, QColor("#FF6600"), "13–18°"),
             QgsColorRampShader.ColorRampItem(25, QColor("#CC2200"), "18–25°"),
-            QgsColorRampShader.ColorRampItem(90, QColor("#660000"), ">25°"),
+            QgsColorRampShader.ColorRampItem(50, QColor("#660000"), "25–50°"),
+            QgsColorRampShader.ColorRampItem(90, QColor("#3A0000"), "≥50°"),
         ])
         raster_shader = QgsRasterShader()
         raster_shader.setRasterShaderFunction(shader)
         renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, raster_shader)
         layer.setRenderer(renderer)
-
-    def toggle_slope_arrows(self, checked):
-        if checked:
-            existing = (self._state.slope_arrows_layer_id and
-                        self._project.instance().mapLayer(self._state.slope_arrows_layer_id))
-            if existing:
-                node = self._project.instance().layerTreeRoot().findLayer(
-                    self._state.slope_arrows_layer_id)
-                if node:
-                    node.setItemVisibilityChecked(True)
-            else:
-                self._generate_slope_arrows()
-        else:
-            if self._state.slope_arrows_layer_id:
-                node = self._project.instance().layerTreeRoot().findLayer(
-                    self._state.slope_arrows_layer_id)
-                if node:
-                    node.setItemVisibilityChecked(False)
-            self._canvas.refresh()
-
-    # Slope-class colour ramp shared by flow lines and slope vectors (matches the
-    # Terrain-Tools slope-class legend so the whole tab reads as one grammar).
-    _SLOPE_COLOR_EXPR = (
-        "CASE"
-        " WHEN \"slope_deg\" < 3  THEN color_rgb( 80,200, 80)"
-        " WHEN \"slope_deg\" < 8  THEN color_rgb(220,220, 30)"
-        " WHEN \"slope_deg\" < 13 THEN color_rgb(255,165,  0)"
-        " WHEN \"slope_deg\" < 18 THEN color_rgb(255,102,  0)"
-        " WHEN \"slope_deg\" < 25 THEN color_rgb(204, 34,  0)"
-        " ELSE                        color_rgb(102,  0,  0)"
-        " END"
-    )
-
-    def _generate_slope_arrows(self):
-        if not self._state.dem_path:
-            return
-        try:
-            from qgis.core import QgsGeometry
-
-            from terrainflow_assessment.modules.flow_lines import trace_flow_lines
-
-            recs = trace_flow_lines(self._state.dem_path, return_slope=True)
-            crs = self._state.dem_info.crs_wkt if self._state.dem_info else None
-            uri = f"LineString?crs={crs}" if crs else "LineString"
-            layer = QgsVectorLayer(uri, "Flow Lines", "memory")
-            if crs is None:
-                layer.setCrs(self._project.instance().crs())
-            pr = layer.dataProvider()
-            pr.addAttributes([QgsField("slope_deg", QMetaType.Double)])
-            layer.updateFields()
-
-            feats = []
-            for rec in recs:
-                f = QgsFeature()
-                f.setGeometry(QgsGeometry.fromWkt(rec["geometry"].wkt))
-                f.setAttributes([rec["mean_slope_deg"]])
-                feats.append(f)
-            pr.addFeatures(feats)
-            layer.updateExtents()
-
-            layer.setRenderer(QgsSingleSymbolRenderer(self._flow_line_symbol()))
-            self.place(layer, G.ANALYSIS)
-            self._state.slope_arrows_layer_id = layer.id()
-            self._canvas.refresh()
-
-        except Exception as exc:
-            self._iface.messageBar().pushWarning(
-                "TerrainFlow Assessment", f"Could not generate flow lines: {exc}"
-            )
-
-    def _flow_line_symbol(self):
-        """A curved flow line coloured by mean slope (gentle→steep), with a
-        downstream arrowhead mid-line (falls back to a plain line if the
-        marker-line API is unavailable)."""
-        from qgis.core import QgsLineSymbol
-        sym = QgsLineSymbol.createSimple({"width": "0.6", "capstyle": "round"})
-        sym.symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.PropertyStrokeColor,
-            QgsProperty.fromExpression(self._SLOPE_COLOR_EXPR))
-        try:
-            from qgis.core import QgsMarkerLineSymbolLayer, QgsMarkerSymbol
-            head = QgsMarkerSymbol.createSimple({
-                "name": "arrowhead", "color": "60,60,60,200",
-                "outline_style": "no", "size": "2.2", "angle": "0",
-            })
-            marker_line = QgsMarkerLineSymbolLayer()
-            marker_line.setSubSymbol(head)
-            marker_line.setRotateSymbols(True)
-            try:
-                marker_line.setPlacement(QgsMarkerLineSymbolLayer.CentralPoint)
-            except Exception:
-                pass
-            sym.appendSymbolLayer(marker_line)
-        except Exception:
-            pass
-        return sym
 
     def toggle_slope_vectors(self, checked):
         if checked:
@@ -3298,50 +3436,43 @@ class EarthworksController(G.LayerTreeMixin):
                     node.setItemVisibilityChecked(False)
             self._canvas.refresh()
 
+    # Hachures are drawn in one neutral dark tone, not on the slope-class ramp.
+    # They are usually read *over* the slope raster, and a red-family stroke
+    # vanishes into the red end of that ramp exactly where the ground is steepest
+    # and the reading matters most. Steepness is carried by stroke width instead.
+    _HACHURE_COLOR = "51,56,59,217"
+    # Taper: 0.3 mm on flat ground widening to 1.8 mm at 45° and above. Capping the
+    # slope term stops a single cliff cell from drawing a stroke the width of a road.
+    _HACHURE_WIDTH_EXPR = '0.3 + min("slope_deg", 45) / 45.0 * 1.5'
+
     def _generate_slope_vectors(self):
         if not self._state.dem_path:
             return
         try:
-            from qgis.core import QgsGeometry, QgsMarkerSymbol, QgsPointXY
+            from qgis.core import QgsGeometry
 
-            from terrainflow_assessment.modules.flow_lines import slope_vectors
+            from terrainflow_assessment.modules.flow_lines import hachure_segments
 
-            vecs = slope_vectors(self._state.dem_path)
+            segs = hachure_segments(self._state.dem_path, spacing_m=30.0)
             crs = self._state.dem_info.crs_wkt if self._state.dem_info else None
-            uri = f"Point?crs={crs}" if crs else "Point"
+            uri = f"LineString?crs={crs}" if crs else "LineString"
             layer = QgsVectorLayer(uri, "Slope Vectors", "memory")
             if crs is None:
                 layer.setCrs(self._project.instance().crs())
             pr = layer.dataProvider()
-            pr.addAttributes([
-                QgsField("angle", QMetaType.Double),
-                QgsField("slope_deg", QMetaType.Double),
-            ])
+            pr.addAttributes([QgsField("slope_deg", QMetaType.Double)])
             layer.updateFields()
 
             feats = []
-            for v in vecs:
+            for seg in segs:
                 f = QgsFeature()
-                f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(v["x"], v["y"])))
-                f.setAttributes([v["angle_deg"], v["slope_deg"]])
+                f.setGeometry(QgsGeometry.fromWkt(seg["geometry"].wkt))
+                f.setAttributes([seg["slope_deg"]])
                 feats.append(f)
             pr.addFeatures(feats)
             layer.updateExtents()
 
-            symbol = QgsMarkerSymbol.createSimple({
-                "name": "arrow", "size": "4", "angle": "0",
-            })
-            sl = symbol.symbolLayer(0)
-            # Rotate to downslope bearing; colour + size by slope steepness.
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyAngle, QgsProperty.fromField("angle"))
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertyFillColor,
-                QgsProperty.fromExpression(self._SLOPE_COLOR_EXPR))
-            sl.setDataDefinedProperty(
-                QgsSymbolLayer.PropertySize,
-                QgsProperty.fromExpression('3 + min("slope_deg" / 5.0, 5)'))
-            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+            layer.setRenderer(QgsSingleSymbolRenderer(self._hachure_symbol()))
             self.place(layer, G.ANALYSIS)
             self._state.slope_vectors_layer_id = layer.id()
             self._canvas.refresh()
@@ -3350,3 +3481,44 @@ class EarthworksController(G.LayerTreeMixin):
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment", f"Could not generate slope vectors: {exc}"
             )
+
+    def _hachure_symbol(self):
+        """A tapered downhill stroke: broad at the uphill end, drawn to a point
+        downhill, width set by steepness.
+
+        Built on the arrow symbol layer with the head suppressed, which is the only
+        stock symbol that varies width along a line. Falls back to a plain
+        constant-taper stroke if that API is unavailable, so the layer still draws.
+        """
+        from qgis.core import QgsLineSymbol
+        try:
+            from qgis.core import QgsArrowSymbolLayer
+
+            arrow = QgsArrowSymbolLayer()
+            arrow.setArrowStartWidth(1.8)   # uphill end — overridden per feature below
+            arrow.setArrowWidth(0.1)        # downhill end — tapers to a point
+            arrow.setHeadLength(0.0)        # no arrowhead; a hachure is a wedge
+            arrow.setHeadThickness(0.0)
+            arrow.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyArrowStartWidth,
+                QgsProperty.fromExpression(self._HACHURE_WIDTH_EXPR))
+            sub = arrow.subSymbol()
+            if sub is not None:
+                sub.setColor(QColor(51, 56, 59, 217))
+                for i in range(sub.symbolLayerCount()):
+                    try:
+                        sub.symbolLayer(i).setStrokeStyle(Qt.NoPen)
+                    except Exception:
+                        pass
+            sym = QgsLineSymbol()
+            sym.changeSymbolLayer(0, arrow)
+            return sym
+        except Exception:
+            sym = QgsLineSymbol.createSimple({
+                "width": "0.5", "capstyle": "round",
+                "color": self._HACHURE_COLOR,
+            })
+            sym.symbolLayer(0).setDataDefinedProperty(
+                QgsSymbolLayer.PropertyStrokeWidth,
+                QgsProperty.fromExpression(self._HACHURE_WIDTH_EXPR))
+            return sym

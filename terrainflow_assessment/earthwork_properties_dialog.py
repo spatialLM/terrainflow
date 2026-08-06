@@ -31,7 +31,10 @@ from .modules.earthwork_design import (
     calculate_capacity,
     calculate_diversion_discharge,
     calculate_spillway_width,
+    effective_freeboard_m,
+    effective_head_m,
     spillway_datum,
+    spillway_policy,
     spillway_validity,
 )
 from .qgis import help_text as H
@@ -198,6 +201,11 @@ class EarthworkPropertiesDialog(QDialog):
         self._rim_elevation = rim_elevation
         self._invert_elevation = invert_elevation
         self._spillway_binding = False           # re-entrancy guard for crest ↔ drop
+        # Per-type spillway policy: a swale overflows over a low sill in its own bank,
+        # an embankment over a designed wall, and the published 0.30 m figure describes
+        # only the second. Resolved once here so every row below reads the same source.
+        (self._policy_freeboard, self._policy_head,
+         self._policy_head_band) = spillway_policy(ew_type)
         # Peak flow (m³/s) from the rational method, with upstream overflow already
         # cascaded in; the controller owns that because only it knows the network.
         self._peak_flow_m3s = peak_flow_m3s
@@ -655,10 +663,17 @@ class EarthworkPropertiesDialog(QDialog):
             else:
                 rim_txt = "unknown — load a DEM to anchor the crest"
                 rim_style = f"color: {_WARN}; font-style: italic;"
+            if (self._rim_elevation is not None and self.ew_type == "swale"
+                    and getattr(ew, "companion_berm", False)):
+                # The burn raises the berm before taking its own pour point, so the real
+                # spill level is higher than this. Said out loud rather than folded in:
+                # the berm is one-sided, so where the low point is at an end it adds
+                # nothing, and quietly crediting it would claim headroom that is not there.
+                rim_txt += "  (excludes the companion berm)"
             lbl_rim = QLabel(rim_txt)
             lbl_rim.setStyleSheet(rim_style)
             lbl_rim.setToolTip(H.SPILLWAY_RIM)
-            spill_layout.addRow("Rim (lowest ground):", lbl_rim)
+            spill_layout.addRow("Rim (natural spill level):", lbl_rim)
 
             self.spin_spillway_crest = QDoubleSpinBox()
             self.spin_spillway_crest.setRange(-500, 9000)
@@ -682,10 +697,30 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_head.setDecimals(2)
             self.spin_spillway_head.setSingleStep(0.05)
             self.spin_spillway_head.setSuffix(" m")
+            # A fresh spillway takes its type's design head — a swale spills over a low
+            # sill in its own bank and wants far less than an embankment does.
             self.spin_spillway_head.setValue(
-                existing.head_m if existing is not None else 0.30)
+                existing.head_m if existing is not None else self._policy_head)
             self.spin_spillway_head.setToolTip(H.SPILLWAY_HEAD)
-            spill_layout.addRow("Head above crest (H):", self.spin_spillway_head)
+            spill_layout.addRow("Design head (target):", self.spin_spillway_head)
+
+            # Read-only counterpart, shown only once a width is committed: then the head
+            # is the consequence rather than the choice, and it is the number the
+            # freeboard is actually spent on.
+            self.lbl_actual_head = QLabel("")
+            self.lbl_actual_head.setToolTip(H.SPILLWAY_ACTUAL_HEAD)
+            self.row_actual_head = QLabel("Head at that width:")
+            spill_layout.addRow(self.row_actual_head, self.lbl_actual_head)
+
+            self.spin_spillway_freeboard = QDoubleSpinBox()
+            self.spin_spillway_freeboard.setRange(0.0, 1.0)
+            self.spin_spillway_freeboard.setDecimals(2)
+            self.spin_spillway_freeboard.setSingleStep(0.05)
+            self.spin_spillway_freeboard.setSuffix(" m")
+            self.spin_spillway_freeboard.setValue(
+                effective_freeboard_m(existing, self.ew_type))
+            self.spin_spillway_freeboard.setToolTip(H.SPILLWAY_FREEBOARD)
+            spill_layout.addRow("Freeboard (min):", self.spin_spillway_freeboard)
 
             # Peak flow, supplied by the controller from the rational method with the
             # upstream cascade already added. It was previously derived here as event
@@ -740,6 +775,25 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_spillway_site.setToolTip(H.SPILLWAY_LOCATION)
             spill_layout.addRow("Location:", self.lbl_spillway_site)
 
+            # The inlet, read-only. It is a separate structure with a separate job — a
+            # protected entry, not a weir — so it carries no head or width here; showing
+            # one would invent a design procedure this module does not implement. But
+            # the dialog previously did not mention it at all, so a placed inlet was
+            # invisible from the only screen that claims to describe the feature.
+            inlet = getattr(ew, "inflow_spillway", None) if ew else None
+            inlet_sited = inlet is not None and inlet.point_wkt
+            if inlet_sited and inlet.crest_elevation is not None:
+                inlet_txt = f"placed at {inlet.crest_elevation:.2f} m"
+            elif inlet_sited:
+                inlet_txt = "placed on the map"
+            else:
+                inlet_txt = "not sited — use Inflow Spillway on the map"
+            self.lbl_inlet_site = QLabel(inlet_txt)
+            self.lbl_inlet_site.setStyleSheet(
+                f"color: {_MUTED}; font-size: 10.5px; font-style: italic;")
+            self.lbl_inlet_site.setToolTip(H.SPILLWAY_INLET)
+            spill_layout.addRow("Inlet:", self.lbl_inlet_site)
+
             self.lbl_spillway_warn = QLabel("")
             self.lbl_spillway_warn.setWordWrap(True)
             self.lbl_spillway_warn.setStyleSheet(
@@ -753,6 +807,10 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_crest.valueChanged.connect(self._on_spillway_crest_changed)
             self.spin_spillway_drop.valueChanged.connect(self._on_spillway_drop_changed)
             self.spin_spillway_head.valueChanged.connect(self._on_spillway_head_changed)
+            # Freeboard moves the ceiling of the crest band exactly as head does, so it
+            # has to re-bind the crest through the new band rather than only re-warn.
+            self.spin_spillway_freeboard.valueChanged.connect(
+                self._on_spillway_head_changed)
             self.grp_spillway.toggled.connect(self._update_spillway_sizing)
             self._update_spillway_sizing()
 
@@ -762,11 +820,15 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_crest = None
             self.spin_spillway_drop = None
             self.spin_spillway_head = None
+            self.spin_spillway_freeboard = None
+            self.lbl_actual_head = None
+            self.row_actual_head = None
             self.spin_built_width = None
             self.chk_width_auto = None
             self.lbl_spillway_width = None
             self.lbl_spillway_warn = None
             self.lbl_spillway_site = None
+            self.lbl_inlet_site = None
             self._spillway_point_wkt = None
             self._spillway_auto = True
 
@@ -1021,10 +1083,22 @@ class EarthworkPropertiesDialog(QDialog):
 
     # -- Spillway ------------------------------------------------------------
 
+    def _current_freeboard(self):
+        """The freeboard in force — the live control, else this type's policy."""
+        if self.spin_spillway_freeboard is not None:
+            return self.spin_spillway_freeboard.value()
+        return self._policy_freeboard
+
     def _crest_band(self):
-        """Crest elevations this feature can currently offer, at the chosen head."""
-        head = self.spin_spillway_head.value() if self.spin_spillway_head else 0.30
-        return spillway_datum(self._rim_elevation, self._invert_elevation, head_m=head)
+        """Crest elevations this feature can currently offer, at the chosen head.
+
+        Both the head and the freeboard move the ceiling (``rim − head − freeboard``),
+        so both have to be read live or the band and the warnings disagree.
+        """
+        head = (self.spin_spillway_head.value() if self.spin_spillway_head
+                else self._policy_head)
+        return spillway_datum(self._rim_elevation, self._invert_elevation,
+                              head_m=head, min_freeboard_m=self._current_freeboard())
 
     def _seed_spillway(self, existing):
         """Initial crest/drop pair — the saved one, or the highest crest that fits.
@@ -1089,13 +1163,37 @@ class EarthworkPropertiesDialog(QDialog):
             return None
         return calculate_spillway_width(self._peak_flow_m3s, head)
 
+    def _feature_length_m(self):
+        """Characteristic length of the drawn feature, for the does-the-weir-fit check.
+
+        Shapely reports a polygon's perimeter as its length, so one call covers both a
+        swale's run and a basin's rim without a special case.
+        """
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+
+            return shapely_shape(json.loads(self.geometry.asJson())).length or None
+        except Exception:
+            return None
+
     def _update_spillway_sizing(self):
-        """Refresh the required width, the auto-tracked built width, and the notes."""
+        """Refresh the required width, the auto-tracked built width, and the notes.
+
+        The weir equation has one spare degree of freedom, so exactly one of head and
+        width is chosen and the other follows. ``auto`` says which, and this method is
+        where that shows: with it ticked the head is the target and the width is solved;
+        with it unticked the width is the commitment and the head is the consequence.
+        Only the second case reports a head, because in the first the two are the same
+        number by construction.
+        """
         if self.lbl_spillway_width is None:
             return
         enabled = self.grp_spillway is None or self.grp_spillway.isChecked()
-        head = self.spin_spillway_head.value() if self.spin_spillway_head else 0.30
-        required = self._required_width(head)
+        target_head = (self.spin_spillway_head.value() if self.spin_spillway_head
+                       else self._policy_head)
+        required = self._required_width(target_head)
 
         if required is not None:
             self.lbl_spillway_width.setText(f"{required:.2f} m")
@@ -1105,6 +1203,7 @@ class EarthworkPropertiesDialog(QDialog):
         # Auto keeps the built width on the requirement as head, catchment or
         # upstream routing change. Unticking it commits to a number, which is what
         # makes the shortfall check meaningful rather than tautological.
+        auto = True
         if self.chk_width_auto is not None:
             auto = self.chk_width_auto.isChecked()
             self.spin_built_width.setEnabled(not auto)
@@ -1112,6 +1211,27 @@ class EarthworkPropertiesDialog(QDialog):
                 self.spin_built_width.blockSignals(True)
                 self.spin_built_width.setValue(required)
                 self.spin_built_width.blockSignals(False)
+
+        built = self.spin_built_width.value() if self.spin_built_width else None
+        head = effective_head_m(target_head, peak_flow_m3s=self._peak_flow_m3s,
+                                width_m=built, width_auto=auto)
+
+        # The head control is the target only while the width is free; once a width is
+        # committed it describes nothing, so it greys out and the achieved head takes
+        # over the row below it.
+        if self.spin_spillway_head is not None:
+            self.spin_spillway_head.setEnabled(auto)
+        if self.lbl_actual_head is not None:
+            show_actual = (not auto) and head is not None
+            self.lbl_actual_head.setVisible(show_actual)
+            self.row_actual_head.setVisible(show_actual)
+            if show_actual:
+                over = head - target_head
+                colour = _INK if over <= 0.005 else _WARN
+                note = "" if over <= 0.005 else f"  ({over:+.2f} m on target)"
+                self.lbl_actual_head.setText(f"{head:.2f} m{note}")
+                self.lbl_actual_head.setStyleSheet(
+                    f"color: {colour}; font-weight: 600;")
 
         if not enabled or self.lbl_spillway_warn is None:
             if self.lbl_spillway_warn is not None:
@@ -1123,8 +1243,12 @@ class EarthworkPropertiesDialog(QDialog):
             self._rim_elevation,
             invert_elevation=self._invert_elevation,
             head_m=head,
-            width_m=self.spin_built_width.value() if self.spin_built_width else None,
+            min_freeboard_m=self._current_freeboard(),
+            width_m=built,
             required_width_m=required,
+            standard_freeboard_m=self._policy_freeboard,
+            typical_head_m=self._policy_head_band,
+            feature_length_m=self._feature_length_m(),
         )
         if self._harvesting_coefficient:
             problems.append(
@@ -1188,6 +1312,12 @@ class EarthworkPropertiesDialog(QDialog):
         if self.grp_spillway is None or not self.grp_spillway.isChecked():
             return None
         head = self.spin_spillway_head.value()
+        # Store the freeboard only where it departs from the type's policy. Writing the
+        # policy value back would freeze today's figure into the design, so a later
+        # change to the standard would reach new features and silently skip saved ones.
+        freeboard = self.spin_spillway_freeboard.value()
+        override = (None if abs(freeboard - self._policy_freeboard) < 1e-9
+                    else freeboard)
         return Spillway(
             crest_elevation=self.spin_spillway_crest.value(),
             drop_below_rim_m=(self.spin_spillway_drop.value()
@@ -1197,6 +1327,7 @@ class EarthworkPropertiesDialog(QDialog):
             width_auto=self.chk_width_auto.isChecked(),
             point_wkt=self._spillway_point_wkt,
             auto=self._spillway_auto,
+            freeboard_m=override,
         )
 
     def get_bottom_width(self):

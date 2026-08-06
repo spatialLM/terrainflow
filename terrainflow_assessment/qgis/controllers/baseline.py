@@ -22,6 +22,7 @@ from qgis.core import (
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsTextFormat,
+    QgsUnitTypes,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -31,7 +32,56 @@ from qgis.PyQt.QtGui import QColor
 from terrainflow_assessment.modules.dem_loader import compute_slope_raster, load_dem
 from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from terrainflow_assessment.modules.reporting import BaselineReport
+from terrainflow_assessment.qgis.controllers import _groups as G
+from terrainflow_assessment.qgis.controllers import _layers as L
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
+
+# --------------------------------------------------------------------------- Exit labels
+# Exit markers and their labels are sized against the ground rather than the screen, so
+# they keep a constant relationship to the terrain instead of swamping it as you zoom out,
+# and are clamped at both ends so they never become illegible or overbearing.
+#
+# The ground sizes reproduce the previous fixed-screen look at 1:1184 (the scale the old
+# styling was judged correct at): 1 mm on screen is 1.184 m on the ground there, so the old
+# 10 pt text is ~4.2 m and the old 5 mm marker is ~5.9 m.
+#
+# The size is computed here in Python and re-applied on scale change, rather than handed to
+# QGIS as a map-unit size with a QgsMapUnitScale min/max. That looks like the natural fit
+# and is not: on QGIS 3.40 the mm clamp bounds the glyph size but *not* the text layout, so
+# the advances stay frozen at the unclamped width and the label renders stretched to ~3x —
+# measured at ratio w/h 10 (correct) against 25-40 (clamped map units). Points and
+# millimetres both lay out correctly, so the arithmetic lives here instead.
+_EXIT_LABEL_GROUND_M = 4.2      # text cap height in metres on the ground
+_EXIT_LABEL_MIN_PT = 8.0        # floor — legible against imagery with the buffer
+_EXIT_LABEL_MAX_PT = 14.0       # ceiling when zoomed right in
+_EXIT_MARKER_GROUND_M = 6.0     # marker diameter in metres on the ground
+_EXIT_MARKER_MIN_MM = 1.5
+_EXIT_MARKER_MAX_MM = 7.0
+
+# A ground length of G metres subtends G * 1000 / scale millimetres on the page, and a
+# point is 25.4/72 mm.
+_MM_PER_M = 1000.0
+_PT_PER_MM = 72.0 / 25.4
+
+
+def _clamp(value, lo, hi):
+    return max(lo, min(hi, value))
+
+
+def exit_label_size_pt(map_scale):
+    """Label point size for a map scale (1:*map_scale*), clamped at both ends."""
+    if not map_scale or map_scale <= 0:
+        return _EXIT_LABEL_MAX_PT
+    ground_pt = _EXIT_LABEL_GROUND_M * _MM_PER_M * _PT_PER_MM / map_scale
+    return round(_clamp(ground_pt, _EXIT_LABEL_MIN_PT, _EXIT_LABEL_MAX_PT), 1)
+
+
+def exit_marker_size_mm(map_scale):
+    """Marker diameter in millimetres for a map scale, clamped at both ends."""
+    if not map_scale or map_scale <= 0:
+        return _EXIT_MARKER_MAX_MM
+    ground_mm = _EXIT_MARKER_GROUND_M * _MM_PER_M / map_scale
+    return round(_clamp(ground_mm, _EXIT_MARKER_MIN_MM, _EXIT_MARKER_MAX_MM), 2)
 
 
 def _crs_label(crs):
@@ -43,7 +93,7 @@ def _crs_label(crs):
     return crs.to_string()
 
 
-class BaselineController(QObject):
+class BaselineController(G.LayerTreeMixin, QObject):
     # Emitted only after a baseline run *succeeds*. Earthworks that were restored before
     # the run — as happens when a design file is opened — hold no catchment labels yet, so
     # something has to re-score them once terrain results exist. Deliberately not emitted
@@ -57,6 +107,13 @@ class BaselineController(QObject):
         self._project = project
         self._iface = iface
         self._canvas = canvas
+        # Exit-points layers whose marker/label size tracks the map scale. Ids, not
+        # layers: the user can delete these from the legend at any time.
+        self._exit_layer_ids = []
+        try:
+            self._canvas.scaleChanged.connect(self.on_map_scale_changed)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- DEM / boundary
 
@@ -100,6 +157,13 @@ class BaselineController(QObject):
 
     def on_earthworks_area_changed(self, layer):
         self._state.earthworks_area_path = self._layer_to_path(layer) if layer else None
+
+    def on_site_name_changed(self, name):
+        """A name typed after the first run adopts the auto-named output group."""
+        try:
+            G.rename_default_site(self._project, name)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- Draw area on canvas
 
@@ -165,7 +229,9 @@ class BaselineController(QObject):
         })
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
-        self._project.instance().addMapLayer(layer)
+        # Directly under the site group, below the stage groups: it is an input the
+        # user drew, not an output of any one stage.
+        self.place(layer, G.SITE)
 
         self._canvas.unsetMapTool(self._canvas.mapTool())
         self._draw_area_tool = None
@@ -207,6 +273,11 @@ class BaselineController(QObject):
             )
             return
 
+        # Every stage group is tagged with the storm this run routed, so the tag is
+        # frozen here rather than read live — the Analysis and Design layers made
+        # afterwards belong to *these* numbers, whatever the spinners say later.
+        self._state.run_tag = self._param_tag()
+
         cell_area_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
         ha_threshold = self._panel.stream_threshold_ha
         threshold_cells = int(ha_threshold * 10_000 / cell_area_m2) if cell_area_m2 > 0 else 1000
@@ -243,6 +314,17 @@ class BaselineController(QObject):
         self._load_result_layers(result, is_earthworks=False)
 
         catchment_ha = result.get("catchment_area_m2", 0) / 10_000.0
+        # The comparison report subtracts this from the simulation's routed outflow, so it
+        # has to be the true boundary flux. Summing the exit points instead compared a
+        # threshold-filtered sum of per-crossing peak cells against a time-integrated
+        # total — two different measurements — and flattered the exit-reduction figure.
+        # The sum is kept only as a fallback for a run that produced no area totals.
+        site_outflow = (result.get("area_outflow", {}).get("site") or {})
+        exit_volume_m3 = site_outflow.get("total_volume_m3")
+        if exit_volume_m3 is None:
+            exit_volume_m3 = sum(
+                ep.get("volume_m3", 0) for ep in result.get("exit_points", []))
+
         self._state.baseline_report = BaselineReport(
             site_name=self._panel.site_name,
             dem_path=self._state.dem_path,
@@ -254,7 +336,7 @@ class BaselineController(QObject):
             cn=result.get("effective_cn", 70),
             runoff_mm=result.get("runoff_mm", 0),
             total_runoff_m3=result.get("runoff_volume_m3", 0),
-            exit_volume_m3=sum(ep.get("volume_m3", 0) for ep in result.get("exit_points", [])),
+            exit_volume_m3=exit_volume_m3,
             exit_points=result.get("exit_points", []),
         )
 
@@ -264,7 +346,8 @@ class BaselineController(QObject):
             f"Exit points: {len(result.get('exit_points', []))}"
         )
         self._panel.set_baseline_complete(summary)
-        self._panel.set_area_outflow(result.get("area_outflow", {}))
+        self._panel.set_area_outflow(result.get("area_outflow", {}),
+                                     result.get("ponded_volume_m3"))
         self.baseline_finished.emit()
 
     def _on_analysis_error(self, tb):
@@ -277,36 +360,39 @@ class BaselineController(QObject):
 
     def _param_tag(self):
         """Abbreviated run parameters for layer-group naming, e.g.
-        ``120mm·24h·CN61·5ha`` — so multiple baseline runs stay distinguishable."""
+        ``120mm·24h·C0.40·5ha`` — so multiple baseline runs stay distinguishable.
+
+        The middle term follows the Runoff Calculation Method (``runoff_basis_tag``)
+        because that is the only calibration number in play: quoting ``CN61`` on a
+        Lancaster run would advertise a value the run never read.
+        """
         p = self._panel
         try:
             return (f"{p.rainfall_mm:.0f}mm·{p.duration_hr:.0f}h·"
-                    f"CN{p.cn}·{p.stream_threshold_ha:g}ha")
+                    f"{p.runoff_basis_tag}·{p.stream_threshold_ha:g}ha")
         except Exception:
             return ""
 
-    def _result_group(self, group_name):
-        """Return a fresh layer-tree group named *group_name*, replacing any
-        existing group of the same name (and its layers) so re-running the same
-        parameters updates in place rather than piling up duplicates."""
-        root = self._project.instance().layerTreeRoot()
-        existing = root.findGroup(group_name)
-        if existing is not None:
-            for child in list(existing.findLayers()):
-                self._project.instance().removeMapLayer(child.layerId())
-            root.removeChildNode(existing)
-        return root.insertGroup(0, group_name)
-
     def _load_result_layers(self, result, is_earthworks=False):
         label = "Earthworks" if is_earthworks else "Baseline"
-        tag = self._param_tag()
-        group = self._result_group(f"{label} · {tag}" if tag else label)
+        # Re-running replaces this stage's rasters; the group itself is kept and
+        # renamed so the rest of the tree stays where the user left it.
+        path = G.RERUN if is_earthworks else G.BASELINE
+        group = G.clear_group(
+            self._project, path,
+            site_name=self._panel.site_name, tag=self._state.run_tag,
+        )
         layer_ids = []
 
-        def _add(layer):
+        def _add(layer, visible=True):
             # Add to the project without the flat legend, then place in the group.
             self._project.instance().addMapLayer(layer, False)
-            group.addLayer(layer)
+            node = group.addLayer(layer)
+            if node is not None:
+                # Collapsed: an expanded raster ramp is ~150 px of legend each.
+                node.setExpanded(False)
+                if not visible:
+                    node.setItemVisibilityChecked(False)
             layer_ids.append(layer.id())
 
         stream_path = result.get("stream_network")
@@ -324,10 +410,7 @@ class BaselineController(QObject):
             layer = QgsRasterLayer(throughflow_path, f"{label} — Throughflow (m³)")
             if layer.isValid():
                 self.apply_throughflow_ramp(layer, self._panel.throughflow_scale_mode)
-                _add(layer)
-                node = self._project.instance().layerTreeRoot().findLayer(layer.id())
-                if node is not None:
-                    node.setItemVisibilityChecked(self._panel.throughflow_visible)
+                _add(layer, visible=self._panel.throughflow_visible)
                 if not is_earthworks:
                     self._state.throughflow_layer_id = layer.id()
 
@@ -376,21 +459,26 @@ class BaselineController(QObject):
 
         symbol = QgsMarkerSymbol.createSimple({
             "name": "circle", "color": "220,0,0,200",
-            "outline_color": "140,0,0", "size": "5",
+            "outline_color": "140,0,0",
         })
+        symbol.setSizeUnit(QgsUnitTypes.RenderMillimeters)
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
         text_fmt = QgsTextFormat()
         text_fmt.setColor(QColor(160, 0, 0))
         font = QFont()
         font.setBold(True)
-        font.setPointSize(9)
         text_fmt.setFont(font)
+        # QgsTextFormat.setFont() ignores the QFont's own point size, so without this the
+        # format silently keeps its 10 pt default and never responds to the map scale.
+        text_fmt.setSizeUnit(QgsUnitTypes.RenderPoints)
 
         buf = QgsTextBufferSettings()
         buf.setEnabled(True)
         buf.setColor(QColor(255, 255, 255))
-        buf.setSize(1.5)
+        # Left in millimetres: the halo is there to lift text off aerial imagery, and at the
+        # minimum text size a ground-referenced buffer would swamp the glyphs it outlines.
+        buf.setSize(1.0)
         text_fmt.setBuffer(buf)
 
         label_settings = QgsPalLayerSettings()
@@ -405,7 +493,69 @@ class BaselineController(QObject):
         label_settings.setFormat(text_fmt)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(label_settings))
         layer.setLabelsEnabled(True)
+
+        self._exit_layer_ids.append(layer.id())
+        self._apply_exit_scale(layer, self._map_scale())
         return layer
+
+    # ---------------------------------------------------------------- Exit point scaling
+
+    def _map_scale(self):
+        try:
+            return float(self._canvas.scale())
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _apply_exit_scale(layer, map_scale):
+        """Resize one exit-points layer's marker and label for *map_scale*.
+
+        Returns True when something changed, so the caller can skip the repaint on the
+        many scale-change signals that do not move a clamped size.
+        """
+        changed = False
+        marker_mm = exit_marker_size_mm(map_scale)
+        symbol = layer.renderer().symbol() if layer.renderer() else None
+        if symbol is not None and symbol.size() != marker_mm:
+            symbol.setSize(marker_mm)
+            changed = True
+
+        labeling = layer.labeling()
+        if labeling is not None:
+            settings = labeling.settings()
+            fmt = settings.format()
+            label_pt = exit_label_size_pt(map_scale)
+            if fmt.size() != label_pt:
+                fmt.setSize(label_pt)
+                settings.setFormat(fmt)
+                layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+                changed = True
+        return changed
+
+    def on_map_scale_changed(self, *_):
+        """Keep exit markers/labels ground-referenced as the user zooms.
+
+        Wired to the canvas rather than expressed as a QGIS map-unit size because the
+        map-unit path mis-lays out the text — see the note by ``_EXIT_LABEL_GROUND_M``.
+        """
+        scale = self._map_scale()
+        live = []
+        repaint = False
+        for lid in self._exit_layer_ids:
+            layer = L.resolve_layer(self._project, lid)
+            if layer is None:
+                continue
+            live.append(lid)
+            try:
+                repaint |= self._apply_exit_scale(layer, scale)
+            except Exception:
+                pass
+        self._exit_layer_ids = live
+        if repaint:
+            for lid in live:
+                layer = L.resolve_layer(self._project, lid)
+                if layer is not None:
+                    layer.triggerRepaint()
 
     # ---------------------------------------------------------------- Before/after toggle
 
@@ -475,10 +625,17 @@ class BaselineController(QObject):
         else:  # log — decades below the maximum
             stops = (0.0, 1e-4, 1e-3, 1e-2, 1.0)
 
+        # Alpha rises far faster than the colour does. Diffuse sheet flow covers
+        # nearly the whole site, so at any weight it reads as a wash over the map
+        # rather than an overlay on it — the layer underneath has to stay legible
+        # through it, since the point is to see where that flow is going. The
+        # gathering and channel stops keep their weight; those are the answer.
+        # Mirrored by the inline key in panel.py — change a hue here and change it
+        # there, or the key stops describing the map.
         colours = [
             QColor(255, 255, 255, 0),      # nothing flows here — fully transparent
-            QColor(226, 240, 250, 150),    # off-white: diffuse sheet flow
-            QColor(144, 196, 232, 195),
+            QColor(226, 240, 250, 40),     # off-white: diffuse sheet flow, ~16%
+            QColor(144, 196, 232, 140),
             QColor(48, 122, 190, 225),
             QColor(8, 36, 110, 245),       # dark blue: concentrated channel
         ]
