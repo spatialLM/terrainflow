@@ -250,15 +250,25 @@ def reorder(project, order, path=SITE, site_name="", tag=""):
     if [n.layer().id() for n in sequence] == [n.layer().id() for n in children]:
         return grp                          # already in order; don't churn the tree
 
-    # A QgsLayerTreeLayer cannot be reparented, so rebuild from layer ids:
-    # drop every child, then re-add in the wanted order.
-    ids = [n.layer().id() for n in sequence]
+    # A QgsLayerTreeLayer cannot be reparented, so rebuild the group: drop every
+    # child, then re-add in the wanted order.
+    #
+    # Hold the layer OBJECTS across the surgery, not their ids. In QGIS Desktop the
+    # layer-tree registry bridge treats "node removed from the tree" as "user
+    # deleted this layer" and drops it from the project — so looking the id up
+    # afterwards returns None, every earthwork layer silently disappears, and the
+    # next refresh dereferences a dead wrapper. Headless there is no bridge, which
+    # is why the check suite never saw it.
+    layers = [n.layer() for n in sequence]
     for node in children:
         grp.removeChildNode(node)
-    for layer_id in ids:
-        layer = project.instance().mapLayer(layer_id)
+    for layer in layers:
         if layer is None:
             continue
+        # Re-register if the bridge took it out from under us; addMapLayer is a
+        # no-op when the layer is already there.
+        if project.instance().mapLayer(layer.id()) is None:
+            project.instance().addMapLayer(layer, False)
         node = grp.addLayer(layer)
         if node is not None:
             node.setExpanded(False)

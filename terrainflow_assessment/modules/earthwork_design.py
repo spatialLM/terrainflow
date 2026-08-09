@@ -232,6 +232,17 @@ def spillway_policy(ew_type):
 # floating point. Sub-millimetre setting-out is meaningless on a DEM anyway.
 _ELEV_EPS = 0.001
 
+# The crest, head and freeboard fields all step in centimetres, and elevations are
+# reported to two decimals. A shortfall finer than that is one the user has no way
+# to correct — nudging the crest down by one step overshoots — and the warning
+# would print "only 0.30 m ... needs 0.30 m", every figure rounding to the same
+# number while the message insists they differ.
+#
+# So the fit test is made at the precision the design is actually expressed in.
+# That also keeps the message honest: a warning can now only fire when the two
+# figures differ by at least one displayed unit.
+_CREST_FIT_EPS = 0.01
+
 
 class Spillway:
     """Where a feature is *designed* to overflow, and how wide that has to be.
@@ -399,7 +410,7 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
             f"({rim:.2f} m) — water will escape around the spillway before it "
             f"ever reaches the crest."
         )
-    elif rim - crest < head + freeboard - _ELEV_EPS:
+    elif rim - crest < head + freeboard - _CREST_FIT_EPS:
         problems.append(
             f"Only {rim - crest:.2f} m between the crest and the rim, but "
             f"{head:.2f} m of head plus {freeboard:.2f} m freeboard needs "

@@ -398,6 +398,72 @@ def check_drawn_group_order_is_stable(dem_path):
                 )
 
 
+def check_restack_keeps_every_layer_in_the_project(dem_path):
+    """Re-stacking must not lose a layer, and drawing after one must not crash.
+
+    reorder() drops every child node and re-adds them in order. In QGIS Desktop
+    the layer-tree registry bridge reads "node removed from tree" as "the user
+    deleted this layer" and drops it from the project — so re-adding by id found
+    nothing, all five earthwork layers vanished, and the next draw dereferenced a
+    dead wrapper:
+
+        RuntimeError: wrapped C/C++ object of type QgsVectorLayer has been deleted
+
+    Headless there is no bridge, so the whole check suite passed while the plugin
+    crashed on the first swale. This asserts the invariant the bridge violates —
+    every layer still resolvable after a restack — rather than the mechanism, so
+    it holds whether or not the harness reproduces the bridge.
+    """
+    from terrainflow_assessment.qgis.controllers import _groups as G
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        _design_of_every_type(h)
+        h.assert_no_errors("initial design")
+
+        before = dict(h.state.ew_layers)
+        if not before:
+            raise AssertionError("no earthwork layers were registered")
+
+        # Anything that restacks: placing a spillway rebuilds its layer and
+        # reasserts the order.
+        swale = next(e for e in h.state.earthwork_manager.get_all()
+                     if e.type == "swale")
+        pt = swale.geometry.interpolate(swale.geometry.length() / 2).asPoint()
+        h.plugin._earthworks._on_spillway_placed(swale.id, pt, 12.0, kind="outflow")
+        h.plugin._earthworks.restack(
+            __import__("terrainflow_assessment.qgis.controllers._symbols",
+                       fromlist=["DRAW_ORDER"]).DRAW_ORDER, G.DRAWN)
+
+        missing = [k for k, lid in before.items()
+                   if h.plugin._earthworks._project.instance().mapLayer(lid) is None]
+        if missing:
+            raise AssertionError(
+                f"restacking removed these layers from the project: {missing}")
+
+        # The crash itself: drawing again after a restack.
+        h.add_earthwork("swale", geometry=line_across_valley(row=120))
+        h.plugin._earthworks._refresh_ew_layer()
+        h.assert_no_errors("drawing after a restack")
+
+
+def check_earthwork_layers_are_held_by_id(dem_path):
+    """_state.ew_layers must hold ids, not layer objects.
+
+    CLAUDE.md's rule, and this is the crash it exists to prevent: a stored wrapper
+    outlives the C++ object behind it, so the next attribute access raises rather
+    than the layer being quietly rebuilt.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        _design_of_every_type(h)
+        for key, value in h.state.ew_layers.items():
+            if not isinstance(value, str):
+                raise AssertionError(
+                    f"ew_layers[{key!r}] holds {type(value).__name__}, not a layer id"
+                )
+
+
 def check_restack_does_not_duplicate_layers(dem_path):
     """Repeated refreshes must not grow the layer tree.
 

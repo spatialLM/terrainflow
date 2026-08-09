@@ -42,6 +42,7 @@ from terrainflow_assessment.modules.earthwork_design import (
 from terrainflow_assessment.modules.swale_design import contour_to_swale_geometry
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _symbols as S
+from terrainflow_assessment.qgis.controllers._layers import resolve_layer
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
@@ -2938,8 +2939,7 @@ class EarthworksController(G.LayerTreeMixin):
             geom_type = cfg.geom_type
             display_name = f"{cfg.label}s"
             color_hex = cfg.style[1]
-            existing = self._state.ew_layers.get(ew_type)
-            if existing and self._project.instance().mapLayer(existing.id()):
+            if resolve_layer(self._project, self._state.ew_layers.get(ew_type)):
                 continue
 
             layer = QgsVectorLayer(f"{geom_type}?crs={crs_str}", display_name, "memory")
@@ -2975,7 +2975,11 @@ class EarthworksController(G.LayerTreeMixin):
             # rule, and this was the one spot in the controller sidestepping it.
             # Same resulting tree position; the restack below owns ordering.
             self.place(layer, G.DRAWN)
-            self._state.ew_layers[ew_type] = layer
+            # The id, never the layer. A stored wrapper outlives the C++ object it
+            # points at — delete the layer in the Layers panel, or drop it while
+            # re-stacking the group, and the next access raises "wrapped C/C++
+            # object has been deleted" instead of quietly rebuilding.
+            self._state.ew_layers[ew_type] = layer.id()
 
         self.restack(S.DRAW_ORDER, G.DRAWN)
 
@@ -2988,13 +2992,14 @@ class EarthworksController(G.LayerTreeMixin):
 
     def _refresh_ew_layer(self):
         self._ensure_ew_layers()
-        for layer in self._state.ew_layers.values():
-            if layer and self._project.instance().mapLayer(layer.id()):
+        for layer_id in self._state.ew_layers.values():
+            layer = resolve_layer(self._project, layer_id)
+            if layer is not None:
                 layer.dataProvider().truncate()
 
         for ew in self._state.earthwork_manager.get_all():
-            layer = self._state.ew_layers.get(ew.type)
-            if not layer or not self._project.instance().mapLayer(layer.id()):
+            layer = resolve_layer(self._project, self._state.ew_layers.get(ew.type))
+            if layer is None:
                 continue
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromWkt(ew.geometry.asWkt()))
@@ -3006,8 +3011,9 @@ class EarthworksController(G.LayerTreeMixin):
                               1 if getattr(ew, "enabled", True) else 0, w])
             layer.dataProvider().addFeature(f)
 
-        for layer in self._state.ew_layers.values():
-            if layer and self._project.instance().mapLayer(layer.id()):
+        for layer_id in self._state.ew_layers.values():
+            layer = resolve_layer(self._project, layer_id)
+            if layer is not None:
                 layer.triggerRepaint()
 
     # ---------------------------------------------------------------- Earthworks analysis
