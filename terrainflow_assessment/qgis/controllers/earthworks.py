@@ -408,9 +408,11 @@ class EarthworksController(G.LayerTreeMixin):
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
-            self.place(layer, G.DRAWN)
+            # at_top: a spillway sits ON a swale, so it has to paint over that
+            # swale's band. Inserted in place rather than re-sorted afterwards —
+            # see the warning on _groups.reorder().
+            self.place(layer, G.DRAWN, at_top=True)
             self._state.spillway_layer_id = layer.id()
-            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — spillway layer error: {exc}")
 
@@ -2184,9 +2186,8 @@ class EarthworksController(G.LayerTreeMixin):
             layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
             layer.setLabelsEnabled(True)
 
-            self.place(layer, G.DRAWN)
+            self.place(layer, G.DRAWN, at_top=True)
             self._state.stress_points_layer_id = layer.id()
-            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — stress points layer error: {exc}")
 
@@ -2766,9 +2767,8 @@ class EarthworksController(G.LayerTreeMixin):
 
             layer.setRenderer(QgsSingleSymbolRenderer(S.connection_symbol()))
 
-            self.place(layer, G.DRAWN)
+            self.place(layer, G.DRAWN, at_top=True)
             self._state.connections_layer_id = layer.id()
-            self.restack(S.DRAW_ORDER, G.DRAWN)
         except Exception as exc:
             print(f"TerrainFlow Assessment — connections layer error: {exc}")
 
@@ -2973,15 +2973,14 @@ class EarthworksController(G.LayerTreeMixin):
 
             # Through place(), not addMapLayer + addLayer by hand — CLAUDE.md's
             # rule, and this was the one spot in the controller sidestepping it.
-            # Same resulting tree position; the restack below owns ordering.
+            # Appended, so the annotation layers placed with at_top=True stay
+            # above the bands without anything having to re-sort the group.
             self.place(layer, G.DRAWN)
             # The id, never the layer. A stored wrapper outlives the C++ object it
             # points at — delete the layer in the Layers panel, or drop it while
             # re-stacking the group, and the next access raises "wrapped C/C++
             # object has been deleted" instead of quietly rebuilding.
             self._state.ew_layers[ew_type] = layer.id()
-
-        self.restack(S.DRAW_ORDER, G.DRAWN)
 
     # ---------------------------------------------------------------- Earthwork symbology
 

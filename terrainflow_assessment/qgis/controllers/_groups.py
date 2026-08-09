@@ -216,6 +216,15 @@ def reorder(project, order, path=SITE, site_name="", tag=""):
     *order* is a list of layer names. ``"__earthworks__"`` stands for every layer
     not otherwise named, keeping the five earthwork bands together as one block
     wherever it appears. Names not present are skipped.
+
+    .. warning::
+       **Do not call this to fix render order.** Removing a layer node in QGIS
+       Desktop makes the layer-tree registry bridge delete the layer from the
+       project — every earthwork blinks into the panel and vanishes again, and
+       ``bridge.setEnabled(False)`` does not prevent it. Insert in the right place
+       instead: ``place(layer, path, at_top=True)``. Kept only because a caller
+       may one day genuinely need to re-sort a group whose layers it owns
+       outright, and then it should be doing so with its eyes open.
     """
     from qgis.core import QgsLayerTreeLayer
 
@@ -253,25 +262,40 @@ def reorder(project, order, path=SITE, site_name="", tag=""):
     # A QgsLayerTreeLayer cannot be reparented, so rebuild the group: drop every
     # child, then re-add in the wanted order.
     #
-    # Hold the layer OBJECTS across the surgery, not their ids. In QGIS Desktop the
-    # layer-tree registry bridge treats "node removed from the tree" as "user
-    # deleted this layer" and drops it from the project — so looking the id up
-    # afterwards returns None, every earthwork layer silently disappears, and the
-    # next refresh dereferences a dead wrapper. Headless there is no bridge, which
-    # is why the check suite never saw it.
+    # The hazard is QGIS Desktop's layer-tree registry bridge. It treats "node
+    # removed from the tree" as "the user deleted this layer" and removes it from
+    # the project — which destroys it. Half a second after a refresh, every
+    # earthwork layer disappears from the panel and the map goes blank.
+    #
+    # Headless there is no bridge, so removal is harmless and the whole check
+    # suite is blind to this. It has to be switched off around the surgery, and
+    # switched back on again whatever happens.
+    bridge = None
+    try:
+        bridge = project.instance().layerTreeRegistryBridge()
+    except Exception:
+        bridge = None
+
     layers = [n.layer() for n in sequence]
-    for node in children:
-        grp.removeChildNode(node)
-    for layer in layers:
-        if layer is None:
-            continue
-        # Re-register if the bridge took it out from under us; addMapLayer is a
-        # no-op when the layer is already there.
-        if project.instance().mapLayer(layer.id()) is None:
-            project.instance().addMapLayer(layer, False)
-        node = grp.addLayer(layer)
-        if node is not None:
-            node.setExpanded(False)
+    if any(layer is None for layer in layers):
+        return grp
+
+    if bridge is not None:
+        bridge.setEnabled(False)
+    try:
+        for node in children:
+            grp.removeChildNode(node)
+        for layer in layers:
+            # Belt and braces: if anything did drop the layer, put it back rather
+            # than leaving a hole in the design.
+            if project.instance().mapLayer(layer.id()) is None:
+                project.instance().addMapLayer(layer, False)
+            node = grp.addLayer(layer)
+            if node is not None:
+                node.setExpanded(False)
+    finally:
+        if bridge is not None:
+            bridge.setEnabled(True)
     return grp
 
 

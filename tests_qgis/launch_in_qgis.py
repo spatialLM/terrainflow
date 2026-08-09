@@ -126,6 +126,77 @@ def drive():
                 f"{len(plugin._state.baseline_layer_ids)} result layer(s)"
             )
 
+        # Draw an earthwork of every type. This is the part the offscreen harness
+        # cannot vouch for: QGIS Desktop runs a QgsLayerTreeRegistryBridge, so
+        # removing a layer node here also removes the layer from the project,
+        # while headless it does not. Layer-tree surgery has to be exercised
+        # against the real thing.
+        try:
+            from qgis.core import QgsGeometry, QgsPointXY
+
+            from terrainflow_assessment.modules.earthwork_design import Earthwork
+
+            ext = dem_layer.extent()
+            y0 = ext.yMinimum() + ext.height() / 2
+            for i, ew_type in enumerate(("swale", "berm", "dam", "diversion")):
+                y = y0 + (i - 1) * ext.height() * 0.12
+                geom = QgsGeometry.fromPolylineXY([
+                    QgsPointXY(ext.xMinimum() + ext.width() * 0.25, y),
+                    QgsPointXY(ext.xMinimum() + ext.width() * 0.75, y),
+                ])
+                ew = Earthwork(ew_type, geom, f"{ew_type.title()} {i + 1}")
+                ew.top_width_m = 2.0
+                _plugin._state.earthwork_manager.add(ew)
+            _plugin._earthworks._refresh_ew_layer()
+
+            # Force the reorder to actually do work. With earthworks alone the
+            # group is already in DRAW_ORDER, so reorder() returns early and the
+            # surgery — the part the registry bridge punishes — never runs. A
+            # placed spillway adds a layer that must sit above the bands, which
+            # is the case that goes wrong in the field.
+            swale = next(e for e in _plugin._state.earthwork_manager.get_all()
+                         if e.type == "swale")
+            mid = swale.geometry.interpolate(
+                swale.geometry.length() / 2).asPoint()
+            _plugin._earthworks._on_spillway_placed(
+                swale.id, mid, 12.0, kind="outflow")
+            for _ in range(5):
+                QCoreApplication.processEvents()
+            _plugin._earthworks._refresh_ew_layer()
+            for _ in range(5):
+                QCoreApplication.processEvents()
+
+            drawn = 0
+            for key, lid in _plugin._state.ew_layers.items():
+                layer = project.mapLayer(lid) if isinstance(lid, str) else None
+                if layer is None:
+                    log(f"  FAIL earthwork layer '{key}' is NOT in the project"
+                        f" (stored {type(lid).__name__})")
+                    status = "earthwork layer missing from project"
+                else:
+                    n = layer.featureCount()
+                    drawn += n
+                    log(f"  earthwork layer '{key}': {n} feature(s), "
+                        f"in canvas={layer in iface.mapCanvas().layers()}")
+            log(f"earthworks drawn: {drawn} feature(s) total")
+            if drawn == 0:
+                status = "no earthwork features reached any layer"
+
+            # The layer tree as the user sees it, after the reorder has run.
+            from terrainflow_assessment.qgis.controllers import _groups as _G
+            drawn_grp = _plugin._earthworks.group_for(_G.DRAWN)
+            names = [n.layer().name() for n in drawn_grp.children()
+                     if n.layer() is not None]
+            log(f"Drawn Earthworks group holds: {names}")
+            if len(names) < 5:
+                log("  FAIL layers vanished from the group after reordering")
+                status = "layers vanished from the Drawn Earthworks group"
+        except Exception as exc:
+            import traceback
+            log(f"FAIL drawing earthworks: {exc}")
+            log(traceback.format_exc())
+            status = "earthwork drawing raised"
+
         # A fresh profile has no saved window geometry, so QGIS opens small and the
         # layer tree / panel get cropped out of the screenshot.
         window = iface.mainWindow()

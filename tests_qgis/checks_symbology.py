@@ -385,12 +385,17 @@ def check_drawn_group_order_is_stable(dem_path):
         h.plugin._earthworks._refresh_spillway_layer()
         second = order()
 
+        # Band layers named from the registry, not guessed from the name. Every
+        # earthwork layer ends in "s" — but so does "Overflow connections", and
+        # treating that as a band made this check fail on a correct tree.
+        from terrainflow_assessment.core.registry.earthwork_types import all_types
+        band_names = {f"{cfg.label}s" for cfg in all_types().values()}
+
         for label, names in (("after first build", first), ("after refresh", second)):
             if "Spillways" not in names:
                 raise AssertionError(f"{label}: no Spillways layer in the Drawn group")
             spill = names.index("Spillways")
-            bands = [i for i, n in enumerate(names) if n.endswith("s") and n != "Spillways"
-                     and n != "Stress points"]
+            bands = [i for i, n in enumerate(names) if n in band_names]
             if bands and spill > min(bands):
                 raise AssertionError(
                     f"{label}: Spillways sits below an earthwork band and will render "
@@ -398,24 +403,24 @@ def check_drawn_group_order_is_stable(dem_path):
                 )
 
 
-def check_restack_keeps_every_layer_in_the_project(dem_path):
-    """Re-stacking must not lose a layer, and drawing after one must not crash.
+def check_refreshing_annotations_keeps_every_band_layer(dem_path):
+    """Refreshing a spillway must not take the earthwork layers with it.
 
-    reorder() drops every child node and re-adds them in order. In QGIS Desktop
-    the layer-tree registry bridge reads "node removed from tree" as "the user
-    deleted this layer" and drops it from the project — so re-adding by id found
-    nothing, all five earthwork layers vanished, and the next draw dereferenced a
-    dead wrapper:
+    The Drawn group's order used to be fixed by re-sorting it: drop every child
+    node, re-add in the wanted order. In QGIS Desktop that is fatal — the
+    layer-tree registry bridge reads "node removed from tree" as "the user
+    deleted this layer" and removes it from the project. Every earthwork blinked
+    into the panel and vanished, and the next draw dereferenced a dead wrapper.
+    Disabling the bridge did not prevent it.
 
-        RuntimeError: wrapped C/C++ object of type QgsVectorLayer has been deleted
+    Ordering is now decided when a layer is inserted (`at_top=True`) and nothing
+    re-sorts anything. This asserts the invariant that broke: after the
+    annotation layers rebuild, every band layer is still there.
 
-    Headless there is no bridge, so the whole check suite passed while the plugin
-    crashed on the first swale. This asserts the invariant the bridge violates —
-    every layer still resolvable after a restack — rather than the mechanism, so
-    it holds whether or not the harness reproduces the bridge.
+    Headless there is no bridge, so this passes either way — the real proof is
+    run_qgis_gui_shot.ps1, which drives the same sequence against QGIS Desktop.
+    Kept here because it is the cheap guard against a re-sort creeping back in.
     """
-    from terrainflow_assessment.qgis.controllers import _groups as G
-
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         _design_of_every_type(h)
@@ -425,26 +430,22 @@ def check_restack_keeps_every_layer_in_the_project(dem_path):
         if not before:
             raise AssertionError("no earthwork layers were registered")
 
-        # Anything that restacks: placing a spillway rebuilds its layer and
-        # reasserts the order.
         swale = next(e for e in h.state.earthwork_manager.get_all()
                      if e.type == "swale")
         pt = swale.geometry.interpolate(swale.geometry.length() / 2).asPoint()
         h.plugin._earthworks._on_spillway_placed(swale.id, pt, 12.0, kind="outflow")
-        h.plugin._earthworks.restack(
-            __import__("terrainflow_assessment.qgis.controllers._symbols",
-                       fromlist=["DRAW_ORDER"]).DRAW_ORDER, G.DRAWN)
+        h.plugin._earthworks._refresh_spillway_layer()
 
         missing = [k for k, lid in before.items()
                    if h.plugin._earthworks._project.instance().mapLayer(lid) is None]
         if missing:
             raise AssertionError(
-                f"restacking removed these layers from the project: {missing}")
+                f"refreshing the spillway layer removed these from the project: {missing}")
 
-        # The crash itself: drawing again after a restack.
+        # The crash itself: drawing again afterwards.
         h.add_earthwork("swale", geometry=line_across_valley(row=120))
         h.plugin._earthworks._refresh_ew_layer()
-        h.assert_no_errors("drawing after a restack")
+        h.assert_no_errors("drawing after an annotation refresh")
 
 
 def check_earthwork_layers_are_held_by_id(dem_path):
@@ -464,14 +465,14 @@ def check_earthwork_layers_are_held_by_id(dem_path):
                 )
 
 
-def check_restack_does_not_duplicate_layers(dem_path):
-    """Repeated refreshes must not grow the layer tree.
+def check_repeated_refreshes_do_not_grow_the_tree(dem_path):
+    """Repeated refreshes must not add or lose layers.
 
-    Reordering a group means rebuilding its child nodes, and a reorder that
-    removes the wrong node leaves the replacement behind as a duplicate. That
-    multiplies on every refresh — the tree still *looks* right, every state
-    assertion still passes, and the canvas quietly gets slower until it stops
-    finishing. Cheap to assert, nearly invisible otherwise.
+    Annotation layers are destroyed and rebuilt on every refresh. A rebuild that
+    fails to remove the old node leaves a duplicate, and one that removes too
+    much loses the layer — either way the tree still *looks* plausible, every
+    state assertion still passes, and the canvas quietly degrades. Cheap to
+    assert, nearly invisible otherwise.
     """
     from terrainflow_assessment.qgis.controllers import _groups as G
 
