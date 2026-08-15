@@ -477,6 +477,21 @@ class ReportingController:
 
     _STAGE_PREFIXES = ("Baseline — ", "Earthworks — ")
 
+    def _analysis_layers(self):
+        """The analysis outputs, resolved from the ids the plugin recorded.
+
+        "Streams", "Exit Points" and "Pond Capacity (full)" are ordinary words.
+        An operator whose project holds a layer of that name would have it drawn
+        on the report's maps in place of the analysis, and nothing would say so
+        — a map with the wrong stream network renders exactly as well as one
+        with the right one. Ids are the plugin's own record of what it made, so
+        a search inside them cannot reach anything it did not.
+        """
+        ids = (list(self._state.baseline_layer_ids or [])
+               + list(self._state.earthworks_layer_ids or []))
+        found = (resolve_layer(self._project, i) for i in ids)
+        return [layer for layer in found if layer is not None]
+
     def _named_layer(self, fragment, group=None):
         """A layer by name fragment, optionally restricted to one stage.
 
@@ -486,23 +501,35 @@ class ReportingController:
         "Earthworks — Streams", so ``_named_layer("Streams")`` could only ever
         return None and the stream network was silently missing from every
         report map. Baseline wins the tie — it is the run the flow map is about.
+
+        The plugin's own analysis layers are searched first and the rest of the
+        project only if that finds nothing. Preferring rather than restricting,
+        because not everything these maps need is an analysis output: the site
+        boundary and the analysis area are drawn by the operator, and the
+        hillshade may predate any run. Those are found by name, as they have to
+        be — but only once the layers the plugin can identify have had their say.
         """
         prefix = {"baseline": self._STAGE_PREFIXES[0],
                   "earthworks": self._STAGE_PREFIXES[1]}.get(group)
-        fallback = None
-        for layer in self._project.instance().mapLayers().values():
-            name = layer.name()
-            if fragment not in name:
-                continue
-            if prefix:
-                if name.startswith(prefix):
+
+        def _search(layers):
+            fallback = None
+            for layer in layers:
+                name = layer.name()
+                if fragment not in name:
+                    continue
+                if prefix:
+                    if name.startswith(prefix):
+                        return layer
+                    continue
+                if not name.startswith(self._STAGE_PREFIXES):
                     return layer
-                continue
-            if not name.startswith(self._STAGE_PREFIXES):
-                return layer
-            if fallback is None or name.startswith(self._STAGE_PREFIXES[0]):
-                fallback = layer
-        return fallback
+                if fallback is None or name.startswith(self._STAGE_PREFIXES[0]):
+                    fallback = layer
+            return fallback
+
+        return (_search(self._analysis_layers())
+                or _search(self._project.instance().mapLayers().values()))
 
     def _hillshade_layer(self):
         """The shaded-relief backdrop for the report's maps.

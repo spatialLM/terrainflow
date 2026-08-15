@@ -114,6 +114,16 @@ class PluginState:
     keyline_analysis: Any | None = None
     keyline_layer_id: str | None = None
     drawn_keyline_layer_id: str | None = None
+    # The rest of the keypoint group. These used to be found and removed by
+    # *name* — `mapLayersByName("Keypoints")` and friends — which meant a user's
+    # own layer called "Keypoints" was deleted out of their project the next
+    # time the analysis re-ran. Everything the plugin creates is removed by the
+    # id it recorded when it created it, and nothing else is ever removed.
+    # (`keyline_layer_id` above is the "Keyline Design" line itself.)
+    keypoints_layer_id: str | None = None
+    ridgelines_layer_id: str | None = None
+    pond_sites_layer_id: str | None = None
+    keyline_keypoint_layer_id: str | None = None
     # The current master keyline (generated or drawn) available for "convert to swale".
     keyline_master_geom: Any | None = None
     keyline_master_coords: list | None = None

@@ -178,6 +178,13 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
     def _on_contours_ready(self, contours):
         """Back on the GUI thread — every layer below belongs to it."""
+        # Number them as they arrive. Everything downstream that has to say
+        # *which* contour it means — the tick filter, the inflow gradient's
+        # scope — needs a name for one, and position in this list is the only
+        # thing a ContourFeature has that is unique: two of them can share an
+        # elevation, a rank and a length.
+        for i, feature in enumerate(contours):
+            feature.index = i
         self._state.contour_features = contours
         # A fresh run replaces the candidates, so anything derived from the old
         # ones (the top-N subset, the segments the overlay grades, and the two
@@ -498,17 +505,14 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
     def clear_analysis(self):
         """Remove all analysis layers and reset state so the user can re-run cleanly."""
         self._reset_contour_map_tool()
-        proj = self._project.instance()
         for attr in ("contour_layer_id", "top5_layer_id", "segment_layer_id",
                      "segment_gradient_layer_id",
                      "simple_contour_layer_id", "keyline_layer_id",
-                     "drawn_keyline_layer_id", "inflow_bands_layer_id"):
+                     "drawn_keyline_layer_id", "inflow_bands_layer_id",
+                     "keypoints_layer_id", "ridgelines_layer_id",
+                     "pond_sites_layer_id", "keyline_keypoint_layer_id"):
             remove_layer(self._project, getattr(self._state, attr, None))
             setattr(self._state, attr, None)
-        for name in ("Keypoints", "Ridgelines (Water Divides)", "Recommended Pond Sites",
-                     "Keyline Design", "Keyline Keypoint"):
-            for lyr in proj.mapLayersByName(name):
-                proj.removeMapLayer(lyr)
         self._state.contour_features = []
         self._state.top_contour_features = []
         self._state.segment_features = []
@@ -533,11 +537,14 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         Returns (features, source_ids, description). *source_ids* are positions in
         ``contour_features`` so the tick filter still reaches the stretches.
         """
-        by_identity = {id(f): i for i, f in enumerate(self._state.contour_features)}
+        # `f.index`, not `id(f)`. Object identity is exact only while the two
+        # lists hold the same objects, and says -1 the moment anything hands
+        # back a copy — a reload, a round-trip through the worker — which reads
+        # as "not a candidate" and quietly drops that contour from the scope.
         top = [f for f in self._state.top_contour_features
                if getattr(f, "selected", True)]
         if top:
-            return (top, [by_identity.get(id(f), -1) for f in top],
+            return (top, [getattr(f, "index", -1) for f in top],
                     f"top {len(top)} selected swale(s)")
         ticked = [(i, f) for i, f in enumerate(self._state.contour_features)
                   if getattr(f, "selected", True)]
@@ -1307,9 +1314,9 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
     def _display_keylines(self, runs, keypoint):
         from qgis.core import QgsLineSymbol
 
-        for name in ("Keyline Design", "Keyline Keypoint"):
-            for lyr in self._project.instance().mapLayersByName(name):
-                self._project.instance().removeMapLayer(lyr)
+        for attr in ("keyline_layer_id", "keyline_keypoint_layer_id"):
+            remove_layer(self._project, getattr(self._state, attr, None))
+            setattr(self._state, attr, None)
 
         crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Keyline Design", "memory")
@@ -1378,10 +1385,11 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         kp_layer.setRenderer(QgsSingleSymbolRenderer(kp_sym))
         kp_layer.updateExtents()
         self.place(kp_layer, G.KEYPOINT)
+        self._state.keyline_keypoint_layer_id = kp_layer.id()
 
     def _display_keypoints(self, keypoints):
-        for lyr in self._project.instance().mapLayersByName("Keypoints"):
-            self._project.instance().removeMapLayer(lyr)
+        remove_layer(self._project, self._state.keypoints_layer_id)
+        self._state.keypoints_layer_id = None
 
         layer = QgsVectorLayer("Point", "Keypoints", "memory")
         layer.setCrs(crs_object(dem_crs(self._state)))
@@ -1418,11 +1426,12 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         layer.setLabelsEnabled(True)
         layer.updateExtents()
         self.place(layer, G.KEYPOINT)
+        self._state.keypoints_layer_id = layer.id()
 
     def _display_ridgelines(self, ridgelines):
         from qgis.core import QgsLineSymbol
-        for lyr in self._project.instance().mapLayersByName("Ridgelines (Water Divides)"):
-            self._project.instance().removeMapLayer(lyr)
+        remove_layer(self._project, self._state.ridgelines_layer_id)
+        self._state.ridgelines_layer_id = None
 
         layer = QgsVectorLayer("LineString", "Ridgelines (Water Divides)", "memory")
         layer.setCrs(crs_object(dem_crs(self._state)))
@@ -1447,10 +1456,11 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         layer.setRenderer(QgsSingleSymbolRenderer(sym))
         layer.updateExtents()
         self.place(layer, G.KEYPOINT)
+        self._state.ridgelines_layer_id = layer.id()
 
     def _display_pond_sites(self, sites):
-        for lyr in self._project.instance().mapLayersByName("Recommended Pond Sites"):
-            self._project.instance().removeMapLayer(lyr)
+        remove_layer(self._project, self._state.pond_sites_layer_id)
+        self._state.pond_sites_layer_id = None
 
         layer = QgsVectorLayer("Point", "Recommended Pond Sites", "memory")
         layer.setCrs(crs_object(dem_crs(self._state)))
@@ -1488,3 +1498,4 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         layer.setLabelsEnabled(True)
         layer.updateExtents()
         self.place(layer, G.KEYPOINT)
+        self._state.pond_sites_layer_id = layer.id()
