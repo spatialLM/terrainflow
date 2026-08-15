@@ -126,6 +126,10 @@ class PluginState:
     sim_ew_centroids: dict = field(default_factory=dict)
     sim_ponding_capacity: Any | None = None
     sim_ponding_masks: dict = field(default_factory=dict)
+    # The bed under the playback's water. Read once with the capacity raster, because
+    # each frame solves for the level that holds the volume delivered so far and
+    # re-reading the burned DEM twice a second is not a thing to do during playback.
+    sim_ponding_ground: Any | None = None
     sim_ponding_meta: dict | None = None
     sim_ponding_frame_layer_id: str | None = None
     # The playback frame raster. Held by id like everything else, so

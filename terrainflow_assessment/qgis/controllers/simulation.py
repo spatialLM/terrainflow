@@ -301,6 +301,22 @@ class SimulationController(G.LayerTreeMixin):
         except Exception:
             return
 
+        # The bed under the water. Each frame solves for the level that holds the
+        # volume delivered so far, which needs the ground, so it is read once here
+        # rather than twice a second during playback.
+        self._state.sim_ponding_ground = None
+        dem_path = self._state.modified_dem_path or self._state.dem_path
+        try:
+            with rasterio.open(dem_path) as src:
+                ground = src.read(1).astype("float64")
+                if src.nodata is not None:
+                    ground[ground == src.nodata] = np.nan
+                if ground.shape == shape:
+                    self._state.sim_ponding_ground = ground
+        except Exception:
+            pass
+
+        self._sim_pools = None
         self._state.sim_ponding_masks = {}
         for ew in self._state.earthwork_manager.get_enabled():
             try:
@@ -352,6 +368,62 @@ class SimulationController(G.LayerTreeMixin):
 
         self._update_sim_ponding_frame({})
 
+    def _frame_depth(self, capacity, masks, fills):
+        """Where the water stands this frame, as a depth raster.
+
+        Solved the way the verification layer solves it — ``event_pond_depth`` fills
+        each pool from the bottom to the level that holds the volume delivered. The
+        frame used to scale the full pond's depth by the fill fraction instead, which
+        is the exact method that function's docstring names as wrong: it keeps the
+        full pond's footprint and paints water up banks it never reaches. Both layers
+        sit in the same Verify group, so the two drawings of one part-full pond
+        disagreed about where its shoreline was.
+
+        Falls back to the fraction scaling only when there is no ground surface to
+        solve against — an empty map is worse than an approximate one, but the
+        approximation is never preferred.
+        """
+        import numpy as np
+
+        from terrainflow_assessment.modules.reporting import (
+            event_pond_depth,
+            group_pools,
+        )
+
+        ground = getattr(self._state, "sim_ponding_ground", None)
+        meta = self._state.sim_ponding_meta or {}
+        transform = meta.get("transform")
+        cell_area = (abs(transform.a * transform.e) if transform is not None else 0.0)
+
+        footprints = [(key, mask) for key, mask in masks.items() if np.any(mask)]
+        if ground is None or not footprints or cell_area <= 0:
+            partial = np.zeros_like(capacity, dtype="float32")
+            for key, mask in footprints:
+                fd = fills.get(key)
+                fraction = min((fd["fill_pct"] / 100.0), 1.0) if fd else 0.0
+                partial[mask] = capacity[mask] * fraction
+            return partial
+
+        # Geometry alone, so it holds for every frame of the playback.
+        if getattr(self, "_sim_pools", None) is None:
+            self._sim_pools = group_pools(capacity, footprints)
+        pools = self._sim_pools
+
+        # Each feature's share in cubic metres, measured off the pond the burn
+        # actually made — the same raster the shoreline is drawn from, so the two
+        # cannot disagree about how much water a full pond is.
+        stored = {}
+        for key, mask in footprints:
+            fd = fills.get(key)
+            fraction = min((fd["fill_pct"] / 100.0), 1.0) if fd else 0.0
+            if fraction <= 0:
+                continue
+            stored[key] = float(capacity[mask].sum()) * cell_area * fraction
+
+        depth = event_pond_depth(capacity, ground, cell_area, footprints, stored,
+                                 pools=pools)
+        return depth.astype("float32")
+
     def _update_sim_ponding_frame(self, fills):
         import numpy as np
         import rasterio
@@ -362,13 +434,7 @@ class SimulationController(G.LayerTreeMixin):
         if capacity is None or meta is None:
             return
 
-        partial = np.zeros_like(capacity, dtype="float32")
-        for key, mask in masks.items():
-            if not np.any(mask):
-                continue
-            fd = fills.get(key)
-            fraction = min((fd["fill_pct"] / 100.0), 1.0) if fd else 0.0
-            partial[mask] = capacity[mask] * fraction
+        partial = self._frame_depth(capacity, masks, fills)
 
         # Two filenames, alternated. The previous frame's layer still has its file
         # open, and on Windows GDAL holds that lock — so rewriting the same path threw,

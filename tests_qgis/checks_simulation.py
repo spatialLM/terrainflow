@@ -9,7 +9,10 @@ without anyone noticing.
 
 import os
 
-from _harness import PluginHarness, line_across_valley
+from _harness import (
+    PluginHarness,
+    line_across_valley,
+)
 
 
 def _simulated(h):
@@ -286,3 +289,84 @@ def check_simulating_with_no_labelling_available_is_refused(dem_path):
         assert any("catchment" in text.lower() or "design analysis" in text.lower()
                    for _, _, text in h.bar.messages), (
             f"the refusal was silent: {h.bar.messages}")
+
+
+def check_the_frame_shoreline_agrees_with_the_verification_layer(dem_path):
+    """Both drawings of one part-full pond sit in the same Verify group.
+
+    The frame layer scaled the full pond's depth by the fill fraction — the exact
+    method `event_pond_depth`'s docstring names as wrong, because it keeps the full
+    pond's footprint and paints water up banks the water never reaches. So the two
+    layers disagreed about where the shoreline was. The frame now solves for the
+    level that holds the delivered volume, as the verification layer does.
+    """
+    import numpy as np
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        # A dam, not a basin: a burned basin has a flat floor, and on a flat floor
+        # half the volume still covers the whole footprint at half the depth — the
+        # two methods agree there and the check would prove nothing. A dam impounds
+        # the valley's own bathymetry, which is where they part company.
+        geom = line_across_valley(row=90)
+        h.add_earthwork("dam", geometry=geom)
+        # add_earthwork bypasses the dialog, which is what sizes a feature; settling
+        # the geometry is the controller's own exact tier and fills both capacities.
+        h.plugin._earthworks._on_vertex_edit_finished(0, geom)
+        h.panel.run_earthworks_requested.emit()
+        h.panel.run_simulation_requested.emit()
+        h.assert_no_errors("simulation")
+
+        sim = h.plugin._simulation
+        capacity = h.state.sim_ponding_capacity
+        ground = h.state.sim_ponding_ground
+        assert capacity is not None and ground is not None, (
+            "the dam impounded nothing — this check needs a pool")
+        masks = h.state.sim_ponding_masks
+        key = next((k for k, m in masks.items() if (m & (capacity > 0.001)).any()),
+                   None)
+        assert key is not None, "no feature has a pond to draw"
+
+        pool = masks[key] & (capacity > 0.001)
+        bed = ground[pool]
+        relief = float(np.nanmax(bed) - np.nanmin(bed))
+        assert relief > 0.1, (
+            f"the pool bed is flat ({relief:.3f} m). The two methods agree on a flat "
+            "floor, so this fixture would prove nothing")
+
+        half = {key: {"fill_pct": 50.0, "overflowed": False}}
+        depth = sim._frame_depth(capacity, masks, half)
+
+        wet_full = int(pool.sum())
+        wet_half = int((depth > 0.001)[pool].sum())
+        assert wet_half > 0, "a half-full pond drew no water at all"
+        assert wet_half < wet_full, (
+            f"a half-full pond covers {wet_half} of {wet_full} cells — it still has "
+            "the full pond's footprint, which is the fraction-scaling it replaced")
+
+        # And it stands in the bottom of the basin, not up the banks.
+        assert float(np.max(depth - capacity)) <= 1e-6, (
+            "the event pond is deeper than the pond that contains it")
+        wet = depth > 0.001
+        assert float(np.nanmax(ground[wet])) < float(np.nanmax(bed)) + 1e-6, (
+            "the water reaches ground the full pond's own shoreline does not")
+
+
+def check_the_playback_frame_is_cheap_enough_to_play(dem_path):
+    """It runs twice a second. The pool grouping depends on geometry alone, so it
+    is computed once per simulation rather than per frame."""
+    import time
+
+    with PluginHarness(dem_path) as h:
+        _simulated(h)
+        sim = h.plugin._simulation
+        if h.state.sim_ponding_capacity is None:
+            return
+
+        sim.show_sim_frame(0)           # warm: builds the grouping
+        start = time.perf_counter()
+        for idx in range(1, 4):
+            sim.show_sim_frame(idx)
+        per_frame = (time.perf_counter() - start) / 3.0
+        h.assert_no_errors("timed playback")
+        assert per_frame < 0.5, f"{per_frame * 1000:.0f} ms per frame is not playback"

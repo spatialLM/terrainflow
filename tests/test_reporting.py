@@ -1328,3 +1328,109 @@ class TestOneCaptureBand:
             assert _capture_tone(85) == "warn"
         finally:
             R.CAPTURE_GOOD_PCT = original
+
+
+class TestPoolsAreGroupedOnce:
+    """Both views of the water — the total and the drawing — must agree about what
+    a pool is. They agreed by hand-copied union-find; now there is one of each."""
+
+    def _two_pools_one_shared(self):
+        import numpy as np
+
+        # Two ponded regions. Region 1 is touched by A and B; region 2 by B alone.
+        depth = np.zeros((3, 7))
+        depth[1, 0:2] = 0.5
+        depth[1, 4:6] = 0.5
+        a = np.zeros((3, 7), dtype=bool); a[1, 0] = True
+        b = np.zeros((3, 7), dtype=bool); b[1, 1] = True; b[1, 4] = True
+        return depth, [("A", a), ("B", b)]
+
+    def test_sharing_one_region_joins_the_features(self):
+        from terrainflow_assessment.modules.reporting import group_pools
+
+        depth, footprints = self._two_pools_one_shared()
+        pools = group_pools(depth, footprints)
+        assert pools.n_regions == 2
+        roots = {pools.root_of_region[1], pools.root_of_region[2]}
+        assert len(roots) == 1, "B's solo pool did not follow it into the joined set"
+        (root,) = roots
+        assert pools.members[root] == ("A", "B")
+
+    def test_joining_is_transitive(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.reporting import group_pools
+
+        depth = np.zeros((3, 9))
+        depth[1, 0:2] = 0.5      # A + B
+        depth[1, 4:6] = 0.5      # B + C
+        a = np.zeros((3, 9), dtype=bool); a[1, 0] = True
+        b = np.zeros((3, 9), dtype=bool); b[1, 1] = True; b[1, 4] = True
+        c = np.zeros((3, 9), dtype=bool); c[1, 5] = True
+        pools = group_pools(depth, [("A", a), ("B", b), ("C", c)])
+        assert pools.members[pools.root_of_region[1]] == ("A", "B", "C"), (
+            "no cut separates A's water from C's, so they are one set")
+
+    def test_a_region_touching_nothing_has_no_root(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.reporting import group_pools
+
+        depth = np.zeros((3, 5))
+        depth[1, 2] = 0.5
+        pools = group_pools(depth, [("A", np.zeros((3, 5), dtype=bool))])
+        assert pools.root_of_region[1] is None
+
+    def test_both_attributions_see_the_same_sets(self):
+        """The property the two docstrings promise each other."""
+        from terrainflow_assessment.modules.reporting import (
+            attribute_ponding_volume,
+            group_pools,
+        )
+
+        depth, footprints = self._two_pools_one_shared()
+        got = attribute_ponding_volume(depth, 1.0, footprints)
+        pools = group_pools(depth, footprints)
+
+        assert [g["names"] for g in got.groups] == [("A", "B")]
+        assert set(pools.members.values()) == {("A", "B")}
+        assert got.per_name == {"A": 0.0, "B": 0.0}, (
+            "nothing is held alone once the two are joined")
+
+    def test_a_prepared_grouping_gives_the_same_depths(self):
+        """The playback passes one in per session rather than relabelling per frame."""
+        import numpy as np
+
+        from terrainflow_assessment.modules.reporting import (
+            event_pond_depth,
+            group_pools,
+        )
+
+        depth = np.zeros((3, 5))
+        depth[1, 1:4] = 1.0
+        ground = np.full((3, 5), 10.0)
+        ground[1, 1:4] = 9.0
+        mask = np.zeros((3, 5), dtype=bool); mask[1, 2] = True
+        footprints = [("A", mask)]
+
+        fresh = event_pond_depth(depth, ground, 1.0, footprints, {"A": 1.5})
+        prepared = event_pond_depth(depth, ground, 1.0, footprints, {"A": 1.5},
+                                    pools=group_pools(depth, footprints))
+        assert np.allclose(fresh, prepared)
+
+
+class TestUnattributedIsAParameter:
+    """It was hard-coded to zero and monkey-patched by the one caller that knew
+    better, so every other caller — the tests included — got a silent zero."""
+
+    def test_it_reaches_the_result(self):
+        from terrainflow_assessment.modules.reporting import build_verification
+
+        result = build_verification({}, {}, 0.0, 40.0, {}, 1.0,
+                                    unattributed_m3=12.5)
+        assert result.unattributed_m3 == 12.5
+
+    def test_it_still_defaults_to_zero(self):
+        from terrainflow_assessment.modules.reporting import build_verification
+
+        assert build_verification({}, {}, 0.0, 0.0, {}, 1.0).unattributed_m3 == 0.0

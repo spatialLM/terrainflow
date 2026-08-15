@@ -432,14 +432,82 @@ class PondAttribution(NamedTuple):
     per_name: dict           # {name: m³} — regions this feature alone touches
     unattributed_m3: float   # regions touching no footprint at all
     groups: list             # [{"names": (…), "volume_m3": …, "overlaps": {name: cells}}]
-    # The same regions and the same shares, measured on a companion array — so a
-    # backwater split lands in exactly the buckets its parent volume did. Empty dict
-    # when no companion array was given.
-    per_name_secondary: dict = {}
 
 
-def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001,
-                             secondary=None):
+class PoolGrouping(NamedTuple):
+    """Which features share which pools, on one grid.
+
+    :func:`attribute_ponding_volume` and :func:`event_pond_depth` are two views of
+    the same water — one totals it, the other draws it — and their docstrings say
+    they must agree about what a pool is. They agreed by hand-copy: the same
+    labelling, the same overlap counts and the same union-find, written out twice.
+    Now there is one of each, and agreement is structural.
+    """
+    labels: object           # int region ids, 0 = the dry background
+    n_regions: int
+    touched: list            # rid → {name: overlapping cells}
+    members: dict            # root → tuple of names, sorted
+    root_of_region: list     # rid → root, or None where the region touches nothing
+    regions_of: dict         # root → [rid] this component owns
+
+
+def group_pools(depth, footprints, min_depth=0.001):
+    """Label the ponded regions and join every feature that shares one.
+
+    Joining is transitive: if A and B share one pool and B and C share another, all
+    three are one component, because no cut separates A's water from C's. Every
+    region a component's members touch belongs to that component, including the ones
+    a member holds alone — see :func:`attribute_ponding_volume` for why.
+    """
+    import numpy as np
+    from scipy.ndimage import label
+
+    arr = np.asarray(depth, dtype="float64")
+    labels, n_regions = label(arr >= min_depth)
+
+    overlaps = {name: np.bincount(labels[mask], minlength=n_regions + 1)
+                for name, mask in footprints}
+    touched = [
+        {name: int(counts[rid])
+         for name, counts in overlaps.items() if counts[rid] > 0}
+        for rid in range(n_regions + 1)
+    ]
+
+    parent = {name: name for name, _ in footprints}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for rid in range(1, n_regions + 1):
+        names = list(touched[rid])
+        for other in names[1:]:
+            ra, rb = find(names[0]), find(other)
+            if ra != rb:
+                parent[rb] = ra
+
+    members = {}
+    for name in parent:
+        members.setdefault(find(name), []).append(name)
+    members = {root: tuple(sorted(names)) for root, names in members.items()}
+
+    root_of_region = [None] * (n_regions + 1)
+    regions_of = {}
+    for rid in range(1, n_regions + 1):
+        if not touched[rid]:
+            continue
+        root = find(next(iter(touched[rid])))
+        root_of_region[rid] = root
+        regions_of.setdefault(root, []).append(rid)
+
+    return PoolGrouping(labels=labels, n_regions=n_regions, touched=touched,
+                        members=members, root_of_region=root_of_region,
+                        regions_of=regions_of)
+
+
+def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001):
     """Attribute a ponding-difference raster to earthwork footprints.
 
     Connected ponded regions (``>= min_depth``) are labelled, then sorted by how many
@@ -486,84 +554,45 @@ def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0
     :class:`PondAttribution`
     """
     import numpy as np
-    from scipy.ndimage import label
 
     arr = np.asarray(ponding_diff, dtype="float64")
-    ponded = arr >= min_depth
     per_name = {name: 0.0 for name, _ in footprints}
-    second = {name: 0.0 for name, _ in footprints}
     unattributed = 0.0
 
-    labels, n_regions = label(ponded)
-    if n_regions == 0:
-        return PondAttribution(per_name, 0.0, [], second)
+    pools = group_pools(arr, footprints, min_depth)
+    if pools.n_regions == 0:
+        return PondAttribution(per_name, 0.0, [])
 
-    # One pass per array rather than one per (region × feature). The old form built a
-    # full-grid boolean per region and again per feature inside it — on this site, 669
-    # regions × 40 features × 2.8 M cells. Label 0 is the unponded background and is
-    # skipped everywhere below, so cells under min_depth cannot contribute.
-    volumes = np.bincount(labels.ravel(), weights=arr.ravel(),
-                          minlength=n_regions + 1) * cell_area_m2
-    if secondary is None:
-        second_vols = np.zeros_like(volumes)
-    else:
-        second_vols = np.bincount(
-            labels.ravel(), weights=np.asarray(secondary, dtype="float64").ravel(),
-            minlength=n_regions + 1) * cell_area_m2
-    overlaps = {name: np.bincount(labels[mask], minlength=n_regions + 1)
-                for name, mask in footprints}
+    # One pass over the array rather than one per (region × feature). The old form
+    # built a full-grid boolean per region and again per feature inside it — on this
+    # site, 669 regions × 40 features × 2.8 M cells. Label 0 is the unponded
+    # background, so cells under min_depth cannot contribute.
+    volumes = np.bincount(pools.labels.ravel(), weights=arr.ravel(),
+                          minlength=pools.n_regions + 1) * cell_area_m2
 
-    touched = [
-        {name: int(counts[rid])
-         for name, counts in overlaps.items() if counts[rid] > 0}
-        for rid in range(n_regions + 1)
-    ]
-
-    # Pass 1 — join every pair of features that share any region, transitively.
-    parent = {name: name for name, _ in footprints}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for rid in range(1, n_regions + 1):
-        names = list(touched[rid])
-        for other in names[1:]:
-            ra, rb = find(names[0]), find(other)
-            if ra != rb:
-                parent[rb] = ra
-
-    members = {}
-    for name in parent:
-        members.setdefault(find(name), []).append(name)
-
-    # Pass 2 — every region goes to the component of whatever it touches. A feature in
-    # a multi-feature component contributes its solo pools to that component too, which
+    # Every region goes to the component of whatever it touches. A feature in a
+    # multi-feature component contributes its solo pools to that component too, which
     # is what keeps the set's measured volume comparable with the set's capacity.
     grouped = {}
-    for rid in range(1, n_regions + 1):
+    for rid in range(1, pools.n_regions + 1):
         volume = float(volumes[rid])
-        if not touched[rid]:
+        root = pools.root_of_region[rid]
+        if root is None:
             unattributed += volume
             continue
-        root = find(next(iter(touched[rid])))
-        names = tuple(sorted(members[root]))
+        names = pools.members[root]
         if len(names) == 1:
             per_name[names[0]] += volume
-            second[names[0]] += float(second_vols[rid])
             continue
         entry = grouped.setdefault(
-            root, {"names": names, "volume_m3": 0.0, "secondary_m3": 0.0,
+            root, {"names": names, "volume_m3": 0.0,
                    "overlaps": {n: 0 for n in names}})
         entry["volume_m3"] += volume
-        entry["secondary_m3"] += float(second_vols[rid])
-        for name, cells in touched[rid].items():
+        for name, cells in pools.touched[rid].items():
             entry["overlaps"][name] += cells
 
     groups = sorted(grouped.values(), key=lambda g: -g["volume_m3"])
-    return PondAttribution(per_name, unattributed, groups, second)
+    return PondAttribution(per_name, unattributed, groups)
 
 
 class SpillOver(NamedTuple):
@@ -721,7 +750,7 @@ def level_for_volume(ground, cell_area_m2, volume_m3, ceiling=None):
 
 
 def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
-                     existing=None, min_depth=0.001):
+                     existing=None, min_depth=0.001, pools=None):
     """Where the water actually stands for *this* event, as a depth raster.
 
     ``ponding`` is the full-capacity depth raster — every hollow filled to its spill
@@ -752,13 +781,17 @@ def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
     footprints     : list of (name, bool_mask), as :func:`attribute_ponding_volume` takes
     stored_by_name : {name: m³} — what the balance says each feature holds
     existing       : 2-D array or None — baseline ponding depth (m)
+    pools          : a :class:`PoolGrouping` over the same ``ponding`` and
+        ``footprints``, when the caller already has one. The grouping depends on
+        geometry alone, so a caller redrawing the same pools at many fill levels —
+        the simulation's playback does, twice a second — computes it once instead of
+        relabelling the whole grid per frame. Omit and it is built here.
 
     Returns
     -------
     2-D float array — event ponding depth (m), zero where the water does not reach.
     """
     import numpy as np
-    from scipy.ndimage import label
 
     arr = np.asarray(ponding, dtype="float64")
     bed = np.asarray(ground, dtype="float64")
@@ -766,34 +799,14 @@ def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
     if arr.shape != bed.shape:
         return out
 
-    labels, n_regions = label(arr >= min_depth)
-    if n_regions == 0:
+    # The same pools, from the same helper, as attribute_ponding_volume — which is
+    # what makes "the two must agree about what a pool is" true by construction.
+    if pools is None:
+        pools = group_pools(arr, footprints, min_depth)
+    if pools.n_regions == 0:
         return out
-
-    overlaps = {name: np.bincount(labels[mask], minlength=n_regions + 1)
-                for name, mask in footprints}
-    touched = [{name for name, counts in overlaps.items() if counts[rid] > 0}
-               for rid in range(n_regions + 1)]
-
-    # Join every pair of features sharing a region, transitively — one pool, one level.
-    parent = {name: name for name, _ in footprints}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for rid in range(1, n_regions + 1):
-        names = list(touched[rid])
-        for other in names[1:]:
-            ra, rb = find(names[0]), find(other)
-            if ra != rb:
-                parent[rb] = ra
-
-    members = {}
-    for name in parent:
-        members.setdefault(find(name), []).append(name)
+    labels, n_regions = pools.labels, pools.n_regions
+    members, regions_of = pools.members, pools.regions_of
 
     capacity = np.bincount(labels.ravel(), weights=arr.ravel(),
                            minlength=n_regions + 1) * cell_area_m2
@@ -804,11 +817,6 @@ def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
             labels.ravel(), weights=np.clip(
                 np.asarray(existing, dtype="float64"), 0.0, None).ravel(),
             minlength=n_regions + 1) * cell_area_m2
-
-    regions_of = {}
-    for rid in range(1, n_regions + 1):
-        if touched[rid]:
-            regions_of.setdefault(find(next(iter(touched[rid]))), []).append(rid)
 
     # One sort of the whole grid buys every region's cells. Masking per region instead
     # is the trap ``attribute_ponding_volume`` documents: hundreds of regions each
@@ -849,7 +857,8 @@ _RESOLUTION_CAVEAT_THRESHOLD = 0.10
 
 def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
                        earthworks_total_m3, min_dims, cell_size,
-                       breakdowns=None, existing_by_name=None, merged_groups=None):
+                       breakdowns=None, existing_by_name=None, merged_groups=None,
+                       unattributed_m3=0.0):
     """Assemble the terrain-vs-analytic verification (site headline + per-feature).
 
     Site terrain-derived storage = ``earthworks_total − baseline_total`` (floored ≥0) —
@@ -1082,7 +1091,7 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         terrain_total_m3=terrain_total,
         delta_m3=delta_m3,
         delta_pct=delta_pct,
-        unattributed_m3=0.0,
+        unattributed_m3=float(unattributed_m3 or 0.0),
         per_feature=per_feature,
         merged_groups=group_rows,
         caveats=caveats,

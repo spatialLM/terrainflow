@@ -3721,6 +3721,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             min_dims, cell_size, breakdowns=breakdowns,
             existing_by_name=existing.per_name,
             merged_groups=added.groups,
+            unattributed_m3=added.unattributed_m3,
         )
         # Ids did the arithmetic; names do the reading. Rewritten in one place so a
         # collision can never make two rows indistinguishable — they were computed
@@ -3734,7 +3735,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         for group in result.merged_groups:
             group["names"] = tuple(name_by_id.get(n, n) for n in group.get("names", ()))
 
-        result.unattributed_m3 = added.unattributed_m3
         # None when the subtraction was applied; a reason string when every measured
         # figure still carries whatever ponded there naturally.
         result.baseline_uncorrected = bl_uncorrected
