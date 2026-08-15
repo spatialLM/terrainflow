@@ -214,5 +214,10 @@ class TerrainFlowAssessmentPlugin:
         p.sim_frame_changed.connect(sim.show_sim_frame)
         p.sim_play_toggled.connect(sim.on_sim_play_toggled)
 
-        # Reporting
+        # Reporting. The selection highlight is a rubber band owned by the
+        # earthworks controller, so it is outside every render flag and outside
+        # anything the reporting controller can reach — clear it first, in
+        # connection order, or the operator's last click prints as a green line
+        # through one swale on the design map.
+        p.export_report_requested.connect(ew.clear_selection_highlight)
         p.export_report_requested.connect(rep.export_report)

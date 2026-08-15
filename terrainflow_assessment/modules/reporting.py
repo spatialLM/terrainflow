@@ -1,19 +1,36 @@
 """
-reporting.py — Before/after comparison and HTML report export.
+reporting.py — report data containers, verification maths and shared wording.
 
 Provides:
-  BaselineReport       — data from a baseline (no earthworks) analysis
+  BaselineReport         — data from a baseline (no earthworks) analysis
   PostInterventionReport — data from a post-earthworks analysis + simulation
-  ComparisonResult     — computed before/after metrics
-  compare()            — compute comparison metrics
-  export_html()        — generate a self-contained HTML report with embedded charts
+  VerificationResult     — terrain-vs-analytic storage check
+  ComparisonResult       — computed before/after metrics
+  compare()              — compute comparison metrics
+  build_verification()   — the non-circular storage check
+  format_live_assessment() — the panel's Live Assessment readout
+  round_volume/fmt_*/drain_wording/... — wording and rounding shared by the
+                           panel and both report renderers
+
+**There is no HTML generator here any more.** It used to hold ``export_html()``,
+a 300-line f-string that built its own document from a ``ComparisonResult`` —
+a second, divergent report that needed a fill simulation and said different
+things from the PDF. Both formats now render the one document model:
+
+    modules/report_model.py   what the report says      (pure)
+    modules/report_charts.py  its charts                (pure)
+    modules/report_html.py    -> HTML                   (pure)
+    qgis/adapters/layout_pdf.py -> PDF                  (QGIS)
+
+``tests/test_report_renderer_parity.py`` asserts the two renderers cover exactly
+the same section types, so they cannot drift apart again.
 """
 
 import base64
 import io
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -64,6 +81,10 @@ class VerificationResult:
     delta_pct: float = 0.0               # delta as % of analytic (0 when analytic == 0)
     unattributed_m3: float = 0.0         # terrain ponding not tied to any feature footprint
     per_feature: list[dict] = field(default_factory=list)  # {name, analytic_m3, terrain_m3|None, delta_pct|None, routing_only}
+    # Features whose pools are one pool. Each entry is the only place that water is
+    # counted — its members carry terrain_m3 None, because neither of them holds it
+    # alone. {names, rasterisable_m3, terrain_m3, delta_pct|None}
+    merged_groups: list[dict] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
     # None when baseline ponding was subtracted; otherwise why it could not be, in
     # which case every terrain figure still carries the water that ponded naturally.
@@ -149,6 +170,162 @@ def _mini_bar(pct, colour, back="#d6dbdf"):
     )
 
 
+# ---------------------------------------------------------------------------
+# Shared wording and rounding — the panel and the report say the same thing
+# ---------------------------------------------------------------------------
+# These live beside format_live_assessment rather than in a report-only module
+# on purpose: both readouts describe the same BalanceResult, and two copies of
+# "how do we phrase a fill percentage" is how the panel and the printed report
+# end up disagreeing about the same number.
+
+def round_volume(m3):
+    """Round a volume to the precision the model has actually earned.
+
+    The balance reports to 0.1 m³. Printing that claims a survey nobody did, and
+    one over-precise figure invites the reader to distrust every other one. Below
+    10,000 m³ round to the nearest 10; above it, to the nearest 100.
+    """
+    if m3 is None:
+        return None
+    v = float(m3)
+    step = 10.0 if abs(v) < 10000.0 else 100.0
+    return int(round(v / step) * step)
+
+
+def fmt_volume(m3, unit="m³"):
+    """A rounded volume with thousands separators, or an em dash for None."""
+    if m3 is None:
+        return "—"
+    return f"{round_volume(m3):,}{(' ' + unit) if unit else ''}"
+
+
+def fmt_pct(pct, places=0):
+    """A percentage as a whole number by default. None becomes an em dash."""
+    if pct is None:
+        return "—"
+    return f"{float(pct):.{places}f}%"
+
+
+def fmt_area_ha(m2):
+    """Square metres in as hectares out, one decimal."""
+    if m2 is None:
+        return "—"
+    return f"{float(m2) / 10000.0:.1f} ha"
+
+
+def drain_wording(drain_hours):
+    """Plain English for ``per_feature['drain_hours']``.
+
+    ``None`` means the feature never empties by soaking — a dam is supposed to
+    hold water. Rendering that as ``0``, ``—`` or a blank cell has it read as
+    "drains instantly" or "unknown", which is the opposite of what it means.
+    """
+    if drain_hours is None:
+        return "Holds water — does not empty by soaking"
+    hours = float(drain_hours)
+    if hours < 1.0:
+        return "empties within the hour"
+    if hours < 24.0:
+        return f"empties in about {hours:.0f} hours"
+    if hours <= 168.0:
+        return f"empties in about {hours / 24.0:.0f} days"
+    return "more than a week to empty"
+
+
+def fill_wording(fill_pct, overflowed):
+    """Plain English for how hard a feature is working, plus the number.
+
+    The words alone put three quite different features — 62%, 80% and 94% — in
+    one bucket called "well used", and the reader has no way to tell which of
+    them is nearly out of room. The percentage is what they act on, so it goes
+    in the same cell rather than being left to be inferred from Held ÷ Capacity.
+    """
+    pct = float(fill_pct or 0.0)
+    if overflowed:
+        return f"fills and spills · {pct:.0f}%"
+    if pct >= 95.0:
+        return f"full at this storm · {pct:.0f}%"
+    if pct >= 60.0:
+        return f"well used · {pct:.0f}%"
+    return f"room to spare · {pct:.0f}%"
+
+
+# Spillway review states, as the reader should see them. The raw keys are
+# internal vocabulary; a status column reading "no_datum" tells nobody anything.
+SPILLWAY_STATE_WORDING = {
+    "ok": "Sized",
+    "fail": "Needs attention",
+    "no_flow": "No inflow calculated",
+    "no_datum": "No ground level yet",
+    "undesigned": "No spillway designed",
+    "unsited": "Not placed on the map",
+    "disabled": "Turned off",
+}
+
+
+def spillway_state_wording(state):
+    return SPILLWAY_STATE_WORDING.get(state, str(state or "—"))
+
+
+def type_label(key):
+    """The registry's display label for an earthwork type key.
+
+    ``per_feature`` carries the raw key, and a column of "swale"/"dam" reads as
+    a database dump rather than a document.
+    """
+    try:
+        from terrainflow_assessment.core.registry.earthwork_types import get_type
+        return get_type(key).label
+    except Exception:
+        return str(key or "").replace("_", " ").title()
+
+
+def cut_fill_sentence(cut_m3, fill_m3):
+    """The cut/fill balance in words.
+
+    ``+340 m³`` reads as a credit to anyone who is not an engineer, and the sign
+    convention is not stated anywhere a landowner would look. Say which way the
+    soil goes instead.
+    """
+    cut = round_volume(cut_m3 or 0.0)
+    fill = round_volume(fill_m3 or 0.0)
+    net = cut - fill
+    if abs(net) < 10:
+        return (f"About {cut:,} m³ comes out and {fill:,} m³ goes back in — "
+                "close enough to balance on site.")
+    if net > 0:
+        return (f"About {net:,} m³ more soil comes out than goes back in; "
+                "that surplus needs somewhere to go on site.")
+    return (f"About {abs(net):,} m³ more soil is needed than the excavation "
+            "produces; it has to be won from somewhere else on the block.")
+
+
+def unique_names(rows, key="name"):
+    """Feature names, disambiguated where they collide.
+
+    The default name is ``f"{type} {len(manager) + 1}"`` counting *all*
+    earthworks, so deleting one and drawing another reproduces an existing name
+    — as the earthworks controller already documents. The balance is keyed by
+    id, but the verification result is keyed by name, so a collision silently
+    attributes one feature's measured storage to another. Returns a list of
+    display names positionally matching ``rows``.
+    """
+    seen = {}
+    for row in rows:
+        name = row.get(key) or "Unnamed"
+        seen[name] = seen.get(name, 0) + 1
+    used = {}
+    out = []
+    for row in rows:
+        name = row.get(key) or "Unnamed"
+        if seen[name] == 1:
+            out.append(name)
+            continue
+        used[name] = used.get(name, 0) + 1
+        out.append(f"{name} ({chr(ord('a') + used[name] - 1)})")
+    return out
+
+
 def format_live_assessment(result, have_flow):
     """Qt-rich-text HTML for the Live Assessment panel readout.
 
@@ -226,13 +403,57 @@ def format_live_assessment(result, have_flow):
     return "<br>".join(parts)
 
 
-def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001):
-    """Attribute a ponding-difference raster to earthwork footprints, one region each.
+class PondAttribution(NamedTuple):
+    """How a ponding raster divided between the features that made it.
 
-    Connected ponded regions (``>= min_depth``) are labelled; each region's volume is
-    attributed **once** to the footprint it overlaps most (so a pool upstream of a dam
-    is captured via the dam's footprint, and adjacent features don't double-count).
-    Regions overlapping no footprint accrue to ``unattributed_m3``.
+    Three disjoint buckets, and they conserve: ``Σ per_name + Σ group volumes +
+    unattributed_m3`` is the whole ponded volume of the raster.
+    """
+    per_name: dict           # {name: m³} — regions this feature alone touches
+    unattributed_m3: float   # regions touching no footprint at all
+    groups: list             # [{"names": (…), "volume_m3": …, "overlaps": {name: cells}}]
+    # The same regions and the same shares, measured on a companion array — so a
+    # backwater split lands in exactly the buckets its parent volume did. Empty dict
+    # when no companion array was given.
+    per_name_secondary: dict = {}
+
+
+def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0.001,
+                             secondary=None):
+    """Attribute a ponding-difference raster to earthwork footprints.
+
+    Connected ponded regions (``>= min_depth``) are labelled, then sorted by how many
+    footprints each one touches:
+
+    * **none** → ``unattributed_m3``.
+    * **one** → the whole region, that feature's. Deliberately the whole of it, including
+      cells outside the footprint: a dam's pool lies upstream of its wall, and a basin's
+      pool spreads past the polygon that was drawn. Clipping to the footprint would
+      under-report exactly the features whose storage is impounded rather than excavated.
+    * **two or more** → the features are joined, and the region belongs to the set.
+
+    That last case used to award the region entire to whichever footprint overlapped it
+    most, which is how a single pool came to be reported twice over: on the Quail Island
+    design, Basin 39 and Dam 40 are one structure — the wall sits on the basin's downhill
+    lip — and the 3,593 m³ they impound together was credited wholly to Basin 39
+    (Δ +211%) while Dam 40, holding 70 cells of the same water, reported Δ −100%. Two more
+    pairs did the same. The volume was never wrong; it was in the wrong box, and the
+    per-feature deltas were reporting the box, not the burn.
+
+    A set is not split by overlap share either. There is no defensible share: a dam
+    contributes a wall, a basin contributes a hole, and the pool is a property of the
+    pair. The honest report is the set's total against the set's capacity, which is
+    what :func:`build_verification` prints.
+
+    **Joining is transitive, and a joined feature brings its solo pools with it.** The
+    sets are the connected components of the graph whose edges are shared regions — so
+    if A and B share one pool and B and C share another, all three are one set, because
+    there is no cut that separates A's water from C's. And once a feature is in a set,
+    *every* region it touches goes to that set, including the ones it holds by itself.
+    Leaving those on the feature's own row would compare a part of its water against the
+    whole of its capacity, which reads as a deficit that is not there: Dam 3 holds 158 m³
+    alone and 321 m³ jointly with Swale 6, and scoring the joint pool against both
+    capacities gave Δ −33% when the pair is in fact within 1% of what the grid holds.
 
     Parameters
     ----------
@@ -242,7 +463,7 @@ def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0
 
     Returns
     -------
-    (per_name, unattributed_m3) — dict{name: m³}, float
+    :class:`PondAttribution`
     """
     import numpy as np
     from scipy.ndimage import label
@@ -250,37 +471,365 @@ def attribute_ponding_volume(ponding_diff, cell_area_m2, footprints, min_depth=0
     arr = np.asarray(ponding_diff, dtype="float64")
     ponded = arr >= min_depth
     per_name = {name: 0.0 for name, _ in footprints}
+    second = {name: 0.0 for name, _ in footprints}
     unattributed = 0.0
 
     labels, n_regions = label(ponded)
-    for region_id in range(1, n_regions + 1):
-        region = labels == region_id
-        volume = float(arr[region].sum() * cell_area_m2)
+    if n_regions == 0:
+        return PondAttribution(per_name, 0.0, [], second)
 
-        best_name = None
-        best_overlap = 0
-        for name, mask in footprints:
-            overlap = int(np.logical_and(region, mask).sum())
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_name = name
+    # One pass per array rather than one per (region × feature). The old form built a
+    # full-grid boolean per region and again per feature inside it — on this site, 669
+    # regions × 40 features × 2.8 M cells. Label 0 is the unponded background and is
+    # skipped everywhere below, so cells under min_depth cannot contribute.
+    volumes = np.bincount(labels.ravel(), weights=arr.ravel(),
+                          minlength=n_regions + 1) * cell_area_m2
+    if secondary is None:
+        second_vols = np.zeros_like(volumes)
+    else:
+        second_vols = np.bincount(
+            labels.ravel(), weights=np.asarray(secondary, dtype="float64").ravel(),
+            minlength=n_regions + 1) * cell_area_m2
+    overlaps = {name: np.bincount(labels[mask], minlength=n_regions + 1)
+                for name, mask in footprints}
 
-        if best_name is None:
+    touched = [
+        {name: int(counts[rid])
+         for name, counts in overlaps.items() if counts[rid] > 0}
+        for rid in range(n_regions + 1)
+    ]
+
+    # Pass 1 — join every pair of features that share any region, transitively.
+    parent = {name: name for name, _ in footprints}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for rid in range(1, n_regions + 1):
+        names = list(touched[rid])
+        for other in names[1:]:
+            ra, rb = find(names[0]), find(other)
+            if ra != rb:
+                parent[rb] = ra
+
+    members = {}
+    for name in parent:
+        members.setdefault(find(name), []).append(name)
+
+    # Pass 2 — every region goes to the component of whatever it touches. A feature in
+    # a multi-feature component contributes its solo pools to that component too, which
+    # is what keeps the set's measured volume comparable with the set's capacity.
+    grouped = {}
+    for rid in range(1, n_regions + 1):
+        volume = float(volumes[rid])
+        if not touched[rid]:
             unattributed += volume
-        else:
-            per_name[best_name] += volume
+            continue
+        root = find(next(iter(touched[rid])))
+        names = tuple(sorted(members[root]))
+        if len(names) == 1:
+            per_name[names[0]] += volume
+            second[names[0]] += float(second_vols[rid])
+            continue
+        entry = grouped.setdefault(
+            root, {"names": names, "volume_m3": 0.0, "secondary_m3": 0.0,
+                   "overlaps": {n: 0 for n in names}})
+        entry["volume_m3"] += volume
+        entry["secondary_m3"] += float(second_vols[rid])
+        for name, cells in touched[rid].items():
+            entry["overlaps"][name] += cells
 
-    return per_name, unattributed
+    groups = sorted(grouped.values(), key=lambda g: -g["volume_m3"])
+    return PondAttribution(per_name, unattributed, groups, second)
+
+
+class SpillOver(NamedTuple):
+    """Where a pool leaves over the barrier that made it, and along how much of it."""
+    name: str
+    pour_level_m: float        # the elevation the pool fills to before it escapes
+    length_m: float            # metres of this barrier's own crest at that level
+    alt_saddle_m: float        # lowest rim point that is NOT this barrier (inf if none)
+    pool_volume_m3: float
+    mask: object               # bool array — the crest cells water goes over
+
+
+def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
+                      min_depth=0.001):
+    """Which barriers their own pools pour over, and along what length of crest.
+
+    A pool fills to the lowest point of its rim and leaves there. Where that low point
+    is the structure's own crest, the water goes over the wall — the failure mode an
+    earth dam has. This finds those cases by measuring the rim, so it answers from the
+    burned ground rather than from intent.
+
+    **The length matters as much as the fact.** A level crest does not spill at a point:
+    the water surface stays flat as it rises, so it goes over every metre of crest that
+    stands at the pour level at once. That length is the crest cells on the pool's rim at
+    the pour elevation, and it is what unit discharge (and therefore erosion) has to be
+    figured against.
+
+    This used to say the stream layer draws one thread "because D8 sends the whole overflow
+    through one cell, steepest descent picking a single neighbour". **Both halves are
+    wrong**, measured in Round 14. Flat resolution is already multi-outlet, and Dam 15's
+    pool leaves at **23 distinct cells**. What concentrated the flow was that a flat is
+    resolved by distance — every cell routes to its *nearest* way out — so the crest cell
+    closest to where the inflow channel arrived took **87% of the flux** while 16 of 24
+    carried nothing.
+
+    **That half is now fixed** (Round 15). ``crest_routing`` contracts each pond to a mixing
+    node and sheds its whole inflow evenly over the cells that discharge, so Dam 15's level
+    band reads a uniform 962.1 — a ratio of exactly 1.00x, a true weir — against
+    ``min 1 / median 1 / max 36,782`` before. What remains is the **threshold**: the Streams
+    layer draws ``accumulation > stream_threshold``, and a crest cell carrying its 1/n share
+    clears a contributing-area threshold the whole catchment only just exceeds even less
+    easily than before. A wall that draws no channel is now the layer's cut-off saying so,
+    and nothing else.
+
+    The length measured here is unaffected by any of that — it is read off the burned rim,
+    never from flow direction — which is why it was worth reporting even while the
+    explanation beside it was wrong.
+
+    **Walk the pool-facing row, not the whole level band** — this is a length, and the band
+    is not one. Dam 15's wall stands 24 cells along the water and **49** cells of its level
+    band can discharge, but that larger figure is length × *thickness*: the wall is ~25 cells
+    long and 2–3 cells thick, and both faces drain. Counting it would inflate ``length_m``,
+    shrink the unit discharge that erosion is judged by, and do so in the unsafe direction.
+    The pool-facing row is the crest run; the ``drawn_len`` cap then absorbs the √2 a
+    diagonal cell path over-counts by.
+
+    ``barriers`` is ``[(name, crest_mask, drawn_length_m)]`` — *crest_mask* being the
+    cells this feature raised, not its whole footprint. The reported length is capped at
+    ``drawn_length_m`` because a wall cannot overtop along more of itself than it has;
+    without the cap a diagonal run of cells over-counts by up to √2.
+
+    ``built`` is every cell the burn raised anywhere. It is what ``alt_saddle_m`` — the
+    next way out if this crest were lifted — is measured against, and passing it matters:
+    a dam's keyed returns are raised ground that its recorded mask does not cover, so
+    without it the "natural saddle" comes back as the dam's own wall at its own level,
+    and the advice reads *raise the crest 0.00 m*. Another feature's embankment is not a
+    natural saddle either. Defaults to the barrier's own crest, which is the weaker
+    answer but never a wrong-shaped one.
+
+    Returns a list of :class:`SpillOver`, one per barrier that pours over itself,
+    deepest pool first. A barrier whose pool escapes elsewhere is simply absent.
+    """
+    import numpy as np
+    from scipy.ndimage import binary_dilation, label
+
+    pond = np.asarray(ponding, dtype="float64")
+    bed = np.asarray(ground, dtype="float64")
+    cell_area = float(cell_size_m) ** 2
+    out = []
+    if pond.shape != bed.shape:
+        return out
+
+    labels, n_pools = label(pond >= min_depth)
+    if n_pools == 0:
+        return out
+
+    made_ground = None if built is None else np.asarray(built, dtype=bool)
+    if made_ground is not None and made_ground.shape != pond.shape:
+        made_ground = None
+
+    for name, crest, drawn_len in barriers:
+        crest = np.asarray(crest, dtype=bool)
+        if crest.shape != pond.shape or not crest.any():
+            continue
+        # Pools this barrier stands against: the ones its crest cells touch.
+        touching = set(np.unique(labels[binary_dilation(crest)])) - {0}
+        for pid in touching:
+            pool = labels == pid
+            rim = binary_dilation(pool) & ~pool
+            if not rim.any():
+                continue
+            pour = float(bed[rim].min())
+            # Its own crest, at the level the pool actually leaves at.
+            own = rim & crest & (bed <= pour + 1e-6)
+            if not own.any():
+                continue          # this pool escapes somewhere else — not this barrier
+            other = rim & ~(crest if made_ground is None else made_ground)
+            alt = float(bed[other].min()) if other.any() else float("inf")
+            length = min(float(own.sum()) * float(cell_size_m),
+                         float(drawn_len) if drawn_len else float("inf"))
+            out.append(SpillOver(
+                name=name,
+                pour_level_m=pour,
+                length_m=length,
+                alt_saddle_m=alt,
+                pool_volume_m3=float(pond[pool].sum() * cell_area),
+                mask=own,
+            ))
+    out.sort(key=lambda s: -s.pool_volume_m3)
+    return out
+
+
+def level_for_volume(ground, cell_area_m2, volume_m3, ceiling=None):
+    """The water-surface elevation at which *volume_m3* stands over *ground*.
+
+    A stage-storage curve inverted, solved exactly rather than by bisection. Sort the
+    bed elevations; the volume held when the surface sits on the k-th of them is
+    ``cell_area × Σ_{i<k} (g_k − g_i)``. That is monotone and piecewise linear in
+    level, so the bracketing pair is one ``searchsorted`` away and the level between
+    them follows from the count of cells wet there — no tolerance, no iteration count.
+
+    ``ceiling`` caps the answer at the pool's own spill level. A feature the balance
+    credits with more water than its pond can hold is then drawn brim-full rather than
+    standing above the ground the surplus would in fact run over: that surplus is
+    overflow, and overflow is somewhere else's water.
+
+    Returns None for an empty region, which the caller skips.
+    """
+    import numpy as np
+
+    g = np.sort(np.asarray(ground, dtype="float64").ravel())
+    if g.size == 0:
+        return None
+    if volume_m3 <= 0 or cell_area_m2 <= 0:
+        return float(g[0])
+
+    below = np.arange(g.size)                      # cells strictly under g[k]
+    held = (g * below - np.concatenate(([0.0], np.cumsum(g)[:-1]))) * cell_area_m2
+    idx = max(int(np.searchsorted(held, float(volume_m3), side="right")) - 1, 0)
+    wet = idx + 1                                  # cells wet once the surface passes
+    level = g[idx] + (float(volume_m3) - held[idx]) / (wet * cell_area_m2)
+    if ceiling is not None:
+        level = min(level, float(ceiling))
+    return float(level)
+
+
+def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
+                     existing=None, min_depth=0.001):
+    """Where the water actually stands for *this* event, as a depth raster.
+
+    ``ponding`` is the full-capacity depth raster — every hollow filled to its spill
+    point, which is what the burn's ponding layer is — and ``ground`` the surface under
+    it. Each pool is re-filled with only the water the balance delivers, by solving for
+    the level that holds it (:func:`level_for_volume`). A part-full pond therefore comes
+    out **smaller and shallower**, standing in the bottom of its basin. Scaling the full
+    pond's depth by a fill fraction instead, as the simulation's frame layer does, keeps
+    the full pond's footprint and paints water up banks it never reaches.
+
+    Pools are attributed exactly as :func:`attribute_ponding_volume` attributes them —
+    same labelling, same transitive joining — because the two must agree about what a
+    pool is. Where a joined set owns more than one pool there is no defensible way to
+    say which of them the water is in, so the set's volume is split between them in
+    proportion to their capacity. That split is a presentational choice and nothing
+    downstream reads it as a measurement.
+
+    ``existing`` is the pre-earthwork ponding on the same grid. Its volume is added back
+    per pool, because ``stored_by_name`` is water held *over and above* what ponded
+    there naturally (that is the basis ``feature_storage`` measures capacity on) and a
+    dam sitting in a wet hollow would otherwise be drawn emptier than the ground is.
+
+    Parameters
+    ----------
+    ponding        : 2-D array — full-capacity ponding depth (m)
+    ground         : 2-D array — bed elevation under it (m), the burned DEM
+    cell_area_m2   : float
+    footprints     : list of (name, bool_mask), as :func:`attribute_ponding_volume` takes
+    stored_by_name : {name: m³} — what the balance says each feature holds
+    existing       : 2-D array or None — baseline ponding depth (m)
+
+    Returns
+    -------
+    2-D float array — event ponding depth (m), zero where the water does not reach.
+    """
+    import numpy as np
+    from scipy.ndimage import label
+
+    arr = np.asarray(ponding, dtype="float64")
+    bed = np.asarray(ground, dtype="float64")
+    out = np.zeros_like(arr)
+    if arr.shape != bed.shape:
+        return out
+
+    labels, n_regions = label(arr >= min_depth)
+    if n_regions == 0:
+        return out
+
+    overlaps = {name: np.bincount(labels[mask], minlength=n_regions + 1)
+                for name, mask in footprints}
+    touched = [{name for name, counts in overlaps.items() if counts[rid] > 0}
+               for rid in range(n_regions + 1)]
+
+    # Join every pair of features sharing a region, transitively — one pool, one level.
+    parent = {name: name for name, _ in footprints}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for rid in range(1, n_regions + 1):
+        names = list(touched[rid])
+        for other in names[1:]:
+            ra, rb = find(names[0]), find(other)
+            if ra != rb:
+                parent[rb] = ra
+
+    members = {}
+    for name in parent:
+        members.setdefault(find(name), []).append(name)
+
+    capacity = np.bincount(labels.ravel(), weights=arr.ravel(),
+                           minlength=n_regions + 1) * cell_area_m2
+    if existing is None:
+        natural = np.zeros_like(capacity)
+    else:
+        natural = np.bincount(
+            labels.ravel(), weights=np.clip(
+                np.asarray(existing, dtype="float64"), 0.0, None).ravel(),
+            minlength=n_regions + 1) * cell_area_m2
+
+    regions_of = {}
+    for rid in range(1, n_regions + 1):
+        if touched[rid]:
+            regions_of.setdefault(find(next(iter(touched[rid]))), []).append(rid)
+
+    # One sort of the whole grid buys every region's cells. Masking per region instead
+    # is the trap ``attribute_ponding_volume`` documents: hundreds of regions each
+    # walking millions of cells.
+    flat = labels.ravel()
+    order = np.argsort(flat, kind="stable")
+    starts = np.searchsorted(flat[order], np.arange(n_regions + 2))
+
+    bed_flat, pond_flat, out_flat = bed.ravel(), arr.ravel(), out.ravel()
+    for root, rids in regions_of.items():
+        stored = sum(float(stored_by_name.get(n, 0.0) or 0.0) for n in members[root])
+        caps = np.array([capacity[r] for r in rids], dtype="float64")
+        total = float(caps.sum())
+        for rid, cap in zip(rids, caps):
+            share = natural[rid] + (stored * (cap / total) if total > 0 else 0.0)
+            if share <= 0:
+                continue
+            cells = order[starts[rid]:starts[rid + 1]]
+            g = bed_flat[cells]
+            spill = float((bed_flat[cells] + pond_flat[cells]).max())
+            level = level_for_volume(g, cell_area_m2, share, ceiling=spill)
+            if level is None:
+                continue
+            out_flat[cells] = np.clip(level - g, 0.0, None)
+    return out
 
 
 # A per-feature gap between the drawn geometry and what the grid can represent,
-# beyond this fraction, is worth naming explicitly in the table.
+# beyond this fraction, is worth naming explicitly in the table. It gates two things
+# that must agree: the caveat sentences, and the per-row ``section_overstated`` flag
+# the panel and the report style from. A measured gap is the right trigger rather than
+# a width-vs-cell-size proxy — the burner levels a flat floor at full depth for any
+# feature carrying no batter run, so a wide swale is misrepresented exactly as much as
+# a narrow one, while a genuinely vertical-walled channel of any width is not
+# misrepresented at all.
 _RESOLUTION_CAVEAT_THRESHOLD = 0.10
 
 
 def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
                        earthworks_total_m3, min_dims, cell_size,
-                       breakdowns=None, existing_by_name=None):
+                       breakdowns=None, existing_by_name=None, merged_groups=None):
     """Assemble the terrain-vs-analytic verification (site headline + per-feature).
 
     Site terrain-derived storage = ``earthworks_total − baseline_total`` (floored ≥0) —
@@ -295,14 +844,27 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     (``rasterisable``) rather than the design capacity, which is what makes it
     interpretable: a non-zero delta then means the burn is wrong, and nothing else.
 
-    Three unrelated gaps used to be summed into one percentage — a genuine burn error,
-    the grid's distortion of the drawn shape, and the freeboard allowance the user
-    chose. That is why a headline of "Verified · Δ −38%" carried no actionable meaning.
-    Each is now reported separately:
+    Unrelated gaps used to be summed into one percentage — a burn error, the grid's
+    distortion of the drawn shape, and the freeboard allowance the user chose. That is
+    why a headline of "Verified · Δ −38%" carried no actionable meaning. Each is now
+    reported separately, and the first two are *calculated* while the last two are
+    *measured*, which is the division that matters:
 
     ``design`` → ``geometric``     the freeboard allowance (a choice)
-    ``geometric`` → ``rasterisable`` the resolution penalty (the cell size)
-    ``rasterisable`` → ``terrain``   the burn (the only real error term)
+    ``section`` → ``cut``          did the grid hold the section you drew?
+    ``section`` → ``rasterisable`` what the bank and the hillside add (``impoundment_m3``)
+    ``rasterisable`` → ``terrain``   interaction with neighbouring features
+
+    The third of those is routinely the largest and it is not an error. A companion berm
+    keyed into its banks holds water above natural ground, so what a swale impounds is
+    commonly half again what its cross-section says — which no cross-section can predict,
+    because it depends on the hillside.
+
+    Past ``_RESOLUTION_CAVEAT_THRESHOLD`` the *grid* gap is carried on the row itself as
+    ``section_overstated`` / ``section_gap_pct``, because at that size the burn did not
+    cut the section it was given and the geometry is the capacity to read. The panel and
+    the report both style from those two keys, so a near-zero Δ on such a row is never
+    presented as reassurance about a section it did not hold.
 
     ``existing_by_name`` is the *baseline* ponding attributed to the same footprints —
     water already sitting there before any earthwork. Every other figure here is
@@ -313,9 +875,23 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     alongside lets the table say all three rather than make the reader choose which
     one "storage" meant. ``total = existing + terrain`` by construction, so the three
     can never disagree.
+
+    ``merged_groups`` comes from :class:`PondAttribution` and names the sets of features
+    that share one pool. A member of such a set gets ``terrain_m3`` / ``delta_pct`` of
+    ``None`` — the same treatment a sub-cell feature gets, and for the same reason: there
+    is a measurement, but it is not a measurement *of this feature*. The comparison is
+    made once, for the set, in ``merged_groups``. Anything else double-counts the water
+    or credits it to whichever member happens to overlap it most, which is how one pool
+    reported +211% on a basin and −100% on the dam holding it back.
     """
     breakdowns = breakdowns or {}
     existing_by_name = existing_by_name or {}
+    merged_groups = list(merged_groups or [])
+    merged_by_name = {}
+    for group in merged_groups:
+        for name in group.get("names", ()):
+            merged_by_name[name] = tuple(
+                n for n in group["names"] if n != name)
 
     def _reference(key, fallback):
         b = breakdowns.get(key)
@@ -340,7 +916,13 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         reference = _reference(name, analytic_m3)
         existing = float(existing_by_name.get(name, 0.0))
 
-        if routing_only:
+        shares_pool_with = merged_by_name.get(name)
+
+        if routing_only or shares_pool_with:
+            # Two different reasons to withhold a measured volume, one rule: report a
+            # figure only where it describes this feature. A sub-cell feature has no
+            # measurement of its own; a feature sharing a pool has one that is not its
+            # own. The group row below makes the comparison the members cannot.
             terrain_m3 = None
             feat_delta_pct = None
         else:
@@ -350,23 +932,75 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
             )
 
         geometric = float(b.get("geometric", analytic_m3))
+        # **The trench, against the trench.** ``resolution_penalty_m3`` is now
+        # ``cut − section``: the excavation the burn actually made against the section
+        # that was drawn, and nothing else. Measured against ``geometric`` instead it
+        # would also carry the companion berm, and against ``rasterisable`` it would
+        # carry the whole impoundment — a berm doing exactly its job would report as a
+        # resolution failure of +80% and upward, which is the noise this flag has twice
+        # had to be rescued from.
+        section = float(b.get("section_m3", geometric))
+        berm_credit = float(b.get("berm_credit_m3", 0.0))
         penalty = float(b.get("resolution_penalty_m3", 0.0))
-        if geometric > 0 and abs(penalty) / geometric > _RESOLUTION_CAVEAT_THRESHOLD:
-            resolution_flagged.append((name, penalty / geometric * 100.0))
+        cut = b.get("cut_m3")
+        # What the bank and the hillside add beyond the drawn trench. Positive and often
+        # large; not an error, and deliberately its own key so it can never be mistaken
+        # for one.
+        impoundment = float(b.get("impoundment_m3", 0.0))
+        barrier = bool(b.get("barrier_impounded", False))
+        gap_pct = penalty / section * 100.0 if section > 0 else None
+        gap_material = (gap_pct is not None
+                        and abs(penalty) / section > _RESOLUTION_CAVEAT_THRESHOLD)
+        if gap_material:
+            resolution_flagged.append((name, gap_pct))
+
+        # One predicate, two consumers: the caveat sentences above and the per-row flag
+        # below cannot disagree about which features are affected.
+        #
+        # Past this gap the at-grid and measured columns have stopped describing storage
+        # and describe the trench the burn cut. Flagging the row is what stops a
+        # near-zero Δ — which only ever compared measured against the grid — from
+        # reading as reassurance about a volume it never tested.
+        #
+        # A dam is excluded because it has no drawn cross-section to be overstated
+        # against (its penalty is forced to zero anyway), a sub-cell feature because it
+        # claims no measured volume in the first place, and a feature sharing a pool
+        # because it has no Δ of its own to qualify. The flag styles a delta and names
+        # itself in a roll-call under the table; setting it on a row whose delta reads
+        # "—" would send the reader hunting for a mark that is not there.
+        overstated = bool(gap_material and not routing_only and not barrier
+                          and not shares_pool_with)
 
         per_feature.append({
             "name": name,
             "analytic_m3": float(analytic_m3),          # design (with freeboard)
             "geometric_m3": geometric,                   # the drawn shape
-            "rasterisable_m3": reference,                # what this grid can hold
-            "terrain_m3": terrain_m3,                    # what the burn produced
-            "delta_pct": feat_delta_pct,                 # terrain vs rasterisable
+            # What geometric is made of. The grid columns describe the trench only, so
+            # a reader comparing them needs to know how much of Geometric is not trench.
+            "section_m3": section,
+            "berm_credit_m3": berm_credit,
+            "rasterisable_m3": reference,                # what it impounds, alone
+            "terrain_m3": terrain_m3,                    # what the finished site ponds
+            "delta_pct": feat_delta_pct,                 # interaction with neighbours
             "freeboard_m3": float(b.get("freeboard_m3", 0.0)),
+            # The trench as cut, and the grid-fidelity gap it implies. None where no burn
+            # has run — a claim about the cut needs a cut.
+            "cut_m3": float(cut) if cut is not None else None,
             "resolution_penalty_m3": penalty,
+            "impoundment_m3": impoundment,
             "routing_only": routing_only,
+            # The other features this one's pool is continuous with, or None. Both
+            # renderers use it to say why the last two columns are blank.
+            "merged_with": list(shares_pool_with) if shares_pool_with else None,
             # A dam impounds against the terrain rather than a drawn section, so its
             # three "design" columns are one number and only Measured is independent.
-            "barrier_impounded": bool(b.get("barrier_impounded", False)),
+            "barrier_impounded": barrier,
+            # The terrain model does not hold this feature's drawn section, so At-grid
+            # and Measured are a placement/routing check here and not a capacity. Both
+            # renderers style from these two: the flag decides *whether* to say so, the
+            # signed gap decides *what* to say.
+            "section_overstated": overstated,
+            "section_gap_pct": gap_pct,
             # Water already ponding here before any earthwork, and the pool actually
             # standing on the ground afterwards. terrain_m3 remains the marginal figure
             # every delta is measured against — these two only add context.
@@ -374,21 +1008,53 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
             "total_m3": None if terrain_m3 is None else terrain_m3 + existing,
         })
 
+    # One row per shared pool, carrying the comparison its members individually cannot.
+    # The reference is the members' at-grid figures summed, so the group is tested on
+    # exactly the same basis as a lone feature: measured against what the grid holds.
+    group_rows = []
+    for group in merged_groups:
+        names = [n for n in group.get("names", ()) if n in analytic_by_name]
+        if len(names) < 2:
+            continue
+        reference = sum(_reference(n, analytic_by_name[n]) for n in names)
+        measured = float(group.get("volume_m3", 0.0))
+        group_rows.append({
+            "names": names,
+            "rasterisable_m3": reference,
+            "terrain_m3": measured,
+            "delta_pct": ((measured - reference) / reference * 100.0
+                          if reference > 0 else None),
+            "existing_m3": sum(float(existing_by_name.get(n, 0.0)) for n in names),
+        })
+
     caveats = [
         "Δ compares measured terrain storage against what a "
         f"{cell_size:.2f} m grid can represent — so a non-zero Δ is a burn issue, not "
         "a resolution or freeboard effect.",
-        "Terrain volume is attributed by connected depression ∩ footprint — the site "
-        "total is robust; per-feature figures are indicative for adjacent features.",
+        "Terrain volume is attributed by connected depression. A pool that reaches "
+        "two features belongs to neither alone, so it is reported once for the pair.",
         "Terrain total includes barrier-impounded storage (e.g. dams) that has no "
         "analytic counterpart.",
         "Sub-cell features (narrower than one DEM cell) are validated for placement and "
         "routing only, not independent storage volume.",
     ]
     for name, pct in resolution_flagged[:3]:
+        # The burn now cuts the drawn section, so a material gap here is the cell size
+        # failing to hold it rather than the burn declining to try: a footprint two
+        # cells across has no cell more than half a cell from its own edge, and so
+        # cannot reach full depth however the batter is specified.
         caveats.append(
-            f"{name}: the grid represents it {pct:+.0f}% differently from the drawn "
-            f"shape — its cross-section is too fine for a {cell_size:.2f} m cell."
+            f"{name}: a {cell_size:.2f} m cell cannot hold its drawn section, so the "
+            f"terrain model cut {pct:+.0f}% against it. Read Geometric, not At-grid, "
+            f"as its capacity."
+        )
+
+    for group in group_rows:
+        joined = " + ".join(group["names"])
+        caveats.append(
+            f"{joined} impound one continuous pool, so it is measured once for the set: "
+            f"{group['terrain_m3']:,.0f} m³ against {group['rasterisable_m3']:,.0f} m³ "
+            f"at grid. Neither holds it alone, so neither carries a Δ of its own."
         )
 
     return VerificationResult(
@@ -398,6 +1064,7 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         delta_pct=delta_pct,
         unattributed_m3=0.0,
         per_feature=per_feature,
+        merged_groups=group_rows,
         caveats=caveats,
     )
 
@@ -557,316 +1224,3 @@ def _build_fill_timeline_chart(post: PostInterventionReport):
     plt.close(fig)
     return b64
 
-
-# ---------------------------------------------------------------------------
-# HTML export
-# ---------------------------------------------------------------------------
-
-def export_html(comparison: ComparisonResult, output_path: str,
-                methodology_text: str = "") -> str:
-    """
-    Generate a self-contained HTML report and save it to output_path.
-
-    All matplotlib charts are embedded as base64 PNGs — no external files needed.
-
-    Parameters
-    ----------
-    comparison : ComparisonResult
-    output_path : str — path to write the .html file
-    methodology_text : str — optional extra methodology notes
-
-    Returns
-    -------
-    str — output_path
-    """
-    baseline = comparison.baseline
-    post = comparison.post
-
-    hydrograph_b64 = _build_hydrograph_chart(baseline, post) if (baseline and post) else None
-    fill_chart_b64 = _build_fill_timeline_chart(post) if post else None
-
-    def _img_tag(b64, alt=""):
-        if b64 is None:
-            return "<p><em>(Chart unavailable — matplotlib required)</em></p>"
-        return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="max-width:100%;border-radius:6px;">'
-
-    # Build earthwork table rows
-    ew_rows = ""
-    if post and post.earthwork_summary:
-        for s in post.earthwork_summary:
-            overflow_cell = (
-                f'<span style="color:#e74c3c;">Yes — {s["first_overflow_hr"]} hr</span>'
-                if s.get("overflowed") else '<span style="color:#27ae60;">No</span>'
-            )
-            # Terrain-vs-analytic cells (§4). Sub-cell features validate routing only.
-            if s.get("routing_only"):
-                terrain_cell = '<span style="color:#7f8c8d;">routing-only</span>'
-                delta_cell = "—"
-            elif s.get("terrain_ponding_m3") is not None:
-                terrain_cell = f"{s['terrain_ponding_m3']:,.1f}"
-                dp = s.get("capacity_delta_pct")
-                delta_cell = f"{dp:+.0f}%" if dp is not None else "—"
-            else:
-                terrain_cell = "—"
-                delta_cell = "—"
-            ew_rows += f"""
-            <tr>
-              <td>{s['name']}</td>
-              <td>{s['type'].capitalize()}</td>
-              <td>{s['capacity_m3']:,.1f}</td>
-              <td>{terrain_cell}</td>
-              <td>{delta_cell}</td>
-              <td>{s.get('total_inflow_m3', 0):,.1f}</td>
-              <td>{s['peak_fill_pct']:.0f}%</td>
-              <td>{overflow_cell}</td>
-              <td>{s.get('total_overflow_m3', 0):,.1f}</td>
-              <td>{s.get('total_infiltration_m3', 0):,.1f}</td>
-              <td>{s.get('cut_vol_m3', 0):,.1f}</td>
-              <td>{s.get('fill_vol_m3', 0):,.1f}</td>
-            </tr>"""
-
-    # Build the non-circular verification block (§4)
-    verification_html = ""
-    v = comparison.verification
-    if v is not None:
-        delta_colour = "#1a7a1a" if abs(v.delta_pct) <= 25 else "#cc6600"
-        caveat_items = "".join(f"<li>{c}</li>" for c in v.caveats)
-        unattr_row = (
-            f'<tr><td>Unattributed terrain ponding</td>'
-            f'<td>{v.unattributed_m3:,.1f} m³</td></tr>'
-            if v.unattributed_m3 > 0.05 else ""
-        )
-        verification_html = f"""
-  <h2>4b. Non-circular Verification (terrain vs analytic)</h2>
-  <div class="card">
-    <p>Independent check: storage measured on the <strong>burned</strong> terrain
-    (ponding difference vs baseline) against the analytic sizing. Non-circular because
-    the terrain figure never sees the analytic capacity.</p>
-    <table>
-      <tbody>
-        <tr><td>Analytic capacity (Σ storage features)</td>
-            <td>{v.analytic_total_m3:,.1f} m³</td></tr>
-        <tr><td>Terrain-derived storage (earthworks − baseline)</td>
-            <td>{v.terrain_total_m3:,.1f} m³</td></tr>
-        <tr><td>Delta</td><td><span style="color:{delta_colour};font-weight:bold;">
-            {v.delta_m3:+,.1f} m³ ({v.delta_pct:+.0f}%)</span></td></tr>
-        {unattr_row}
-      </tbody>
-    </table>
-    <p style="margin-top:8px;font-size:0.85rem;color:#7f8c8d;">The delta is diagnostic,
-    not pass/fail — a graded channel legitimately ponds less than its static capacity.</p>
-    <div class="caveats"><strong>Attribution caveats</strong><ul>{caveat_items}</ul></div>
-  </div>"""
-
-    # Build exit points tables
-    def _exit_table(exit_points, title):
-        if not exit_points:
-            return ""
-        rows = "".join(
-            f"<tr><td>{ep.get('label', f'Exit {i+1}')}</td>"
-            f"<td>{ep.get('volume_m3', 0):,.0f}</td></tr>"
-            for i, ep in enumerate(exit_points)
-        )
-        return f"""
-        <h3>{title}</h3>
-        <table><thead><tr><th>Exit Point</th><th>Volume (m³)</th></tr></thead>
-        <tbody>{rows}</tbody></table>"""
-
-    baseline_exits = _exit_table(
-        baseline.exit_points if baseline else [], "Baseline Exit Points"
-    )
-    post_exits = _exit_table(
-        post.exit_points if post else [], "Post-Intervention Exit Points"
-    )
-
-    # Headline stats
-    def _stat(label, value, unit="", highlight=False):
-        color = "#2980b9" if highlight else "#2c3e50"
-        return f"""
-        <div class="stat-card">
-          <div class="stat-label">{label}</div>
-          <div class="stat-value" style="color:{color};">{value}<span class="stat-unit"> {unit}</span></div>
-        </div>"""
-
-    stats_html = ""
-    if baseline:
-        stats_html += _stat("Catchment Area", f"{baseline.catchment_area_ha:,.1f}", "ha")
-        stats_html += _stat("Rainfall Event", f"{baseline.rainfall_mm:.0f} mm / {baseline.duration_hr:.0f} hr")
-        stats_html += _stat("SCS Curve Number", f"{baseline.cn:.0f}")
-        stats_html += _stat("Total Runoff Generated", f"{baseline.total_runoff_m3:,.0f}", "m³")
-
-    summary_rows = ""
-    if baseline and post:
-        summary_rows = f"""
-        <tr><td>Total exit volume</td>
-            <td>{baseline.exit_volume_m3:,.0f} m³</td>
-            <td>{post.exit_volume_m3:,.0f} m³</td>
-            <td class="highlight">−{comparison.exit_reduction_pct:.0f}%</td></tr>
-        <tr><td>Peak exit flow</td>
-            <td>{baseline.peak_outflow_ls:,.0f} L/s</td>
-            <td>{post.peak_outflow_ls:,.0f} L/s</td>
-            <td class="highlight">−{comparison.peak_reduction_pct:.0f}%</td></tr>
-        <tr><td>Peak flow timing</td>
-            <td>{baseline.peak_outflow_time_hr:.1f} hr</td>
-            <td>{post.peak_outflow_time_hr:.1f} hr</td>
-            <td class="highlight">+{comparison.peak_delay_hr:.1f} hr delay</td></tr>
-        <tr><td>Water captured on-site</td>
-            <td>—</td>
-            <td>{comparison.captured_pct:.0f}% of runoff</td>
-            <td class="highlight">{comparison.captured_pct:.0f}%</td></tr>
-        """
-
-    net_cut_fill = (
-        f"Net cut: {comparison.net_cut_m3:,.0f} m³ | "
-        f"Net fill: {comparison.net_fill_m3:,.0f} m³ | "
-        f"Balance: {'+' if comparison.net_cut_fill_m3 >= 0 else ''}"
-        f"{comparison.net_cut_fill_m3:,.0f} m³ "
-        f"({'net cut' if comparison.net_cut_fill_m3 >= 0 else 'net fill'})"
-    )
-
-    site_name = baseline.site_name if baseline else "TerrainFlow Assessment"
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{site_name} — Hydrological Assessment Report</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #f0f2f5; color: #2c3e50; line-height: 1.6; }}
-    .page {{ max-width: 1100px; margin: 0 auto; padding: 32px 24px; }}
-    h1 {{ font-size: 2rem; color: #1a252f; border-bottom: 3px solid #2980b9;
-          padding-bottom: 12px; margin-bottom: 8px; }}
-    .subtitle {{ color: #7f8c8d; font-size: 1rem; margin-bottom: 32px; }}
-    h2 {{ font-size: 1.4rem; color: #1a252f; margin: 32px 0 12px;
-          border-left: 4px solid #2980b9; padding-left: 12px; }}
-    h3 {{ font-size: 1.1rem; color: #34495e; margin: 20px 0 8px; }}
-    .card {{ background: #fff; border-radius: 10px; padding: 24px;
-             box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 24px; }}
-    .stats-grid {{ display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }}
-    .stat-card {{ background: #fff; border-radius: 8px; padding: 16px 20px;
-                  box-shadow: 0 1px 4px rgba(0,0,0,0.08); min-width: 180px; flex: 1; }}
-    .stat-label {{ font-size: 0.8rem; color: #7f8c8d; text-transform: uppercase;
-                   letter-spacing: 0.5px; margin-bottom: 4px; }}
-    .stat-value {{ font-size: 1.5rem; font-weight: 700; color: #2c3e50; }}
-    .stat-unit {{ font-size: 0.9rem; font-weight: 400; color: #7f8c8d; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
-    thead {{ background: #2980b9; color: white; }}
-    th {{ padding: 10px 12px; text-align: left; font-weight: 600; }}
-    td {{ padding: 9px 12px; border-bottom: 1px solid #ecf0f1; }}
-    tr:nth-child(even) td {{ background: #f8f9fa; }}
-    .highlight {{ font-weight: 700; color: #27ae60; }}
-    .chart-wrap {{ background: #fff; border-radius: 10px; padding: 20px;
-                   box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 24px; }}
-    .caveats {{ background: #fff3cd; border-left: 4px solid #f39c12;
-                padding: 16px 20px; border-radius: 6px; margin-top: 12px; }}
-    .caveats ul {{ padding-left: 20px; margin-top: 8px; }}
-    .caveats li {{ margin-bottom: 6px; font-size: 0.9rem; }}
-    footer {{ text-align: center; color: #bdc3c7; font-size: 0.8rem;
-              margin-top: 40px; padding-top: 16px; border-top: 1px solid #ecf0f1; }}
-  </style>
-</head>
-<body>
-<div class="page">
-
-  <h1>{site_name}</h1>
-  <p class="subtitle">Hydrological Assessment Report — generated by TerrainFlow Assessment</p>
-
-  <!-- Section 1: Site summary -->
-  <h2>1. Site Summary</h2>
-  <div class="stats-grid">
-    {stats_html}
-  </div>
-
-  <!-- Section 2: Before/after comparison -->
-  <h2>2. Before / After Comparison</h2>
-  <div class="card">
-    <table>
-      <thead><tr><th>Metric</th><th>Baseline</th><th>With Earthworks</th><th>Change</th></tr></thead>
-      <tbody>{summary_rows}</tbody>
-    </table>
-  </div>
-
-  <!-- Section 3: Hydrograph -->
-  <h2>3. Outflow Hydrograph</h2>
-  <div class="chart-wrap">
-    {_img_tag(hydrograph_b64, "Outflow hydrograph before and after earthworks")}
-  </div>
-
-  <!-- Section 4: Earthwork summary -->
-  <h2>4. Earthwork Summary</h2>
-  <div class="card">
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th><th>Type</th><th>Capacity (m³)</th>
-          <th>Terrain Ponding (m³)</th><th>Δ vs analytic</th><th>Total Inflow (m³)</th>
-          <th>Peak Fill</th><th>Overflowed?</th><th>Overflow Vol (m³)</th>
-          <th>Infiltration (m³)</th><th>Cut (m³)</th><th>Fill (m³)</th>
-        </tr>
-      </thead>
-      <tbody>{ew_rows}</tbody>
-    </table>
-    <p style="margin-top:12px;font-size:0.85rem;color:#7f8c8d;">{net_cut_fill}</p>
-  </div>
-  {verification_html}
-
-  <!-- Section 5: Fill timeline -->
-  <h2>5. Fill Timeline</h2>
-  <div class="chart-wrap">
-    {_img_tag(fill_chart_b64, "Earthwork fill percentage over time")}
-  </div>
-
-  <!-- Section 6: Exit points -->
-  <h2>6. Exit Points</h2>
-  <div class="card">
-    {baseline_exits}
-    {post_exits}
-  </div>
-
-  <!-- Section 7: Methodology -->
-  <h2>7. Methodology & Caveats</h2>
-  <div class="card">
-    <h3>Approach</h3>
-    <p>Flow routing uses the pysheds D-infinity or D8 algorithm applied to a
-    digital elevation model (DEM). Runoff is estimated using the USDA-NRCS SCS
-    Curve Number method. Earthwork storage capacity is calculated using trapezoidal
-    cross-sections (swales) and polygon depth (basins) with a 0.8 freeboard factor.
-    Infiltration losses are estimated using a steady-state rate per soil texture.</p>
-
-    {f'<p style="margin-top:10px;">{methodology_text}</p>' if methodology_text else ""}
-
-    <div class="caveats">
-      <strong>Current Version Limitations</strong>
-      <ul>
-        <li>DEM burning uses a rectangular approximation at the native DEM resolution.
-            Accurate swale routing requires DEM resolution ≤ swale width.</li>
-        <li>Earthwork capacities assume uniform rectangular cross-sections
-            (conservative). Actual trapezoidal capacity is larger.</li>
-        <li>Infiltration is modelled as a constant rate (steady-state).
-            Initial high infiltration rates (Green-Ampt) are not included.</li>
-        <li>Cascading overflow routes to the nearest lower-elevation earthwork
-            by elevation centroid — not by actual flow path connectivity.</li>
-        <li>Hydrograph timing is approximate: the SCS model distributes runoff
-            proportionally to cumulative rainfall and does not model travel time
-            through the catchment.</li>
-        <li>Future versions will incorporate surveyed cross-sections, higher-resolution
-            terrain data, and Green-Ampt infiltration modelling.</li>
-      </ul>
-    </div>
-  </div>
-
-  <footer>TerrainFlow Assessment — Report generated automatically.
-  For design decisions, verify results with a qualified engineer.</footer>
-
-</div>
-</body>
-</html>"""
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    _log.info(f"Report saved to {output_path}")
-    return output_path

@@ -953,7 +953,13 @@ class ContourController(G.LayerTreeMixin):
             boundary_mask = self._get_keypoint_boundary_mask(self._state.dem_path)
 
             self._panel.set_keypoint_progress(25, "Finding keypoints…")
-            ka = DrainageLineAnalysis(self._state.dem_path, acc_path)
+            # The pond raster goes with the accumulation: inside a contracted pond the
+            # accumulation is no longer contributing area, and every test in here reads it
+            # as if it were. Without it a reservoir floor comes back as a ridgeline.
+            ka = DrainageLineAnalysis(
+                self._state.dem_path, acc_path,
+                (self._state.baseline_result or {}).get("pond_flow"),
+            )
             self._state.keyline_analysis = ka
 
             keypoints = ka.find_keypoints(
@@ -1004,7 +1010,10 @@ class ContourController(G.LayerTreeMixin):
                     DrainageLineAnalysis,
                 )
                 acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
-                ka = DrainageLineAnalysis(self._state.dem_path, acc_path)
+                ka = DrainageLineAnalysis(
+                    self._state.dem_path, acc_path,
+                    (self._state.baseline_result or {}).get("pond_flow"),
+                )
 
             self._panel.set_ponds_progress(50, "Finding pond sites…")
             boundary_mask = self._get_keypoint_boundary_mask(self._state.dem_path)

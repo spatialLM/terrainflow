@@ -123,9 +123,10 @@ simulation's flow direction, and the report. Skipping it degrades everything dow
 
 | | |
 |---|---|
-| **Action** | Report stage → **Export HTML Report** → choose a path. |
-| **Expected** | Self-contained HTML: site summary, before/after table, outflow hydrograph, earthwork summary + verification, fill timeline, exit points, methodology. Opens automatically (Windows). |
-| **⚠ Watch-for** | (a) **Export only unlocks after a full baseline→earthworks→simulation cycle** — confirm you can't export a baseline-only report. (b) **The report has no map/plan-view images** — only two line charts. Is the lack of a site map a real gap for your use? (c) If matplotlib is missing, do charts show as "unavailable" with no warning? (d) Methodology text is **generic/hardcoded** (doesn't reflect your actual routing/settings); filename **ignores the site name**. (e) Baseline "peak flow timing" may read 0.0 hr, making the "+X hr delay" figure look off. |
+| **Action** | Report stage → **Export Report** → choose a path (PDF or HTML in the file dialog). |
+| **Expected** | A ~9-page A4 PDF, *Site Water Plan*: one-page summary (capture %, water-fate table, stat cards, three condition checks, next three things) · site & flow map with the two-exit-volumes note · design plan map + feature list · flow-network diagram · per-feature water table (landscape) · spillway review · build schedule (landscape) · terrain check when Re-analyse has run · inputs, provenance and limits. Opens automatically (Windows). |
+| **⚠ Watch-for** | (a) Does the **site name** reach the cover? A blank field falls back to the QGIS project title, then the DEM name, and the message bar says so. (b) Do the **landscape tables fit** at your feature count — they overflow silently rather than wrapping. (c) Do the **maps draw**, or is a stated reason printed instead? (d) Does the **scale bar** read sensibly for your extent? (e) With matplotlib missing, does the flow network degrade to the text cascade? |
+| **Note** | **Neither format needs a simulation** — both are built from the design tier and render the same document, so a figure in one is a figure in the other. When a simulation *has* run, both gain the same extra section (before/after table, hydrograph, fill timeline), labelled as the only part that models timing. |
 
 ---
 
@@ -138,8 +139,12 @@ fixing session.)
 - [ ] Panel opens on **Design**, not Baseline — `panel.py:134`.
 - [ ] **Verify marked "done" by Re-analyse, not by Run Simulation** — `panel.py:1128`.
 - [ ] **Design & Report stepper stages never advance** — no `mark_stage` for them.
-- [ ] **Failed runs still show green ✓** — baseline/analysis/verify error handlers call the
-      same `set_*_complete`.
+- [x] **Failed runs still show green ✓** → fixed. `set_baseline_failed` /
+      `set_earthworks_failed` leave the button idle and the stage un-ticked: amber when an
+      earlier run left usable output behind, quiet when nothing has ever succeeded. The
+      baseline failure path no longer switches on the downstream results tools either —
+      it used to enable ponding query, slope, throughflow and contours for a run that
+      produced no data. Covered by four checks in `tests_qgis/checks_report.py`.
 - [ ] **Re-analyse warning text vs actual precondition mismatch** → zeroed verification Δ if
       baseline skipped — `earthworks.py` `run_with_earthworks` / `_compute_verification`.
 
@@ -152,12 +157,25 @@ fixing session.)
 - [ ] **Centroid-outside-DEM stores get 0 inflow silently** — `simulation.py:360`.
 - [ ] **Broad `except Exception: pass`** hides simulation/ponding failures.
 
-### Report gaps
-- [ ] **No map/plan-view images** in the report (only matplotlib line charts).
-- [ ] **Charts vanish silently without matplotlib.**
-- [ ] **Methodology text hardcoded/generic**; `methodology_text` never passed.
-- [ ] **Default filename ignores site name**; no baseline-only report; possible misleading
-      baseline peak-timing (0.0 hr).
+### Report gaps — closed by the PDF Site Water Plan
+- [x] **No map/plan-view images** → three maps (design plan, flow, before/after ponding),
+      each with a scale bar and a stated reason when its layers are unavailable.
+- [x] **Charts vanish silently without matplotlib** → the flow network degrades to a text
+      cascade; nothing is ever the sole carrier of a number.
+- [x] **No baseline-only report** → a baseline is now the only precondition. Sections
+      without data keep their heading and say which button produces them.
+- [x] **Default filename ignores site name** → `<Site>_WaterPlan_<date>.pdf`, sanitised,
+      with a fallback chain and a message-bar nudge when it lands on "Unnamed Site".
+- [x] **Misleading baseline peak-timing (0.0 hr)** → every simulation-derived figure is cut
+      from the PDF rather than degraded; no timing claim is made anywhere.
+- [x] **Report stepper stage never advances** → `mark_stage("report", "done")` on export.
+- [x] **Export button stayed lit after Open Design** and dead-ended on a warning → cleared
+      with the derived results, along with the stale summary label.
+- [x] **Methodology text hardcoded/generic** → the old HTML generator is gone; both formats
+      print the real inputs, DEM provenance and limits appendix.
+- [x] **PDF and HTML can disagree** → converged. One `Report`, two renderers, and
+      `tests/test_report_renderer_parity.py` fails if a section type is handled by only one
+      of them or a model figure fails to reach the HTML. HTML no longer needs a simulation.
 
 _Verified non-issue: simulation CN via `SOIL_REFERENCE` is a real CN table
 (`SCSRunoff.SOIL_REFERENCE`) — not a unit mix-up._

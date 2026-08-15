@@ -134,7 +134,7 @@ ORIGIN_X = 1_750_000.0   # NZTM2000 — the plugin's target projection
 ORIGIN_Y = 5_900_000.0
 
 
-def build_synthetic_dem(path):
+def build_synthetic_dem(path, pond=False):
     """Write a deterministic 300x300 @ 2 m DEM (36 ha) in EPSG:2193.
 
     Shape: a valley draining south, with a concave long profile (~15 % at the top
@@ -147,6 +147,12 @@ def build_synthetic_dem(path):
     the site tilts back uphill and becomes a false depression), and the
     cross-section rise must stay well under the total longitudinal drop (or the
     valley walls close off basins along the edges).
+
+    ``pond=True`` cuts a basin into the channel so one forms anyway. Everything above is
+    written to be depression-free, which means the default surface exercises **nothing** of
+    the crest split — no pond, no contraction, no ``Ponds (routed)`` layer — and a green run
+    over it says nothing about them. The basin is 30 rows x 13 columns at 4 m deep, well
+    over ``crest_routing.MIN_POND_CELLS``, and it fills and spills over its downstream lip.
     """
     import numpy as np
     import rasterio
@@ -166,6 +172,12 @@ def build_synthetic_dem(path):
     # ever accumulates enough upstream area to register as a stream — the stream
     # renderer then has nothing to draw. Real terrain has a channel; so does this.
     z = z - 4.0 * np.exp(-((across / 5.0) ** 2))
+
+    if pond:
+        z = np.broadcast_to(z, (NROWS, NCOLS)).copy()
+        basin = ((rows >= 120) & (rows < 150)
+                 & (np.abs(cols - (NCOLS - 1) / 2.0) <= 6))
+        z[np.broadcast_to(basin, (NROWS, NCOLS))] -= 4.0
 
     transform = from_origin(ORIGIN_X, ORIGIN_Y, CELL_M, CELL_M)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +295,74 @@ class RecordingMessageBar:
         return "\n".join(f"    [{lvl}] {t}: {m}" for lvl, t, m in self.messages)
 
 
+class RecordingDialogs:
+    """Captures modal message boxes instead of showing them.
+
+    A ``QMessageBox`` shown offscreen has nobody to click OK, so it blocks until the
+    module's timeout. That is the whole of why ``check_recommend_ponds`` was quarantined
+    as "does not finish, ran >12 min, no result and no error": it emitted the pond
+    recommendation without running the keypoint pass first, and the controller's guard
+    put up *"Run 'Find Keypoints + Ridgelines' first."* and waited. Stubbed here it
+    returns in 0.00 s.
+
+    The general hazard is worse than the one check. Both keypoint controllers end their
+    ``except`` blocks with ``QMessageBox.critical``, so a genuine exception in them
+    presented as a **timeout rather than an error** — the failure mode that hides its own
+    cause. Recorded, it becomes a failed assertion with the traceback attached.
+
+    Nothing that passes today can regress: a check that showed a dialog could not
+    previously have finished at all.
+    """
+
+    _KINDS = ("information", "warning", "critical", "question", "about")
+
+    def __init__(self):
+        self.all = []          # list of (kind, title, text)
+        self.answer = None     # what question() should return, if a check needs a say
+        self._saved = {}
+
+    def install(self):
+        from qgis.PyQt.QtWidgets import QMessageBox
+
+        for kind in self._KINDS:
+            self._saved[kind] = getattr(QMessageBox, kind)
+            setattr(QMessageBox, kind, staticmethod(self._recorder(kind)))
+
+    def restore(self):
+        from qgis.PyQt.QtWidgets import QMessageBox
+
+        for kind, original in self._saved.items():
+            setattr(QMessageBox, kind, original)
+        self._saved.clear()
+
+    def _recorder(self, kind):
+        def _record(parent=None, title="", text="", *args, **kwargs):
+            from qgis.PyQt.QtWidgets import QMessageBox
+
+            self.all.append((kind, str(title), str(text)))
+            if kind == "about":
+                return None
+            if kind == "question":
+                # Default No: nothing a check has not asked for should proceed.
+                return self.answer if self.answer is not None else QMessageBox.No
+            return QMessageBox.Ok
+
+        return _record
+
+    def of(self, kind):
+        return [d for d in self.all if d[0] == kind]
+
+    @property
+    def blocking(self):
+        """The ones that mean something went wrong, rather than merely informing."""
+        return [d for d in self.all if d[0] in ("warning", "critical")]
+
+    def render(self):
+        if not self.all:
+            return "    (no dialogs)"
+        return "\n".join(f"    [{k}] {t}: {m}" for k, t, m in self.all)
+
+
 class StubIface:
     """Minimal QgisInterface stand-in covering every iface call the plugin makes."""
 
@@ -382,6 +462,9 @@ class PluginHarness:
         self.bar = self.iface.messageBar()
         self.project = project
 
+        self.dialogs = RecordingDialogs()
+        self.dialogs.install()
+
         if self._load_dem:
             self.dem_layer = self.add_dem()
         if self._load_boundary:
@@ -397,6 +480,7 @@ class PluginHarness:
         finally:
             QgsProject.instance().clear()
             self._restore_global_iface()
+            self.dialogs.restore()
         return False
 
     # ------------------------------------------------------------------ actions
@@ -573,6 +657,14 @@ class PluginHarness:
             raise AssertionError(
                 f"{context}: {len(criticals)} error(s) pushed to the message bar\n"
                 + self.bar.render()
+            )
+        # A modal warning or error is still an error — it is just one that used to stop
+        # the run dead instead of reporting itself. See RecordingDialogs.
+        blocking = self.dialogs.blocking
+        if blocking:
+            raise AssertionError(
+                f"{context}: {len(blocking)} modal dialog(s) the run would have "
+                f"stopped on\n" + self.dialogs.render()
             )
 
     def layer_names(self):

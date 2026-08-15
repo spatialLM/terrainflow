@@ -80,6 +80,21 @@ def save_canvas(canvas, name, size=(1200, 900)):
     return path
 
 
+def save_qimage(image, name):
+    """Write an already-rendered QImage to tests_qgis/_shots/<name>.png.
+
+    Print-layout pages and matplotlib charts arrive as images rather than live
+    widgets, so neither save_widget nor save_canvas fits — but they belong in the
+    same diff workflow, which is the only way a report layout change gets looked
+    at rather than discovered in a printed PDF.
+    """
+    path = shots_dir() / f"{name}.png"
+    if not image.save(str(path)):
+        raise AssertionError(f"failed to write image: {path}")
+    print(f"\n    shot: {path.name} ({image.width()}x{image.height()})", end="")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Inspection — enough to tell "drawn" from "blank" without extra dependencies
 # ---------------------------------------------------------------------------

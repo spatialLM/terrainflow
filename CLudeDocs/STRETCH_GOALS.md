@@ -33,14 +33,34 @@ matches how `simulation.py` reads storage (analytic `capacity_m3` cascade, not r
 walls), so the analytical sizing engine is resolution-independent regardless.
 
 **Reaffirmed 2026-07-28** during the Design-tab correctness work. The resolution
-penalty is no longer merely asserted — it is **measured** per feature. Capacity is now
+penalty is no longer merely asserted — it is **measured** per feature. Capacity is
 reported as four numbers (`earthwork_design.capacity_breakdown`): design (with
 freeboard), geometric (the drawn shape), **rasterisable** (what this cell size can
-represent), and terrain (what the burn produced). The gap between geometric and
-rasterisable *is* the resolution penalty, shown per feature in the Verify stage, and
-verification Δ now compares terrain against rasterisable so it isolates burn error
-alone. A 2.0 m swale with 1:1 batters on a 1 m grid, for instance, is reported as
-+33% — it cannot hold its sloping walls, so it burns as a rectangular trench.
+represent), and terrain (what the burn produced), with verification Δ comparing terrain
+against rasterisable so it isolates burn error alone.
+
+**Corrected 2026-08-12 (Round 8).** The 2026-07-28 paragraph above went on to claim that
+the geometric→rasterisable gap *was* the resolution penalty, and offered "a 2.0 m swale
+with 1:1 batters on a 1 m grid reports +33%, because it cannot hold its sloping walls."
+**That example was measuring a burn choice, not a cell size.** `batter_run_m` was a
+basin-only field, so `level_invert` squared every drawn channel off to a full-depth
+rectangle whatever cross-section it carried — at any resolution. On the Quail Island
+design that put At-grid at **2.10×** the drawn section (Swale 22: 628 m³ against a
+299.6 m³ trapezoid), of which none would have been recovered by a finer DEM.
+
+The burn now cuts the section it was given (`burn_strategy.tapered_invert`, a distance
+transform rather than the old nested-erosion staircase) and At-grid is measured off that
+cut rather than modelled beside it. Sitewide, At-grid now tracks the drawn trench to
+**+2.1%**. What remains *is* a genuine cell-size limit, and it is the honest version of
+what this section always meant: a footprint two cells across has no cell more than half a
+cell from its own edge, so it cannot reach the depth it was drawn at, and it comes out
+shallower. That residual is per-feature, flagged, and small.
+
+**None of which changes the conclusion.** Interpolating still invents elevation, the
+cost is still ~16× against `_MAX_PONDING_CELLS`, pysheds still has no mixed-resolution
+routing, and the route to finer is still finer *native* data. The correction is to the
+reasoning, not the decision — and it removes the one argument in this section that a
+reader could have acted on by going looking for a finer DEM.
 
 **Revisit trigger.** A concrete need appears that drone-photogrammetry native
 resolution cannot meet — e.g. a user with only a coarse regional DEM and a hard
@@ -221,6 +241,27 @@ swale, or the steep-ground warning starts firing routinely on real designs.
 
 ---
 
+## 5a. Cut the spillway into the terrain — NEXT UP (user, 2026-08-14)
+
+**Priority: the next substantive change after the demo video is recorded.** Flagged by the
+user as an urgent usability upgrade, not a backlog item.
+
+**What.** The burn is spillway-blind: no `_burn_*` method reads a spillway and nothing cuts
+a notch. A sized, sited spillway therefore changes no raster, no routing and no pond, and
+reported capacity is measured to the crest. Dam 15 reads **2,688 m³ to the crest against
+1,832 m³ to a sill at 55.52 — about 30% overstated**. Every overtopping advisory currently
+has to carry a caveat saying the model cannot see the structure the user designed.
+
+**Why it is not a small change.** Cutting the notch moves the burned DEM, and with it pond
+volumes, capacity, verification Δ, the ponding and event-pond layers, and the report. It
+also collides with §6: `simulation.py:308` uses `capacity_m3` for both *how much it holds*
+and *when it spills*, so a crest cannot drive an overflow threshold until those are split.
+
+**Do first:** a measured before/after plan over the Quail Island design, and the
+capacity/threshold split from §6. Do **not** attempt the notch directly.
+
+---
+
 ## 6. Spillway crest as the level-bottom datum
 
 **What.** Let a user-placed spillway's crest elevation set the invert datum for its
@@ -247,6 +288,26 @@ follow-on will have to answer:
 - For a dam the containing rim is the wall crest, not the natural pour point
   (`_spillway_datums` already makes that distinction). A crest-as-datum rule has to
   respect it or dams will burn against the valley floor they are impounding.
+
+**Status (2026-08-13).** A second, larger use for the crest arrived with Round 11, and the
+machinery it needs is now built. Storage is measured by flooding each feature alone
+(`DEMBurner.feature_storage`), which returns the pond's **level and region** — so
+"the volume at any elevation below the spill level" is one integration over arrays already
+in hand. The stated goal is that **"% full" should never reach 100%**: a spillway lets
+water go before the lip, so the working threshold is the crest volume while the lip volume
+stays the true 100%.
+
+That makes this two changes, not one:
+
+1. `feature_storage` returns a stage–storage lookup instead of a single figure, and the
+   capacity a store is built with becomes the volume at `min(spillway crest, spill level)`.
+2. `EarthworkStore` needs the overflow threshold **separate** from the capacity —
+   `simulation.py:308` currently uses `capacity_m3` for both "how much it holds" and "when
+   it spills", which is exactly the conflation that stops a feature reading 85% and
+   spilling. Deliberately not added speculatively in Round 11; it is a five-line change
+   once a crest actually feeds something.
+
+The datum question above is unaffected — this is about the *water level*, not the floor.
 
 ---
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 
 from qgis.core import (
-    QgsColorRampShader,
     QgsFeature,
     QgsField,
     QgsGeometry,
@@ -18,8 +17,6 @@ from qgis.core import (
     QgsPalLayerSettings,
     QgsPointXY,
     QgsRasterLayer,
-    QgsRasterShader,
-    QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsTextFormat,
     QgsUnitTypes,
@@ -34,7 +31,27 @@ from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from terrainflow_assessment.modules.reporting import BaselineReport
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _layers as L
+from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
+
+
+def param_tag(panel):
+    """Abbreviated run parameters for layer-group naming, e.g.
+    ``120mm·24h·C0.40·5ha`` — so multiple baseline runs stay distinguishable.
+
+    The middle term follows the Runoff Calculation Method (``runoff_basis_tag``)
+    because that is the only calibration number in play: quoting ``CN61`` on a
+    Lancaster run would advertise a value the run never read.
+
+    Module-level so the report can re-derive it at export time. ``state.run_tag``
+    is frozen when Baseline runs, so on its own it cannot report that it is out
+    of date — it *is* the stale value.
+    """
+    try:
+        return (f"{panel.rainfall_mm:.0f}mm·{panel.duration_hr:.0f}h·"
+                f"{panel.runoff_basis_tag}·{panel.stream_threshold_ha:g}ha")
+    except Exception:
+        return ""
 
 # --------------------------------------------------------------------------- Exit labels
 # Exit markers and their labels are sized against the ground rather than the screen, so
@@ -66,6 +83,8 @@ _PT_PER_MM = 72.0 / 25.4
 
 def _clamp(value, lo, hi):
     return max(lo, min(hi, value))
+
+
 
 
 def exit_label_size_pt(map_scale):
@@ -118,18 +137,41 @@ class BaselineController(G.LayerTreeMixin, QObject):
     # ---------------------------------------------------------------- DEM / boundary
 
     def on_dem_changed(self, layer):
+        """Adopt *layer* as the session's terrain — and drop what the old one produced.
+
+        This is the one place ``state.burner`` is written, so it is also the only place
+        that can notice the grid has moved. It used to leave ``baseline_result`` alone,
+        which let a baseline computed on one DEM survive next to a burner built on
+        another: two ponding rasters with different extents, a subtraction the
+        verification could not perform, and measured storage that silently included the
+        site's natural ponding. The design-file Open path has always invalidated here;
+        swapping the DEM in the picker is the same event.
+
+        Only when the grid actually changes — re-selecting the same raster must not
+        throw away a valid baseline.
+        """
         if layer is None:
             self._state.dem_path = None
             self._state.dem_info = None
+            self._state.burner = None
             return
         try:
             path = layer.source()
             info = load_dem(path)
+            if self._grid_moved(info):
+                self._state.invalidate_flow_cache()
+                self._state.invalidate_results()
+                self._reset_stage_ticks()
             self._state.dem_path = path
             self._state.dem_info = info
             self._state.burner = DEMBurner(path)
+            # "DEM covers", not "Area": this is the raster's full extent, which is
+            # rarely the ground being assessed. On the Quail Island run it read
+            # "284.5 ha" beside a score computed over a 29.2 ha analysis area, and the
+            # 284.5 was reasonably taken for the site. The analysed area is a different
+            # number, and Baseline prints it once it knows it.
             self._panel.set_dem_info(
-                f"Cell: {info.cell_size_m:.2f} m | Area: {info.area_ha:.1f} ha | "
+                f"Cell: {info.cell_size_m:.2f} m | DEM covers {info.area_ha:.1f} ha | "
                 f"{_crs_label(info.crs)}"
             )
             slope_path = os.path.join(self._state.output_dir, "slope.tif")
@@ -138,6 +180,39 @@ class BaselineController(G.LayerTreeMixin, QObject):
         except Exception as exc:
             self._iface.messageBar().pushWarning("TerrainFlow Assessment",
                                                   f"DEM load error: {exc}")
+
+    def _grid_moved(self, info):
+        """True when *info* describes a different raster grid from the current one.
+
+        Compared on shape **and** origin, not on path: a clip of the same source is a
+        different grid, and two files of identical dimensions at different origins
+        subtract cell-for-cell while being geographically offset. Both are grids the
+        previous results do not describe. No current DEM means nothing to invalidate.
+        """
+        old = self._state.dem_info
+        if old is None:
+            return False
+        try:
+            return (
+                (old.width, old.height) != (info.width, info.height)
+                or tuple(round(v, 6) for v in (old.bounds or ()))
+                != tuple(round(v, 6) for v in (info.bounds or ()))
+            )
+        except Exception:
+            return True
+
+    def _reset_stage_ticks(self):
+        """Let the stages re-earn their ticks after the terrain moved underneath them."""
+        for stage in ("baseline", "analysis", "design", "verify", "report"):
+            try:
+                self._panel.mark_stage(stage, "todo")
+            except Exception:
+                pass
+        try:
+            self._panel.set_report_ready(False)
+            self._panel.clear_report_summary()
+        except Exception:
+            pass
 
     def on_boundary_changed(self, layer):
         if layer is None:
@@ -313,6 +388,16 @@ class BaselineController(G.LayerTreeMixin, QObject):
         self._state.invalidate_flow_cache()
         self._load_result_layers(result, is_earthworks=False)
 
+        # Water the routing could not place. Said out loud rather than left to vanish
+        # quietly out of the streams, the exit volumes and everything derived from them.
+        unrouted = result.get("unrouted_warning")
+        if unrouted:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", unrouted)
+
+        crest = result.get("crest_warning")
+        if crest:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", crest)
+
         catchment_ha = result.get("catchment_area_m2", 0) / 10_000.0
         # The comparison report subtracts this from the simulation's routed outflow, so it
         # has to be the true boundary flux. Summing the exit points instead compared a
@@ -340,7 +425,10 @@ class BaselineController(G.LayerTreeMixin, QObject):
             exit_points=result.get("exit_points", []),
         )
 
+        # The analysed area leads, because until now the only area on screen was the
+        # DEM's full extent — and every figure that follows is scored over this one.
         summary = (
+            f"Analysed: {catchment_ha:.1f} ha | "
             f"Runoff: {result.get('runoff_mm', 0):.1f} mm | "
             f"CN: {result.get('effective_cn', 0):.0f} | "
             f"Exit points: {len(result.get('exit_points', []))}"
@@ -348,10 +436,16 @@ class BaselineController(G.LayerTreeMixin, QObject):
         self._panel.set_baseline_complete(summary)
         self._panel.set_area_outflow(result.get("area_outflow", {}),
                                      result.get("ponded_volume_m3"))
+        # A baseline alone is a reportable site assessment, so the export unlocks here
+        # rather than waiting on a design or a simulation. Deliberately not in
+        # set_baseline_complete(): _on_analysis_error calls that too, and a failed run
+        # would light the button with baseline_report still None.
+        self._panel.set_report_ready(True)
         self.baseline_finished.emit()
 
     def _on_analysis_error(self, tb):
-        self._panel.set_baseline_complete("Analysis failed — see Python console for details.")
+        self._panel.set_baseline_failed(
+            "Analysis failed — see Python console for details.")
         print("TerrainFlow Assessment — Analysis error:\n" + tb)
         self._iface.messageBar().pushCritical("TerrainFlow Assessment",
                                                "Analysis failed. See Python console.")
@@ -359,40 +453,25 @@ class BaselineController(G.LayerTreeMixin, QObject):
     # ---------------------------------------------------------------- Layer loading
 
     def _param_tag(self):
-        """Abbreviated run parameters for layer-group naming, e.g.
-        ``120mm·24h·C0.40·5ha`` — so multiple baseline runs stay distinguishable.
-
-        The middle term follows the Runoff Calculation Method (``runoff_basis_tag``)
-        because that is the only calibration number in play: quoting ``CN61`` on a
-        Lancaster run would advertise a value the run never read.
-        """
-        p = self._panel
-        try:
-            return (f"{p.rainfall_mm:.0f}mm·{p.duration_hr:.0f}h·"
-                    f"{p.runoff_basis_tag}·{p.stream_threshold_ha:g}ha")
-        except Exception:
-            return ""
+        return param_tag(self._panel)
 
     def _load_result_layers(self, result, is_earthworks=False):
         label = "Earthworks" if is_earthworks else "Baseline"
         # Re-running replaces this stage's rasters; the group itself is kept and
         # renamed so the rest of the tree stays where the user left it.
         path = G.RERUN if is_earthworks else G.BASELINE
-        group = G.clear_group(
+        G.clear_group(
             self._project, path,
             site_name=self._panel.site_name, tag=self._state.run_tag,
         )
         layer_ids = []
 
         def _add(layer, visible=True):
-            # Add to the project without the flat legend, then place in the group.
-            self._project.instance().addMapLayer(layer, False)
-            node = group.addLayer(layer)
-            if node is not None:
-                # Collapsed: an expanded raster ramp is ~150 px of legend each.
-                node.setExpanded(False)
-                if not visible:
-                    node.setItemVisibilityChecked(False)
+            # Through place(), which registers the layer without the flat legend,
+            # files it in this stage's group and adds it collapsed — an expanded
+            # raster ramp is ~150 px of legend each. clear_group above keeps the
+            # group itself, so place() resolves the same node it just emptied.
+            self.place(layer, path, visible=visible)
             layer_ids.append(layer.id())
 
         stream_path = result.get("stream_network")
@@ -402,22 +481,52 @@ class BaselineController(G.LayerTreeMixin, QObject):
                 self.apply_stream_ramp(layer, result.get("stream_acc_max", 1))
                 _add(layer)
 
+        # The reservoirs the flow model routes as ponds, drawn as water bodies. Added
+        # *under* nothing and beside Streams on purpose: a channel entering a pond now
+        # genuinely stops there — a pond holds its inflow and sheds it along its whole
+        # crest rather than threading a line through itself — so without this the map has a
+        # gap where the water is. Drawn from the pond mask rather than by lowering the
+        # stream threshold, because folding the pools into Streams took that layer from
+        # 3,286 cells to 10,955, nearly three times its own baseline: that is a flood of
+        # ink, not a reservoir.
+        pond_path = result.get("pond_flow")
+        if pond_path and os.path.exists(pond_path):
+            layer = QgsRasterLayer(pond_path, f"{label} — Ponds (routed)")
+            if layer.isValid():
+                self.apply_ponding_ramp(layer)
+                _add(layer)
+
         # Total event water passing through each cell — the whole surface, not just
         # the cells that pass the stream threshold, so water is visible gathering
         # before it becomes a defined channel. Off by default: it covers the map.
         throughflow_path = result.get("throughflow")
         if throughflow_path and os.path.exists(throughflow_path):
-            layer = QgsRasterLayer(throughflow_path, f"{label} — Throughflow (m³)")
+            layer = QgsRasterLayer(throughflow_path,
+                                   f"{label} — Surface Runoff (m³)")
             if layer.isValid():
                 self.apply_throughflow_ramp(layer, self._panel.throughflow_scale_mode)
                 _add(layer, visible=self._panel.throughflow_visible)
                 if not is_earthworks:
                     self._state.throughflow_layer_id = layer.id()
 
+        # Shaded relief over the source DEM. Nothing on the canvas needs it —
+        # the user has their own basemap — but the report's maps had no terrain
+        # behind them at all, so the design printed as coloured lines on white
+        # paper with no way to tell a gully from a ridge. Built once, here,
+        # rather than conjured during an export: a transient layer that is not
+        # in the project cannot be resolved by a print layout at export time.
+        if not is_earthworks:
+            self._add_hillshade(_add, self._state.dem_path, "Baseline — Hillshade",
+                                visible=False)
+
         ponding_path = result.get("ponding")
         if ponding_path and os.path.exists(ponding_path):
             self._state.ponding_raster_path = ponding_path
-            layer = QgsRasterLayer(ponding_path, f"{label} — Water Captured")
+            # "Water Captured" claimed a fill this layer does not show. It is a
+            # depression-fill of the run's DEM — every hollow to its spill point,
+            # brim-full whatever the storm delivers — so it is a capacity map, and
+            # the water actually delivered is the (event) layer built beside it.
+            layer = QgsRasterLayer(ponding_path, f"{label} — Pond Capacity (full)")
             if layer.isValid():
                 self.apply_ponding_ramp(layer)
                 _add(layer)
@@ -428,10 +537,46 @@ class BaselineController(G.LayerTreeMixin, QObject):
             if ep_layer:
                 _add(ep_layer)
 
+        # The burned DEM's shaded copy is *not* added here. It belongs beside the burned
+        # DEM itself, in the Design group, because "rerun" sits below Design's loose
+        # layers in the tree and a backdrop added here would render underneath the very
+        # raster it exists to replace. See ``EarthworksController._load_burned_dem_layer``.
         if is_earthworks:
             self._state.earthworks_layer_ids = layer_ids
         else:
             self._state.baseline_layer_ids = layer_ids
+
+    def _add_hillshade(self, add, dem_path, name, visible=True):
+        """A shaded-relief copy of *dem_path*, added through *add*.
+
+        A second QgsRasterLayer over the same file rather than a renderer swap
+        on the user's own DEM layer: their styling is theirs, and the report
+        needs a known backdrop rather than whatever the canvas happens to be
+        showing. Skipped silently when the path is missing or the renderer is
+        unavailable — a map with no hillshade is a smaller problem than a
+        failed run.
+
+        Called twice with two different rasters. Over the source DEM it is the
+        report's terrain backdrop, and unticked because nothing on the canvas
+        needs it. Over the **burned** DEM it is the one view that shows the
+        design as built ground rather than as drawn lines, and it is ticked.
+        """
+        if not dem_path or not os.path.exists(dem_path):
+            return
+        try:
+            from qgis.core import QgsHillshadeRenderer
+
+            layer = QgsRasterLayer(dem_path, name)
+            if not layer.isValid():
+                return
+            renderer = QgsHillshadeRenderer(layer.dataProvider(), 1, 315.0, 45.0)
+            # Exaggerated: at a 1 m grid the default returns a nearly flat grey
+            # on the rolling country most of these blocks sit on.
+            renderer.setZFactor(2.0)
+            layer.setRenderer(renderer)
+            add(layer, visible=visible)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — hillshade skipped: {exc}")
 
     def _create_exit_points_layer(self, exit_points, label):
         from qgis.core import QgsTextBufferSettings
@@ -444,16 +589,23 @@ class BaselineController(G.LayerTreeMixin, QObject):
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("label", QMetaType.QString),
+            # What is actually drawn: "Exit 3". The full sentence stays in
+            # "label" — the identify tool and the report both read it — but on
+            # the map it made every crossing a 40-character banner, and at a
+            # dozen exits round a boundary those banners simply collide.
+            QgsField("short", QMetaType.QString),
             QgsField("volume_m3", QMetaType.Double),
             QgsField("flow_ls", QMetaType.Double),
         ])
         layer.updateFields()
 
         feats = []
-        for ep in exit_points:
+        for i, ep in enumerate(exit_points):
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(ep["x"], ep["y"])))
-            f.setAttributes([ep.get("label", ""), ep.get("volume_m3", 0), ep.get("flow_ls", 0)])
+            full = ep.get("label", "")
+            f.setAttributes([full, full.split(":")[0] or f"Exit {i + 1}",
+                             ep.get("volume_m3", 0), ep.get("flow_ls", 0)])
             feats.append(f)
         pr.addFeatures(feats)
 
@@ -482,14 +634,45 @@ class BaselineController(G.LayerTreeMixin, QObject):
         text_fmt.setBuffer(buf)
 
         label_settings = QgsPalLayerSettings()
-        label_settings.fieldName = "label"
+        label_settings.fieldName = "short"
         label_settings.enabled = True
+        # Let the label move round the marker to find room, rather than sitting
+        # pinned above it. Pinned, the labels at a cluster of crossings stacked
+        # into an unreadable block — three exits within a few metres of each
+        # other printed three overlapping banners at any zoom.
         try:
-            label_settings.placement = QgsPalLayerSettings.OverPoint
-            label_settings.quadOffset = QgsPalLayerSettings.QuadrantAbove
+            label_settings.placement = \
+                QgsPalLayerSettings.OrderedPositionsAroundPoint
+            label_settings.dist = 1.5
+            label_settings.distUnits = QgsUnitTypes.RenderMillimeters
+        except Exception:
+            try:
+                label_settings.placement = QgsPalLayerSettings.AroundPoint
+                label_settings.dist = 1.5
+            except Exception:
+                pass
+        # Labels get out of each other's way, and out of the markers' way.
+        # Nothing here was set before, so PAL had no reason to treat a marker as
+        # an obstacle and happily printed a label straight over the next exit.
+        label_settings.priority = 8
+        try:
+            label_settings.obstacle = True
+            label_settings.obstacleFactor = 1.5
         except Exception:
             pass
-        label_settings.yOffset = 2.0
+        # A leader line, so a label that had to move stays attached to the
+        # crossing it names. Without it, displacing a label just relocates the
+        # ambiguity.
+        try:
+            from qgis.core import QgsSimpleLineCallout
+
+            callout = QgsSimpleLineCallout()
+            callout.setEnabled(True)
+            callout.lineSymbol().setColor(QColor(160, 0, 0))
+            callout.lineSymbol().setWidth(0.3)
+            label_settings.setCallout(callout)
+        except Exception:
+            pass
         label_settings.setFormat(text_fmt)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(label_settings))
         layer.setLabelsEnabled(True)
@@ -573,27 +756,10 @@ class BaselineController(G.LayerTreeMixin, QObject):
     # ---------------------------------------------------------------- Shared raster styling
 
     def apply_stream_ramp(self, layer, max_acc=None):
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
-        if max_acc is None:
-            try:
-                stats = layer.dataProvider().bandStatistics(1)
-                max_acc = stats.maximumValue or 1.0
-            except Exception:
-                max_acc = 1.0
-        # Stream cells are the only non-zero cells (all exceed the threshold), so
-        # jump to a solid, saturated blue immediately above zero — otherwise the
-        # thin low-accumulation threads render near-transparent and are hard to see.
-        color_ramp.setColorRampItemList([
-            QgsColorRampShader.ColorRampItem(0, QColor(0, 0, 0, 0), "none"),
-            QgsColorRampShader.ColorRampItem(max_acc * 0.001, QColor(60, 130, 220, 255), "stream"),
-            QgsColorRampShader.ColorRampItem(max_acc * 0.4, QColor(25, 85, 190, 255), "channel"),
-            QgsColorRampShader.ColorRampItem(max_acc, QColor(8, 32, 110, 255), "main"),
-        ])
-        shader.setRasterShaderFunction(color_ramp)
-        renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-        layer.setRenderer(renderer)
+        """The thresholded channel network. Stops live in ``map_palette``."""
+        from terrainflow_assessment.core.registry.map_palette import STREAMS
+
+        apply_raster_ramp(layer, STREAMS, max_acc)
 
     def apply_throughflow_ramp(self, layer, scale="log"):
         """Blue gradient over the whole site: total event water through each cell.
@@ -602,55 +768,15 @@ class BaselineController(G.LayerTreeMixin, QObject):
         a different colour family from the green→red slope ramp, keeping the shared
         rule that blue means actual water.
 
-        Flow accumulation is heavily skewed: a handful of channel cells carry orders
-        of magnitude more than the hillsides feeding them, so a linear stretch renders
-        everything but the main channels as near-white. ``log`` (the default) places
-        the stops at decades of the maximum so the minor flow paths stay legible;
-        ``linear`` and ``quantile`` mirror the contour-inflow gradient's options.
+        The stops live in ``core.registry.map_palette`` so the panel's inline key
+        and the report's map legend describe the ramp the map is actually drawn
+        with. They used to be declared here and hand-copied into ``panel.py``.
         """
-        try:
-            stats = layer.dataProvider().bandStatistics(1)
-            max_v = stats.maximumValue or 1.0
-        except Exception:
-            max_v = 1.0
-        if max_v <= 0:
-            max_v = 1.0
+        from terrainflow_assessment.core.registry.map_palette import (
+            surface_runoff_ramp,
+        )
 
-        if scale == "linear":
-            stops = (0.0, 0.15, 0.4, 0.7, 1.0)
-        elif scale == "quantile":
-            # Even visual weight per band: bunch the stops toward the low end, where
-            # the overwhelming majority of cells actually sit.
-            stops = (0.0, 0.02, 0.08, 0.25, 1.0)
-        else:  # log — decades below the maximum
-            stops = (0.0, 1e-4, 1e-3, 1e-2, 1.0)
-
-        # Alpha rises far faster than the colour does. Diffuse sheet flow covers
-        # nearly the whole site, so at any weight it reads as a wash over the map
-        # rather than an overlay on it — the layer underneath has to stay legible
-        # through it, since the point is to see where that flow is going. The
-        # gathering and channel stops keep their weight; those are the answer.
-        # Mirrored by the inline key in panel.py — change a hue here and change it
-        # there, or the key stops describing the map.
-        colours = [
-            QColor(255, 255, 255, 0),      # nothing flows here — fully transparent
-            QColor(226, 240, 250, 40),     # off-white: diffuse sheet flow, ~16%
-            QColor(144, 196, 232, 140),
-            QColor(48, 122, 190, 225),
-            QColor(8, 36, 110, 245),       # dark blue: concentrated channel
-        ]
-        labels = ["none", "diffuse", "gathering", "concentrated", "channel"]
-
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
-        color_ramp.setColorRampItemList([
-            QgsColorRampShader.ColorRampItem(max_v * f, c, lbl)
-            for f, c, lbl in zip(stops, colours, labels)
-        ])
-        shader.setRasterShaderFunction(color_ramp)
-        layer.setRenderer(
-            QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader))
+        apply_raster_ramp(layer, surface_runoff_ramp(scale))
 
     def set_throughflow_visible(self, visible):
         """Show/hide the throughflow raster without re-running the analysis."""
@@ -674,19 +800,9 @@ class BaselineController(G.LayerTreeMixin, QObject):
         self._canvas.refresh()
 
     def apply_ponding_ramp(self, layer):
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
-        try:
-            stats = layer.dataProvider().bandStatistics(1)
-            max_v = stats.maximumValue or 1.0
-        except Exception:
-            max_v = 1.0
-        color_ramp.setColorRampItemList([
-            QgsColorRampShader.ColorRampItem(0, QColor(180, 220, 255, 0), "0"),
-            QgsColorRampShader.ColorRampItem(max_v * 0.5, QColor(80, 160, 240, 160), "mid"),
-            QgsColorRampShader.ColorRampItem(max_v, QColor(0, 40, 180, 220), "max"),
-        ])
-        shader.setRasterShaderFunction(color_ramp)
-        renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-        layer.setRenderer(renderer)
+        """Standing water, by depth. Full opacity — see ``map_palette``."""
+        from terrainflow_assessment.core.registry.map_palette import (
+            WATER_CAPTURED,
+        )
+
+        apply_raster_ramp(layer, WATER_CAPTURED)

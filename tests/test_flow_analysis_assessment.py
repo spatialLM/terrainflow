@@ -798,3 +798,387 @@ class TestAnalysisWorker:
             routing="d8",
         )
         assert "D8" in w._flow_dir_description()
+
+
+class TestUnroutedFlow:
+    """Water the routing could not place has to be counted, not quietly dropped.
+
+    A cell pysheds marks flat (-1) or pit (-2) is rewritten to a self-loop before
+    accumulation, so it absorbs everything upstream and reports none of it downstream.
+    Round 14 measured 36 such cells on the Quail Island design holding ~1.4% of the site's
+    runoff, with nothing anywhere saying so.
+    """
+
+    def test_a_clean_dem_has_nothing_unrouted(self, sloped_dem):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        result = fa.run()
+        assert result["unrouted_cells"] == 0
+        assert result["unrouted_flow"] == 0.0
+
+    def test_before_a_run_it_reports_nothing_rather_than_failing(self):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        assert FlowAnalysis().unrouted_flow() == (0, 0.0)
+
+    def test_a_flat_cell_is_counted_with_the_flow_it_holds(self, sloped_dem):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        fdir = np.array(fa.fdir, dtype="float64")
+        acc = np.array(fa.acc, dtype="float64")
+        # Well inside the grid: a cell on the border, or against nodata, is the site's
+        # edge rather than a place water gets stuck.
+        fdir[10, 10] = FlowAnalysis.FDIR_FLAT
+        fdir[12, 12] = FlowAnalysis.FDIR_PIT
+        fa.fdir, fa.acc = fdir, acc
+        n, flow = fa.unrouted_flow()
+        assert n == 2
+        assert flow == pytest.approx(acc[10, 10] + acc[12, 12])
+
+    def test_water_stopping_at_the_edge_of_the_data_is_not_a_loss(self, sloped_dem):
+        """Quail Island is an island: 35 of its 36 stuck cells are the coastline.
+
+        Water reaching the end of the elevation data has left the analysed area, not gone
+        missing. Counting those would fire this warning on every clipped or coastal DEM
+        for an entirely benign reason.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        fdir = np.array(fa.fdir, dtype="float64")
+        dem = np.array(fa.dem, dtype="float64")
+        # One stuck cell on the border, one against a hole punched in the data.
+        fdir[0, 5] = FlowAnalysis.FDIR_PIT
+        dem[15, 15] = np.nan
+        fdir[15, 16] = FlowAnalysis.FDIR_FLAT
+        fa.fdir, fa.dem = fdir, dem
+        assert fa.unrouted_flow() == (0, 0.0)
+
+
+class TestUnroutedFlowWarning:
+    def test_it_says_nothing_when_the_share_is_trivial(self):
+        from terrainflow_assessment.modules.flow_analysis import unrouted_flow_warning
+        # One cell out of a 10,000-cell domain is a nodata speck, not a finding.
+        assert unrouted_flow_warning(1, 1.0, 10_000) is None
+
+    def test_it_reports_a_material_share_with_the_number(self):
+        from terrainflow_assessment.modules.flow_analysis import unrouted_flow_warning
+        msg = unrouted_flow_warning(36, 4152.0, 292_288)
+        assert msg is not None
+        assert "36 cells inside the site" in msg
+        assert "1.4%" in msg
+
+    def test_nothing_unrouted_is_not_a_warning(self):
+        from terrainflow_assessment.modules.flow_analysis import unrouted_flow_warning
+        assert unrouted_flow_warning(0, 0.0, 1000) is None
+        assert unrouted_flow_warning(5, 0.0, 1000) is None
+        assert unrouted_flow_warning(5, 10.0, 0) is None
+
+    def test_one_cell_is_singular(self):
+        from terrainflow_assessment.modules.flow_analysis import unrouted_flow_warning
+        msg = unrouted_flow_warning(1, 500.0, 1000)
+        assert "1 cell inside the site" in msg
+
+
+class TestConditionedSurfacePrecision:
+    """The conditioned surface must survive the round-trip to disk.
+
+    ``resolve_flats`` inflates a flat by integer multiples of ``eps = 1e-5`` m. float32's
+    spacing is ~6.1e-5 m at 1000 m elevation, so above roughly 600 m that whole gradient is
+    quantised away on save — and ``flow_graph.d8_from_dem``, which requires a *strictly*
+    positive drop, then reads a genuine flat and calls every cell of it a sink. A site near
+    sea level never shows it, which is why this fixture is deliberately in hill country.
+    """
+
+    def _flat_topped_hill(self, path, base):
+        """A plateau at *base* draining off one edge — a flat that must be resolved."""
+        data = np.full((20, 20), base, dtype="float64")
+        data[:, 15:] = base - np.arange(1, 6, dtype="float64")   # fall away to the east
+        with rasterio.open(
+            path, "w", driver="GTiff", height=20, width=20, count=1,
+            dtype="float64", crs="EPSG:2193",
+            transform=rasterio.transform.from_origin(0, 20, 1, 1),
+        ) as dst:
+            dst.write(data, 1)
+        return path
+
+    def test_float32_destroys_the_flat_gradient_in_hill_country(self, tmp_path):
+        """The fault itself, so the fix is pinned to a demonstrated failure."""
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_graph import d8_from_dem
+
+        fa = FlowAnalysis()
+        fa.load_dem(self._flat_topped_hill(str(tmp_path / "hill.tif"), 1000.0))
+        result = fa.run(routing="dinf")   # pysheds d8 accumulation needs np.in1d (gone in NumPy 2)
+        conditioned = np.asarray(result["conditioned_dem"], dtype="float64")
+
+        # In memory the plateau has a gradient and drains.
+        _, sink64 = d8_from_dem(conditioned, 1.0, 1.0)
+        # Rounded to float32 it does not: the inflation is below the representable step.
+        _, sink32 = d8_from_dem(conditioned.astype("float32").astype("float64"), 1.0, 1.0)
+        assert int(sink32.sum()) > int(sink64.sum()), (
+            "float32 should flatten the resolved gradient at this elevation — if it no "
+            "longer does, this fixture has stopped testing anything"
+        )
+
+    def test_saving_the_conditioned_surface_as_float64_keeps_it(self, tmp_path):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        from terrainflow_assessment.modules.flow_graph import d8_from_dem
+
+        fa = FlowAnalysis()
+        fa.load_dem(self._flat_topped_hill(str(tmp_path / "hill.tif"), 1000.0))
+        result = fa.run(routing="dinf")   # pysheds d8 accumulation needs np.in1d (gone in NumPy 2)
+        conditioned = np.asarray(result["conditioned_dem"], dtype="float64")
+
+        out = str(tmp_path / "conditioned.tif")
+        fa.save_result(conditioned, out, "conditioned", dtype="float64")
+        with rasterio.open(out) as src:
+            assert src.dtypes[0] == "float64"
+            round_tripped = src.read(1).astype("float64")
+
+        _, sink_mem = d8_from_dem(conditioned, 1.0, 1.0)
+        _, sink_disk = d8_from_dem(round_tripped, 1.0, 1.0)
+        assert int(sink_disk.sum()) == int(sink_mem.sum())
+
+    def test_the_default_is_still_float32_for_every_other_raster(self, tmp_path):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        fa = FlowAnalysis()
+        fa.load_dem(self._flat_topped_hill(str(tmp_path / "hill.tif"), 1000.0))
+        fa.run(routing="dinf")   # pysheds d8 accumulation needs np.in1d (gone in NumPy 2)
+        out = str(tmp_path / "acc.tif")
+        fa.save_result(np.asarray(fa.acc, dtype="float64"), out, "accumulation")
+        with rasterio.open(out) as src:
+            assert src.dtypes[0] == "float32"
+
+
+class TestCrestSplit:
+    """A pond spills along its whole level crest, and the site loses no water doing it.
+
+    ``resolve_flats`` is multi-outlet but routes each flat cell to its *nearest* way out, so
+    a pool hands its inflow channel to whichever crest cell it happens to arrive beside. The
+    fix contracts each pond to a mixing node and sheds its whole inflow evenly over the cells
+    that discharge — measured on Quail Island's Dam 15, a level band of 65 cells reading
+    ``min 1 / median 1 / max 36,782`` becomes a uniform 962.1, a ratio of exactly 1.00x.
+
+    Every number below was measured, not derived. Each test runs ``routing="dinf"`` because
+    pysheds' d8 accumulation calls ``np.in1d``, which NumPy 2 removed.
+    """
+
+    WALL = 100.0
+
+    def _trough(self, path, *bands, width=3):
+        """A walled trough: one uniform row per band, wall around it, outlet row at 0."""
+        rows = [[self.WALL] * (width + 2)]
+        rows += [[self.WALL] + [float(v)] * width + [self.WALL] for v in bands]
+        rows += [[0.0] * (width + 2)]
+        return _write_raster(path, np.array(rows, dtype="float32"))
+
+    def _staircase(self, tmp_path):
+        """Two ponds chained **through open ground** — what the parked version lost on.
+
+        Pond A's pool (12) fills to its crest at 15; a row of ordinary hillside at 14 sits
+        below that crest, and only then pond B's pool at 8. No cell of A discharges into a
+        cell of B, so a pond graph read off the immediate D8 neighbour of an exit holds no
+        edge between them — and yet every drop A sheds arrives in B.
+        """
+        return self._trough(str(tmp_path / "stair.tif"),
+                            20, 12, 12, 12, 15, 14, 8, 8, 8, 10, 5)
+
+    def test_the_chain_conserves_every_unit_of_water(self, tmp_path):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        fa = FlowAnalysis()
+        fa.load_dem(self._staircase(tmp_path))
+        result = fa.run(routing="dinf")
+        acc = np.asarray(fa.acc, dtype="float64")
+
+        assert result["crest_ponds"] == 2
+        assert result["crest_cells"] == 6
+        assert result["crest_passes"] == 3
+        assert result["crest_residual"] == pytest.approx(0.0)
+        # 33 interior cells; the border is nodata in a D-infinity direction field.
+        assert acc[-1].sum() == pytest.approx(33.0)
+
+    def test_the_outlet_row_stops_being_a_single_thread(self, tmp_path):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        path = self._staircase(tmp_path)
+        before = FlowAnalysis()
+        before.load_dem(path)
+        before.run(routing="dinf", crest_split=False)
+        was = np.asarray(before.acc, dtype="float64")[-1, 1:4]
+
+        after = FlowAnalysis()
+        after.load_dem(path)
+        after.run(routing="dinf")
+        now = np.asarray(after.acc, dtype="float64")[-1, 1:4]
+
+        # Measured: 4.21 / 24.59 / 4.21 becomes a flat 11 / 11 / 11.
+        assert was.max() / was.min() == pytest.approx(5.846, rel=1e-3)
+        assert now == pytest.approx([11.0, 11.0, 11.0])
+        assert was.sum() == pytest.approx(now.sum())
+
+    def test_a_lopsided_inflow_still_leaves_over_the_whole_crest(self, tmp_path):
+        """The case the user reported: one channel arrives, and the wall spills at one end.
+
+        A nine-cell pool fed through a single-column inlet at its west end, against a level
+        crest nine cells long.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        wall = self.WALL
+
+        def band(v):
+            return [wall] + [v] * 9 + [wall]
+
+        data = np.array(
+            [[wall] * 11]
+            + [[wall, 32.0] + [wall] * 9,
+               [wall, 31.0] + [wall] * 9,
+               [wall, 30.0] + [wall] * 9]
+            + [band(12.0)] * 3 + [band(15.0)] + [band(5.0)] + [[0.0] * 11],
+            dtype="float32")
+        path = _write_raster(str(tmp_path / "weir.tif"), data)
+
+        before = FlowAnalysis()
+        before.load_dem(path)
+        before.run(routing="dinf", crest_split=False)
+        was = np.asarray(before.acc, dtype="float64")[7, 1:10]
+
+        after = FlowAnalysis()
+        after.load_dem(path)
+        after.run(routing="dinf")
+        now = np.asarray(after.acc, dtype="float64")[7, 1:10]
+
+        assert was.max() / np.median(was) == pytest.approx(1.535, rel=1e-3)
+        assert now.max() / now.min() == pytest.approx(1.0)
+        assert now == pytest.approx(np.full(9, 55.0 / 9.0))
+        assert (np.asarray(after.acc, dtype="float64")[-1].sum()
+                == pytest.approx(np.asarray(before.acc, dtype="float64")[-1].sum()))
+
+    def test_the_flow_directions_are_not_touched(self, tmp_path):
+        """The guarantee everything downstream rests on.
+
+        One pointer per cell cannot divide the load of one cell, so the split is done in the
+        flux field and the directions are left exactly alone — which is what keeps
+        ``feature_inflow_m3``, the catchment labelling and capture % out of it.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        path = self._staircase(tmp_path)
+        plain = FlowAnalysis()
+        plain.load_dem(path)
+        plain.run(routing="dinf", crest_split=False)
+
+        split = FlowAnalysis()
+        split.load_dem(path)
+        split.run(routing="dinf")
+
+        assert np.array_equal(np.asarray(plain.fdir, dtype="float64"),
+                              np.asarray(split.fdir, dtype="float64"),
+                              equal_nan=True)
+
+    def test_a_pond_cell_is_never_counted_as_unrouted(self, tmp_path):
+        """A pond cell self-loops *inside* the split and nowhere else.
+
+        Were the absorbing map stored on ``self.fdir`` instead of kept local, every pond cell
+        would read as ``FDIR_FLAT`` and ``unrouted_flow`` would report the whole pool as
+        water the routing could not place.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        fa = FlowAnalysis()
+        fa.load_dem(self._staircase(tmp_path))
+        result = fa.run(routing="dinf")
+        assert result["crest_ponds"] == 2
+        assert fa.unrouted_flow() == (0, 0.0)
+
+    def test_a_dem_with_no_ponds_is_left_exactly_as_it_was(self, sloped_dem):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        plain = FlowAnalysis()
+        plain.load_dem(sloped_dem)
+        plain.run(routing="dinf", crest_split=False)
+
+        split = FlowAnalysis()
+        split.load_dem(sloped_dem)
+        result = split.run(routing="dinf")
+
+        assert result["crest_ponds"] == 0
+        assert np.array_equal(np.asarray(plain.acc, dtype="float64"),
+                              np.asarray(split.acc, dtype="float64"))
+
+    def test_a_bowl_with_no_way_out_keeps_the_default_routing_and_says_so(self, tmp_path):
+        """Its level band reaches every cell around it, so there is nowhere to discharge to.
+
+        Contracting it would swallow the whole domain and hand back water nobody could place.
+        Left alone it stays with the mechanism that already exists for water with nowhere to
+        go — and the reason is recorded rather than left to be inferred.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        data = np.full((9, 9), 50.0, dtype="float32")
+        data[2:7, 2:7] = 10.0
+        path = _write_raster(str(tmp_path / "bowl.tif"), data)
+
+        plain = FlowAnalysis()
+        plain.load_dem(path)
+        plain.run(routing="dinf", crest_split=False)
+
+        split = FlowAnalysis()
+        split.load_dem(path)
+        result = split.run(routing="dinf")
+
+        assert result["crest_ponds"] == 0
+        assert "nothing discharges" in result["crest_skipped"][0]
+        assert np.array_equal(np.asarray(plain.acc, dtype="float64"),
+                              np.asarray(split.acc, dtype="float64"))
+
+    def test_the_weighted_field_is_spread_the_same_way(self, tmp_path):
+        """``runoff_accumulation`` feeds throughflow and the exit volumes.
+
+        Spreading one field and not the other would have the two rasters beside each other
+        disagree by the whole of the crest correction.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        path = self._staircase(tmp_path)
+        single = FlowAnalysis()
+        single.load_dem(path)
+        one = np.asarray(
+            single.run(routing="dinf", runoff_weights=np.ones((13, 5)))
+            ["runoff_accumulation"], dtype="float64")
+
+        double = FlowAnalysis()
+        double.load_dem(path)
+        two = np.asarray(
+            double.run(routing="dinf", runoff_weights=np.full((13, 5), 2.0))
+            ["runoff_accumulation"], dtype="float64")
+
+        # The weighted field is spread, not left as the raw routing would have it...
+        assert one[-1, 1:4] == pytest.approx([one[-1, 1]] * 3)
+        # ...and twice the rain is twice the flux everywhere, which is the linearity the
+        # whole construction rests on.
+        assert two == pytest.approx(2.0 * one)
+
+
+class TestCrestSpreadWarning:
+    def test_silent_below_the_threshold(self):
+        from terrainflow_assessment.modules.flow_analysis import crest_spread_warning
+        assert crest_spread_warning(1.0, 1000) is None
+
+    def test_silent_when_nothing_is_held(self):
+        from terrainflow_assessment.modules.flow_analysis import crest_spread_warning
+        assert crest_spread_warning(0.0, 1000) is None
+        assert crest_spread_warning(10.0, 0) is None
+
+    def test_says_the_share_and_which_way_it_is_wrong(self):
+        from terrainflow_assessment.modules.flow_analysis import crest_spread_warning
+        msg = crest_spread_warning(50.0, 1000)
+        assert "5.0%" in msg
+        assert "under-reported" in msg
+        assert "nothing is over-reported" in msg

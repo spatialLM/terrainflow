@@ -4,6 +4,55 @@ from _harness import PluginHarness
 from qgis.PyQt.QtCore import Qt
 
 
+def check_recommend_ponds(dem_path):
+    """Pond-site recommendation, end to end: keypoints first, then dam sites.
+
+    Quarantined in ``checks_slow`` until Round 15 as "does not finish — ran >12 min on a
+    120x120 DEM with no result and no error", with the cause down as either pathological
+    smooth terrain or a non-terminating loop. **It was neither.** The check emitted the
+    recommendation without running the keypoint pass, so the controller put up a modal
+    *"Run 'Find Keypoints + Ridgelines' first."* and waited for a click that never comes
+    offscreen. ``recommend_pond_sites`` itself runs in ~0.05 s on this DEM.
+
+    Ordering is the whole point of the check now: the two panel buttons have a
+    prerequisite between them, and nothing else asserts it.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        h.panel.run_keypoint_analysis_requested.emit()
+        h.assert_no_errors("keypoint analysis")
+        assert h.state.found_keypoints, (
+            "no keypoints found — there is nothing to site a pond against, and the "
+            "recommendation below would be asserting on an empty list"
+        )
+
+        h.panel.recommend_ponds_requested.emit()
+        h.assert_no_errors("recommend ponds")
+
+        from qgis.core import QgsProject
+
+        sites = QgsProject.instance().mapLayersByName("Recommended Pond Sites")
+        assert sites, "no 'Recommended Pond Sites' layer created"
+        assert sites[0].featureCount() > 0, "pond sites layer is empty"
+
+
+def check_recommend_ponds_without_keypoints_warns(dem_path):
+    """The guard that used to hang the suite, asserted rather than tripped over.
+
+    It is a modal dialog, so offscreen it blocks until the module's timeout unless the
+    harness records it — which is what ``RecordingDialogs`` is for.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.recommend_ponds_requested.emit()
+
+        warnings = h.dialogs.of("warning")
+        assert warnings, "expected a modal warning when no keypoints have been found"
+        assert "Find Keypoints" in warnings[0][2], h.dialogs.render()
+
+
 def check_contour_analysis_requires_baseline(dem_path):
     """Without a baseline the controller warns rather than throwing."""
     with PluginHarness(dem_path) as h:

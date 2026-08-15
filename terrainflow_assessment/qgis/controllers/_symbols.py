@@ -43,6 +43,45 @@ from qgis.PyQt.QtGui import QColor, QFont
 # UI state, not a feature type.
 DISABLED_COLOUR = "#9aa4a2"
 
+
+def band_max(layer, band=1):
+    """The band maximum a ramp stretches to. Never zero, never negative."""
+    try:
+        stats = layer.dataProvider().bandStatistics(band)
+        maximum = stats.maximumValue or 1.0
+    except Exception:
+        maximum = 1.0
+    return maximum if maximum > 0 else 1.0
+
+
+def apply_raster_ramp(layer, stops, max_value=None):
+    """Paint ``layer`` with a ``core.registry.map_palette`` ramp.
+
+    ``stops`` are ``(fraction_of_max, (r, g, b, a), label)``. Baseline and the
+    simulation both draw the same quantities — captured water, the channel
+    network — and each used to carry its own copy of the stops, so a change on
+    one side left two views of one thing in different colours.
+    """
+    from qgis.core import (
+        QgsColorRampShader,
+        QgsRasterShader,
+        QgsSingleBandPseudoColorRenderer,
+    )
+
+    top = band_max(layer) if max_value is None else max_value
+    if not top or top <= 0:
+        top = 1.0
+    ramp = QgsColorRampShader()
+    ramp.setColorRampType(QgsColorRampShader.Interpolated)
+    ramp.setColorRampItemList([
+        QgsColorRampShader.ColorRampItem(top * fraction, QColor(*rgba), label)
+        for fraction, rgba, label in stops
+    ])
+    shader = QgsRasterShader()
+    shader.setRasterShaderFunction(ramp)
+    layer.setRenderer(
+        QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader))
+
 # --- the metres/millimetres split, as numbers -------------------------------
 #
 # BAND_* is ground truth: the coloured band is exactly top_width_m, so measuring it
@@ -213,15 +252,17 @@ def polygon_label_settings(field_or_expr, fmt, is_expression=False,
 
 
 def earthwork_label_settings(cfg, colour_hex):
-    """Name + storage metric for a drawn earthwork, e.g. "Swale 1 · 140 m³".
+    """The drawn earthwork's name, e.g. "Swale 1".
 
     Type is carried by the symbol's colour and signature, so it is not repeated
-    in the text.
+    in the text — and neither is capacity. The label used to read
+    "Swale 26 · 130 m³", which doubled its length for a number nobody reads off
+    a map, and wherever features cluster (a dozen swales across one face) the
+    result was a wall of overlapping text with the design invisible under it.
+    Capacity is a column in "Water arriving at each feature", where it can be
+    compared against the next feature's rather than hunted for.
     """
-    expr = (
-        "\"name\" || CASE WHEN \"capacity_m3\" > 0 THEN "
-        "' · ' || format_number(\"capacity_m3\", 0) || ' m³' ELSE '' END"
-    )
+    expr = "\"name\""
     fmt = label_format(label_colour(colour_hex), size_pt=9.0)
     if cfg.geom_type == "Polygon":
         return polygon_label_settings(expr, fmt, is_expression=True)

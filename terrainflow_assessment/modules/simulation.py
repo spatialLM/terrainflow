@@ -51,6 +51,15 @@ class EarthworkStore:
     id: Optional[str] = None
     overflow_target_id: Optional[str] = None
 
+    # The drawn capacity, carried alongside whichever basis ``capacity_m3`` is on, so the
+    # readouts can show both without asking the earthwork again. Equal to ``capacity_m3``
+    # whenever no terrain measurement was available.
+    drawn_capacity_m3: float = 0.0
+    # True when ``capacity_m3`` is a flood measurement rather than the drawn section — the
+    # readouts say which, because the two differ by a factor of two on keyed swales and a
+    # figure that size cannot be presented without saying where it came from.
+    capacity_is_measured: bool = False
+
     # Direct contributing catchment — the cells whose runoff this feature is the FIRST
     # to intercept (from flow_graph.label_direct_catchments). Mutually exclusive across
     # features, so summing them never double-counts a shared hillside.
@@ -673,7 +682,8 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
 # Helper: build EarthworkStore list from plugin earthworks
 # ---------------------------------------------------------------------------
 
-def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
+def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
+                                 basis="terrain"):
     """
     Build a list of EarthworkStore objects from the plugin's Earthwork list.
 
@@ -682,6 +692,12 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
     earthworks : list of Earthwork (from earthwork_design module)
     soil_name : str — global soil type for infiltration rates
     dem_path : str or None — used to look up centroid elevation
+    basis : ``"terrain"`` (default) sizes each store by what it impounds on the actual
+        ground; ``"drawn"`` forces the cross-section figure. The second exists so the
+        two can be *compared* — running the same storm both ways is what shows whether
+        capacity is the constraint at all, and on the Quail Island design it is not:
+        the score is 57% either way because 7,567 m³ of the 17,537 m³ storm never
+        reaches a feature.
 
     Returns
     -------
@@ -768,10 +784,27 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None):
         own_soil = getattr(ew, "soil_name", None)
         infil_rate = get_infiltration_rate(own_soil) if own_soil else site_rate
 
+        # **The one place the capacity basis is chosen.** Everything downstream — the
+        # balance, the simulation, the flow-network nodes, the scorecard and the report —
+        # reads capacity through this store, so switching basis here switches it
+        # everywhere and cannot be switched inconsistently anywhere.
+        #
+        # The terrain measurement wins where there is one. Sizing against the drawn
+        # section instead means a keyed swale reports "full at this storm" while most of
+        # its pond is still empty — Swale 5 of the Quail Island design reads 100% of
+        # 440 m³ against a pond of 1,095 m³ — and the designer enlarges a feature that
+        # needed nothing. The drawn figure travels alongside rather than being discarded:
+        # it is the one that can be checked by hand and the one a contractor builds to.
+        drawn = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
+        terrain = getattr(ew, "terrain_capacity_m3", None)
+        measured = (basis == "terrain" and terrain is not None and float(terrain) > 0)
+
         store = EarthworkStore(
             name=ew.name,
             ew_type=ew.type,
-            capacity_m3=ew.capacity_m3,
+            capacity_m3=float(terrain) if measured else drawn,
+            drawn_capacity_m3=drawn,
+            capacity_is_measured=measured,
             area_m2=area_m2,
             infiltration_rate_mm_hr=infil_rate if wets_soil else 0.0,
             elevation=elevation,

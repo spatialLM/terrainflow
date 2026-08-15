@@ -21,6 +21,7 @@ import pytest
 
 from terrainflow_assessment.modules.burn_strategy import (
     battered_invert,
+    impoundment_warning,
     level_invert,
     rasterisable_capacity,
     steep_ground_warning,
@@ -260,6 +261,51 @@ class TestSteepGroundWarning:
         assert steep_ground_warning("x", 2.0, 0.0) is None
 
 
+class TestImpoundmentWarning:
+    """When a companion berm has stopped being a bank and become a dam wall.
+
+    Both thresholds are set from the 36 storage features of the Quail Island design,
+    whose ponds were flooded individually: retained depth runs 0.00–3.13 m with a median
+    of 0.77 m. Retaining *something* is what a berm is for, so a threshold near that
+    median fires on nearly everything (0.5 m catches 31 of 36) and says nothing. Past a
+    metre the population thins to 4 of 36 and the consequence changes.
+    """
+
+    def test_an_ordinary_swale_berm_is_silent(self):
+        # Swale 22's measured figures: 0.44 m of head, 108 m³ above natural ground.
+        assert impoundment_warning("Swale 22", 0.44, 108.0) is None
+
+    def test_deep_head_fires(self):
+        # Basin 39: 3.13 m standing above natural ground.
+        msg = impoundment_warning("Basin 39", 3.13, 1158.0)
+        assert msg is not None
+        assert "3.1 m" in msg and "1,158" in msg and "Basin 39" in msg
+
+    def test_a_large_volume_behind_a_shallower_bank_also_fires(self):
+        """Swale 5: 0.91 m — under the depth arm — but 603 m³ held above ground.
+
+        The risk has two shapes and one arm catches only the first. What runs downhill
+        if the bank fails is the volume, not the head.
+        """
+        msg = impoundment_warning("Swale 5", 0.91, 603.0)
+        assert msg is not None
+        assert "603" in msg
+
+    def test_it_asks_for_a_spillway_when_there_is_none(self):
+        msg = impoundment_warning("Swale 5", 0.91, 603.0, has_spillway=False)
+        assert "spillway" in msg and "council" in msg
+
+    def test_with_a_spillway_it_still_names_the_structure(self):
+        msg = impoundment_warning("Swale 5", 0.91, 603.0, has_spillway=True)
+        assert "spillway" in msg
+        assert "council" not in msg
+        assert "compacted" in msg
+
+    def test_degenerate_inputs_are_silent(self):
+        assert impoundment_warning("x", None, None) is None
+        assert impoundment_warning("x", 0.0, 0.0) is None
+
+
 # ---------------------------------------------------------------------------
 # DEMBurner integration — the level-bottom burn through the real burner
 # ---------------------------------------------------------------------------
@@ -400,14 +446,45 @@ class TestCapacityBreakdown:
         assert b["geometric"] == pytest.approx(75.0)
         assert b["freeboard_m3"] == pytest.approx(15.0)
 
-    def test_resolution_penalty_is_reported_separately(self):
-        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200)
-        assert b["rasterisable"] == pytest.approx(100.0)
+    def test_resolution_penalty_measures_the_trench_the_burn_cut(self):
+        """The penalty is ``cut − section``: did the grid hold the section you drew?
+
+        It used to be ``rasterisable − geometric``, which worked only while
+        ``rasterisable`` meant "the drawn shape at this cell size". It no longer does —
+        it is the pond, and on a swale with a keyed companion berm the pond is roughly
+        double the drawn section because the bank holds water above natural ground.
+        Left pointed at that figure this key would have reported every working berm as a
+        resolution failure, at +80% and upward. The narrow grid-fidelity question is
+        still worth asking, so it keeps the key and gets the right operands.
+        """
+        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200, cut_m3=100.0)
+        assert b["cut_m3"] == pytest.approx(100.0)
+        assert b["section_m3"] == pytest.approx(75.0)
         assert b["resolution_penalty_m3"] == pytest.approx(25.0)
+
+    def test_impoundment_is_what_the_pond_adds_over_the_drawn_trench(self):
+        """The new figure, and the one a designer needs: what berm and hillside add.
+
+        No cross-section predicts it — it depends on the ground the bank stands on — so
+        it cannot live inside ``geometric`` and it must not be folded into the grid
+        penalty. Its own key, measured against the drawn trench.
+        """
+        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200,
+                               terrain_storage_m3=180.0, cut_m3=100.0)
+        assert b["rasterisable"] == pytest.approx(180.0)
+        assert b["impoundment_m3"] == pytest.approx(105.0)   # 180 pond − 75 trench
+        assert b["resolution_penalty_m3"] == pytest.approx(25.0)  # unaffected
+
+    def test_a_measurement_beats_the_model(self):
+        """Given both, the flood wins — a model beside a burn has gone wrong twice."""
+        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200,
+                               terrain_storage_m3=42.0)
+        assert b["rasterisable"] == pytest.approx(42.0)
 
     def test_without_a_cell_count_no_resolution_claim_is_made(self):
         b = capacity_breakdown(self._swale(), cell_size=1.0)
         assert b["rasterisable"] == b["geometric"]
+        assert b["cut_m3"] is None
         assert b["resolution_penalty_m3"] == 0.0
 
 

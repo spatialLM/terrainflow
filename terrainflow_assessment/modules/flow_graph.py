@@ -17,8 +17,10 @@ Design rules baked in
 * **Direction comes from steepest descent on the *conditioned* DEM**, never from
   rounding the saved D-infinity angles. A rounded angle's neighbour is not guaranteed
   to be lower, which seeds cycles (measured: ~90k cells trapped in cycles on a 1690²
-  grid); steepest descent after ``fill_pits`` + ``breach_depressions`` +
-  ``resolve_flats`` is provably acyclic and costs the same.
+  grid); steepest descent after ``fill_pits`` + ``fill_depressions`` +
+  ``resolve_flats`` is provably acyclic and costs the same. (That middle step is a
+  priority-flood **fill** — ``breach_depressions`` does not exist in pysheds 0.5 and has
+  never run, whatever the variable it was assigned to was called.)
 * **Labelling is storm-independent.** It depends only on terrain + geometry, so the
   caller caches the result and re-derives volumes (× runoff depth) for free when the
   storm changes. Only a geometry edit invalidates it.
@@ -96,10 +98,19 @@ def d8_from_dem(dem, cell_w: float = 1.0, cell_h: float = 1.0, nodata=None):
     themselves). Slope is ``(z - z_neighbour) / distance``, so diagonals are correctly
     de-weighted by √2 rather than competing on raw drop.
 
-    *dem* should be **hydrologically conditioned** (pits filled, depressions breached,
+    *dem* should be **hydrologically conditioned** (pits filled, depressions filled,
     flats resolved). On a conditioned DEM the pointer graph is acyclic and every
     interior cell reaches the boundary; on a raw DEM it will contain pits, which
     :func:`label_direct_catchments` reports as ``LABEL_SINK`` rather than hiding.
+
+    **Ties break by scan position.** ``best`` starts at 0.0 and the test is a strict ``>``,
+    so a neighbour must be *strictly* lower to be chosen and, among equal slopes, the
+    earliest offset in :data:`_OFFSETS` wins. That matters wherever the surface is level:
+    on a resolved flat the synthetic gradient is an integer multiple of a small epsilon, so
+    exact ties are common and every one of them resolves the same way. Note pysheds' own
+    ``flowdir`` scans N, NE, E, SE, S, SW, W, NW and this scans NW, N, NE, W, E, SW, S, SE,
+    so the two tiers lean in different directions on the same tie — pinned by
+    ``test_flow_graph.TestTieBreak`` so neither can drift unnoticed.
 
     Non-finite cells (and *nodata*, when given) are excluded: nothing drains into them
     and they are left as self-pointing sinks.

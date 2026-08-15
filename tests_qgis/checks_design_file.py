@@ -245,6 +245,59 @@ def check_embedded_dem_opens_without_the_original(dem_path):
         )
 
 
+def check_opening_an_embedded_design_moves_the_whole_session_to_the_clip(dem_path):
+    """One DEM per session — burner, dem_info and picker all on the restored clip.
+
+    An embedded design carries a *clip* of its DEM, so opening one repoints the session
+    at a smaller raster. ``state.burner`` is written in exactly one place
+    (``BaselineController.on_dem_changed``), and the Open path used to set ``dem_path``
+    and ``dem_info`` by hand without going near it. The session then straddled two
+    grids: Baseline analysed the clip while the burn ran on the parent tile — 1027x858
+    against 2157x1319 on the Quail Island design — and the verification, unable to
+    subtract two different extents, silently dropped the correction and reported every
+    measured volume with the site's natural ponding still inside it.
+
+    The larger DEM is deliberately still selected in the picker when the design opens,
+    because that is the situation that produced the bug.
+    """
+    with PluginHarness(dem_path) as h:
+        _build_a_design(h)
+        controller = h.plugin._design_file
+        target = os.path.join(h.state.output_dir, "clipped.tfd")
+
+        restore = _script_prompts(controller, embed=True)
+        try:
+            with ScriptedDialogs(save_path=target):
+                controller.save_design()
+            h.assert_no_errors("save design (embedded clip)")
+
+            with ScriptedDialogs(open_path=target):
+                controller.open_design()
+        finally:
+            restore()
+
+        h.assert_no_errors("open embedded design")
+
+        burner = h.state.burner
+        info = h.state.dem_info
+        assert burner is not None, "no burner after opening a design"
+        assert info is not None, "no dem_info after opening a design"
+        assert burner.dem_path == h.state.dem_path, (
+            f"burner is built from {burner.dem_path!r} but the session points at "
+            f"{h.state.dem_path!r} — the two would produce rasters on different grids"
+        )
+        assert tuple(burner.shape) == (info.height, info.width), (
+            f"burner grid {burner.shape[1]}x{burner.shape[0]} does not match the "
+            f"session DEM {info.width}x{info.height}"
+        )
+
+        picked = h.panel.dem_layer
+        assert picked is not None, "the restored DEM was not selected in the picker"
+        assert picked.source().split("|")[0] == h.state.dem_path, (
+            "the DEM picker shows a different raster from the one being analysed"
+        )
+
+
 def check_a_non_archive_is_refused(dem_path):
     """Opening something that is not a .tfd reports an error and changes nothing."""
     with PluginHarness(dem_path) as h:

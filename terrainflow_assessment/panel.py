@@ -67,6 +67,10 @@ from terrainflow_assessment.qgis.widgets.run_button import RunButton
 # colour, which is the reading that made the old gradient unreadable.
 _BAND_GLYPHS = ("▂", "▄", "▆", "█")
 
+# The report needs a baseline and nothing else. Saying "and simulation" here was
+# the visible half of a gate that no longer exists.
+_REPORT_SUMMARY_IDLE = "Run Baseline to enable the report."
+
 
 def _ramp_swatches(labels=None):
     """The inflow ramp as coloured, thickening glyphs, optionally labelled."""
@@ -221,9 +225,7 @@ class AssessmentPanel(QDockWidget):
             " padding: 3px 11px; font-size: 11px; color: #5f7176; background: transparent; }"
             "QPushButton:hover { border-color: #2e7d55; color: #22302e; }"
         )
-        self._storm_chip.setToolTip(
-            "The design storm the score is computed against.\nClick to edit in Baseline."
-        )
+        self._storm_chip.setToolTip(H.STORM_CHIP)
         self._storm_chip.clicked.connect(lambda: self._show_stage("baseline"))
         head.addWidget(self._storm_chip)
         root_lay.addLayout(head)
@@ -256,6 +258,16 @@ class AssessmentPanel(QDockWidget):
     def mark_stage(self, key, state):
         """Set a stage's pipeline state: 'todo' | 'done' | 'stale'."""
         self._stepper.set_state(key, state)
+
+    def _mark_stage_failed(self, key):
+        """A run that errored leaves the stage un-ticked.
+
+        Amber when an earlier run left usable output behind — that output is
+        still there but no longer reflects what was just attempted — and quiet
+        when nothing has ever succeeded. Never green.
+        """
+        previously_done = self._stepper.state(key) == "done"
+        self.mark_stage(key, "stale" if previously_done else "todo")
 
     # ---------------------------------------------------------------- UI construction
 
@@ -421,19 +433,13 @@ class AssessmentPanel(QDockWidget):
 
         save_btn = QPushButton("💾 Save design")
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.setToolTip(
-            "Save the DEM reference, every storm and sizing input, the site areas and "
-            "all drawn earthworks to a single .tfd file."
-        )
+        save_btn.setToolTip(H.SAVE_DESIGN)
         save_btn.setStyleSheet(self._SECONDARY_BTN_STYLE)
         save_btn.clicked.connect(lambda: self.save_design_requested.emit())
 
         open_btn = QPushButton("📂 Open design")
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.setToolTip(
-            "Open a .tfd design file. Inputs, areas and earthworks are restored "
-            "immediately; you are then offered the baseline re-run that restores scoring."
-        )
+        open_btn.setToolTip(H.OPEN_DESIGN)
         open_btn.setStyleSheet(self._SECONDARY_BTN_STYLE)
         open_btn.clicked.connect(lambda: self.open_design_requested.emit())
 
@@ -747,7 +753,7 @@ class AssessmentPanel(QDockWidget):
         slope_class_row.addWidget(self._toggle_slope_class_btn, 1)
         self._slope_class_info_btn = QPushButton("ⓘ")
         self._slope_class_info_btn.setFixedWidth(30)
-        self._slope_class_info_btn.setToolTip("What do the slope classes mean for earthworks?")
+        self._slope_class_info_btn.setToolTip(H.SLOPE_CLASS_INFO_BTN)
         self._slope_class_info_btn.clicked.connect(self._show_slope_class_info)
         slope_class_row.addWidget(self._slope_class_info_btn)
         lay.addLayout(slope_class_row)
@@ -801,10 +807,13 @@ class AssessmentPanel(QDockWidget):
         contour_row.addWidget(self._generate_contours_btn)
         lay.addLayout(contour_row)
 
-        # Throughflow: total event water through every cell, as a blue gradient.
-        # Sits with the other terrain overlays; off by default (it covers the map).
+        # Surface runoff: total event water through every cell, as a blue
+        # gradient. Sits with the other terrain overlays; off by default (it
+        # covers the map). Named for what it shows rather than for the
+        # accumulation step that produces it — "throughflow" is a soil-science
+        # term for subsurface flow, which is the opposite of this.
         flow_row = QHBoxLayout()
-        self._toggle_throughflow_btn = QPushButton("Throughflow")
+        self._toggle_throughflow_btn = QPushButton("Surface Runoff")
         self._toggle_throughflow_btn.setCheckable(True)
         self._toggle_throughflow_btn.setEnabled(False)
         self._toggle_throughflow_btn.setToolTip(H.THROUGHFLOW)
@@ -817,17 +826,19 @@ class AssessmentPanel(QDockWidget):
         self._throughflow_scale_combo.setEnabled(False)
         flow_row.addWidget(self._throughflow_scale_combo)
 
-        # Keep in step with the ramp in controllers/baseline.py:apply_throughflow_ramp —
-        # these are its stop colours at full strength. The renderer fades the low end
-        # out with alpha so the map stays readable underneath; a key shows the hue, not
-        # the blend, so the swatches carry a border to keep the near-white one visible.
-        # The transparent "none" stop is deliberately not shown.
-        for hex_colour, lbl_text in [
-            ("#E2F0FA", "diffuse"),
-            ("#90C4E8", "gathering"),
-            ("#307ABE", "concentrated"),
-            ("#08246E", "channel"),
-        ]:
+        # Read from the ramp the layer is actually painted with, rather than
+        # hand-copied from it — these four hexes used to live here as literals
+        # under a comment asking whoever changed the renderer to remember to
+        # change them here too. The renderer fades the low end out with alpha so
+        # the map stays readable underneath; a key shows the hue, not the blend,
+        # so the swatches carry a border to keep the near-white one visible. The
+        # transparent "none" stop drops out of visible_stops by construction.
+        from terrainflow_assessment.core.registry.map_palette import (
+            surface_runoff_ramp,
+            visible_stops,
+        )
+
+        for hex_colour, lbl_text in visible_stops(surface_runoff_ramp()):
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
             swatch.setStyleSheet(
@@ -1188,11 +1199,7 @@ class AssessmentPanel(QDockWidget):
         ew_actions = QHBoxLayout()
         self._ew_edit_btn = QPushButton("Edit")
         self._ew_reshape_btn = QPushButton("Reshape")
-        self._ew_reshape_btn.setToolTip(
-            "Drag earthwork vertices on the map — the Live Assessment updates\n"
-            "as you drag. Double-click a segment to insert a vertex; Del removes\n"
-            "the highlighted vertex; right-click or Esc finishes."
-        )
+        self._ew_reshape_btn.setToolTip(H.RESHAPE_EARTHWORK)
         self._ew_delete_btn = QPushButton("Delete")
         self._ew_toggle_btn = QPushButton("Enable/Disable")
         ew_actions.addWidget(self._ew_edit_btn)
@@ -1374,8 +1381,9 @@ class AssessmentPanel(QDockWidget):
         """Design vs measured, per feature.
 
         The scorecard chip carries one site-wide Δ, which on its own conflates the
-        freeboard allowance, the grid's resolution penalty and any actual burn error.
-        This section separates them so a number that looks alarming can be read.
+        freeboard allowance, what the terrain model made of the drawn section, and any
+        actual burn error. This section separates them so a number that looks alarming
+        can be read — and marks the rows where the last two columns are not a capacity.
         """
         from terrainflow_assessment.qgis.widgets.verification_table import (
             VerificationTable,
@@ -1396,7 +1404,12 @@ class AssessmentPanel(QDockWidget):
     def set_verification(self, result, cell_size_m=1.0):
         """Populate the per-feature verification table (None clears it)."""
         self._verification_table.set_result(result, cell_size_m=cell_size_m)
-        self._verification_empty.setVisible(not self._verification_table.isVisible())
+        # isHidden(), not isVisible(): a widget on a stage page that is not the active
+        # one is not visible even though it was never hidden. Verification is computed
+        # from the Design stage, so isVisible() answered False every time and the
+        # "re-analyse to compare" placeholder stayed on screen above the populated
+        # table until something else redrew the section.
+        self._verification_empty.setVisible(self._verification_table.isHidden())
 
     def _build_section_simulation(self):
         lay = self._section("Fill Simulation", collapsed=False)
@@ -1515,15 +1528,16 @@ class AssessmentPanel(QDockWidget):
     def _build_section_report(self):
         lay = self._section("Report", collapsed=False)
 
-        self._report_summary_lbl = QLabel("Run baseline and simulation first.")
+        self._report_summary_lbl = QLabel(_REPORT_SUMMARY_IDLE)
         self._report_summary_lbl.setWordWrap(True)
         self._report_summary_lbl.setStyleSheet(
             "background: #ecf0f1; padding: 10px; border-radius: 6px; font-size: 11px;"
         )
         lay.addWidget(self._report_summary_lbl)
 
-        self._export_btn = self._button("Export HTML Report", "#1abc9c")
+        self._export_btn = self._button("Export Report", "#1abc9c")
         self._export_btn.setEnabled(False)
+        self._export_btn.setToolTip(H.EXPORT_REPORT)
         lay.addWidget(self._export_btn)
 
         self._export_btn.clicked.connect(self.export_report_requested)
@@ -1549,6 +1563,19 @@ class AssessmentPanel(QDockWidget):
         self._toggle_throughflow_btn.setEnabled(True)
         self._throughflow_scale_combo.setEnabled(True)
         self._generate_contours_btn.setEnabled(True)
+
+    def set_baseline_failed(self, summary):
+        """A baseline that errored must not look like one that worked.
+
+        The error handler used to call :meth:`set_baseline_complete`, which put
+        the button in its Done state, ticked the stage green *and* switched on
+        every downstream results tool — for a run that produced no data at all.
+        The button goes back to idle so it reads as runnable, and the tools stay
+        as they were: enabled only if an earlier run genuinely earned them.
+        """
+        self._run_baseline_btn.set_idle()
+        self._baseline_results_lbl.setText(summary)
+        self._mark_stage_failed("baseline")
 
     def set_usable_area_source(self, source):
         """Set the contour 'Usable area (clip)' selector (fires usable-area change)."""
@@ -1673,6 +1700,16 @@ class AssessmentPanel(QDockWidget):
         self._earthworks_results_lbl.setText(summary)
         self.mark_stage("verify", "done")
 
+    def set_earthworks_failed(self, summary=""):
+        """As :meth:`set_baseline_failed`, for Re-analyse with Earthworks.
+
+        A failed burn leaves no verification, so ticking Verify green would
+        claim a measurement that was never taken.
+        """
+        self._run_ew_btn.set_idle()
+        self._earthworks_results_lbl.setText(summary)
+        self._mark_stage_failed("verify")
+
     def set_verified_chip(self, text, fresh, tooltip=""):
         """Scorecard's verified-vs-design chip (Workbench)."""
         self._scorecard.set_verified(text, fresh, tooltip)
@@ -1682,15 +1719,18 @@ class AssessmentPanel(QDockWidget):
         self._live_assessment_lbl.setText(html)
 
     def update_scorecard(self, capture_pct, stored_m3, soaked_m3, leaves_m3,
-                         natural_ponding_m3=None):
+                         natural_ponding_m3=None, capacity_note=None):
         """Feed the persistent scorecard with the live balance.
 
         *natural_ponding_m3* is context rather than part of the balance — it comes from
         a depression-fill of the bare terrain, not the event routing the band shows, so
-        the scorecard prints it below the band instead of inside it.
+        the scorecard prints it below the band instead of inside it. *capacity_note* is
+        the same kind of thing: a sentence about whether storage is the binding
+        constraint, which is a statement about the score rather than part of it.
         """
         self._scorecard.set_balance(capture_pct, stored_m3, soaked_m3, leaves_m3)
         self._scorecard.set_natural_ponding(natural_ponding_m3)
+        self._scorecard.set_capacity_note(capacity_note)
 
     def scorecard_empty(self, message=None):
         if message:
@@ -1937,7 +1977,20 @@ class AssessmentPanel(QDockWidget):
             f"<b>Net cut/fill balance:</b> {comparison.net_cut_fill_m3:+,.0f} m³"
         )
         self._report_summary_lbl.setText(text)
-        self._export_btn.setEnabled(True)
+
+    def clear_report_summary(self):
+        """Drop the headline metrics — the design they described is gone."""
+        self._report_summary_lbl.setText(_REPORT_SUMMARY_IDLE)
+
+    def set_report_ready(self, ready):
+        """Enable/disable the export button.
+
+        The single owner of that button's state. It used to be switched on inside
+        :meth:`set_report_summary`, whose only caller is the simulation — which is
+        what made a report impossible without one, and what left the button lit
+        after a design file was opened and every derived result cleared.
+        """
+        self._export_btn.setEnabled(bool(ready))
 
     # ---------------------------------------------------------------- getters
 
@@ -1956,6 +2009,17 @@ class AssessmentPanel(QDockWidget):
     @property
     def earthworks_area_layer(self):
         return self._earthworks_area_combo.currentLayer()
+
+    def set_dem_layer(self, layer):
+        """Select *layer* in the DEM picker, so the session's terrain is what is shown.
+
+        Setting currentLayer re-fires ``dem_changed``, which is what rebuilds the burner,
+        the DEM info label and the slope raster. Callers that must guarantee the rebuild
+        emit the signal themselves as well — ``setLayer`` is a no-op when the layer is
+        already current, and a silent no-op here means the burner keeps describing a
+        different DEM from the one the session is analysing.
+        """
+        self._dem_combo.setLayer(layer)
 
     def set_area_layer(self, kind, layer):
         """Select *layer* in the picker named by *kind* ('boundary' | 'analysis' |

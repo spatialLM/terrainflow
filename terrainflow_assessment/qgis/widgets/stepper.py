@@ -53,6 +53,15 @@ class StageStepper(QWidget):
             self._states[key] = state
             self._restyle()
 
+    def state(self, key):
+        """A stage's current state, so a caller can react to what came before.
+
+        A failed run reports differently depending on whether an earlier run
+        left usable output behind: amber if it did, quiet if nothing has ever
+        succeeded. Asking the stepper avoids keeping a second copy of that.
+        """
+        return self._states.get(key, "todo")
+
     def set_current(self, key):
         if key in self._buttons:
             self._current = key

@@ -13,7 +13,10 @@ from qgis.core import (
     QgsColorRampShader,
     QgsFeature,
     QgsField,
+    QgsFillSymbol,
     QgsGeometry,
+    QgsLineSymbol,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProperty,
     QgsRasterLayer,
@@ -21,6 +24,8 @@ from qgis.core import (
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
+    QgsTextBufferSettings,
+    QgsTextFormat,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
     QgsWkbTypes,
@@ -40,6 +45,7 @@ from terrainflow_assessment.modules.earthwork_design import (
     calculate_capacity,
 )
 from terrainflow_assessment.modules.swale_design import contour_to_swale_geometry
+from terrainflow_assessment.qgis import help_text as H
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _symbols as S
 from terrainflow_assessment.qgis.controllers._layers import resolve_layer
@@ -53,6 +59,35 @@ class EarthworksController(G.LayerTreeMixin):
         self._project = project
         self._iface = iface
         self._canvas = canvas
+        # Layer nodes whose visibility we are already listening to, so a rebuilt
+        # layer does not accumulate connections.
+        self._watched_layer_ids = set()
+
+    def _watch_visibility(self, layer_id):
+        """Clear the highlight when this layer is unticked.
+
+        Unticking an earthwork layer is the obvious way to make its highlight go
+        away, and it did not: the band is a canvas item and belongs to no layer
+        at all. Connected per node rather than to the tree root — the root's
+        ``visibilityChanged`` does not reliably carry a descendant's change.
+        """
+        if layer_id in self._watched_layer_ids:
+            return
+        try:
+            node = self._project.instance().layerTreeRoot().findLayer(layer_id)
+            if node is None:
+                return
+            node.visibilityChanged.connect(self._on_layer_visibility_changed)
+            self._watched_layer_ids.add(layer_id)
+        except Exception:
+            pass
+
+    def _on_layer_visibility_changed(self, node):
+        try:
+            if not node.isVisible():
+                self.clear_selection_highlight()
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- Drawing tools
 
@@ -586,6 +621,10 @@ class EarthworksController(G.LayerTreeMixin):
                 ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
             elif ew_type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+                # A berm open at its ends impounds nothing on ground that falls along
+                # the swale, so this decides whether the companion berm is real storage.
+                ew.key_into_banks = getattr(
+                    dlg, "get_key_into_banks", lambda: True)()
             elif ew_type == "diversion":
                 # Was silently dropped on create (only the edit path read it).
                 ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
@@ -619,6 +658,7 @@ class EarthworksController(G.LayerTreeMixin):
                     bottom_width=getattr(ew, "bottom_width_m", None),
                     batter_run=getattr(ew, "batter_run_m", None),
                 )
+            self._refresh_terrain_capacity(ew)
             self._state.earthwork_manager.add(ew)
             self._panel.add_earthwork_to_list(
                 len(self._state.earthwork_manager) - 1, ew.summary()
@@ -698,6 +738,10 @@ class EarthworksController(G.LayerTreeMixin):
                 ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
             elif ew.type == "swale":
                 ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+                # A berm open at its ends impounds nothing on ground that falls along
+                # the swale, so this decides whether the companion berm is real storage.
+                ew.key_into_banks = getattr(
+                    dlg, "get_key_into_banks", lambda: True)()
             elif ew.type == "diversion":
                 ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
             if ew.type == "basin":
@@ -724,6 +768,7 @@ class EarthworksController(G.LayerTreeMixin):
                     bottom_width=getattr(ew, "bottom_width_m", None),
                     batter_run=getattr(ew, "batter_run_m", None),
                 )
+            self._refresh_terrain_capacity(ew)
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
             self._refresh_spillway_layer()
@@ -873,6 +918,7 @@ class EarthworksController(G.LayerTreeMixin):
                 bottom_width=getattr(ew, "bottom_width_m", None),
                 batter_run=getattr(ew, "batter_run_m", None),
             )
+        self._refresh_terrain_capacity(ew)
         self._resnap_spillways(ew)
         self._panel.update_earthwork_in_list(idx, ew.summary())
         self._refresh_ew_layer()
@@ -954,7 +1000,8 @@ class EarthworksController(G.LayerTreeMixin):
             )
             from terrainflow_assessment.modules.earthwork_design import DEMBurner
             burner = self._state.burner or DEMBurner(self._state.dem_path)
-            baseline_ponding = self._cached_baseline_ponding(burner.shape)
+            baseline_ponding = self._cached_baseline_ponding(
+                burner.shape, burner.transform)
             volume = round(
                 burner.dam_stage_storage(
                     ew, baseline_ponding=baseline_ponding,
@@ -969,49 +1016,132 @@ class EarthworksController(G.LayerTreeMixin):
             print(f"TerrainFlow Assessment — dam storage error: {exc}")
             return 0.0
 
-    def _cached_baseline_ponding(self, shape):
-        """Baseline ponding array (saves a flood pass), or None if unavailable/mismatched."""
+    # ------------------------------------------------- Terrain capacity (the live basis)
+
+    def _refresh_terrain_capacity(self, ew, quiet=False):
+        """Flood *ew* alone and cache what it impounds on ``ew.terrain_capacity_m3``.
+
+        Heavy — a depression-fill — so this belongs on the same tier as
+        :meth:`_compute_dam_capacity`: draw, dialog OK, and vertex-edit release. Never the
+        drag tier, which keeps whatever was last measured, exactly as a dam does.
+
+        This is what stops the design being oversized. Until now the live "% full" bar was
+        driven by the drawn cross-section, so a swale with a companion berm keyed into the
+        banks reported *full at this storm* while most of its pond was still empty — Swale
+        5 of the Quail Island design read 100% of 440 m³ against a pond of 1,095 m³ — and
+        the only thing that would have contradicted it was a Verify run, long after the
+        sizing decisions were made.
+
+        A dam is skipped because ``capacity_m3`` **is** this measurement already
+        (:meth:`_compute_dam_capacity` floods the same way), so re-flooding would buy an
+        identical number at the same price. Degrades to None without a DEM, which puts the
+        readout back on the drawn figure and says so.
+        """
+        if ew.type == "dam":
+            ew.terrain_capacity_m3 = float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None
+            return
+        if not self._state.dem_path:
+            ew.terrain_capacity_m3 = None
+            return
+        try:
+            from terrainflow_assessment.modules.earthwork_design import DEMBurner
+            burner = self._state.burner or DEMBurner(self._state.dem_path)
+            storage = burner.feature_storage(
+                ew, baseline_ponding=self._cached_baseline_ponding(
+                    burner.shape, burner.transform),
+            )
+            ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
+            ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
+            ew.retained_depth_m = round(storage.retained_depth_m, 2)
+            if not quiet:
+                self._warn_impoundment(ew)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — terrain capacity error: {exc}")
+            ew.terrain_capacity_m3 = None
+
+    def _refresh_all_terrain_capacities(self):
+        """Measure every feature's pond in one pass — on design open, or a DEM change.
+
+        One flood per feature at ~0.1–0.3 s, so a full design is comparable to a Verify
+        run and worth a progress notice. Deliberately **not** serialised into the ``.tfd``:
+        a terrain number cached in a project file outlives the terrain that produced it,
+        and there is no cheap way to tell that it has.
+        """
+        ews = [e for e in self._state.earthwork_manager.get_all() if e.enabled]
+        if not ews or not self._state.dem_path:
+            return
+        self._iface.messageBar().pushInfo(
+            "TerrainFlow Assessment",
+            f"Measuring what {len(ews)} features hold on this terrain…")
+        for ew in ews:
+            self._refresh_terrain_capacity(ew, quiet=True)
+        for ew in ews:
+            self._warn_impoundment(ew)
+
+    def _warn_impoundment(self, ew):
+        """Surface the retaining-structure advisory for *ew*, if it has become one."""
+        from terrainflow_assessment.modules.burn_strategy import impoundment_warning
+
+        msg = impoundment_warning(
+            ew.name,
+            retained_depth_m=getattr(ew, "retained_depth_m", None),
+            above_ground_m3=getattr(ew, "impounded_above_ground_m3", None),
+            has_spillway=getattr(ew, "spillway", None) is not None,
+        )
+        if msg:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
+
+    def _cached_baseline_ponding(self, shape, transform=None):
+        """Baseline ponding array on the burner's grid, or None if it cannot be lined up.
+
+        A shape match alone was the old test, which is two things at once: it rejected a
+        baseline that merely sat on a sub-window of the same grid, and it accepted one
+        that happened to share dimensions from a different origin — subtracting cell for
+        cell while geographically offset. Pass *transform* and both are answered by
+        ``align_to_grid``; without it the shape test is kept, since a caller that cannot
+        say where its grid is cannot be told whether another one matches.
+        """
         path = (self._state.baseline_result or {}).get("ponding")
         if not path or not os.path.exists(path):
             return None
         try:
             import numpy as np
             import rasterio
+
+            from terrainflow_assessment.modules.dem_loader import align_to_grid
             with rasterio.open(path) as src:
                 arr = src.read(1).astype("float32")
                 nodata = src.nodata
-            if arr.shape != shape:
-                return None
+                src_transform = src.transform
             if nodata is not None:
                 arr[arr == nodata] = 0.0
-            return np.clip(arr, 0.0, None)
+            arr = np.clip(arr, 0.0, None)
+            if arr.shape == shape and (transform is None or src_transform == transform):
+                return arr
+            if transform is None:
+                return None
+            return align_to_grid(arr, src_transform, transform, shape)
         except Exception:
             return None
 
     def _natural_ponding_m3(self):
-        """Water the bare terrain already holds, from the baseline ponding raster.
+        """Water the bare terrain already holds, over the analysed site.
 
         Context for the scorecard, not an input to it: the headline scores the design
         only, so runoff that never reaches an earthwork is counted as leaving the site
-        whether or not it would settle in a hollow first. Returns 0.0 when there is no
-        baseline raster to read — the caller hides the line rather than guessing.
-        """
-        path = (self._state.baseline_result or {}).get("ponding")
-        if not path or not os.path.exists(path):
-            return 0.0
-        try:
-            import numpy as np
-            import rasterio
+        whether or not it would settle in a hollow first. Returns 0.0 when no baseline
+        has run — the caller hides the line rather than guessing.
 
-            from terrainflow_assessment.modules.reporting import raster_ponding_volume
-            with rasterio.open(path) as src:
-                arr = src.read(1).astype("float64")
-                nodata = src.nodata
-                cell_area = abs(src.transform.a * src.transform.e)
-            if nodata is not None:
-                arr[arr == nodata] = 0.0
-            return float(raster_ponding_volume(np.clip(arr, 0.0, None), cell_area))
-        except Exception:
+        Takes the worker's ``ponded_volume_m3``, which is already clipped to the analysis
+        domain, rather than re-summing the raster. Summing the raster answered a
+        different question from the one beside it: on the Quail Island run the domain is
+        29.2 ha of an 88.1 ha raster, so a line printed under a 57% score described three
+        times the ground the score did.
+        """
+        volume = (self._state.baseline_result or {}).get("ponded_volume_m3")
+        try:
+            return max(0.0, float(volume))
+        except (TypeError, ValueError):
             return 0.0
 
     # ---------------------------------------------------------------- Live analytical assessment
@@ -1078,10 +1208,15 @@ class EarthworksController(G.LayerTreeMixin):
             # recompute_catchments and the live assessment are both safe before a baseline
             # exists: labelling needs the flow graph and quietly does nothing without it,
             # and the assessment has a no-flow branch that reports geometry only.
+            #
+            # Terrain capacities are measured before the assessment, not after: they are
+            # the basis it scores on, and a first paint against the drawn figures would
+            # show every keyed swale full and then quietly correct itself.
             for step in (
                 lambda: self._panel.refresh_earthwork_list(manager.get_all()),
                 self._refresh_ew_layer,
                 self._refresh_spillway_layer,
+                self._refresh_all_terrain_capacities,
                 self.recompute_catchments,
                 self._recompute_live_assessment,
             ):
@@ -1120,7 +1255,11 @@ class EarthworksController(G.LayerTreeMixin):
             from terrainflow_assessment.modules.flow_graph import d8_from_dem
 
             with rasterio.open(cond_path) as src:
-                dem = src.read(1).astype("float32")
+                # float64: this raster carries resolve_flats' flat gradient in multiples of
+                # 1e-5 m, and reading it as float32 would quantise that away above ~600 m
+                # elevation — leaving d8_from_dem, which needs a strictly positive drop, to
+                # read a true flat and call every cell of it a sink.
+                dem = src.read(1).astype("float64")
                 transform = src.transform
                 nodata = src.nodata
             cell_w, cell_h = abs(transform.a), abs(transform.e)
@@ -1839,7 +1978,11 @@ class EarthworksController(G.LayerTreeMixin):
                 if row is not None:
                     row["index"] = i
                     rows.append(row)
-            self._panel.set_spillway_review(rows, self._spillway_context())
+            context = self._spillway_context()
+            # Retained for the report, which has no handle on this controller.
+            self._state.spillway_rows = rows
+            self._state.spillway_context = context
+            self._panel.set_spillway_review(rows, context)
         except Exception as exc:
             import traceback
             print(f"TerrainFlow Assessment — spillway review error: {exc}")
@@ -2551,6 +2694,11 @@ class EarthworksController(G.LayerTreeMixin):
                 uncaptured_m3=uncaptured_m3, routing=routing,
                 count_infiltration=self._panel.count_infiltration,
             ) if stores else None
+            # Keep them for the report. Without this the balance falls out of scope
+            # at the end of this method and the report has no design-tier numbers to
+            # print — which is why it used to demand a simulation first.
+            self._state.balance = result
+            self._state.balance_stores = stores
 
             # Flow network (Live Assessment) — every earthwork, ordered high→low.
             nodes = self._build_network_nodes(all_ews, stores, result)
@@ -2562,9 +2710,12 @@ class EarthworksController(G.LayerTreeMixin):
             self._refresh_connections_layer(result, routing)
             self._panel.set_area_subtotals(self.compute_area_subtotals())
             self.refresh_stress_points_layer()
+            drawn_result = None
             if geometry_settled:
                 self._build_spillway_rows()
                 self._check_spillway_capacity()
+                drawn_result = self._drawn_basis_balance(
+                    enabled, soil, duration_hr, total_runoff_m3, uncaptured_m3, routing)
 
             # Persistent scorecard (Workbench header) — blue means actual water.
             if result is not None and have_flow:
@@ -2573,6 +2724,7 @@ class EarthworksController(G.LayerTreeMixin):
                     result.capture_pct, stored,
                     result.total_infiltration_m3, result.site_exit_m3,
                     natural_ponding_m3=self._natural_ponding_m3(),
+                    capacity_note=self._capacity_note(result, drawn_result),
                 )
             elif result is not None:
                 self._panel.scorecard_no_flow(result.total_capacity_m3)
@@ -2584,6 +2736,76 @@ class EarthworksController(G.LayerTreeMixin):
             import traceback
             print(f"TerrainFlow Assessment — live assessment error: {exc}")
             traceback.print_exc()
+
+    def _drawn_basis_balance(self, enabled, soil, duration_hr, total_runoff_m3,
+                             uncaptured_m3, routing):
+        """The same storm scored against the **drawn** capacities, for comparison.
+
+        The live score is sized on measured terrain storage, which on a keyed design is
+        nearly double the drawn figure. That invites an obvious and important question —
+        *did all that extra storage buy anything?* — and it is answerable for the price of
+        one more balance pass (~30 ms over arithmetic already in hand), so it is answered
+        rather than left to be assumed.
+
+        On the Quail Island design the answer is **no**: 57% either way, because 7,567 m³
+        of the 17,537 m³ storm never reaches a feature at all and every overflow that does
+        occur is caught downstream. Capacity is not the constraint there; interception is.
+        Returns None when nothing is measured, so there is nothing to compare.
+        """
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+        from terrainflow_assessment.modules.water_balance import run_water_balance
+
+        if not any(getattr(e, "terrain_capacity_m3", None) for e in enabled):
+            return None
+        try:
+            drawn_stores = build_stores_from_earthworks(
+                enabled, soil_name=soil, dem_path=self._state.dem_path, basis="drawn")
+            counts = self._state.catchment_counts or {}
+            meta = self._state.flow_grid_meta or {}
+            cell_area = meta.get("cell_area_m2", 0.0)
+            runoff_m = self._current_runoff_mm() / 1000.0
+            for store in drawn_stores:
+                cells = counts.get(store.id, 0)
+                store.direct_catchment_m2 = cells * cell_area
+                store.inflow_m3 = cells * cell_area * runoff_m
+                store.outlet_flat = self._state.catchment_outlets.get(store.id)
+            return run_water_balance(
+                drawn_stores, duration_hr, total_runoff_m3,
+                uncaptured_m3=uncaptured_m3, routing=routing,
+                count_infiltration=self._panel.count_infiltration,
+            ) if drawn_stores else None
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — drawn-basis balance error: {exc}")
+            return None
+
+    def _capacity_note(self, result, drawn_result):
+        """One line under the scorecard band: is capacity what limits this design?
+
+        Adaptive rather than decorative. Where the two bases agree, the useful thing to
+        say is that storage is not the lever and how much water never arrives; where they
+        differ, the useful thing is by how much. Both are one sentence, because the
+        scorecard is a headline and this is a footnote to it.
+        """
+        if result is None or drawn_result is None:
+            return None
+        built = result.total_capacity_m3
+        drawn = drawn_result.total_capacity_m3
+        if built <= drawn * 1.02:
+            return None
+        gain = result.capture_pct - drawn_result.capture_pct
+        if abs(gain) < 0.5:
+            missed = max(0.0, result.site_exit_m3)
+            return (
+                f"Measured on the ground your earthworks hold {built:,.0f} m³, not the "
+                f"{drawn:,.0f} m³ the drawn sections give — but the score is the same "
+                f"either way. Capacity is not what limits this design: {missed:,.0f} m³ "
+                f"never reaches a feature. Intercept more, not store more."
+            )
+        return (
+            f"Measured on the ground your earthworks hold {built:,.0f} m³ against the "
+            f"{drawn:,.0f} m³ the drawn sections give, and that is worth {gain:+.0f} "
+            f"points of capture — water the banks hold above natural ground."
+        )
 
     def _build_network_nodes(self, all_ews, stores, result):
         """Node dicts for the flow network — one per earthwork, water from the balance.
@@ -2614,8 +2836,19 @@ class EarthworksController(G.LayerTreeMixin):
                 "name": ew.name,
                 "ew_type": ew.type,
                 "colour": colour,
+                # The ground at the centroid — it orders the network. A dam's *crest*
+                # is a separate figure, and the row prints that instead: sampling the
+                # ground under a wall and calling it the crest read 54 m for a crest
+                # of 56.12 m.
                 "elevation": elev,
-                "capacity_m3": getattr(ew, "capacity_m3", 0.0) or 0.0,
+                "crest_elevation": getattr(ew, "crest_elevation", None),
+                # Both, always. The node's bar is filled against ``capacity_m3``, which is
+                # the measured pond wherever one exists — and a figure that can be twice
+                # the drawn one cannot be shown without the drawn one beside it.
+                "capacity_m3": (getattr(ew, "terrain_capacity_m3", None)
+                                or getattr(ew, "capacity_m3", 0.0) or 0.0),
+                "drawn_capacity_m3": getattr(ew, "capacity_m3", 0.0) or 0.0,
+                "capacity_is_measured": getattr(ew, "terrain_capacity_m3", None) is not None,
                 "stored_m3": f["stored_m3"] if f else 0.0,
                 "fill_pct": f["fill_pct"] if f else 0.0,
                 "overflowed": bool(f["overflowed"]) if f else False,
@@ -2634,8 +2867,16 @@ class EarthworksController(G.LayerTreeMixin):
         """Totals + disclaimer line beneath the network."""
         if result is None:
             return ""
+        # "Capacity" here is what the ground holds, which is the basis the bars above are
+        # filled against. Where that differs from the drawn sections, both are named —
+        # the drawn total is what a contractor prices and what can be checked by hand.
+        drawn = sum(getattr(s, "drawn_capacity_m3", 0.0) or 0.0
+                    for s in (self._state.balance_stores or []))
+        cap = f"Capacity {result.total_capacity_m3:,.0f} m³"
+        if drawn and result.total_capacity_m3 > drawn * 1.02:
+            cap += f" on the ground ({drawn:,.0f} m³ drawn)"
         parts = [
-            f"Capacity {result.total_capacity_m3:,.0f} m³ · "
+            f"{cap} · "
             f"Cut {result.total_cut_m3:,.0f} · Fill {result.total_fill_m3:,.0f} m³"
         ]
         if result.terminal_deficit_m3 > 0:
@@ -2837,6 +3078,26 @@ class EarthworksController(G.LayerTreeMixin):
         """Show/hide the direct-catchment layer from the panel."""
         self.refresh_catchment_layer(visible=visible)
 
+    def clear_selection_highlight(self):
+        """Take the highlight off the canvas.
+
+        The band is deliberately independent of the earthwork layers so it can
+        survive them being rebuilt on every edit — which also means hiding
+        those layers does not hide it, and there was no other way to get rid of
+        it than selecting something else. Anything that ends the selection, or
+        that is about to photograph the canvas, calls this.
+        """
+        from qgis.core import QgsWkbTypes
+
+        band = getattr(self, "_selection_band", None)
+        if band is None:
+            return
+        band.reset(QgsWkbTypes.LineGeometry)
+        try:
+            self._canvas.refresh()
+        except Exception:
+            pass
+
     def highlight_selected_earthwork(self, index):
         """Outline the selected feature on the canvas.
 
@@ -2939,7 +3200,7 @@ class EarthworksController(G.LayerTreeMixin):
             geom_type = cfg.geom_type
             display_name = f"{cfg.label}s"
             color_hex = cfg.style[1]
-            if resolve_layer(self._project, self._state.ew_layers.get(ew_type)):
+            if resolve_layer(self._project, self._state.ew_layer_ids.get(ew_type)):
                 continue
 
             layer = QgsVectorLayer(f"{geom_type}?crs={crs_str}", display_name, "memory")
@@ -2980,7 +3241,8 @@ class EarthworksController(G.LayerTreeMixin):
             # points at — delete the layer in the Layers panel, or drop it while
             # re-stacking the group, and the next access raises "wrapped C/C++
             # object has been deleted" instead of quietly rebuilding.
-            self._state.ew_layers[ew_type] = layer.id()
+            self._state.ew_layer_ids[ew_type] = layer.id()
+            self._watch_visibility(layer.id())
 
     # ---------------------------------------------------------------- Earthwork symbology
 
@@ -2991,13 +3253,13 @@ class EarthworksController(G.LayerTreeMixin):
 
     def _refresh_ew_layer(self):
         self._ensure_ew_layers()
-        for layer_id in self._state.ew_layers.values():
+        for layer_id in self._state.ew_layer_ids.values():
             layer = resolve_layer(self._project, layer_id)
             if layer is not None:
                 layer.dataProvider().truncate()
 
         for ew in self._state.earthwork_manager.get_all():
-            layer = resolve_layer(self._project, self._state.ew_layers.get(ew.type))
+            layer = resolve_layer(self._project, self._state.ew_layer_ids.get(ew.type))
             if layer is None:
                 continue
             f = QgsFeature()
@@ -3010,18 +3272,56 @@ class EarthworksController(G.LayerTreeMixin):
                               1 if getattr(ew, "enabled", True) else 0, w])
             layer.dataProvider().addFeature(f)
 
-        for layer_id in self._state.ew_layers.values():
+        for layer_id in self._state.ew_layer_ids.values():
             layer = resolve_layer(self._project, layer_id)
             if layer is not None:
                 layer.triggerRepaint()
 
     # ---------------------------------------------------------------- Earthworks analysis
 
+    def _burner_grid_mismatch(self):
+        """Why the burner cannot be used against the session's DEM, or None.
+
+        The burner is built once, from whichever DEM was selected at the time. Every
+        raster it writes inherits that grid, while Baseline analyses ``state.dem_path`` —
+        so if the two ever disagree, the before and after rasters describe different
+        ground and nothing downstream can reconcile them. On the Quail Island run they
+        disagreed by an entire extent (2157x1319 against 1027x858) and the only visible
+        symptom was a line of small print under the verification table.
+        """
+        burner = self._state.burner
+        info = self._state.dem_info
+        if burner is None or info is None:
+            return None
+        if getattr(burner, "dem_path", None) == self._state.dem_path:
+            return None
+        try:
+            same_grid = tuple(burner.shape) == (int(info.height), int(info.width))
+        except Exception:
+            same_grid = False
+        if same_grid:
+            return None
+        return (
+            f"Baseline and the earthworks burn would run on different terrain: the "
+            f"burn is set up for a {burner.shape[1]}x{burner.shape[0]} grid but the "
+            f"session's DEM is {info.width}x{info.height}. Re-select the DEM in the "
+            f"panel and run Baseline again."
+        )
+
     def run_with_earthworks(self):
         if not self._state.dem_path or not self._state.burner:
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment", "Load a DEM and run baseline first."
             )
+            return
+        mismatch = self._burner_grid_mismatch()
+        if mismatch:
+            # Refuse rather than warn. Burning against a burner built from a different
+            # DEM produces a ponding raster on a different grid from the baseline's, and
+            # the verification can only respond by skipping the subtraction — so every
+            # measured volume comes back carrying the site's natural ponding, with the
+            # design's own numbers looking plausible throughout.
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", mismatch)
             return
 
         enabled = self._state.earthwork_manager.get_enabled()
@@ -3040,6 +3340,18 @@ class EarthworksController(G.LayerTreeMixin):
         self._state.burner.save(modified_dem, mod_path)
         self._state.modified_dem_path = mod_path
 
+        # What the terrain model actually moved, measured here because both surfaces are
+        # in hand. The report prints it beside the drawn-section figure, which assumes
+        # flat ground and so understates a level cut on any real slope.
+        try:
+            from terrainflow_assessment.modules.earthwork_design import burn_quantities
+            cell_area = (self._state.dem_info.cell_area_m2
+                         if self._state.dem_info else 1.0)
+            self._state.burn_quantities = burn_quantities(
+                self._state.burner.original, modified_dem, cell_area)
+        except Exception:
+            self._state.burn_quantities = None
+
         cell_area_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
         threshold_cells = int(
             self._panel.stream_threshold_ha * 10_000 / cell_area_m2
@@ -3057,6 +3369,13 @@ class EarthworksController(G.LayerTreeMixin):
             label="earthworks",
             run_catchments=False,
             routing=self._panel.routing,
+            # Without these the re-run silently fell back to the worker's constructor
+            # defaults — coefficient at C=0.50 — so a rainfall-basis or SCS-CN session got
+            # its earthworks Surface Runoff and exit L/s scaled by a *different* depth from
+            # the baseline it is meant to be compared against. The chosen basis governs the
+            # whole assessment, which has to include this run.
+            sizing_basis=self._panel.sizing_basis,
+            runoff_coefficient=self._panel.runoff_coefficient,
         )
         self._state.analysis_worker.progress.connect(self._panel.set_earthworks_progress)
         self._state.analysis_worker.finished.connect(self._on_earthworks_complete)
@@ -3070,12 +3389,27 @@ class EarthworksController(G.LayerTreeMixin):
         bl = BaselineController(self._state, self._panel, self._project,
                                 self._iface, self._canvas)
         bl._load_result_layers(result, is_earthworks=True)
-        self._load_burned_dem_layer()
+        self._load_burned_dem_layer(bl)
         if result.get("ponding"):
             self._state.ponding_raster_path = result["ponding"]
 
+        # Reported on this tier as well as the baseline, so the two runs are comparable: a
+        # burn that creates unrouted cells the bare ground did not have is worth knowing
+        # about, and it is exactly the case a design would introduce.
+        unrouted = result.get("unrouted_warning")
+        if unrouted:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", unrouted)
+
+        crest = result.get("crest_warning")
+        if crest:
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", crest)
+
         # Non-circular check: terrain-derived ponding vs analytic capacity (§4).
         self._state.verification = self._compute_verification()
+        # Both need what that pass read off disk, so they follow it rather than
+        # standing on their own.
+        self._build_event_pond_layers()
+        self._build_overtopping_layer()
         msg = "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
         v = self._state.verification
         if v is not None:
@@ -3104,27 +3438,34 @@ class EarthworksController(G.LayerTreeMixin):
     def verification_sentence(self, v):
         """Explain the verification delta in words.
 
-        "Verified · Δ −38%" said nothing about what was being compared or what the
-        user should do. The delta now measures **only** the burn — measured ponding
-        against what the grid can represent — with freeboard and resolution reported
-        as separate, expected differences rather than folded into the same number.
+        "Verified · Δ −38%" said nothing about what was being compared or what the user
+        should do. The delta now compares two floods — what each feature impounds alone
+        against what the finished site ponds there — so it isolates interaction between
+        features, with impoundment, freeboard and the grid's fidelity all reported as
+        separate terms rather than folded into the same number.
         """
         if v is None:
             return ""
         freeboard = sum(f.get("freeboard_m3", 0.0) for f in v.per_feature)
         penalty = sum(f.get("resolution_penalty_m3", 0.0) for f in v.per_feature)
+        impounded = sum(f.get("impoundment_m3", 0.0) for f in v.per_feature)
         reference = sum(f.get("rasterisable_m3", 0.0) for f in v.per_feature)
 
         parts = [
-            f"Δ {v.delta_pct:+.0f}% — measured storage {v.terrain_total_m3:,.0f} m³ "
-            f"against the {reference:,.0f} m³ this grid can represent."
+            f"Δ {v.delta_pct:+.0f}% — the finished site ponds "
+            f"{v.terrain_total_m3:,.0f} m³ against the {reference:,.0f} m³ these "
+            f"features hold on their own."
         ]
+        if impounded > 1:
+            parts.append(f"Of that, {impounded:,.0f} m³ is water the banks hold above "
+                         f"natural ground — beyond any drawn cross-section.")
         if abs(freeboard) > 1:
             parts.append(f"Freeboard accounts for a further {freeboard:,.0f} m³ "
                          f"deliberately kept empty.")
         if abs(penalty) > 1:
-            parts.append(f"Grid resolution shifts the drawn shape by "
-                         f"{penalty:+,.0f} m³.")
+            parts.append(f"The grid cut the drawn trench {penalty:+,.0f} m³ "
+                         f"differently; where that is large, Geometric is the capacity "
+                         f"figure.")
         return " ".join(parts)
 
     def _compute_verification(self):
@@ -3140,6 +3481,7 @@ class EarthworksController(G.LayerTreeMixin):
         import rasterio
         from shapely.geometry import shape as _shp
 
+        from terrainflow_assessment.modules.dem_loader import align_to_grid
         from terrainflow_assessment.modules.earthwork_design import capacity_breakdown
         from terrainflow_assessment.modules.footprint import (
             min_dimension,
@@ -3190,21 +3532,41 @@ class EarthworksController(G.LayerTreeMixin):
                 with rasterio.open(bl_pond_path) as src:
                     arr = src.read(1).astype("float64")
                     bnd = src.nodata
-                if arr.shape != shape:
-                    bl_uncorrected = (
-                        f"the baseline ponding raster is {arr.shape[1]}×{arr.shape[0]} "
-                        f"but the earthworks raster is {shape[1]}×{shape[0]}. Re-run "
-                        f"the Baseline stage at the current extent"
-                    )
+                    bl_transform = src.transform
+                if bnd is not None:
+                    arr[arr == bnd] = 0.0
+                arr = np.clip(arr, 0.0, None)
+                if arr.shape == shape and bl_transform == transform:
+                    bl_pond = arr
                 else:
-                    if bnd is not None:
-                        arr[arr == bnd] = 0.0
-                    bl_pond = np.clip(arr, 0.0, None)
+                    # Different shape is not necessarily different ground. A design file
+                    # carries a *clip* of its DEM, so the baseline commonly sits on an
+                    # exact sub-window of the burn's grid at the same cell size — on the
+                    # Quail Island run, 66 rows and 287 columns in. Align it; only give
+                    # up when the two grids genuinely do not share cells.
+                    aligned = align_to_grid(arr, bl_transform, transform, shape)
+                    if aligned is not None:
+                        bl_pond = aligned
+                    else:
+                        bl_uncorrected = (
+                            f"the baseline ponding raster ({arr.shape[1]}×{arr.shape[0]}) "
+                            f"does not share a grid with the earthworks raster "
+                            f"({shape[1]}×{shape[0]}), so it cannot be lined up cell for "
+                            f"cell. Re-run the Baseline stage at the current extent"
+                        )
             except Exception as exc:
                 bl_uncorrected = (f"the baseline ponding raster could not be read "
                                   f"({exc})")
 
         diff = np.clip(ew_pond - bl_pond, 0.0, None)
+
+        burned_masks = getattr(self._state.burner, "burned_masks", None) or {}
+        burned_cut = getattr(self._state.burner, "burned_cut", None) or {}
+        # The terrain capacities the design tier already computed and cached on each
+        # feature (see ``_refresh_terrain_capacity``). Reusing them here rather than
+        # re-flooding costs nothing and guarantees the Verify table and the live
+        # assessment cannot disagree about what a feature holds.
+        terrain_by_id = {}
 
         analytic_by_name = {}
         min_dims = {}
@@ -3226,71 +3588,401 @@ class EarthworksController(G.LayerTreeMixin):
             else:
                 min_dims[ew.name] = min_dimension(geom) if geom is not None else None
 
-            mask = np.zeros(shape, dtype=bool)
-            if geom is not None:
-                try:
-                    foot = geom
-                    if foot.geom_type in ("LineString", "MultiLineString"):
-                        foot = foot.buffer(
-                            max(getattr(ew, "width", 2.0) / 2.0, cell_size))
-                    mask = rasterize_footprint(foot, shape, transform,
-                                               all_touched=True)
-                except Exception:
-                    mask = np.zeros(shape, dtype=bool)
+            # The cells the burn actually claimed, straight from the burner. Re-deriving
+            # them here is what let the two drift: this buffered a line by
+            # max(width/2, cell_size) with all_touched while _burn_swale buffered by
+            # top_width/2, so for anything narrower than two cells the measuring mask was
+            # wider than the trench, inflating n_cells, inflating the At-grid reference
+            # and biasing every Δ negative. Falls back to re-deriving only when no burn
+            # has run on this grid.
+            terrain = getattr(ew, "terrain_capacity_m3", None)
+            if terrain is not None:
+                terrain_by_id[ew.name] = float(terrain)
+
+            mask = burned_masks.get(getattr(ew, "id", None))
+            if mask is None or mask.shape != shape:
+                mask = np.zeros(shape, dtype=bool)
+                if geom is not None:
+                    try:
+                        foot = geom
+                        if foot.geom_type in ("LineString", "MultiLineString"):
+                            foot = foot.buffer(
+                                max(getattr(ew, "width", 2.0) / 2.0, cell_size))
+                        mask = rasterize_footprint(foot, shape, transform,
+                                                   all_touched=False)
+                    except Exception:
+                        mask = np.zeros(shape, dtype=bool)
             footprints.append((ew.name, mask))
 
             # What this grid can actually represent — the reference the delta is
             # measured against, so the headline isolates burn error from cell size.
             try:
                 breakdowns[ew.name] = capacity_breakdown(
-                    ew, cell_size=cell_size, n_cells=int(mask.sum()))
+                    ew, cell_size=cell_size, n_cells=int(mask.sum()),
+                    terrain_storage_m3=getattr(ew, "terrain_capacity_m3", None),
+                    cut_m3=burned_cut.get(getattr(ew, "id", None)))
             except Exception:
                 pass
 
         if not analytic_by_name:
             return None
 
-        terrain_by_name, unattributed = attribute_ponding_volume(diff, cell_area, footprints)
+        added = attribute_ponding_volume(diff, cell_area, footprints)
         # Water already standing here before any earthwork, over the same footprints —
         # so a feature built in a hollow can report what it adds, what was already
         # there, and the pool that ends up on the ground. One extra region-labelling
         # pass; the flood it depends on has already run.
-        existing_by_name, _ = attribute_ponding_volume(bl_pond, cell_area, footprints)
+        existing = attribute_ponding_volume(bl_pond, cell_area, footprints)
         baseline_total = raster_ponding_volume(bl_pond, cell_area)
         earthworks_total = raster_ponding_volume(ew_pond, cell_area)
 
         result = build_verification(
-            analytic_by_name, terrain_by_name, baseline_total, earthworks_total,
+            analytic_by_name, added.per_name, baseline_total, earthworks_total,
             min_dims, cell_size, breakdowns=breakdowns,
-            existing_by_name=existing_by_name,
+            existing_by_name=existing.per_name,
+            merged_groups=added.groups,
         )
-        result.unattributed_m3 = unattributed
+        result.unattributed_m3 = added.unattributed_m3
         # None when the subtraction was applied; a reason string when every measured
         # figure still carries whatever ponded there naturally.
         result.baseline_uncorrected = bl_uncorrected
+
+        # Hand the arrays forward rather than reading and re-aligning them a second
+        # time for the event pond. Same rasters, same footprints, same grid — which is
+        # what stops the two views of one pool from disagreeing about where it is.
+        self._state.pond_context = {
+            "full": ew_pond, "baseline": bl_pond, "footprints": footprints,
+            "transform": transform, "shape": shape, "cell_area_m2": cell_area,
+        }
         return result
 
-    def _load_burned_dem_layer(self):
-        """Add the burned (Strategy-C) DEM to the layer panel so the carve/ridge is visible.
+    def _build_event_pond_layers(self):
+        """Draw where *this event's* water actually stands, over the full pond.
 
-        Placed at the bottom of the Design group (it is a backdrop, not a result
-        overlay) and registered under the earthworks layer ids so it shows/hides with
+        The ponding raster beside it is a capacity map: every hollow filled to its
+        spill point, drawn brim-full whatever the storm delivers, so a dam at 5% and a
+        dam at 100% render identically. This is the other half of that picture — each
+        pool re-filled with only the volume the balance routes into it, solved for the
+        level that holds it, so a part-full pond sits small and shallow in the bottom
+        of its basin.
+
+        **Two layers from one raster**, because the comparison is what the user is
+        after and a fill under a fill shows nothing: the raster carries the depth, and
+        the outline is the water's edge, which is the thing that survives being drawn
+        over a dark pond. Both go in at the top of the group, so the line reads over
+        the fill and the fill over the capacity beneath it.
+
+        Built here rather than live on the design tier because it needs the burn — the
+        pools come from the raster the re-analysis produced. It therefore carries the
+        same staleness as the layer it qualifies, which is the honest arrangement:
+        both move when you re-analyse, and neither claims to be current before then.
+        """
+        import numpy as np
+        import rasterio
+        from rasterio.features import shapes as _shapes
+
+        from terrainflow_assessment.core.registry.map_palette import (
+            EVENT_WATER_LINE,
+            WATER_CAPTURED,
+        )
+        from terrainflow_assessment.modules.reporting import event_pond_depth
+
+        ctx = self._state.pond_context
+        balance = self._state.balance
+        dem_path = self._state.modified_dem_path
+        if not ctx or balance is None or not dem_path or not os.path.exists(dem_path):
+            return
+
+        stored = {f["name"]: f.get("stored_m3", 0.0)
+                  for f in (getattr(balance, "per_feature", None) or [])}
+        if not stored:
+            return
+
+        try:
+            with rasterio.open(dem_path) as src:
+                ground = src.read(1).astype("float64")
+                crs = src.crs
+        except Exception:
+            return
+        if ground.shape != ctx["shape"]:
+            return
+
+        try:
+            depth = event_pond_depth(
+                ctx["full"], ground, ctx["cell_area_m2"], ctx["footprints"], stored,
+                existing=ctx["baseline"],
+            )
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — event pond error: {exc}")
+            return
+
+        wet = depth > 0.001
+        if not wet.any():
+            return
+
+        path = os.path.join(self._state.output_dir, "event_pond.tif")
+        try:
+            with rasterio.open(
+                path, "w", driver="GTiff", dtype="float32", count=1,
+                height=depth.shape[0], width=depth.shape[1],
+                crs=crs, transform=ctx["transform"], nodata=-9999.0,
+            ) as dst:
+                dst.write(np.where(wet, depth, -9999.0).astype("float32"), 1)
+        except Exception:
+            return
+
+        layer = QgsRasterLayer(path, "Earthworks — Pond Capacity (event)")
+        if layer.isValid():
+            # Scaled to the *full* pond's deepest cell, not its own. Left to scale
+            # itself, a shallower event pond would stretch the same ramp over a
+            # smaller range and the two layers would say "deepest" in the same navy
+            # at different depths — which is exactly the comparison being made here.
+            S.apply_raster_ramp(layer, WATER_CAPTURED,
+                                float(np.asarray(ctx["full"]).max()))
+            self.place(layer, G.RERUN, at_top=True)
+            self._state.earthworks_layer_ids.append(layer.id())
+
+        crs_str = (self._state.dem_info.crs_wkt if self._state.dem_info
+                   else (crs.to_wkt() if crs else "EPSG:4326"))
+        line = QgsVectorLayer(f"LineString?crs={crs_str}",
+                              "Earthworks — Event Water Line", "memory")
+        if not line.isValid():
+            return
+        feats = []
+        for geom, _value in _shapes(wet.astype("uint8"), mask=wet,
+                                    transform=ctx["transform"]):
+            # Cell-edge rings, deliberately unsmoothed: the water's edge is known to
+            # the cell and drawing it as a curve would claim a precision the grid
+            # does not have. Holes come through as their own rings — an island in a
+            # pond has a shoreline too.
+            for ring in geom.get("coordinates", []):
+                pts = [QgsPointXY(float(x), float(y)) for x, y in ring]
+                if len(pts) < 2:
+                    continue
+                f = QgsFeature()
+                f.setGeometry(QgsGeometry.fromPolylineXY(pts))
+                feats.append(f)
+        if not feats:
+            return
+        line.dataProvider().addFeatures(feats)
+        line.updateExtents()
+        line.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple({
+            "color": ",".join(str(c) for c in EVENT_WATER_LINE),
+            "width": "0.5",
+        })))
+        self.place(line, G.RERUN, at_top=True)
+        self._state.earthworks_layer_ids.append(line.id())
+
+    def _build_overtopping_layer(self):
+        """Find barriers their own pools pour over, say so, and draw the run of crest.
+
+        Two things the map could not previously tell you, both measured off the burn.
+
+        *That it happens at all*: a pool leaves at the lowest point of its rim, and where
+        that point is the structure's own crest the water goes over the wall. Finding it
+        by eye meant clicking cells with Identify and comparing them against a crest
+        elevation held in a dialog.
+
+        *That it happens along the whole crest*: D8 sends the entire overflow through one
+        cell, so the stream layer draws a single thread crossing the wall and invites the
+        reading that water is picking a spot. A level crest does not work that way — the
+        pool's surface stays flat as it rises, so it goes over every metre standing at
+        the pour level simultaneously. The band drawn here is that length, and it is what
+        discharge per metre has to be figured against.
+        """
+        import rasterio
+        from rasterio.features import shapes as _shapes
+
+        from terrainflow_assessment.core.registry.map_palette import (
+            OVERTOPPING_EDGE,
+            OVERTOPPING_FILL,
+        )
+        from terrainflow_assessment.modules.burn_strategy import overtopping_warning
+        from terrainflow_assessment.modules.reporting import overtopping_spill
+
+        ctx = self._state.pond_context
+        dem_path = self._state.modified_dem_path
+        burner = self._state.burner
+        if not ctx or burner is None or not dem_path or not os.path.exists(dem_path):
+            return
+
+        try:
+            with rasterio.open(dem_path) as src:
+                ground = src.read(1).astype("float64")
+        except Exception:
+            return
+        if ground.shape != ctx["shape"]:
+            return
+
+        original = getattr(burner, "original", None)
+        masks = getattr(burner, "burned_masks", None) or {}
+        built_by = getattr(burner, "burned_raised", None) or {}
+        if original is None or original.shape != ground.shape:
+            return
+        # The cells this feature *raised* — its crest — not its whole footprint. A cut
+        # cannot be overtopped; only built ground can.
+        raised = ground > original + 1e-6
+
+        barriers, by_name = [], {}
+        for ew in self._state.earthwork_manager.get_enabled():
+            key = getattr(ew, "id", None)
+            # ``burned_raised`` is the bank this feature built; ``burned_masks`` is what it
+            # claimed. For a dam the two overlap, but a swale's mask is its trench and its
+            # companion berm sits beside it, so ``mask & raised`` is empty and a keyed
+            # swale was never checked at all. Prefer the bank, fall back to the mask.
+            mask = built_by.get(key)
+            if mask is None or mask.shape != ground.shape:
+                mask = masks.get(key)
+            if mask is None or mask.shape != ground.shape:
+                continue
+            crest = mask & raised
+            if not crest.any():
+                continue
+            try:
+                length = float(ew.geometry.length())
+            except Exception:
+                length = 0.0
+            barriers.append((ew.name, crest, length))
+            by_name[ew.name] = ew
+
+        if not barriers:
+            return
+        try:
+            spills = overtopping_spill(ctx["full"], ground,
+                                       abs(ctx["transform"].a), barriers,
+                                       built=raised)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — overtopping check failed: {exc}")
+            return
+        if not spills:
+            return
+
+        for spill in spills:
+            ew = by_name.get(spill.name)
+            msg = overtopping_warning(
+                spill.name, spill.length_m, spill.pour_level_m,
+                alt_saddle_m=spill.alt_saddle_m,
+                has_spillway=getattr(ew, "spillway", None) is not None,
+            )
+            if msg:
+                self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
+
+        crs_str = (self._state.dem_info.crs_wkt if self._state.dem_info
+                   else "EPSG:4326")
+        layer = QgsVectorLayer(f"Polygon?crs={crs_str}",
+                               "Earthworks — Overtopping", "memory")
+        if not layer.isValid():
+            return
+        pr = layer.dataProvider()
+        pr.addAttributes([
+            QgsField("feature", QMetaType.QString),
+            QgsField("length_m", QMetaType.Double),
+            QgsField("level_m", QMetaType.Double),
+            QgsField("spillway", QMetaType.QString),
+        ])
+        layer.updateFields()
+
+        feats = []
+        for spill in spills:
+            ew = by_name.get(spill.name)
+            sited = "designed" if getattr(ew, "spillway", None) is not None else "none"
+            parts = []
+            for geom, _v in _shapes(spill.mask.astype("uint8"), mask=spill.mask,
+                                    transform=ctx["transform"]):
+                rings = geom.get("coordinates", [])
+                if not rings:
+                    continue
+                poly = QgsGeometry.fromPolygonXY(
+                    [[QgsPointXY(float(x), float(y)) for x, y in ring]
+                     for ring in rings])
+                if poly is not None and not poly.isEmpty():
+                    parts.append(poly)
+            if not parts:
+                continue
+            merged = parts[0]
+            for extra in parts[1:]:
+                merged = merged.combine(extra)
+            f = QgsFeature(layer.fields())
+            f.setGeometry(merged)
+            f.setAttributes([spill.name, round(spill.length_m, 1),
+                             round(spill.pour_level_m, 2), sited])
+            feats.append(f)
+        if not feats:
+            return
+        pr.addFeatures(feats)
+        layer.updateExtents()
+
+        sym = QgsFillSymbol.createSimple({
+            "color": ",".join(str(c) for c in OVERTOPPING_FILL),
+            "outline_color": ",".join(str(c) for c in OVERTOPPING_EDGE),
+            "outline_width": "0.6",
+        })
+        layer.setRenderer(QgsSingleSymbolRenderer(sym))
+
+        # Labelled with the length, because that is the whole point of the band.
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "concat(\"feature\", ' spills over ', " \
+                             "format_number(\"length_m\", 0), ' m')"
+        settings.isExpression = True
+        text = QgsTextFormat()
+        text.setSize(9)
+        text.setColor(QColor(120, 20, 12))
+        buf = QgsTextBufferSettings()
+        buf.setEnabled(True)
+        buf.setSize(1.0)
+        buf.setColor(QColor(255, 255, 255, 220))
+        text.setBuffer(buf)
+        settings.setFormat(text)
+        settings.placement = QgsPalLayerSettings.Placement.OverPoint
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+
+        self.place(layer, G.RERUN, at_top=True)
+        self._state.earthworks_layer_ids.append(layer.id())
+
+    def _load_burned_dem_layer(self, baseline=None):
+        """Add the burned (Strategy-C) DEM, and its shaded relief, to the layer panel.
+
+        Both are backdrops rather than result overlays, so they go at the bottom of the
+        Design group and are registered under the earthworks layer ids to show/hide with
         the 'with earthworks' toggle. Silently skips if the burn produced no valid raster.
+
+        **The hillshade is what makes the design visible as earth.** On the elevation
+        ramp a 1 m swale inside 60 m of relief is one shade of grey against another and
+        cannot be seen at all; shaded, it reads immediately as a cut line with a bank
+        beside it, and the keyed returns at each end show as the hooks they are. Ticked
+        on arrival, unlike Baseline's copy of the same idea, because looking at it is the
+        entire point.
+
+        Order matters and is the reason this is one method rather than two. ``place``
+        appends, and appended means bottom of the group means painted **underneath**, so
+        the shading has to be added *before* the elevation raster it is shading or it
+        renders behind it and nothing changes on screen. *baseline* supplies the renderer
+        (:meth:`BaselineController._add_hillshade`) so there is one definition of what a
+        TerrainFlow hillshade looks like rather than two that can drift apart.
         """
         path = self._state.modified_dem_path
         if not path or not os.path.exists(path):
             return
         from qgis.core import QgsRasterLayer
-        layer = QgsRasterLayer(path, "Earthworks — Burned DEM")
-        if not layer.isValid():
-            return
-        self.place(layer, G.DESIGN)
+
         ids = list(getattr(self._state, "earthworks_layer_ids", None) or [])
-        ids.append(layer.id())
+
+        def _place(layer, visible=True):
+            self.place(layer, G.DESIGN, visible=visible)
+            ids.append(layer.id())
+
+        if baseline is not None:
+            baseline._add_hillshade(_place, path, "Earthworks — Hillshade")
+
+        layer = QgsRasterLayer(path, "Earthworks — Burned DEM")
+        if layer.isValid():
+            _place(layer)
         self._state.earthworks_layer_ids = ids
 
     def _on_analysis_error(self, tb):
-        self._panel.set_earthworks_complete("Analysis failed — see Python console for details.")
+        self._panel.set_earthworks_failed(
+            "Analysis failed — see Python console for details.")
         print("TerrainFlow Assessment — Analysis error:\n" + tb)
         self._iface.messageBar().pushCritical("TerrainFlow Assessment",
                                                "Analysis failed. See Python console.")
@@ -3347,11 +4039,7 @@ class EarthworksController(G.LayerTreeMixin):
             lbl_fill = QLabel(
                 f"<b>Storm fill:</b>  <span style=\"color:{colour}\">{fill_str}</span>"
             )
-            lbl_fill.setToolTip(
-                "Ratio of design-storm inflow volume to depression capacity.\n"
-                "Below 100%: depression absorbs the full storm event.\n"
-                "Above 100%: overflow will occur — consider enlarging the earthwork."
-            )
+            lbl_fill.setToolTip(H.FILL_RATIO)
             layout.addWidget(lbl_fill)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
@@ -3362,7 +4050,7 @@ class EarthworksController(G.LayerTreeMixin):
     def _on_no_ponding(self):
         self._iface.messageBar().pushInfo(
             "TerrainFlow Assessment",
-            "No ponding at that location — click a blue zone in the Water Captured layer.",
+            "No ponding at that location — click a blue zone in a Pond Capacity layer.",
         )
 
     # ---------------------------------------------------------------- Slope visualisation

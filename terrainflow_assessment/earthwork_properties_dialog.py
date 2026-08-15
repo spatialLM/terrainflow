@@ -27,6 +27,7 @@ from .core.sizing import (
 from .modules.earthwork_design import (
     Spillway,
     berm_height_estimate,
+    berm_spoil_per_metre,
     bind_crest,
     calculate_capacity,
     calculate_diversion_discharge,
@@ -259,14 +260,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.spin_crest_elev.setValue(ew.crest_elevation)
             elif self._crest_elevation is not None:
                 self.spin_crest_elev.setValue(self._crest_elevation)
-            self.spin_crest_elev.setToolTip(
-                "Absolute elevation of the dam crest (top of the wall).\n\n"
-                "Pre-filled from the highest ground the drawn line touches.\n"
-                "All cells under the wall will be raised to this elevation,\n"
-                "so the wall height varies with the valley shape beneath it.\n\n"
-                "Water will pool behind the dam up to this level.\n"
-                "Run Re-analyse with Earthworks to see retained volume."
-            )
+            self.spin_crest_elev.setToolTip(H.DAM_CREST_ELEVATION)
             self.spin_crest_elev.valueChanged.connect(self._update_capacity)
             form.addRow("Crest elevation:", self.spin_crest_elev)
 
@@ -279,19 +273,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.chk_key_banks.setChecked(
                 bool(getattr(ew, "key_into_banks", False)) if ew else True
             )
-            self.chk_key_banks.setToolTip(
-                "On (default): extend each end of the wall along its own bearing\n"
-                "until the ground rises to the crest elevation, so water cannot flow\n"
-                "around the ends. The drawn line is replaced by the wall that would\n"
-                "actually have to be built — often noticeably longer — and both the\n"
-                "capacity and the verification burn use that wall.\n\n"
-                "You are told how far each end moved. If an end finds no ground at\n"
-                "crest height within 250 m you get a warning: the design does not\n"
-                "impound as drawn, and the crest is too high for this location.\n\n"
-                "Off: keep the wall exactly as drawn. Water escapes around the ends\n"
-                "if it stops short of high ground, and the reported storage is what\n"
-                "the short wall actually holds."
-            )
+            self.chk_key_banks.setToolTip(H.DAM_KEY_BANKS)
             self.chk_key_banks.toggled.connect(self._update_capacity)
             form.addRow("", self.chk_key_banks)
             self.spin_depth = None
@@ -340,19 +322,12 @@ class EarthworkPropertiesDialog(QDialog):
             seed_bottom = (ew.bottom_width_m if ew
                            else max(0.05, self.spin_width.value() - 2 * 0.5))
             self.spin_bottom_width.setValue(min(seed_bottom, self.spin_width.value()))
-            self.spin_bottom_width.setToolTip(
-                "Width of the channel floor, centred under the top width.\n"
-                "Together with depth and top width this sets the side batter\n"
-                "(shown below). A narrower bottom → steeper batter."
-            )
+            self.spin_bottom_width.setToolTip(H.BOTTOM_WIDTH)
             self.spin_bottom_width.valueChanged.connect(self._update_capacity)
             form.addRow("Bottom width:", self.spin_bottom_width)
 
             self.lbl_side_slope = QLabel("—")
-            self.lbl_side_slope.setToolTip(
-                "Side batter angle from horizontal, derived from top/bottom width and\n"
-                "depth. 45° = 1:1; a smaller angle is flatter/more stable; 90° = vertical."
-            )
+            self.lbl_side_slope.setToolTip(H.SIDE_SLOPE)
             form.addRow("Side slope:", self.lbl_side_slope)
         else:
             self.spin_bottom_width = None
@@ -366,15 +341,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_gradient.setDecimals(1)
             self.spin_gradient.setSuffix(" %")
             self.spin_gradient.setSingleStep(0.1)
-            self.spin_gradient.setToolTip(
-                "Channel gradient — the fall in elevation per 100 m of drain length.\n\n"
-                "Recommended range: 0.5–2.0 %\n"
-                "  0.5 % — minimum to maintain flow, suits gentle slopes\n"
-                "  1.0 % — standard design gradient\n"
-                "  2.0 % — steep; use erosion protection (rock mulch / vegetation)\n"
-                "  >2.0 % — significant erosion risk; consider drop structures\n\n"
-                "Higher gradient → higher discharge capacity but greater erosion risk."
-            )
+            self.spin_gradient.setToolTip(H.CHANNEL_GRADIENT)
             self.spin_gradient.valueChanged.connect(self._update_capacity)
             form.addRow("Drain gradient:", self.spin_gradient)
         else:
@@ -391,13 +358,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_wall_slope.setValue(
                 ew.wall_slope if ew else self._cfg.default_side_slope
             )
-            self.spin_wall_slope.setToolTip(
-                "Wall batter as horizontal run per unit of depth (H:V).\n"
-                "0 : 1 = vertical walls; 1 : 1 = 45°; flatter is more stable.\n\n"
-                "The stored capacity accounts for the sloped walls. Note the DEM\n"
-                "burn (Re-analyse) still carves vertical walls this phase — the\n"
-                "verification comparison will surface the difference."
-            )
+            self.spin_wall_slope.setToolTip(H.WALL_SLOPE)
             self.spin_wall_slope.valueChanged.connect(self._update_capacity)
             form.addRow("Wall batter:", self.spin_wall_slope)
 
@@ -414,15 +375,30 @@ class EarthworkPropertiesDialog(QDialog):
         self.chk_companion.setChecked(ew.companion_berm if ew else False)
         self.chk_companion.setVisible(self.ew_type == "swale")
         if self.ew_type == "swale":
-            self.chk_companion.setToolTip(
-                "Excavated material is placed on the downhill side of the swale,\n"
-                "forming a retaining berm. Volume is conserved — the berm height is\n"
-                "calculated from the excavated volume at 75% compaction.\n\n"
-                "The berm raises the effective water level above the original ground,\n"
-                "significantly increasing total water retention capacity."
-            )
+            self.chk_companion.setToolTip(H.COMPANION_BERM)
             self.chk_companion.stateChanged.connect(self._update_capacity)
             form.addRow("", self.chk_companion)
+
+            # A bank open at its ends holds nothing on ground that falls along the
+            # alignment, however tall it is — the pool simply goes round. Same geometry
+            # as a dam keyed into its abutments, so the same wording and the same
+            # underlying walk (extend_to_abutments).
+            self.chk_key_banks = QCheckBox("Key the berm into the banks")
+            self.chk_key_banks.setChecked(
+                bool(getattr(ew, "key_into_banks", True)) if ew else True)
+            self.chk_key_banks.setToolTip(H.SWALE_KEY_BANKS)
+            self.chk_key_banks.setVisible(True)
+            self.chk_key_banks.stateChanged.connect(self._update_capacity)
+            form.addRow("", self.chk_key_banks)
+
+            # The elevation the burn settled on. It cannot be known before an analysis
+            # — the spoil sets it, and the spoil depends on the ground the trench is cut
+            # into — so until then this says which button produces it rather than
+            # showing a number that would have to be a guess.
+            self.lbl_berm_crest = QLabel("")
+            self.lbl_berm_crest.setStyleSheet("color: #5f7176; font-size: 10px;")
+            self.lbl_berm_crest.setToolTip(H.BERM_CREST)
+            form.addRow("", self.lbl_berm_crest)
 
         # Per-feature soil. Soil is rarely uniform across a farm and infiltration is
         # the term most sensitive to it, so a basin in a clay hollow can be sized on
@@ -457,13 +433,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.combo_overflow.addItem(opt_name, opt_id)
                 if opt_id == current_target:
                     self.combo_overflow.setCurrentIndex(self.combo_overflow.count() - 1)
-            self.combo_overflow.setToolTip(
-                "Where this feature's overflow goes once it is full.\n\n"
-                "Auto: the nearest feature downslope (elevation heuristic).\n"
-                "A named target only receives water when it actually sits\n"
-                "downslope of this feature — water can't flow uphill. An uphill\n"
-                "choice is flagged below and its water goes downslope instead."
-            )
+            self.combo_overflow.setToolTip(H.OVERFLOW_TARGET)
             self.combo_overflow.currentIndexChanged.connect(self._update_overflow_warning)
             form.addRow("Overflows to:", self.combo_overflow)
 
@@ -490,12 +460,7 @@ class EarthworkPropertiesDialog(QDialog):
             cap_layout.addRow("Drain length:", lbl_length)
 
             self.lbl_capacity_m3 = QLabel("—")
-            self.lbl_capacity_m3.setToolTip(
-                "Peak discharge capacity using Manning's equation.\n"
-                "Q = (1/n) × A × R^(2/3) × S^(1/2)\n"
-                "Manning's n = 0.025 (compacted earthen channel)\n"
-                "Trapezoidal cross-section, 1:1 side slopes."
-            )
+            self.lbl_capacity_m3.setToolTip(H.MANNINGS_CAPACITY)
             cap_layout.addRow("Discharge capacity:", self.lbl_capacity_m3)
             self.lbl_capacity_l = QLabel("—")   # repurposed: capacity vs inflow status
             cap_layout.addRow("", self.lbl_capacity_l)
@@ -505,11 +470,7 @@ class EarthworkPropertiesDialog(QDialog):
             if self.ew_type == "swale":
                 length_m = self.geometry.length()
                 lbl_length = QLabel(f"{length_m:,.1f} m")
-                lbl_length.setToolTip(
-                    "Total length of the swale as drawn on the map.\n"
-                    "Compare with the Recommended length below — if this swale\n"
-                    "is shorter, consider extending it or adjusting depth / width."
-                )
+                lbl_length.setToolTip(H.SWALE_LENGTH)
                 cap_layout.addRow("Swale length:", lbl_length)
 
             self.lbl_capacity_m3 = QLabel("—")
@@ -529,20 +490,11 @@ class EarthworkPropertiesDialog(QDialog):
                 cap_layout.addRow(QLabel("Berms are barriers — no storage capacity."))
             if self.ew_type == "dam":
                 self.lbl_wall_volume = QLabel("—")
-                self.lbl_wall_volume.setToolTip(
-                    "Estimated volume of earthfill needed to construct the dam wall.\n\n"
-                    "Calculated as: sum along the wall of (crest − ground) × wall thickness × segment length.\n"
-                    "This is a rectangular cross-section approximation — add ~20% for side slopes."
-                )
+                self.lbl_wall_volume.setToolTip(H.DAM_WALL_VOLUME)
                 cap_layout.addRow("Wall fill volume:", self.lbl_wall_volume)
 
                 self.lbl_max_height = QLabel("—")
-                self.lbl_max_height.setToolTip(
-                    "Height of the tallest point of the dam wall above the ground beneath it.\n\n"
-                    "Lower is better — a maximum height under 4–5 m is generally\n"
-                    "considered feasible for a farm dam without engineering certification.\n"
-                    "Higher walls require professional design and may need regulatory approval."
-                )
+                self.lbl_max_height.setToolTip(H.DAM_MAX_HEIGHT)
                 cap_layout.addRow("Max wall height:", self.lbl_max_height)
 
                 lbl_note = QLabel(
@@ -623,11 +575,7 @@ class EarthworkPropertiesDialog(QDialog):
         # Channel batter feedback: narrowest width (min_dimension) + live soil advisory.
         if self._cfg is not None and "bottom_width" in self._cfg.derived_dims:
             self.lbl_min_dim = QLabel("—")
-            self.lbl_min_dim.setToolTip(
-                "Narrowest dimension of the cross-section (the channel bottom width).\n"
-                "If this falls below the DEM cell size the feature burns at 1-cell width\n"
-                "(routing effect only) — you'll see a warning when you re-analyse."
-            )
+            self.lbl_min_dim.setToolTip(H.MIN_DIMENSION)
             cap_layout.addRow("Bottom width (min):", self.lbl_min_dim)
 
             self.lbl_advisory = QLabel("")
@@ -909,15 +857,61 @@ class EarthworkPropertiesDialog(QDialog):
 
         if self.lbl_berm_height is not None:
             if companion:
-                h_b = berm_height_estimate(depth, width)
+                # The bank the burner actually builds: this swale's spoil spread across
+                # a band as wide as the swale, to a level crest. Quoted as height x
+                # width, because a height alone was read as a ridge — and the figure
+                # this line used to carry *was* a ridge, √(0.75 x section), which is
+                # 2.4x taller than the flat top the burn lays down.
+                spoil = berm_spoil_per_metre(depth, width, bottom_width)
+                h_b = berm_height_estimate(depth, width, bottom_width)
                 self.lbl_berm_height.setText(
-                    f"Berm height ≈ {h_b:.2f} m  · capacity is an estimate — actual\n"
-                    f"backwater ponding depends on local slope and terrain."
+                    f"Berm ≈ {h_b:.2f} m high × {width:.1f} m wide, level-topped —\n"
+                    f"{spoil:.2f} m³ of spoil per metre. Level ground: a real crest is\n"
+                    f"one elevation, so its height follows the ground, and keying in\n"
+                    f"spreads the same soil lower."
                 )
             else:
                 self.lbl_berm_height.setText("")
 
+        self._update_berm_crest(companion)
+
         self._update_swale_verdict(depth, width, side_slope)
+
+    def _update_berm_crest(self, companion):
+        """Show the crest the last burn built, beside the key-in choice it depends on.
+
+        Blank when there is no berm to describe. Stated as an elevation *and* as its
+        height above the ground under the bank, so it can be read against the predicted
+        height under Calculated Capacity rather than sitting there as a bare datum with
+        nothing to compare it to.
+        """
+        label = getattr(self, "lbl_berm_crest", None)
+        if label is None:
+            return
+        if not companion:
+            label.setText("")
+            return
+        crest = getattr(self._earthwork, "berm_crest_elevation", None)
+        if crest is None:
+            label.setText("Berm crest: run Re-analyse with Earthworks")
+            return
+        height = getattr(self._earthwork, "berm_height_m", None)
+        if not height:
+            label.setText(f"Berm crest: {crest:.2f} m  (last analysis)")
+            return
+        low, mean, high = height
+        # The range, not the mean. The crest is one elevation and the ground under it is
+        # not, so the bank's height changes along its run — by 0.60 m to 1.73 m on one
+        # swale of the Quail Island design, whose mean of 0.98 m describes neither end.
+        # Collapsed to a single figure only when there is genuinely nothing to spread.
+        if high - low < 0.05:
+            label.setText(
+                f"Berm crest: {crest:.2f} m — {mean:.2f} m above the ground it sits "
+                f"on  (last analysis)")
+        else:
+            label.setText(
+                f"Berm crest: {crest:.2f} m — {low:.2f}–{high:.2f} m tall along its "
+                f"run (mean {mean:.2f})  (last analysis)")
 
     def _update_swale_verdict(self, depth, width, side_slope):
         """Deficit-at-the-drawn-length readout for a swale.

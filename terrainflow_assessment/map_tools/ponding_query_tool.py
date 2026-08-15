@@ -13,7 +13,7 @@ from shapely.ops import unary_union
 
 class PondingQueryTool(QgsMapTool):
     """
-    Click on the 'Water Captured' raster to select a connected ponding area.
+    Click on the 'Pond Capacity (full)' raster to select a connected ponding area.
 
     Emits ponding_selected(volume_m3, volume_l, cell_count, area_m2,
                            QgsGeometry, inflow_m3, fill_fraction)

@@ -9,11 +9,72 @@ from shapely.geometry import box
 from terrainflow_assessment.modules.dem_loader import (
     DEMInfo,
     DEMValidationError,
+    align_to_grid,
     clip_dem_to_polygon,
     compute_slope_raster,
     load_dem,
     slope_degrees,
 )
+
+# ---------------------------------------------------------------------------
+# align_to_grid
+# ---------------------------------------------------------------------------
+
+def _tf(left, top, cell=1.0):
+    from rasterio.transform import Affine
+    return Affine(cell, 0.0, left, 0.0, -cell, top)
+
+
+class TestAlignToGrid:
+    def test_sub_window_lands_at_its_offset(self):
+        """The Quail Island case: a clip 66 rows down and 287 columns in.
+
+        Baseline ran on the design file's embedded clip (1027x858) while the burn ran on
+        the parent tile (2157x1319) — same 1 m cell, same CRS, an exact integer offset.
+        Lining the two up recovers the subtraction that isolates earthwork storage; the
+        old shape-equality test threw it away and reported every measured volume with the
+        site's natural ponding still in it.
+        """
+        src = np.arange(6, dtype="float64").reshape(2, 3)
+        dst = align_to_grid(src, _tf(1574398.0, 5169966.0), _tf(1574111.0, 5170032.0),
+                            (100, 400))
+        assert dst is not None
+        assert dst[66:68, 287:290] == pytest.approx(src)
+        assert dst.sum() == pytest.approx(src.sum())
+
+    def test_identical_grids_round_trip(self):
+        src = np.array([[1.0, 2.0], [3.0, 4.0]])
+        out = align_to_grid(src, _tf(0.0, 10.0), _tf(0.0, 10.0), (2, 2))
+        assert out == pytest.approx(src)
+
+    def test_larger_source_is_cropped_to_the_destination(self):
+        src = np.arange(16, dtype="float64").reshape(4, 4)
+        out = align_to_grid(src, _tf(0.0, 10.0), _tf(1.0, 9.0), (2, 2))
+        assert out == pytest.approx(src[1:3, 1:3])
+
+    def test_different_cell_size_is_refused(self):
+        src = np.ones((2, 2))
+        assert align_to_grid(src, _tf(0.0, 10.0, cell=0.5),
+                             _tf(0.0, 10.0, cell=1.0), (4, 4)) is None
+
+    def test_fractional_offset_is_refused(self):
+        """Half a cell out is not a window — and must never be nudged into one."""
+        src = np.ones((2, 2))
+        assert align_to_grid(src, _tf(0.5, 10.0), _tf(0.0, 10.0), (4, 4)) is None
+
+    def test_disjoint_but_commensurate_grids_give_zeros_not_none(self):
+        # Same grid, no overlap: the correction is legitimately zero everywhere, which
+        # is a different statement from "these rasters cannot be compared".
+        src = np.ones((2, 2))
+        out = align_to_grid(src, _tf(100.0, 10.0), _tf(0.0, 10.0), (2, 2))
+        assert out is not None
+        assert out.sum() == pytest.approx(0.0)
+
+    def test_volume_is_preserved_when_fully_contained(self):
+        rng = np.random.default_rng(0)
+        src = rng.random((7, 5))
+        out = align_to_grid(src, _tf(3.0, 17.0), _tf(0.0, 20.0), (20, 20))
+        assert out.sum() == pytest.approx(src.sum())
 
 # ---------------------------------------------------------------------------
 # load_dem

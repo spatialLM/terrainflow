@@ -301,6 +301,50 @@ def basin_volume_battered(area_m2: float, perimeter_m: float, depth_m: float,
     )
 
 
+def level_crest_from_spoil(ground_elevations, cell_area_m2: float,
+                           spoil_m3: float) -> float | None:
+    """Elevation of a **level** crest built from ``spoil_m3`` over the given cells.
+
+    Returns the ``E`` for which ``Σ max(0, E − ground) × cell_area == spoil``, or
+    ``None`` when there is nothing to build with or nowhere to put it.
+
+    A berm is spoil from the trench beside it, and a berm that impounds water has to be
+    *level* — a bank built to a constant height above sloping ground has its crest on
+    the same slope, so the water finds the low end and leaves. Raising every cell by one
+    height is what the burn used to do, and it is why a companion berm could be credited
+    with storage it could not hold.
+
+    Solved by sorting rather than iterating: with the ground sorted ascending, the fill
+    volume below the ``k``-th cell is a known running sum, so the bracket containing the
+    answer is found in one pass and the level within it is exact. O(n log n), no
+    tolerance, no iteration count.
+
+    ``ground_elevations`` is any sequence of the cells the berm may occupy.
+    """
+    ground = sorted(float(g) for g in ground_elevations
+                    if g is not None and not math.isnan(g))
+    if not ground or cell_area_m2 <= 0 or spoil_m3 <= 0:
+        return None
+
+    # Walk the sorted ground. Standing at level ground[k], the fill needed to reach it
+    # is Σ_{i<k} (ground[k] − ground[i]) × cell_area, which the running sum gives for
+    # free. The first k whose requirement exceeds the spoil brackets the answer.
+    running = 0.0                       # Σ ground[i] for i < k
+    for k in range(1, len(ground)):
+        running += ground[k - 1]
+        needed = (ground[k] * k - running) * cell_area_m2
+        if needed >= spoil_m3:
+            # Between ground[k-1] and ground[k], k cells are being raised.
+            below = (ground[k - 1] * k - running) * cell_area_m2
+            return ground[k - 1] + (spoil_m3 - below) / (k * cell_area_m2)
+
+    # Enough spoil to bury every cell and keep going: level off above the highest.
+    running += ground[-1]
+    n = len(ground)
+    below = (ground[-1] * n - running) * cell_area_m2
+    return ground[-1] + (spoil_m3 - below) / (n * cell_area_m2)
+
+
 def drawdown_time(storage_m3: float, infiltration_rate_m_hr: float,
                   infiltrating_area_m2: float) -> DrawdownResult:
     """Time (hours) to infiltrate ``storage_m3`` away through the pond floor.

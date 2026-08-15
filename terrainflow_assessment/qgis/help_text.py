@@ -112,10 +112,10 @@ EXIT_FLOW = (
 
 # --------------------------------------------------------------------- Terrain Tools
 QUERY_PONDING = (
-    "Click on a blue zone in the 'Water Captured' layer to select the\n"
+    "Click on a blue zone in the 'Pond Capacity (full)' layer to select the\n"
     "entire connected pooling area and report its volume and surface area.\n\n"
-    "Baseline: shows natural low spots where water collects.\n"
-    "Earthworks: shows water captured by your swales/basins."
+    "That layer is what each hollow holds when brim-full, so this reports a\n"
+    "capacity. 'Pond Capacity (event)' shows how far the storm actually fills it."
 )
 SLOPE_CLASS = (
     "Semi-transparent slope suitability overlay (calculated from DEM):\n"
@@ -455,11 +455,6 @@ OVERFLOW_TARGET_AUTO = (
     "instead forces the link — unless that would create a loop, which is\n"
     "refused with a warning."
 )
-AREA_SUBTOTALS = (
-    "The same water balance restricted to one area, so a large site can be\n"
-    "read block by block. Subtotals come from the same cell-by-cell routing as\n"
-    "the site figure, so they always add up to it."
-)
 STRESS_POINTS = (
     "Where a feature is predicted to overtop before it is nominally full.\n\n"
     "Inflow concentrates where drainage lines cross an alignment, so a swale\n"
@@ -467,8 +462,8 @@ STRESS_POINTS = (
     "shows the distance along the feature and the surplus in m³."
 )
 THROUGHFLOW = (
-    "Total water that passes through each cell over the event, as a blue\n"
-    "gradient — pale where flow is diffuse, dark where it concentrates.\n\n"
+    "Total surface water that passes over each cell during the event, as a\n"
+    "blue gradient — pale where flow is diffuse, dark where it concentrates.\n\n"
     "Finer-grained than the stream layer: it shows the whole surface, so you\n"
     "can see water gathering before it becomes a defined channel."
 )
@@ -516,7 +511,7 @@ FEATURE_SOIL = (
 RUNOFF_METHOD = (
     "How runoff is estimated from the design storm. The depth this produces is what\n"
     "the whole assessment then works from — the analysis rasters (streams,\n"
-    "throughflow, exit points) and earthwork sizing alike.\n\n"
+    "surface runoff, exit points) and earthwork sizing alike.\n\n"
     "RUNOFF COEFFICIENT (default). The rational method: runoff = rainfall x C,\n"
     "with C taken from the Surface row below. Standard practice in water-harvesting\n"
     "design and the basis of Brad Lancaster's sizing calculations. Its merit is that\n"
@@ -583,22 +578,40 @@ INFLOW_PROFILE = (
     "and looser the further the alignment departs from the contour."
 )
 VERIFICATION_TABLE = (
-    "What each feature was designed to hold, against what the burned terrain\n"
-    "actually holds. Four numbers because a single figure hid three unrelated gaps.\n\n"
-    "DESIGN      the drawn shape less the 0.8 freeboard allowance — what you plan on\n"
-    "GEOMETRIC   the drawn shape exactly — the hole as specified\n"
-    "AT GRID     that shape rasterised to the DEM — what this cell size can represent\n"
-    "MEASURED    ponding read off the burned DEM — what the burn produced\n\n"
-    "Only the last comparison tests anything. Delta is MEASURED against AT GRID, and\n"
-    "it should sit near zero; a non-zero delta there is a burn problem and nothing\n"
-    "else.\n\n"
-    "The other two gaps are expected. Geometric to At-grid is the resolution penalty,\n"
-    "and it is often POSITIVE: a 1 m cell cannot cut a battered side, so it burns the\n"
-    "section square and ends up larger than drawn. Design to Geometric is the\n"
-    "freeboard you chose, a fixed -20%.\n\n"
+    "What each feature was drawn to hold, against what it holds on the actual\n"
+    "ground. Four numbers because a single figure hid three unrelated gaps.\n\n"
+    "DESIGN      the drawn shape less the 0.8 freeboard allowance — pure arithmetic\n"
+    "            from your dimensions, and reproducible by hand\n"
+    "GEOMETRIC   the drawn shape exactly. For a swale with a companion berm this is\n"
+    "            the trench PLUS the berm's own section\n"
+    "AT GRID     what this feature impounds on this hillside — its own cut and its own\n"
+    "            bank, flooded on the DEM in isolation from every other feature\n"
+    "MEASURED    the pond it ends up with once the whole design is built\n\n"
+    "The first two are CALCULATED, the last two are MEASURED. That is the important\n"
+    "division, and it is why AT GRID is usually the larger.\n\n"
+    "AT GRID is bigger than GEOMETRIC on most swales, and this is real, not an error.\n"
+    "A companion berm keyed into its banks holds water ABOVE natural ground, standing\n"
+    "deeper than the trench and reaching further up the slope than the trench does.\n"
+    "No cross-section can predict that — it depends on the hillside — so the drawn\n"
+    "figure understates a keyed swale, often by half. That is also why the live score\n"
+    "sizes against AT GRID: against the drawn figure a keyed swale reads 'full' while\n"
+    "most of its pond is still empty, and the design gets oversized.\n\n"
+    "Delta is MEASURED against AT GRID and should sit near zero. Both are floods now,\n"
+    "so a non-zero delta means the finished site ponds differently from the feature on\n"
+    "its own — interaction with a neighbour, and nothing else.\n\n"
+    "Where a feature impounds well above natural ground it is flagged as a retaining\n"
+    "structure. It is holding water like a dam; give it a designed spillway and build\n"
+    "the bank properly, rather than letting it overtop at its own lowest point.\n\n"
+    "A row marked with a dagger is one where the grid could not hold the section you\n"
+    "drew — a feature narrower than about three cells has no cell more than half a\n"
+    "cell from its own edge, so it cannot reach full depth. That is a grid limit, and\n"
+    "GEOMETRIC is the capacity to read on such a row.\n\n"
     "A feature narrower than one cell shows no measured figure. It is verified for\n"
     "placement and routing only — a storage volume read off the grid would measure\n"
-    "the grid rather than the design."
+    "the grid rather than the design.\n\n"
+    "Two features whose pools run together are blank in the same two columns and get\n"
+    "one line beneath the table instead. A basin and the dam on its lip hold a single\n"
+    "sheet of water; dividing it between them would report the division, not the burn."
 )
 RAINFALL_DATA = (
     "Depth-duration-frequency statistics for this site — how much rain falls, over\n"
@@ -854,3 +867,155 @@ RUNOFF_COEFFICIENT = (
     "have stood on: bare compacted earth sheds roughly half its rain, healthy pasture\n"
     "much less, and the same paddock sheds far more when already wet."
 )
+EXPORT_REPORT = (
+    "Write the Site Water Plan as a PDF (or HTML) you can print, hand to a\n"
+    "contractor, or send on.\n\n"
+    "Needs a Baseline and nothing more. Sections that depend on a design, or on\n"
+    "Re-analyse with Earthworks, say so on the page rather than quietly going\n"
+    "missing — so the document always states how complete it is.\n\n"
+    "Storage figures are arithmetic on the shapes you drew until Re-analyse has\n"
+    "measured them against the burned terrain. It is a design estimate from a\n"
+    "terrain model, not a survey and not an engineering certification."
+)
+
+# --------------------------------------------------------------------- Earthwork properties
+# The per-feature dialog. Dams and swales each have a "key the banks into the
+# hillside" option that does the same thing for a different shape, so the copy
+# differs and the two constants are kept apart.
+DAM_CREST_ELEVATION = (
+    "Absolute elevation of the dam crest (top of the wall).\n\n"
+    "Pre-filled from the highest ground the drawn line touches.\n"
+    "All cells under the wall will be raised to this elevation,\n"
+    "so the wall height varies with the valley shape beneath it.\n\n"
+    "Water will pool behind the dam up to this level.\n"
+    "Run Re-analyse with Earthworks to see retained volume."
+)
+DAM_KEY_BANKS = (
+    "On (default): extend each end of the wall along its own bearing\n"
+    "until the ground rises to the crest elevation, so water cannot flow\n"
+    "around the ends. The drawn line is replaced by the wall that would\n"
+    "actually have to be built — often noticeably longer — and both the\n"
+    "capacity and the verification burn use that wall.\n\n"
+    "You are told how far each end moved. If an end finds no ground at\n"
+    "crest height within 250 m you get a warning: the design does not\n"
+    "impound as drawn, and the crest is too high for this location.\n\n"
+    "Off: keep the wall exactly as drawn. Water escapes around the ends\n"
+    "if it stops short of high ground, and the reported storage is what\n"
+    "the short wall actually holds."
+)
+DAM_WALL_VOLUME = (
+    "Estimated volume of earthfill needed to construct the dam wall.\n\n"
+    "Calculated as: sum along the wall of (crest − ground) × wall thickness × segment length.\n"
+    "This is a rectangular cross-section approximation — add ~20% for side slopes."
+)
+DAM_MAX_HEIGHT = (
+    "Height of the tallest point of the dam wall above the ground beneath it.\n\n"
+    "Lower is better — a maximum height under 4–5 m is generally\n"
+    "considered feasible for a farm dam without engineering certification.\n"
+    "Higher walls require professional design and may need regulatory approval."
+)
+WALL_SLOPE = (
+    "Wall batter as horizontal run per unit of depth (H:V).\n"
+    "0 : 1 = vertical walls; 1 : 1 = 45°; flatter is more stable.\n\n"
+    "The stored capacity accounts for the sloped walls. Note the DEM\n"
+    "burn (Re-analyse) still carves vertical walls this phase — the\n"
+    "verification comparison will surface the difference."
+)
+BOTTOM_WIDTH = (
+    "Width of the channel floor, centred under the top width.\n"
+    "Together with depth and top width this sets the side batter\n"
+    "(shown below). A narrower bottom → steeper batter."
+)
+SIDE_SLOPE = (
+    "Side batter angle from horizontal, derived from top/bottom width and\n"
+    "depth. 45° = 1:1; a smaller angle is flatter/more stable; 90° = vertical."
+)
+CHANNEL_GRADIENT = (
+    "Channel gradient — the fall in elevation per 100 m of drain length.\n\n"
+    "Recommended range: 0.5–2.0 %\n"
+    "  0.5 % — minimum to maintain flow, suits gentle slopes\n"
+    "  1.0 % — standard design gradient\n"
+    "  2.0 % — steep; use erosion protection (rock mulch / vegetation)\n"
+    "  >2.0 % — significant erosion risk; consider drop structures\n\n"
+    "Higher gradient → higher discharge capacity but greater erosion risk."
+)
+COMPANION_BERM = (
+    "Excavated material is placed on the downhill side of the swale,\n"
+    "forming a retaining berm. Volume is conserved — the spoil from the\n"
+    "trench is spread along the bank at 75% compaction, and the bank is\n"
+    "built to a LEVEL crest at whatever elevation that volume reaches.\n\n"
+    "Level, not a constant height: a bank raised the same amount all along\n"
+    "sloping ground has its crest on that slope, and the water leaves at\n"
+    "the low end. The crest elevation is reported after Re-analyse with\n"
+    "Earthworks, since it depends on how much earth the cut produced."
+)
+SWALE_KEY_BANKS = (
+    "On (default): the berm wraps around both ends of the swale, running\n"
+    "on until the ground rises to the crest, so water cannot flow around\n"
+    "it. This is what makes a companion berm hold the water it is credited\n"
+    "with — soil is added at the ends as well as along the downhill side.\n\n"
+    "Off: the bank runs along the downhill side only. On ground that falls\n"
+    "along the swale the pool escapes at the low end, and the berm adds\n"
+    "little or nothing to what the trench holds by itself."
+)
+BERM_CREST = (
+    "The level the bank was built to, from the volume of earth the trench\n"
+    "produced. Water stands behind the berm up to this height.\n\n"
+    "The height quoted under Calculated Capacity predicts the same bank on\n"
+    "level ground; this is what the terrain model made of it."
+)
+SWALE_LENGTH = (
+    "Total length of the swale as drawn on the map.\n"
+    "Compare with the Recommended length below — if this swale\n"
+    "is shorter, consider extending it or adjusting depth / width."
+)
+OVERFLOW_TARGET = (
+    "Where this feature's overflow goes once it is full.\n\n"
+    "Auto: the nearest feature downslope (elevation heuristic).\n"
+    "A named target only receives water when it actually sits\n"
+    "downslope of this feature — water can't flow uphill. An uphill\n"
+    "choice is flagged below and its water goes downslope instead."
+)
+MANNINGS_CAPACITY = (
+    "Peak discharge capacity using Manning's equation.\n"
+    "Q = (1/n) × A × R^(2/3) × S^(1/2)\n"
+    "Manning's n = 0.025 (compacted earthen channel)\n"
+    "Trapezoidal cross-section, 1:1 side slopes."
+)
+MIN_DIMENSION = (
+    "Narrowest dimension of the cross-section (the channel bottom width).\n"
+    "If this falls below the DEM cell size the feature burns at 1-cell width\n"
+    "(routing effect only) — you'll see a warning when you re-analyse."
+)
+FILL_RATIO = (
+    "Ratio of design-storm inflow volume to depression capacity.\n"
+    "Below 100%: depression absorbs the full storm event.\n"
+    "Above 100%: overflow will occur — consider enlarging the earthwork."
+)
+
+# --------------------------------------------------------------------- Workbench panel
+STORM_CHIP = "The design storm the score is computed against.\nClick to edit in Baseline."
+SAVE_DESIGN = (
+    "Save the DEM reference, every storm and sizing input, the site areas and "
+    "all drawn earthworks to a single .tfd file."
+)
+OPEN_DESIGN = (
+    "Open a .tfd design file. Inputs, areas and earthworks are restored "
+    "immediately; you are then offered the baseline re-run that restores scoring."
+)
+# The ⓘ button beside the slope-class toggle. SLOPE_CLASS_INFO above is the body
+# of the dialog it opens; this is the button's own tooltip.
+SLOPE_CLASS_INFO_BTN = "What do the slope classes mean for earthworks?"
+RESHAPE_EARTHWORK = (
+    "Drag earthwork vertices on the map — the Live Assessment updates\n"
+    "as you drag. Double-click a segment to insert a vertex; Del removes\n"
+    "the highlighted vertex; right-click or Esc finishes."
+)
+
+# --------------------------------------------------------------------- Flow network view
+NETWORK_WATER_HELD = "Water held (ponded) · fill"
+NETWORK_SOAKED = (
+    "Soaked into the ground over the event — captured, but not held "
+    "as standing water, so it does not fill the feature."
+)
+NETWORK_SITE_EXIT = "Runoff not held by any feature"

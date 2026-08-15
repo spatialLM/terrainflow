@@ -17,6 +17,7 @@ plugin wires ``earthworks_payload_ready`` and friends to the controllers that ow
 
 from __future__ import annotations
 
+import logging
 import os
 import zipfile
 
@@ -24,6 +25,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsGeometry,
+    QgsRasterLayer,
     QgsVectorFileWriter,
     QgsVectorLayer,
 )
@@ -40,6 +42,10 @@ from terrainflow_assessment.modules.project_io import (
     DemReference,
     DesignDocument,
 )
+from terrainflow_assessment.qgis.controllers import _groups as G
+from terrainflow_assessment.qgis.controllers._groups import LayerTreeMixin
+
+_log = logging.getLogger(__name__)
 
 # Archive member names. Fixed rather than derived so a human can unzip a design and know
 # what they are looking at.
@@ -59,7 +65,7 @@ class DesignFileError(RuntimeError):
     """A design file could not be written, read, or resolved against a DEM."""
 
 
-class DesignFileController(QObject):
+class DesignFileController(LayerTreeMixin, QObject):
     """Saves the session to a `.tfd` archive and restores it."""
 
     # Restored payloads handed to the controllers that own them.
@@ -370,14 +376,66 @@ class DesignFileController(QObject):
         return path
 
     def _apply_dem(self, dem_path):
-        """Point the session at *dem_path* and invalidate anything derived from terrain."""
-        self._state.dem_path = dem_path
+        """Point the session at *dem_path*, **through the DEM picker**.
+
+        Selecting the restored DEM in the panel is what makes this one session rather
+        than two. ``state.burner`` is written in exactly one place in the codebase —
+        ``BaselineController.on_dem_changed`` — along with ``dem_info``, the panel's
+        "Cell / Area" label and ``slope.tif``. This method used to set ``dem_path`` and
+        ``dem_info`` by hand and leave the other three behind, and because an embedded
+        DEM travels as a *clip*, the consequence was a session split across two grids:
+        Baseline analysed the clip (1027x858 on the Quail Island design) while the burn
+        ran on the stale full tile (2157x1319). The verification then found two rasters
+        it could not subtract, skipped the correction, and reported every measured volume
+        with the site's natural ponding still in it.
+
+        Routing through the picker also makes the restored clip *visible*, which it
+        previously was not: the user was analysing an extent with nothing on the map to
+        say so.
+        """
+        # Validated here rather than in the signal handler, which swallows its own
+        # errors into the message bar — an unreadable DEM has to stop the Open.
         try:
-            self._state.dem_info = load_dem(dem_path)
+            info = load_dem(dem_path)
         except Exception as exc:
             raise DesignFileError(f"The DEM could not be loaded: {exc}") from exc
+
+        self._state.dem_path = dem_path
+        self._state.dem_info = info
         self._state.invalidate_flow_cache()
         self._clear_derived_results()
+        self._select_dem_layer(dem_path)
+
+    def _select_dem_layer(self, dem_path):
+        """Show *dem_path* in the DEM picker so the whole session re-derives from it.
+
+        Prefers a raster already in the project over adding a second copy of the same
+        file. Emits ``dem_changed`` directly rather than relying on the combo: when the
+        layer is already selected, ``setLayer`` is a no-op and no signal fires, which
+        would leave the burner exactly as stale as if this had never been called.
+        """
+        layer = None
+        try:
+            for candidate in self._project.instance().mapLayers().values():
+                if self._raster_source(candidate) == dem_path:
+                    layer = candidate
+                    break
+            if layer is None:
+                layer = QgsRasterLayer(dem_path, os.path.basename(dem_path))
+                if not layer.isValid():
+                    raise DesignFileError(
+                        f"The DEM restored to {dem_path} could not be loaded as a "
+                        f"raster layer.")
+                self.place(layer, G.SITE)
+            self._panel.set_dem_layer(layer)
+            self._panel.dem_changed.emit(layer)
+        except DesignFileError:
+            raise
+        except Exception:
+            # No panel/project (headless construction). The state fields set by the
+            # caller still describe the right DEM; only the burner rebuild is missed,
+            # and run_with_earthworks refuses to run against a mismatched one.
+            _log.exception("could not select the restored DEM in the picker")
 
     def _clear_derived_results(self):
         """Drop every result carried over from whatever was open before.
@@ -389,16 +447,17 @@ class DesignFileController(QObject):
         stale-state-looking-authoritative failure this format exists to avoid, so the
         restore clears it and lets the stages re-earn their ticks.
         """
-        state = self._state
-        state.baseline_result = None
-        state.earthworks_result = None
-        state.sim_result = None
-        state.baseline_report = None
-        state.post_report = None
-        state.comparison = None
-        state.verification = None
-        state.verified_delta_pct = None
-        state.edits_since_verify = None
+        self._state.invalidate_results()
+
+        # The export button is the other half of the same stale claim: it was never
+        # switched back off here, so after an Open it stayed lit and the click
+        # dead-ended on a warning. The summary label kept the previous run's headline
+        # metrics on screen for the same reason.
+        try:
+            self._panel.set_report_ready(False)
+            self._panel.clear_report_summary()
+        except Exception:
+            pass
 
         # The stepper ticks are the visible half of the same claim.
         for stage in ("baseline", "analysis", "design", "verify", "report"):

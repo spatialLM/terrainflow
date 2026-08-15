@@ -36,8 +36,13 @@ for p in (str(HERE), str(HERE.parent)):
 
 DEFAULT_TIMEOUT_S = 300
 
-# Skipped unless named explicitly on the command line: `run_qgis_tests.ps1 slow`.
-OPT_IN_MODULES = {"checks_slow"}
+# Modules skipped unless named explicitly on the command line. Empty since Round 15:
+# `checks_slow` held only `recommend_ponds`, whose "does not terminate" was a modal
+# QMessageBox waiting for a click that never comes offscreen — the harness records those
+# now (see RecordingDialogs), so it runs in seconds and lives in checks_contour with the
+# rest of the keypoint path. Kept as a mechanism, because quarantining beats deleting a
+# check that has found something real.
+OPT_IN_MODULES = set()
 
 
 # ---------------------------------------------------------------------------

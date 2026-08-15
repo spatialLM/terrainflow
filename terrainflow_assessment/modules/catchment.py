@@ -160,11 +160,13 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
         grid = Grid.from_raster(tmp_path)
         dem_r = grid.read_raster(tmp_path)
         pit_filled = grid.fill_pits(dem_r)
+        # A fill, not a breach: ``breach_depressions`` does not exist in pysheds 0.5, so
+        # the except branch is the one that has always run (Round 14).
         try:
-            breached = grid.breach_depressions(pit_filled)
+            filled = grid.breach_depressions(pit_filled)
         except AttributeError:
-            breached = grid.fill_depressions(pit_filled)
-        inflated = grid.resolve_flats(breached)
+            filled = grid.fill_depressions(pit_filled)
+        inflated = grid.resolve_flats(filled)
         # Use dinf routing — avoids np.in1d which was removed in NumPy 2.x
         try:
             fdir = grid.flowdir(inflated, routing="dinf")

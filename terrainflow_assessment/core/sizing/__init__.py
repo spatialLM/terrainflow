@@ -37,6 +37,7 @@ from .primitives import (  # noqa: F401
     basin_volume_battered,
     contour_spacing,
     drawdown_time,
+    level_crest_from_spoil,
     manning_flow,
     pond_volume_frustum,
     prismatic_volume,

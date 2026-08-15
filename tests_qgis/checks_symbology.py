@@ -216,7 +216,22 @@ def _band_thickness(h, rgb, tol=60):
     return best
 
 
-SWALE_RGB = (0, 188, 212)
+def _registry_rgb(ew_type):
+    """The type's colour, read from the registry rather than transcribed.
+
+    These two checks measure a band by hunting for its colour in the rendered
+    pixels, so a hard-coded hex turns any deliberate palette change into a
+    failure that reads like a broken symbol.
+    """
+    from qgis.PyQt.QtGui import QColor
+
+    from terrainflow_assessment.core.registry.earthwork_types import get_type
+
+    c = QColor(get_type(ew_type).style[1])
+    return (c.red(), c.green(), c.blue())
+
+
+SWALE_RGB = _registry_rgb("swale")
 WHITE_RGB = (255, 255, 255)
 
 
@@ -426,7 +441,7 @@ def check_refreshing_annotations_keeps_every_band_layer(dem_path):
         _design_of_every_type(h)
         h.assert_no_errors("initial design")
 
-        before = dict(h.state.ew_layers)
+        before = dict(h.state.ew_layer_ids)
         if not before:
             raise AssertionError("no earthwork layers were registered")
 
@@ -449,7 +464,7 @@ def check_refreshing_annotations_keeps_every_band_layer(dem_path):
 
 
 def check_earthwork_layers_are_held_by_id(dem_path):
-    """_state.ew_layers must hold ids, not layer objects.
+    """_state.ew_layer_ids must hold ids, not layer objects.
 
     CLAUDE.md's rule, and this is the crash it exists to prevent: a stored wrapper
     outlives the C++ object behind it, so the next attribute access raises rather
@@ -458,10 +473,10 @@ def check_earthwork_layers_are_held_by_id(dem_path):
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         _design_of_every_type(h)
-        for key, value in h.state.ew_layers.items():
+        for key, value in h.state.ew_layer_ids.items():
             if not isinstance(value, str):
                 raise AssertionError(
-                    f"ew_layers[{key!r}] holds {type(value).__name__}, not a layer id"
+                    f"ew_layer_ids[{key!r}] holds {type(value).__name__}, not a layer id"
                 )
 
 

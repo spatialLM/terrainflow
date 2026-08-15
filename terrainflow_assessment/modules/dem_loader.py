@@ -17,6 +17,65 @@ class DEMValidationError(ValueError):
     pass
 
 
+# Two grids are the same grid if their cells line up. A metre of slack over a 1 m cell
+# would be a whole cell of error, so the tolerance is a tiny fraction of one — big
+# enough to absorb float drift in a transform read back off disk, small enough that
+# nothing genuinely offset slips through.
+_GRID_EPS = 1e-6
+
+
+def align_to_grid(array, src_transform, dst_transform, dst_shape):
+    """Place *array* onto a larger/smaller grid by **integer cell offset**, or None.
+
+    Returns a ``dst_shape`` array holding *array*'s values where the two grids overlap
+    and zero elsewhere, provided the grids are commensurate: same cell size, same
+    rotation, and origins separated by a whole number of cells. Returns ``None`` when
+    they are not, so the caller can say so rather than resample.
+
+    Resampling is deliberately not offered. The arrays this exists for are ponding
+    *depths*, and interpolating a depth field invents water — a pool one cell wide
+    becomes two cells of half the depth, in the wrong place. Where the grids genuinely
+    differ the honest answer is to re-run the analysis, not to manufacture a correction.
+
+    This exists because a saved design carries a **clipped** DEM: opening one and
+    re-analysing produced a baseline on the clip (1027x858) and a burn on the parent
+    tile (2157x1319), and the verification, unable to subtract them, silently skipped
+    the correction. Those two grids were an exact 66-row / 287-column sub-window of one
+    another at the same 1 m cell — commensurate, and worth aligning rather than
+    discarding.
+    """
+    src = np.asarray(array, dtype="float64")
+    try:
+        if (abs(src_transform.a - dst_transform.a) > _GRID_EPS
+                or abs(src_transform.e - dst_transform.e) > _GRID_EPS
+                or abs(src_transform.b - dst_transform.b) > _GRID_EPS
+                or abs(src_transform.d - dst_transform.d) > _GRID_EPS):
+            return None
+        col_off = (src_transform.c - dst_transform.c) / dst_transform.a
+        row_off = (src_transform.f - dst_transform.f) / dst_transform.e
+    except (AttributeError, TypeError, ZeroDivisionError):
+        return None
+
+    if (abs(col_off - round(col_off)) > _GRID_EPS
+            or abs(row_off - round(row_off)) > _GRID_EPS):
+        return None
+    row_off, col_off = int(round(row_off)), int(round(col_off))
+
+    out = np.zeros(dst_shape, dtype="float64")
+    # Intersect the source's footprint with the destination's, in destination indices.
+    dst_r0, dst_c0 = max(0, row_off), max(0, col_off)
+    dst_r1 = min(dst_shape[0], row_off + src.shape[0])
+    dst_c1 = min(dst_shape[1], col_off + src.shape[1])
+    if dst_r0 >= dst_r1 or dst_c0 >= dst_c1:
+        return out  # commensurate but disjoint — nothing to copy, and that is not an error
+
+    out[dst_r0:dst_r1, dst_c0:dst_c1] = src[
+        dst_r0 - row_off:dst_r1 - row_off,
+        dst_c0 - col_off:dst_c1 - col_off,
+    ]
+    return out
+
+
 class DEMInfo:
     """Container for DEM spatial metadata."""
 

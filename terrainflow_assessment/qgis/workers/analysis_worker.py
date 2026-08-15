@@ -147,11 +147,27 @@ class AnalysisWorker(QThread):
         runoff_vol = fa.get_runoff_volume_raster(runoff_mm, cell_area_m2)
         fa.save_result(runoff_vol, runoff_path, "runoff volume (m³)")
 
+        # Standing water, valued by what the pond passes. Written because the accumulation
+        # beside it stops meaning contributing area inside a pool — a contracted pond holds
+        # its inflow rather than threading a channel through itself — so a reader that wants
+        # catchment size there has to be given it rather than left to infer it.
+        pond_path = None
+        pond_flow = result.get("pond_flow")
+        if pond_flow is not None and np.any(pond_flow):
+            pond_path = os.path.join(self.output_dir, f"ponds_{self.label}.tif")
+            fa.save_result(pond_flow, pond_path, "pond throughflow (cell count)")
+
         # The conditioned surface drives the design-tier catchment labelling
         # (flow_graph.d8_from_dem). Saved rather than kept in memory because the
         # FlowAnalysis instance dies with this thread.
-        conditioned = np.array(result.get("conditioned_dem", fa.dem), dtype="float32")
-        fa.save_result(conditioned, cond_path, "hydrologically conditioned DEM")
+        #
+        # float64, unlike every other raster here: this one carries resolve_flats' synthetic
+        # flat gradient, which is integer multiples of 1e-5 m. float32's spacing passes that
+        # around 600 m elevation, so on a hill country site the gradient would be rounded
+        # out of existence on the way to disk and every flat cell would come back a sink.
+        conditioned = np.array(result.get("conditioned_dem", fa.dem), dtype="float64")
+        fa.save_result(conditioned, cond_path, "hydrologically conditioned DEM",
+                       dtype="float64")
 
         # The site itself — the capture-% denominator. Most specific area wins.
         domain = self._build_domain_mask(fa, shape, transform)
@@ -255,6 +271,23 @@ class AnalysisWorker(QThread):
         # area and must never again be used as the capture-% denominator.
         max_upstream_area_m2 = float(acc_array.max()) * cell_area_m2
 
+        # Water the routing could not place anywhere. Measured against the domain rather
+        # than the whole tile, because a nodata margin outside the site is not a loss.
+        from terrainflow_assessment.modules.flow_analysis import (
+            crest_spread_warning,
+            unrouted_flow_warning,
+        )
+        unrouted_cells = int(result.get("unrouted_cells", 0))
+        unrouted_flow = float(result.get("unrouted_flow", 0.0))
+        unrouted_warning = unrouted_flow_warning(
+            unrouted_cells, unrouted_flow, domain_cells)
+
+        # A pond spills along its whole level crest at once, so each pond is contracted to a
+        # mixing node and sheds its inflow evenly over the cells that discharge from it.
+        # Anything it could not pass on is reported here rather than left to read as a leak.
+        crest_unplaced = float(result.get("crest_residual", 0.0))
+        crest_warning = crest_spread_warning(crest_unplaced, domain_cells)
+
         self.progress.emit(100, "Analysis complete.")
         self.finished.emit({
             "label": self.label,
@@ -278,6 +311,15 @@ class AnalysisWorker(QThread):
             "domain_area_m2": domain_area_m2,
             "catchment_area_m2": domain_area_m2,
             "max_upstream_area_m2": max_upstream_area_m2,
+            "unrouted_cells": unrouted_cells,
+            "unrouted_flow_m3": unrouted_flow * cell_area_m2 * runoff_mm / 1000.0,
+            "unrouted_warning": unrouted_warning,
+            "crest_ponds": int(result.get("crest_ponds", 0)),
+            "crest_cells": int(result.get("crest_cells", 0)),
+            "crest_passes": int(result.get("crest_passes", 0)),
+            "pond_flow": pond_path,
+            "crest_unplaced_m3": crest_unplaced * cell_area_m2 * runoff_mm / 1000.0,
+            "crest_warning": crest_warning,
             "runoff_volume_m3": (runoff_mm / 1000.0) * domain_area_m2,
             "exit_points": exit_points,
             "area_outflow": area_outflow,

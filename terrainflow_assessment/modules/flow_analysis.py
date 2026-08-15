@@ -15,6 +15,68 @@ import numpy as np
 import rasterio
 from pysheds.grid import Grid
 
+# Below this share of the site's runoff, unrouted cells are not worth interrupting for:
+# a handful of nodata holes on the edge of a tile is normal and says nothing about the
+# design. Set from the Quail Island measurement, where 1.4% was worth reporting and a
+# tenth of that would not have been.
+UNROUTED_WARN_FRACTION = 0.005
+
+
+def unrouted_flow_warning(n_cells, flow_cells, domain_cells,
+                          threshold=UNROUTED_WARN_FRACTION):
+    """Advisory when water stops inside the site with nowhere to go.
+
+    Counts only cells away from the edge of the data — see
+    :meth:`FlowAnalysis.unrouted_flow` for why water stopping at a coastline or a clip
+    boundary has left the site rather than gone missing.
+
+    ``flow_cells`` and ``domain_cells`` are both in cell-units, so their ratio is the
+    share of the site's runoff that stops mid-catchment. Returns ``None`` when there is
+    nothing to say.
+    """
+    if not n_cells or flow_cells <= 0 or domain_cells <= 0:
+        return None
+    share = flow_cells / float(domain_cells)
+    if share < threshold:
+        return None
+    return (
+        f"{n_cells:,} cell{'s' if n_cells != 1 else ''} inside the site have nowhere "
+        f"downhill to send water, and hold about {share * 100:.1f}% of its runoff where "
+        f"the flow map cannot follow it. These are not ponds — hollows are already filled "
+        f"to their spill level — but a hole or a spike the conditioning could not resolve. "
+        f"Treat streams and exit volumes below those points as under-reported."
+    )
+
+
+def crest_spread_warning(unplaced_cells, domain_cells, threshold=UNROUTED_WARN_FRACTION):
+    """Advisory when the crest split ran out of passes before a pond chain drained.
+
+    A pond hands its overflow to the next pond down, which hands on what it in turn
+    receives, and each pass of the spread moves the water one link — so a long enough chain
+    of dams needs more passes than the budget allows. Reported rather than absorbed, because
+    the loop is monotone from below: it can only ever *under*-emit, so the number below is
+    exactly how much the map is understating and its sign is known.
+
+    (A pond with no way out at all is a different thing and never gets here — it keeps the
+    default routing, where ``unrouted_flow`` already reports water with nowhere to go.)
+
+    Same units and the same threshold as :func:`unrouted_flow_warning`: cell-units against
+    the domain, so the ratio is the share of the site's runoff. ``None`` when there is
+    nothing to say.
+    """
+    if unplaced_cells <= 0 or domain_cells <= 0:
+        return None
+    share = unplaced_cells / float(domain_cells)
+    if share < threshold:
+        return None
+    return (
+        f"About {share * 100:.1f}% of the site's runoff is still held in ponds: the chain "
+        f"of ponds here runs deeper than the crest spreading resolved, and each pass carries "
+        f"water only one pond further down. Streams and exit volumes below them are "
+        f"under-reported by that much; nothing is over-reported."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core flow analysis
 # ---------------------------------------------------------------------------
@@ -52,23 +114,38 @@ class FlowAnalysis:
             self.nodata = src.nodata
         return True
 
-    def run(self, routing='dinf', runoff_weights=None):
+    def run(self, routing='dinf', runoff_weights=None, crest_split=True):
         """
         Run the full flow analysis pipeline:
           1. Fill pits
-          2. Breach depressions
+          2. Fill depressions (priority-flood)
           3. Resolve flats
           4. Compute flow direction (D-infinity or D8)
-          5. Compute flow accumulation (optionally weighted by per-cell runoff)
+          5. Compute flow accumulation (optionally weighted by per-cell runoff),
+             with every pond contracted to a mixing node so it spills evenly along
+             its crest — see :meth:`_spread_crests`.
+
+        Step 2 is a **fill**, not a breach. ``breach_depressions`` does not exist in
+        pysheds 0.5 — a grep over the installed package finds no definition — so the
+        ``except AttributeError`` branch below has always been the one that runs, and
+        filling is what we want anyway. The old name and comment here claimed otherwise
+        for long enough to mislead a diagnosis (Round 14), which is why they now say
+        what the code does.
 
         Parameters
         ----------
         routing : str — 'dinf' or 'd8'
         runoff_weights : numpy array or None
             Per-cell runoff volume (m³) for weighted accumulation.
+        crest_split : bool
+            Contract ponds and spread their overflow along the crest. ``False`` restores
+            the pipeline exactly as it was before Round 15 — kept so the before/after can
+            be measured from one process, and so "no ponds means nothing moved" is
+            assertable rather than argued.
 
-        Returns dict with 'flow_direction', 'flow_accumulation',
-        and optionally 'runoff_accumulation'.
+        Returns dict with 'flow_direction', 'flow_accumulation', 'conditioned_dem',
+        'unrouted_cells', 'unrouted_flow' and the 'crest_*' counters, and optionally
+        'runoff_accumulation'.
         """
         if self.grid is None:
             raise RuntimeError("DEM not loaded. Call load_dem() first.")
@@ -76,15 +153,23 @@ class FlowAnalysis:
         self.routing = routing
 
         pit_filled = self.grid.fill_pits(self.dem)
+        # ``fill_depressions`` writes into its input buffer and hands the same array back:
+        # ``np.shares_memory(filled, pit_filled)`` is True, so the pre-fill surface has to be
+        # copied out *here*. Measured against it afterwards, every pond is 0.00 m deep and
+        # none is ever found (Round 14).
+        ground = np.array(pit_filled, dtype="float64", copy=True)
         try:
-            breached = self.grid.breach_depressions(pit_filled)
+            filled = self.grid.breach_depressions(pit_filled)
         except AttributeError:
-            breached = self.grid.fill_depressions(pit_filled)
+            filled = self.grid.fill_depressions(pit_filled)
+        # ``resolve_flats`` inflates the flats it is given, and a pond's rim is a flat, so
+        # the level surface has to be copied before it too.
+        ponded = np.array(filled, dtype="float64", copy=True)
 
-        inflated = self.grid.resolve_flats(breached)
+        inflated = self.grid.resolve_flats(filled)
         # Keep the conditioned surface: it is what flow_graph derives its D8 pointers
         # from. Steepest descent on this array is provably acyclic (pits filled,
-        # depressions breached, flats resolved), unlike rounding the D-infinity angles.
+        # depressions filled, flats resolved), unlike rounding the D-infinity angles.
         self.conditioned = inflated
 
         try:
@@ -93,35 +178,192 @@ class FlowAnalysis:
             self.routing = 'd8'
             self.fdir = self.grid.flowdir(inflated)
 
-        try:
-            self.acc = self.grid.accumulation(self.fdir, routing=self.routing)
-        except TypeError:
-            self.acc = self.grid.accumulation(self.fdir)
+        plan = self._crest_plan(ponded, ground) if crest_split else None
+        crest = self._spread_crests(plan) if plan is not None else None
+        if crest is not None:
+            self.acc = crest.accumulation
+        else:
+            try:
+                self.acc = self.grid.accumulation(self.fdir, routing=self.routing)
+            except TypeError:
+                self.acc = self.grid.accumulation(self.fdir)
+
+        unrouted_cells, unrouted_flow = self.unrouted_flow()
 
         result = {
             "flow_direction": self.fdir,
             "flow_accumulation": self.acc,
             "conditioned_dem": inflated,
+            "unrouted_cells": unrouted_cells,
+            "unrouted_flow": unrouted_flow,
+            "crest_ponds": crest.ponds if crest else 0,
+            "crest_cells": crest.outlet_cells if crest else 0,
+            "crest_passes": crest.passes if crest else 0,
+            "crest_residual": crest.residual if crest else 0.0,
+            "crest_skipped": list(crest.skipped) if crest else [],
+            # Each pool painted with its pond's whole throughput, in the same cell-units as
+            # the accumulation. Inside a contracted pond the accumulation is no longer
+            # contributing area — it is what arrived at that cell and stopped — so anything
+            # reading it as catchment size needs this instead.
+            "pond_flow": crest.pond_flow if crest else None,
         }
 
         if runoff_weights is not None:
-            try:
-                from pysheds.sview import Raster as _PR
-                weights_raster = _PR(
-                    runoff_weights.astype("float64"),
-                    viewfinder=self.fdir.viewfinder,
-                )
-            except Exception:
-                weights_raster = runoff_weights
-            try:
-                weighted = self.grid.accumulation(
-                    self.fdir, weights=weights_raster, routing=self.routing
-                )
-            except TypeError:
-                weighted = self.grid.accumulation(self.fdir, weights=weights_raster)
-            result["runoff_accumulation"] = weighted
+            if plan is not None:
+                # The ponds and their exits are a fact about the terrain, so the plan is
+                # reused rather than rebuilt. Spreading this field too is not optional: it
+                # is what ``throughflow_*.tif`` and the exit volumes are read off, and
+                # leaving it unspread would have them disagree with the accumulation beside
+                # them by the whole of the crest correction.
+                result["runoff_accumulation"] = self._spread_crests(
+                    plan, base_weights=np.asarray(runoff_weights, dtype="float64"),
+                ).accumulation
+            else:
+                try:
+                    from pysheds.sview import Raster as _PR
+                    weights_raster = _PR(
+                        runoff_weights.astype("float64"),
+                        viewfinder=self.fdir.viewfinder,
+                    )
+                except Exception:
+                    weights_raster = runoff_weights
+                try:
+                    weighted = self.grid.accumulation(
+                        self.fdir, weights=weights_raster, routing=self.routing
+                    )
+                except TypeError:
+                    weighted = self.grid.accumulation(self.fdir, weights=weights_raster)
+                result["runoff_accumulation"] = weighted
 
         return result
+
+    def _crest_plan(self, filled, ground):
+        """Find the ponds and work out which of their cells discharge. ``None`` if none do.
+
+        ``filled`` is the depression-filled surface and ``ground`` the same surface *before*
+        the fill — both copies taken in :meth:`run`, because pysheds fills in place.
+        """
+        from terrainflow_assessment.modules import crest_routing
+        from terrainflow_assessment.modules.flow_graph import d8_from_dem
+
+        impoundments, skipped = crest_routing.find_impoundments(filled, ground)
+        if not impoundments:
+            return None
+
+        cell_w = abs(self.transform.a) if self.transform is not None else 1.0
+        cell_h = abs(self.transform.e) if self.transform is not None else 1.0
+        surface = self.conditioned if self.conditioned is not None else self.dem
+        next_flat, is_sink = d8_from_dem(
+            np.asarray(surface, dtype="float64"),
+            cell_w=cell_w, cell_h=cell_h, nodata=self.nodata,
+        )
+        # Returned even when nothing survived the exit test: the plan still carries *why*,
+        # and a pond that kept the default routing is worth saying out loud. Spreading an
+        # empty plan absorbs nothing, so the accumulation comes back unchanged.
+        return crest_routing.plan_crest_absorption(
+            impoundments, next_flat, is_sink,
+            np.asarray(self.fdir).shape, skipped=skipped,
+        )
+
+    def _spread_crests(self, plan, base_weights=None):
+        """Accumulate with every pond contracted to a mixing node.
+
+        A pool spills along its whole level crest at once, and one pointer per cell cannot
+        divide the load of one cell, so the split is done in the **flux field** instead —
+        see :mod:`terrainflow_assessment.modules.crest_routing` for the whole argument and
+        the measurements behind it.
+
+        **The flow directions are not touched.** The absorbing map is a private copy, so
+        ``feature_inflow_m3``, the catchment labelling and capture % are unaffected by
+        construction — and ``unrouted_flow`` keeps reading the real directions rather than
+        counting every pond cell as a flat with nowhere to go.
+        """
+        from pysheds.sview import Raster as _PR
+
+        from terrainflow_assessment.modules import crest_routing
+
+        # Wrap with the *direction* raster's viewfinder, not the DEM's: for D-infinity its
+        # nodata is NaN while the DEM's is a real sentinel, and borrowing the wrong one hands
+        # the nodata border a weight of 1 and silently changes the domain.
+        viewfinder = self.fdir.viewfinder
+        fdir_abs = np.array(self.fdir, copy=True)
+        fdir_abs[np.asarray(plan.absorb, dtype=bool)] = self.FDIR_FLAT
+        fdir_abs = _PR(fdir_abs, viewfinder=viewfinder)
+
+        def accumulate(weights):
+            if weights is None:
+                try:
+                    return self.grid.accumulation(fdir_abs, routing=self.routing)
+                except TypeError:
+                    return self.grid.accumulation(fdir_abs)
+            w = _PR(np.ascontiguousarray(weights, dtype="float64"), viewfinder=viewfinder)
+            try:
+                return self.grid.accumulation(fdir_abs, weights=w, routing=self.routing)
+            except TypeError:
+                return self.grid.accumulation(fdir_abs, weights=w)
+
+        return crest_routing.spread_crests(plan, accumulate, base_weights=base_weights)
+
+    # Sentinels pysheds writes into a flow-direction array for a cell it could not route:
+    # ``flat`` when the best available slope is exactly zero, ``pit`` when every neighbour
+    # is higher. Both are the library's own defaults (``_sgrid._d8_flowdir_numba``).
+    FDIR_FLAT = -1
+    FDIR_PIT = -2
+
+    def unrouted_flow(self):
+        """Water that stops **inside** the site because the routing could not place it.
+
+        A cell pysheds marks ``flat`` or ``pit`` is dropped from the direction map before
+        accumulation (``sgrid.py`` sets it to 0, which ``_flatten_fdir_numba`` maps to the
+        cell itself). It becomes a **self-loop**: everything upstream arrives, nothing
+        leaves, and the water is absent from every downstream figure with nothing saying
+        so. Under D-infinity it is the same — a flat angle decomposes to two zero-proportion
+        directions rewritten to 0.5/0.5 back into the same cell.
+
+        **These are not ponds.** ``fill_depressions`` has already raised every hollow to its
+        spill level, which is exactly the mechanism that makes a filling pond overflow to
+        the next cell. What is left over is conditioning residue, and on a real site almost
+        all of it sits against **nodata**: Quail Island is an island, so 35 of its 36 stuck
+        cells are on the coastline, where the only downhill neighbour is sea that carries no
+        elevation. That water has *left the analysed area* — it is not lost, it is simply
+        unlabelled on this tier, and warning about it would fire on every clipped or coastal
+        DEM for a benign reason.
+
+        So the split is the same one the design tier already makes, ``LABEL_EXIT`` at the
+        edge of the data against ``LABEL_SINK`` in an interior pit, and only the second is
+        reported here. On Quail Island that is **1 cell, not 36** — which is the honest
+        number, and quiet.
+
+        Nothing is re-routed: a cell with no lower neighbour genuinely has nowhere to send
+        water, and inventing a destination would be worse than reporting the fact. Because
+        such a cell absorbs its whole upstream, its own accumulation *is* the held load.
+
+        Returns ``(n_cells, flow_cells)`` for the interior cells only — the count, and the
+        accumulation held there in cell-units. ``(0, 0.0)`` when the analysis has not run.
+        """
+        if self.fdir is None or self.acc is None:
+            return 0, 0.0
+        fdir = np.asarray(self.fdir, dtype="float64")
+        stuck = (fdir == self.FDIR_FLAT) | (fdir == self.FDIR_PIT)
+        if not stuck.any():
+            return 0, 0.0
+        stuck &= ~self._at_data_edge()
+        if not stuck.any():
+            return 0, 0.0
+        return int(stuck.sum()), float(np.asarray(self.acc, dtype="float64")[stuck].sum())
+
+    def _at_data_edge(self):
+        """Cells on the grid border or touching nodata — where the site's data runs out."""
+        from scipy.ndimage import binary_dilation
+
+        dem = np.asarray(self.dem, dtype="float64")
+        invalid = ~np.isfinite(dem)
+        if self.nodata is not None:
+            invalid |= dem == self.nodata
+        edge = binary_dilation(invalid, structure=np.ones((3, 3), dtype=bool))
+        edge[0, :] = edge[-1, :] = True
+        edge[:, 0] = edge[:, -1] = True
+        return edge
 
     def delineate_catchment(self, x, y):
         """Return boolean mask for the catchment draining to (x, y)."""
@@ -521,20 +763,30 @@ class FlowAnalysis:
             return "D-infinity flow direction (angle in radians, CCW from east)"
         return "D8 flow direction (ESRI codes: 1=E 2=SE 4=S 8=SW 16=W 32=NW 64=N 128=NE)"
 
-    def get_profile(self):
+    def get_profile(self, dtype="float32"):
         """rasterio write profile for result GeoTIFFs."""
         return {
-            "driver": "GTiff", "dtype": "float32",
+            "driver": "GTiff", "dtype": dtype,
             "crs": self.crs, "transform": self.transform,
             "width": self.grid.shape[1], "height": self.grid.shape[0],
             "count": 1, "compress": "lzw",
         }
 
-    def save_result(self, array, output_path, band_description=""):
-        """Save a result array to GeoTIFF."""
-        profile = self.get_profile()
+    def save_result(self, array, output_path, band_description="", dtype="float32"):
+        """Save a result array to GeoTIFF.
+
+        float32 is right for every output whose values are metres of water or counts of
+        cells. It is **wrong for the conditioned surface**, which carries a synthetic
+        gradient across every flat: ``resolve_flats`` inflates a flat by integer multiples
+        of ``eps = 1e-5`` m, and float32's spacing already reaches ~6.1e-5 m at 1000 m
+        elevation. Above roughly 600 m the whole gradient is quantised away on the way to
+        disk, and ``flow_graph.d8_from_dem`` — which needs a *strictly* positive drop —
+        then reads a genuine flat and turns every cell of it into a ``LABEL_SINK``. Pass
+        ``dtype="float64"`` for that raster; a site near sea level never shows the fault.
+        """
+        profile = self.get_profile(dtype)
         with rasterio.open(output_path, "w", **profile) as dst:
-            dst.write(array.astype("float32"), 1)
+            dst.write(array.astype(dtype), 1)
             if band_description:
                 dst.update_tags(1, description=band_description)
 

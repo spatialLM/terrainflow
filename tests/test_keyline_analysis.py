@@ -758,3 +758,153 @@ class TestAssessmentKeypointBranches:
         result = kl.get_cultivation_elevations(kps, n_each_side=1, spacing_m=5.0)
         elevs = [r["elevation"] for r in result]
         assert len(elevs) == len(set(elevs))  # no duplicates
+
+
+# ---------------------------------------------------------------------------
+# The pond raster — accumulation inside a pool is not contributing area
+# ---------------------------------------------------------------------------
+
+class TestValleyCrossWidthEquivalence:
+    """The vectorised width count must equal the 401-cell Python loop it replaced.
+
+    That loop was the whole cost of ``recommend_pond_sites`` — 0.047 s of 0.054 s
+    profiled, in only 120 calls, and it is called once per candidate, which is
+    ``n_keypoints x (2 x search_r + 1)^2`` times on a fine grid. The rewrite is only worth
+    having if it counts identically, including at the raster edges and over nodata, so
+    that is asserted against the original rather than argued.
+    """
+
+    @staticmethod
+    def _loop(dem, cell_w, row, col, fill_elev):
+        """The implementation as it stood, verbatim."""
+        _, cols = dem.shape
+        count = 0
+        for dc in range(-200, 201):
+            nc = col + dc
+            if nc < 0:
+                continue
+            if nc >= cols:
+                break
+            if np.isnan(dem[row, nc]):
+                continue
+            if dem[row, nc] <= fill_elev:
+                count += 1
+        return count * cell_w
+
+    def test_it_matches_the_loop_everywhere_including_edges_and_nodata(self, tmp_path):
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        rng = np.random.default_rng(11)
+        dem = (50.0 + rng.normal(0, 5, (40, 500))).astype("float32")
+        dem[:, 100:104] = np.nan                       # a nodata stripe to skip
+        dem[7, :] = 40.0                               # a flat row, all under any sill
+        acc = np.ones((40, 500), dtype="float32")
+        dla = DrainageLineAnalysis(
+            _write_raster(str(tmp_path / "dem.tif"), dem),
+            _write_raster(str(tmp_path / "acc.tif"), acc),
+        )
+
+        # Columns chosen to straddle both edges, the nodata stripe, and the middle.
+        for col in (0, 1, 3, 99, 102, 150, 250, 399, 496, 498, 499):
+            for row in (0, 7, 21, 39):
+                for sill in (35.0, 50.0, 60.0):
+                    assert dla._valley_cross_width(row, col, sill) == pytest.approx(
+                        self._loop(dla.dem, dla.cell_w, row, col, sill)
+                    ), f"row={row} col={col} sill={sill}"
+
+
+class TestPondThroughflow:
+    """A contracted pond holds its inflow instead of threading a channel through itself.
+
+    Every use of ``self.acc`` here reads accumulation as contributing area, and inside a
+    pool it stops meaning that: measured on Quail Island the median pool cell falls from
+    22.3 to 1.0. Handing the analysis the pond's own throughput restores the reading.
+
+    **It does not change the ridge set, and that is the point of the last test.** 9,325 pool
+    cells newly satisfy ``acc <= 2`` on their own, which predicts reservoir floors turning
+    up as ridgelines — but the ridge test is ``tpi > min_tpi_m`` *and* ``acc <= 2``, and a
+    pool is a hollow, so TPI excludes it either way. Measured on the real site: **0 cells**.
+    Pinned so nobody re-derives the fault from the accumulation alone.
+    """
+
+    def _site(self, tmp_path, pond=True):
+        """A ridge down the middle, and a flat basin the accumulation has gone quiet in."""
+        dem = np.full((30, 30), 50.0, dtype="float32")
+        dem += np.abs(np.arange(30) - 15).reshape(1, -1) * -0.4   # ridge along column 15
+        dem[18:26, 10:22] = 40.0                                  # the basin
+        acc = np.full((30, 30), 500.0, dtype="float32")
+        acc[:, 14:17] = 1.0                                       # the real ridge: no upstream
+        acc[18:26, 10:22] = 1.0                                   # the pool, gone quiet
+        paths = [_write_raster(str(tmp_path / "dem.tif"), dem),
+                 _write_raster(str(tmp_path / "acc.tif"), acc)]
+        if pond:
+            flow = np.zeros((30, 30), dtype="float32")
+            flow[18:26, 10:22] = 9000.0                           # what the pond passes
+            paths.append(_write_raster(str(tmp_path / "ponds.tif"), flow))
+        return paths
+
+    def test_without_the_pond_raster_a_pool_reads_as_unvisited_ground(self, tmp_path):
+        """The wrong reading, asserted before the thing that corrects it."""
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        dem_path, acc_path = self._site(tmp_path, pond=False)
+        dla = DrainageLineAnalysis(dem_path, acc_path)
+        assert dla.pond is None
+        assert bool((dla.acc[18:26, 10:22] <= 2).all())
+
+    def test_the_pond_throughput_replaces_the_accumulation_inside_the_pool(self, tmp_path):
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        dem_path, acc_path, pond_path = self._site(tmp_path)
+        dla = DrainageLineAnalysis(dem_path, acc_path, pond_path)
+
+        assert dla.pond is not None
+        assert bool(dla.pond[20, 15]) and not bool(dla.pond[5, 5])
+        # The pool now reads its throughput, so it fails the `acc <= 2` ridge test...
+        assert dla.acc[18:26, 10:22] == pytest.approx(9000.0)
+        assert not bool((dla.acc[18:26, 10:22] <= 2).any())
+        # ...and the genuine ridge outside it is untouched.
+        assert dla.acc[5, 15] == pytest.approx(1.0)
+
+    def test_a_wrong_shaped_pond_raster_is_ignored_rather_than_trusted(self, tmp_path):
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        dem_path, acc_path = self._site(tmp_path, pond=False)
+        odd = _write_raster(str(tmp_path / "odd.tif"), np.ones((4, 4), dtype="float32"))
+        dla = DrainageLineAnalysis(dem_path, acc_path, odd)
+        assert dla.pond is None
+        assert bool((dla.acc[18:26, 10:22] <= 2).all())
+
+    def test_a_keypoints_catchment_inside_a_pool_is_the_ponds_own(self, tmp_path):
+        """What the raster is actually for: `acc x cell area` has to mean something there."""
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        dem_path, acc_path, pond_path = self._site(tmp_path)
+        bare = DrainageLineAnalysis(dem_path, acc_path)
+        fixed = DrainageLineAnalysis(dem_path, acc_path, pond_path)
+        cell_area = bare.cell_w * bare.cell_h
+
+        assert float(bare.acc[20, 15]) * cell_area / 10_000 == pytest.approx(0.0001)
+        assert float(fixed.acc[20, 15]) * cell_area / 10_000 == pytest.approx(0.9)
+
+    def test_the_pool_never_reached_the_ridge_set_either_way(self, tmp_path):
+        """A pool is a hollow, so TPI excludes it whatever the accumulation says.
+
+        Reading `acc <= 2` on its own predicts a fault here — 9,325 pool cells satisfy it
+        after the crest split — but the ridge test is a conjunction and the real site moves
+        by **0 cells**. Pinned so the prediction is not made again from half the test.
+        """
+        from scipy.ndimage import uniform_filter
+
+        from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+        dem_path, acc_path, pond_path = self._site(tmp_path)
+        pool = np.zeros((30, 30), dtype=bool)
+        pool[18:26, 10:22] = True
+
+        for args in ((), (pond_path,)):
+            dla = DrainageLineAnalysis(dem_path, acc_path, *args)
+            valid = np.isfinite(dla.dem)
+            filled = np.where(valid, dla.dem, 0.0).astype("float64")
+            tpi = filled - uniform_filter(filled, size=15)
+            assert not ((tpi > 1.5) & (dla.acc <= 2) & valid & pool).any()

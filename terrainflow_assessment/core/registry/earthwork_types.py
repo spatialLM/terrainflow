@@ -110,7 +110,11 @@ _add(EarthworkTypeConfig(
     has_cut=True,
     has_fill=True,
     burn_method="swale",
-    style=("line", "#00BCD4", "2.5"),
+    # Violet, not cyan. A swale used to be drawn in the same blue-green family
+    # as the natural streams and the water rasters it sits among, so on the
+    # design map the thing being proposed was hard to pick out from the
+    # hydrology that was already there. Nothing else on these maps is violet.
+    style=("line", "#7E57C2", "2.5"),
     category="storage",
     tooltip=(
         "On-contour channel that captures and infiltrates runoff.\n"

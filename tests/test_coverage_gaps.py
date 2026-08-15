@@ -159,6 +159,52 @@ class TestBuildStoresFromEarthworks:
         assert len(stores) == 1
         assert stores[0].capacity_m3 == 0.0
 
+    def test_a_measured_pond_sizes_the_store(self):
+        """The one place the capacity basis is chosen, and the point of choosing it.
+
+        Sized on the drawn section, a swale whose companion berm is keyed into the banks
+        reports *full at this storm* while most of its pond is still empty — Swale 5 of
+        the Quail Island design read 100% of 440 m³ against a measured 1,095 m³ — and a
+        designer reading that bar enlarges a feature that needed nothing. The drawn
+        figure is carried alongside, never discarded: it is the one a contractor builds
+        to and the one that can be checked by hand.
+        """
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+
+        ew = self._ew("S1")
+        ew.capacity_m3 = 440.0
+        ew.terrain_capacity_m3 = 1095.0
+        store = build_stores_from_earthworks([ew])[0]
+        assert store.capacity_m3 == pytest.approx(1095.0)
+        assert store.drawn_capacity_m3 == pytest.approx(440.0)
+        assert store.capacity_is_measured is True
+
+    def test_without_a_measurement_it_falls_back_to_the_drawn_section(self):
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+
+        ew = self._ew("S1")
+        ew.capacity_m3 = 440.0
+        store = build_stores_from_earthworks([ew])[0]
+        assert store.capacity_m3 == pytest.approx(440.0)
+        assert store.drawn_capacity_m3 == pytest.approx(440.0)
+        assert store.capacity_is_measured is False
+
+    def test_the_drawn_basis_can_be_forced_for_comparison(self):
+        """Running the same storm both ways is what shows whether capacity is the limit.
+
+        On the Quail Island design it is not — 57% either way, because 7,567 m³ of the
+        storm never reaches a feature — and that is only sayable because both can be
+        computed.
+        """
+        from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
+
+        ew = self._ew("S1")
+        ew.capacity_m3 = 440.0
+        ew.terrain_capacity_m3 = 1095.0
+        store = build_stores_from_earthworks([ew], basis="drawn")[0]
+        assert store.capacity_m3 == pytest.approx(440.0)
+        assert store.capacity_is_measured is False
+
     def test_store_names_match_earthworks(self):
         from terrainflow_assessment.modules.simulation import build_stores_from_earthworks
 

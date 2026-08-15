@@ -167,7 +167,7 @@ def drive():
                 QCoreApplication.processEvents()
 
             drawn = 0
-            for key, lid in _plugin._state.ew_layers.items():
+            for key, lid in _plugin._state.ew_layer_ids.items():
                 layer = project.mapLayer(lid) if isinstance(lid, str) else None
                 if layer is None:
                     log(f"  FAIL earthwork layer '{key}' is NOT in the project"

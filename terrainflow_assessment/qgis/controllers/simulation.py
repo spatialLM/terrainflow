@@ -33,6 +33,7 @@ from qgis.PyQt.QtGui import QColor
 from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
+from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
 
 
@@ -332,22 +333,17 @@ class SimulationController(G.LayerTreeMixin):
             self._state.sim_ponding_frame_layer_id = layer.id()
 
     def _apply_ponding_ramp(self, layer):
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
-        try:
-            stats = layer.dataProvider().bandStatistics(1)
-            max_v = stats.maximumValue or 1.0
-        except Exception:
-            max_v = 1.0
-        color_ramp.setColorRampItemList([
-            QgsColorRampShader.ColorRampItem(0, QColor(180, 220, 255, 0), "0"),
-            QgsColorRampShader.ColorRampItem(max_v * 0.5, QColor(80, 160, 240, 160), "mid"),
-            QgsColorRampShader.ColorRampItem(max_v, QColor(0, 40, 180, 220), "max"),
-        ])
-        shader.setRasterShaderFunction(color_ramp)
-        renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-        layer.setRenderer(renderer)
+        """The same ramp Baseline paints its captured water with.
+
+        Water held is water held; the simulation's frame used to carry its own
+        copy of these stops, so a change on one side left the two views of the
+        same quantity in different colours.
+        """
+        from terrainflow_assessment.core.registry.map_palette import (
+            WATER_CAPTURED,
+        )
+
+        apply_raster_ramp(layer,WATER_CAPTURED)
 
     # ---------------------------------------------------------------- Fill layer
 
@@ -479,23 +475,10 @@ class SimulationController(G.LayerTreeMixin):
             self._update_sim_ponding_frame(fills)
 
     def _apply_stream_ramp(self, layer, max_acc=None):
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
-        if max_acc is None:
-            try:
-                stats = layer.dataProvider().bandStatistics(1)
-                max_acc = stats.maximumValue or 1.0
-            except Exception:
-                max_acc = 1.0
-        color_ramp.setColorRampItemList([
-            QgsColorRampShader.ColorRampItem(0, QColor(220, 235, 255, 0), "0"),
-            QgsColorRampShader.ColorRampItem(max_acc * 0.3, QColor(100, 160, 230), "low"),
-            QgsColorRampShader.ColorRampItem(max_acc, QColor(20, 60, 150), "high"),
-        ])
-        shader.setRasterShaderFunction(color_ramp)
-        renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-        layer.setRenderer(renderer)
+        """The same channel ramp Baseline uses, from ``map_palette``."""
+        from terrainflow_assessment.core.registry.map_palette import STREAMS
+
+        apply_raster_ramp(layer,STREAMS, max_acc)
 
     # ---------------------------------------------------------------- Timer
 

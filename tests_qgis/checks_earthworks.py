@@ -44,6 +44,148 @@ def check_swale_burns_and_reanalyses(dem_path):
         assert baseline is not None
 
 
+def check_event_pond_nests_inside_the_capacity_pond(dem_path):
+    """The two pond layers, the line over them, and the invariant between them.
+
+    "Pond Capacity (full)" is a depression-fill — every hollow to its spill point,
+    drawn identically at 5% full and at 100%. "Pond Capacity (event)" is what the storm
+    actually delivers, so it has to lie *inside* it: never a wet cell the full pond does
+    not have, never deeper in any cell, never more volume overall. That containment is
+    the entire claim the pair makes to a reader comparing them, and solving a level per
+    pool is exactly the kind of thing that can quietly break it.
+
+    A basin, not a swale: an excavated hole ponds on any terrain, so the check rests on
+    the relationship between the layers rather than on the fixture happening to trap
+    water behind a bank.
+    """
+    import numpy as np
+    import rasterio
+    from _harness import CELL_M, ORIGIN_Y, centreline_x
+    from qgis.core import QgsGeometry, QgsProject, QgsRectangle
+
+    from terrainflow_assessment.qgis.controllers import _groups as G
+
+    def _band(layer):
+        with rasterio.open(layer.source()) as src:
+            arr = src.read(1).astype("float64")
+            if src.nodata is not None:
+                arr[arr == src.nodata] = 0.0
+        return np.clip(arr, 0.0, None)
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        cx, y = centreline_x(), ORIGIN_Y - 60 * CELL_M
+        geom = QgsGeometry.fromRect(
+            QgsRectangle(cx - 25.0, y - 25.0, cx + 25.0, y + 25.0))
+        h.add_earthwork("basin", geometry=geom)
+        # ``add_earthwork`` bypasses the dialog, and the dialog is what sizes a feature:
+        # left alone the basin carries capacity 0, which drops it out of the
+        # verification pass and so out of the event pond too. Settling the geometry is
+        # the controller's own "exact tier" and fills both capacities the way an edit
+        # on the canvas does.
+        h.plugin._earthworks._on_vertex_edit_finished(0, geom)
+        ew = h.state.earthwork_manager.get(0)
+        assert ew.capacity_m3 > 0, "the basin was not sized — the check needs a pond"
+
+        # Populates state.balance. The event pond is filled from its per-feature stored
+        # volumes, so without a live recompute first there is nothing to fill it with.
+        h.panel.analysis_inputs_changed.emit()
+        assert h.state.balance is not None, "no live assessment to fill the pond from"
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis")
+        assert h.state.pond_context is not None, (
+            "the verification pass did not run, so it handed nothing forward")
+
+        layers = list(QgsProject.instance().mapLayers().values())
+        named = {}
+        for fragment in ("Pond Capacity (full)", "Pond Capacity (event)",
+                         "Event Water Line"):
+            hit = [lyr for lyr in layers
+                   if fragment in lyr.name() and lyr.name().startswith("Earthworks")]
+            assert hit, (f"no {fragment!r} layer after re-analysis: "
+                         f"{sorted(lyr.name() for lyr in layers)}")
+            named[fragment] = hit[0]
+
+        assert named["Event Water Line"].featureCount() > 0, (
+            "the water line layer was added with no rings in it")
+
+        full = _band(named["Pond Capacity (full)"])
+        event = _band(named["Pond Capacity (event)"])
+        assert event.shape == full.shape, "the two pond rasters are on different grids"
+        assert event.any(), "the event pond is empty — nothing was actually compared"
+        deeper = event > full + 1e-9
+        assert not deeper.any(), (
+            f"the event pond stands deeper than the pool can hold in "
+            f"{int(deeper.sum())} cell(s) — max excess "
+            f"{float((event - full).max()):.3f} m")
+        assert event.sum() <= full.sum() + 1e-6, (
+            f"the event pond holds more than the capacity pond: "
+            f"{float(event.sum()):.1f} vs {float(full.sum()):.1f} (depth-sum)")
+
+        # The line has to sit above the fill, and the fill above the capacity, or the
+        # comparison the layers exist for is hidden underneath itself.
+        group = G.group(h.plugin._project, G.RERUN,
+                        site_name=h.panel.site_name, tag=h.state.run_tag)
+        order = [n.layer().name() for n in group.findLayers() if n.layer() is not None]
+
+        def rank(fragment):
+            return next(i for i, name in enumerate(order) if fragment in name)
+
+        assert rank("Event Water Line") < rank("Pond Capacity (event)") \
+            < rank("Pond Capacity (full)"), f"pond layers stacked wrong: {order}"
+
+
+def check_a_dam_that_pours_over_its_own_crest_is_flagged(dem_path):
+    """A dam across the valley with no spillway must warn, and draw the run of crest.
+
+    The band is the point: D8 sends the whole overflow through one cell, so the stream
+    layer draws a single thread over the wall. A level crest spills along all of itself
+    at once, and the layer has to say so — the length is what discharge per metre, and
+    therefore whether the face erodes, is figured against.
+    """
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        geom = line_across_valley(row=60)
+        ew = h.add_earthwork("dam", geometry=geom)
+        # A crest above the natural channel, keyed, and deliberately no spillway.
+        ew.crest_elevation = float(h.plugin._earthworks._feature_elevation(geom) or 0) + 2.0
+        ew.key_into_banks = True
+        h.plugin._earthworks._on_vertex_edit_finished(0, geom)
+        h.panel.analysis_inputs_changed.emit()
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis")
+
+        warnings = " ".join(str(w) for w in h.bar.warnings)
+        assert "leaves over its own crest" in warnings, (
+            f"no overtopping advisory was raised: {h.bar.warnings}")
+
+        all_layers = list(QgsProject.instance().mapLayers().values())
+        layers = [lyr for lyr in all_layers if "Overtopping" in lyr.name()]
+        assert layers, ("no overtopping layer: "
+                        f"{sorted(lyr.name() for lyr in all_layers)}")
+        layer = layers[0]
+        assert layer.featureCount() >= 1, "the overtopping layer carries no band"
+
+        feat = next(layer.getFeatures())
+        length = feat["length_m"]
+        assert length > 0, f"a spill with no length: {length}"
+        # It spills along the crest, not at one cell — and never along more wall
+        # than there is.
+        cell = h.state.dem_info.cell_size_m
+        assert length > cell, (
+            f"the band is a single cell ({length} m) — that is the D8 artefact this "
+            f"layer exists to contradict")
+        assert length <= geom.length() + 1e-6, (
+            f"spill length {length} m exceeds the {geom.length():.1f} m wall")
+        assert feat["spillway"] == "none", feat["spillway"]
+
+
 def check_multiple_earthwork_types_burn(dem_path):
     """Every registry type must survive being burned and re-analysed."""
     with PluginHarness(dem_path) as h:

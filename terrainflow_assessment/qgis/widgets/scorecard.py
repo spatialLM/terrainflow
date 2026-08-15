@@ -102,6 +102,15 @@ class Scorecard(QWidget):
         self._natural_lbl.setVisible(False)
         lay.addWidget(self._natural_lbl)
 
+        # Whether capacity is what limits this design. Sits with natural ponding rather
+        # than in the band for the same reason: it is a statement *about* the score, not
+        # a part of it.
+        self._capacity_lbl = QLabel("")
+        self._capacity_lbl.setStyleSheet("font-size: 10px; color: #8fa0a4;")
+        self._capacity_lbl.setWordWrap(True)
+        self._capacity_lbl.setVisible(False)
+        lay.addWidget(self._capacity_lbl)
+
         self.show_empty()
 
     # ------------------------------------------------------------------ API
@@ -161,6 +170,11 @@ class Scorecard(QWidget):
             f"earthwork. The score above counts only what your design captures."
         )
         self._natural_lbl.setVisible(True)
+
+    def set_capacity_note(self, text):
+        """Whether more storage would buy anything — or None to hide the line."""
+        self._capacity_lbl.setText(text or "")
+        self._capacity_lbl.setVisible(bool(text))
 
     def set_verified(self, text, fresh, tooltip=""):
         """The verified-vs-design chip.

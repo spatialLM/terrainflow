@@ -22,7 +22,7 @@ controllers (QGIS glue) → modules (pure logic).
 | Widgets | `qgis/widgets/` (`network_view`, `verification_table`, `scorecard`, `stepper`, `tool_menu`, `run_button`) | Custom-painted panel components |
 | Controllers | `qgis/controllers/` (`baseline`, `contour`, `earthworks`, `simulation`, `reporting`, `_state`, `_layers`, `_groups`) | Per-feature QGIS glue: run analysis, render layers, styling |
 | Workers | `qgis/workers/` | Background threads (analysis, simulation) |
-| Adapters | `qgis/adapters/` | Thin `QgsProject`/geometry wrappers |
+| Adapters | `qgis/adapters/` (`project`, `geom`, `map_image`, `layout_pdf`) | Thin `QgsProject`/geometry wrappers, plus offscreen map rendering and the PDF print-layout builder |
 | Modules | `modules/` | **Pure analysis logic, no QGIS UI** — the testable core |
 | Map tools | `map_tools/` | Interactive canvas clicking (draw, select, query, connect) |
 | Core | `core/registry/`, `core/sizing/` | Pure config (earthwork types) + geometry/hydraulics primitives |
@@ -67,6 +67,52 @@ Non-obvious invariants:
 - Verification compares **measured vs rasterisable**, not vs design. Dams are
   `barrier_impounded` and skip that path entirely (no drawn section to rasterise).
 
+## The report (`Site Water Plan`, PDF)
+
+**A baseline is the only precondition.** The report used to gate on `state.comparison`,
+written only at the end of a fill simulation, so no document existed until one had run —
+and the simulation's per-feature figures were wrong (every feature 0.0 m³ inflow against a
+claimed 100% capture). It is now built from the **design tier**: `run_water_balance()` →
+`BalanceResult`, which is recomputed on every design edit and is retained on `_state`
+(`balance`, `balance_stores`, `spillway_rows`, `spillway_context`) instead of falling out
+of scope. A simulation, where one has run, is optional enrichment.
+
+**PDF and HTML are one document with two renderers.** There is no separate HTML report —
+`export_html()` and its 300-line f-string are gone. Both formats consume the same
+`Report`, the same chart PNGs and the same maps, so they can differ only in paper size.
+
+| File | Layer | Holds |
+|---|---|---|
+| `modules/report_model.py` | pure | `build_report(data) -> [Section]` — what the document says, and what each section says when its data is missing. Sections degrade with a stated reason; never silently dropped. |
+| `modules/report_charts.py` | pure | The flow-network diagram; wrappers over the existing hydrograph/fill-timeline builders. Geometry is **millimetres at printed size** with `set_aspect("equal")`, so point sizes are the sizes on paper. |
+| `modules/report_html.py` | pure | → HTML, self-contained (inline CSS, images as data URIs) |
+| `qgis/adapters/layout_pdf.py` | QGIS | → PDF. The only file that knows QGIS layouts exist. |
+
+**Adding or changing a section must be done in both renderers, in the same change.** Each
+keeps a `SECTION_HANDLERS` table mapping section type → handler, and
+`tests/test_report_renderer_parity.py` asserts the two cover exactly the same types and
+that every model figure reaches the HTML. Add a type to one renderer only and the suite
+fails. Extend the model → add a handler on both sides → the parity test is the gate.
+
+Timing claims live **only** in `_page_simulation`, which appears when `state.comparison`
+exists and says on the page that it came from the simulation. Nothing else in the report
+may imply *when* water arrives — the rest is an event-total balance.
+
+Three presentation rules the tests enforce: the four storage figures appear in derivation
+order with **Δ only ever against the grid**, the two exit volumes are never in one table,
+and anything unreliable is **suppressed rather than printed as zero** (`drain_hours=None`
+is "does not empty by soaking", not `0`).
+
+Non-obvious layout facts, all measured rather than assumed:
+- `QgsLayoutItemTextTable.totalSize()` returns the **frame** height, not the content height,
+  and the table **silently overflows** its frame rather than wrapping. Row height is linear
+  in font size (4.730 mm at 7 pt) — see `table_content_height()`.
+- A scale bar must be **added to the layout before** being configured, or it cannot resolve
+  its linked map's scale and renders a fifth of the right width. `applyDefaultSettings()`
+  alone leaves 0 m per segment.
+- `attemptMove(..., page=N)` takes a **page-relative** point, not a document offset.
+- Every glyph must exist in DejaVu Sans or it prints as a box (U+2312 ARC does not).
+
 ## The key rule for new features
 
 **Before writing code for a non-trivial feature, propose the file split and get sign-off.**
@@ -84,6 +130,15 @@ Only add/modify what's asked — no drive-by refactors of working code.
 
 - **Deploy to QGIS:** `deploy.ps1` (copies `terrainflow_assessment/` into the QGIS profile;
   then disable + re-enable the plugin in QGIS Plugin Manager to reload). No zip needed.
+  It **prunes build artefacts** on the way in (`__pycache__`, `.pytest_cache`, `*.pyc`,
+  `*.pyo`, `*.aux.xml`, `symbology-style.db`) and refuses to report success if any
+  bytecode survives. That matters because `run_qgis_tests.ps1` runs QGIS's own Python over
+  the source tree, so the repo fills with `cpython-312` `.pyc` — the interpreter QGIS uses —
+  and the copy preserves mtimes, so Python would trust that bytecode over the sources
+  beside it. Note it deploys the working tree, **not** `git ls-files`: work in progress is
+  untracked by definition. Every `.ps1` is ASCII-only and BOM-less, because PowerShell 5.1
+  reads a `.ps1` as ANSI and a stray em dash is a parse error — enforced by
+  `tests/test_architecture.py`, which also guards the layering rules below.
 - **Tests:** `python -m pytest tests/` (target Python 3.9). `pyproject.toml` sets a 95%
   coverage gate on pure-Python `modules/`; the `qgis/*` Qt/QGIS layer is omitted from that
   gate — it is covered by the real-QGIS harness below instead.
@@ -99,7 +154,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # 44 checks, headless, ~2-4 min. Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, ~2-4 min. Exit code gates.
 .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
 .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
 .\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
@@ -108,8 +163,14 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 - Needs QGIS's own Python; the scripts find it. **Not in CI** (no QGIS on the runner) —
   these are local, pre-deploy commands.
-- `checks_slow.py` is quarantined (its `recommend_ponds` check does not terminate) and runs
-  only when named: `.\run_qgis_tests.ps1 slow`.
+- **A modal dialog is recorded, not shown.** Offscreen a `QMessageBox` has nobody to click
+  OK, so it blocks until the module's timeout — which is how `recommend_ponds` spent 300 s
+  and was quarantined as "does not terminate" when it was really a one-line guard saying
+  *run keypoints first*. `RecordingDialogs` captures them; `assert_no_errors` fails on any
+  warning or error dialog, so a controller's `except QMessageBox.critical` reports itself
+  instead of stalling. Assert on them with `h.dialogs.of("warning")`.
+- Nothing is quarantined at present. `run_all.OPT_IN_MODULES` still exists for it —
+  a module named there runs only when asked for by name.
 - Renders the real panel/dialogs/canvas to PNGs in `tests_qgis/_shots/` — **open them**;
   that is how the UI gets verified. Rendering is deterministic, so a plain run reports
   exactly which images a change moved. A changed image is information, not a failure.

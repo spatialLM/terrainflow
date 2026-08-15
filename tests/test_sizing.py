@@ -12,6 +12,7 @@ from terrainflow_assessment.core.sizing import (
     basin_volume_battered,
     contour_spacing,
     drawdown_time,
+    level_crest_from_spoil,
     manning_flow,
     pond_volume_frustum,
     prismatic_volume,
@@ -334,3 +335,49 @@ class TestBasinVolumeBattered:
         r = basin_volume_battered(1000.0, 130.0, 2.0, 1.0)
         assert r.effective_depth == pytest.approx(2.0)
         assert r.min_dimension is None
+
+
+class TestLevelCrestFromSpoil:
+    """A berm has to be LEVEL to impound, and it is built from the trench's own spoil.
+
+    Raising every cell by one height puts the crest on the slope of the ground under it,
+    so the water leaves at the low end — which is what the burn did before, and why a
+    companion berm could be credited with storage it could not hold.
+    """
+
+    def test_flat_ground_spreads_evenly(self):
+        # 10 cells of 1 m² at 50.0, 20 m³ of spoil → 2 m over the lot.
+        assert level_crest_from_spoil([50.0] * 10, 1.0, 20.0) == pytest.approx(52.0)
+
+    def test_sloping_ground_fills_the_low_end_first(self):
+        # Ground 0..9, and exactly enough spoil to bring the lowest five up to 5.0:
+        # (5-0)+(5-1)+(5-2)+(5-3)+(5-4) = 15 m³.
+        assert level_crest_from_spoil(range(10), 1.0, 15.0) == pytest.approx(5.0)
+
+    def test_more_spoil_than_the_band_holds_keeps_going_above_it(self):
+        # Filling 0..9 to level 9 takes 45 m³; another 10 m³ over 10 cells adds 1 m.
+        assert level_crest_from_spoil(range(10), 1.0, 55.0) == pytest.approx(10.0)
+
+    def test_cell_area_scales_the_answer(self):
+        assert level_crest_from_spoil([50.0], 2.0, 10.0) == pytest.approx(55.0)
+
+    def test_the_crest_reproduces_the_spoil_volume(self):
+        """The property that matters: fill under the crest is the earth that was dug."""
+        import random
+        rng = random.Random(3)
+        ground = [rng.uniform(40.0, 45.0) for _ in range(500)]
+        for spoil in (5.0, 100.0, 900.0):
+            crest = level_crest_from_spoil(ground, 1.0, spoil)
+            rebuilt = sum(max(0.0, crest - g) for g in ground)
+            assert rebuilt == pytest.approx(spoil, abs=1e-6)
+
+    def test_no_spoil_builds_nothing(self):
+        assert level_crest_from_spoil([50.0] * 5, 1.0, 0.0) is None
+
+    def test_nowhere_to_build_returns_none(self):
+        assert level_crest_from_spoil([], 1.0, 10.0) is None
+
+    def test_nan_ground_is_ignored_rather_than_poisoning_the_sort(self):
+        import math
+        assert level_crest_from_spoil(
+            [50.0, math.nan, 50.0], 1.0, 4.0) == pytest.approx(52.0)

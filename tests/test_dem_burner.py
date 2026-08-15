@@ -41,6 +41,10 @@ def _mock_ew(ew_type, geom, **kwargs):
     ew.top_width_m = kwargs.get("width", 2.0)
     ew.buffer_radius_m = kwargs.get("width", 2.0) / 2.0
     ew.bottom_width_m = kwargs.get("bottom_width_m", 1.0)
+    # Explicit because MagicMock answers float() with 1.0: left unset, every mock
+    # earthwork silently claimed a 1 m batter run and took burn branches the real
+    # Earthwork (which defaults it to 0.0) never would.
+    ew.batter_run_m = kwargs.get("batter_run_m", 0.0)
     ew.companion_berm = kwargs.get("companion_berm", False)
     ew.crest_elevation = kwargs.get("crest_elevation", None)
     ew.gradient_pct = kwargs.get("gradient_pct", 1.0)
@@ -358,3 +362,73 @@ class TestGetPondingLayer:
         b = DEMBurner(path)
         result = b.get_ponding_layer(data)
         assert result.shape == (20, 20)
+
+
+# ---------------------------------------------------------------------------
+# burned_raised — the bank a feature built, kept apart from what it claimed
+# ---------------------------------------------------------------------------
+
+class TestBurnedRaised:
+    """A swale's mask is its trench and its companion berm sits beside it.
+
+    ``mask & raised`` therefore finds a dam's wall and finds nothing at all for a swale, so
+    a keyed swale berm — which impounds water and fails exactly the way a dam does — was
+    never checked for overtopping. ``burned_raised`` is the separate record that answers
+    "what did this feature build", without widening ``burned_masks``, which sets the
+    verification's At-grid reference and must not move.
+    """
+
+    def _sloped(self, tmp_path):
+        data = np.fromfunction(lambda r, c: 50.0 - r * 0.5, (20, 20)).astype("float32")
+        return _write_dem(str(tmp_path / "dem.tif"), data)
+
+    def test_a_bermed_swale_records_the_bank_it_built(self, tmp_path):
+        b = DEMBurner(self._sloped(tmp_path))
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        result = b.burn_earthworks([ew])
+
+        raised = b.burned_raised.get(ew.id)
+        assert raised is not None and raised.any()
+        # It is the built ground, so every cell of it stands at or above the original.
+        assert (result[raised] >= b.original[raised]).all()
+        assert (result > b.original).any()
+
+    def test_an_unbermed_swale_builds_nothing(self, tmp_path):
+        b = DEMBurner(self._sloped(tmp_path))
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=False)
+        b.burn_earthworks([ew])
+        assert not b.burned_raised.get(ew.id, np.zeros((20, 20), bool)).any()
+
+    def test_the_bank_is_not_the_trench(self, tmp_path):
+        """The whole point: the two records answer different questions."""
+        b = DEMBurner(self._sloped(tmp_path))
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        b.burn_earthworks([ew])
+        trench = b.burned_masks[ew.id]
+        bank = b.burned_raised[ew.id]
+        assert not (trench & bank).any(), "the berm sits beside the trench, not in it"
+
+    def test_a_dam_records_its_wall(self, tmp_path):
+        b = DEMBurner(self._sloped(tmp_path))
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("dam", geom, depth=2.0, width=2.0, crest_elevation=48.0)
+        ew.key_into_banks = False
+        result = b.burn_earthworks([ew])
+        raised = b.burned_raised.get(ew.id)
+        assert raised is not None and raised.any()
+        assert result[raised].max() == pytest.approx(48.0, abs=1e-3)
+
+    def test_an_isolated_burn_does_not_pollute_the_site_record(self, tmp_path):
+        """``feature_storage`` re-burns one feature; the site burn's records must survive."""
+        b = DEMBurner(self._sloped(tmp_path))
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("swale", geom, depth=0.5, width=2.0, companion_berm=True)
+        b.burn_earthworks([ew])
+        before = {k: v.copy() for k, v in b.burned_raised.items()}
+        b._isolated_burn(ew)
+        assert set(b.burned_raised) == set(before)
+        for key, mask in before.items():
+            assert (b.burned_raised[key] == mask).all()

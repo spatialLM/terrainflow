@@ -51,7 +51,31 @@ def _thin_to_centreline(mask):
 
 class DrainageLineAnalysis:
 
-    def __init__(self, dem_path, acc_path):
+    def __init__(self, dem_path, acc_path, pond_path=None):
+        """Read the terrain and the flow field this analysis reasons over.
+
+        ``pond_path`` is the pond throughflow raster the analysis writes beside the
+        accumulation. **Pass it whenever it exists.** Every use of ``self.acc`` in this class
+        reads accumulation as *contributing area* — a keypoint's catchment is
+        ``acc x cell area``, a pond site is found by walking to cells of higher ``acc``, and
+        a ridge is ``acc <= 2``. Inside a contracted pond the accumulation stops meaning
+        that: the pond holds its inflow and sheds it along its crest rather than threading a
+        channel through itself, so the median pool cell reads **1.0 where it used to read
+        22.3**. Substituting the pond's own throughput restores the reading for every use at
+        once, which is why it is done here rather than masked at each of them.
+
+        **On the ridge test it changes nothing, and that was worth measuring.** A pool is a
+        hollow, so its TPI is negative and ``tpi > min_tpi_m`` excludes it whatever the
+        accumulation says: on Quail Island the ridge set moves by **0 cells inside a pond**,
+        against 9,325 pool cells that newly satisfy ``acc <= 2`` on their own. The two
+        conditions are not independent, and reading only the second one predicts a fault
+        that does not exist. Kept here because the *reading* is still wrong without it and
+        the next thing to consult ``self.acc`` would inherit that.
+
+        Values are per-cell lookups of the pond's whole throughput, so every cell of a pool
+        carries the same figure. **Do not sum it over an area** — it is a lookup, not a
+        distributable quantity.
+        """
         with rasterio.open(dem_path) as src:
             self.dem = src.read(1).astype("float32")
             self.transform = src.transform
@@ -62,6 +86,14 @@ class DrainageLineAnalysis:
 
         with rasterio.open(acc_path) as src:
             self.acc = src.read(1).astype("float32")
+
+        self.pond = None
+        if pond_path:
+            with rasterio.open(pond_path) as src:
+                pond = src.read(1).astype("float32")
+            if pond.shape == self.acc.shape:
+                self.pond = pond > 0
+                self.acc = np.where(self.pond, pond, self.acc)
 
         self.cell_w = abs(self.transform.a)
         self.cell_h = abs(self.transform.e)
@@ -412,28 +444,32 @@ class DrainageLineAnalysis:
 
         return results
 
+    # How far either side of a candidate the valley is measured, in cells.
+    _CROSS_SCAN = 200
+
     def _valley_cross_width(self, row, col, fill_elev):
         """
         Estimate valley width at (row, col) by scanning left and right along the
         same row and counting cells at or below fill_elev.
+
+        The clamp matters and used to be a ``break``: the scan starts 200 columns to the
+        *left*, so stopping there ended it on its first iteration for any candidate within
+        200 columns of the west edge — width 0 m, which maximises the ``acc/(width+1)`` dam
+        score and pulled every pond-site recommendation to the raster's left edge.
+
+        Counted with numpy rather than by walking 401 cells in Python. This is called once
+        per candidate — ``n_keypoints x (2 x search_r + 1)^2`` times, which is tens of
+        thousands on a fine grid — and it was the entire cost of ``recommend_pond_sites``
+        (0.047 s of 0.054 s profiled, in only 120 calls; 0.001 s after). NaN compares
+        False without warning, so nodata is excluded exactly as the explicit ``isnan``
+        test did — asserted against the original loop in
+        ``TestValleyCrossWidthEquivalence``.
         """
         _, cols = self.dem.shape
-        count = 0
-        for dc in range(-200, 201):
-            nc = col + dc
-            if nc < 0:
-                # The scan STARTS 200 columns to the left, so breaking here stopped it
-                # on its first iteration for any candidate within 200 columns of the
-                # west edge — width 0 m, which maximises the acc/(width+1) dam score
-                # and pulled every pond-site recommendation to the raster's left edge.
-                continue
-            if nc >= cols:
-                break                    # dc only increases — nothing further is in range
-            if np.isnan(self.dem[row, nc]):
-                continue
-            if self.dem[row, nc] <= fill_elev:
-                count += 1
-        return count * self.cell_w
+        lo = max(0, col - self._CROSS_SCAN)
+        hi = min(cols, col + self._CROSS_SCAN + 1)
+        # No guard for hi <= lo: an inverted slice is empty and already counts zero.
+        return int(np.count_nonzero(self.dem[row, lo:hi] <= fill_elev)) * self.cell_w
 
     # ---------------------------------------------------------------------- cultivation elevations
 
@@ -869,11 +905,13 @@ class YeomansKeylineAnalysis:
             grid = Grid.from_raster(tmp_path)
             dem_r = grid.read_raster(tmp_path)
             pit_filled = grid.fill_pits(dem_r)
+            # A fill, not a breach: ``breach_depressions`` does not exist in pysheds 0.5,
+            # so the except branch is the one that has always run (Round 14).
             try:
-                breached = grid.breach_depressions(pit_filled)
+                filled = grid.breach_depressions(pit_filled)
             except AttributeError:
-                breached = grid.fill_depressions(pit_filled)
-            inflated = grid.resolve_flats(breached)
+                filled = grid.fill_depressions(pit_filled)
+            inflated = grid.resolve_flats(filled)
             try:
                 fdir = grid.flowdir(inflated, routing="dinf")
                 _routing = "dinf"

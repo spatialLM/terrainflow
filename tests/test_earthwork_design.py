@@ -519,6 +519,66 @@ class TestDEMBurner:
         result = b.burn_earthworks([ew])
         assert result.max() >= 60.0
 
+    def test_burn_dam_wall_is_the_drawn_width(self, tmp_path):
+        """A 2 m wall burns 2 m thick, not the 4 m ``all_touched`` used to claim."""
+        data = np.full((20, 20), 50.0)
+        path = _make_dem(tmp_path, data)          # 1 m cells
+        b = DEMBurner(path)
+
+        # On a cell boundary, so the 2 m band's own edges do not land on cell centres.
+        geom = make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)])
+        ew = _mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=60.0)
+        burned = b.burn_earthworks([ew])
+
+        # Cross-section through the middle of the wall: 2 m of wall on 1 m cells is two
+        # cells. Rasterising by brush rather than by cell centre gave four.
+        assert int((burned[:, 10] > 50.0).sum()) == 2
+
+    def test_burn_dam_diagonal_wall_is_not_widened(self, tmp_path):
+        """The diagonal case, where brushed rasterising over-claimed most."""
+        data = np.full((30, 30), 50.0)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(5.0, 5.0), (20.0, 20.0)])
+        ew = _mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=60.0)
+        burned = b.burn_earthworks([ew])
+
+        length = (15.0 ** 2 + 15.0 ** 2) ** 0.5
+        effective_width = int((burned > 50.0).sum()) / length   # cells are 1 m²
+        assert effective_width < 2.6      # drawn 2.0 m, plus the buffer's end caps
+
+    def test_burn_dam_keys_into_the_banks_when_asked(self, tmp_path):
+        """``key_into_banks`` is ground, not just a capacity estimate.
+
+        The wall used to be keyed only inside ``_keyed_dam_dem``, so the capacity was
+        measured against a wall reaching its abutments while the burn every raster is
+        built from kept the short one as drawn — and the pond ran round its ends.
+        """
+        # Flat channel between cols 7 and 13, banks rising 1 m per cell outside it.
+        cols = np.arange(20) + 0.5
+        profile = 50.0 + np.maximum(0.0, np.abs(cols - 10.0) - 3.0)
+        data = np.tile(profile, (20, 1)).astype("float32")
+        path = _make_dem(tmp_path, data)
+
+        geom = make_mock_line_geom([(7.5, 10.5), (12.5, 10.5)])
+        # Ground at col 14 is 51.5 — below the 52.0 crest, so a keyed wall has to run
+        # out through it, and an as-drawn wall must leave it alone.
+        plain = DEMBurner(path).burn_earthworks(
+            [_mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=52.0,
+                      key_into_banks=False)]
+        )
+        assert plain[9, 14] == pytest.approx(51.5)
+
+        keyed_burner = DEMBurner(path)
+        keyed = keyed_burner.burn_earthworks(
+            [_mock_ew("dam", geom, depth=1.0, width=2.0, crest_elevation=52.0,
+                      key_into_banks=True)]
+        )
+        assert keyed[9, 14] == pytest.approx(52.0)
+        assert keyed[9, 5] == pytest.approx(52.0)      # and the other abutment
+        assert any("keyed" in w for w in keyed_burner.warnings)
+
     def test_burn_dam_no_crest_acts_like_berm(self, tmp_path):
         data = np.full((20, 20), 50.0)
         path = _make_dem(tmp_path, data)
@@ -737,12 +797,12 @@ class TestCompanionBermSingleSide:
         orig = b._rasterize
         call_state = {"n": 0}
 
-        def fake_rasterize(geom):
+        def fake_rasterize(geom, **kwargs):
             call_state["n"] += 1
             # Calls: 1=swale footprint, 2=left berm, 3=right berm (or vice versa)
             if call_state["n"] == 3:
                 return np.zeros(b.shape, dtype=bool)
-            return orig(geom)
+            return orig(geom, **kwargs)
 
         monkeypatch.setattr(b, "_rasterize", fake_rasterize)
 
@@ -760,11 +820,11 @@ class TestCompanionBermSingleSide:
         orig = b._rasterize
         call_state = {"n": 0}
 
-        def fake_rasterize(geom):
+        def fake_rasterize(geom, **kwargs):
             call_state["n"] += 1
             if call_state["n"] == 2:  # left side empty
                 return np.zeros(b.shape, dtype=bool)
-            return orig(geom)
+            return orig(geom, **kwargs)
 
         monkeypatch.setattr(b, "_rasterize", fake_rasterize)
 
@@ -782,11 +842,11 @@ class TestCompanionBermSingleSide:
         orig = b._rasterize
         call_state = {"n": 0}
 
-        def fake_rasterize(geom):
+        def fake_rasterize(geom, **kwargs):
             call_state["n"] += 1
             if call_state["n"] >= 2:  # both berm rasterizations empty
                 return np.zeros(b.shape, dtype=bool)
-            return orig(geom)
+            return orig(geom, **kwargs)
 
         monkeypatch.setattr(b, "_rasterize", fake_rasterize)
 
@@ -953,11 +1013,14 @@ class TestStrategyCConveyances:
     def test_before_after_integrity_changes_localized(self, tmp_path):
         """Baseline vs with-earthwork must be identical away from the feature.
 
-        The corridor is rows 8–12 rather than 9–10 because footprints now rasterise
-        with ``all_touched``: a cell counts if the geometry touches it at all, not
-        only if its centre falls inside. That deliberately widens every footprint by
-        up to a cell — previously they were systematically undersized against the
-        exact polygon the analytic capacity used.
+        The corridor is the drawn 2 m, not a cell wider. The volumetric burns rasterise
+        on cell **centres**: ``all_touched`` claims every cell the geometry brushes,
+        which is the right answer to "did we lose the feature?" and the wrong one to
+        "how much earth came out?". Left on, a drawn 3.0 m swale was cut 4.19 m wide on
+        the Quail Island design — 628 cells over 149.8 m — so both the excavation and the
+        storage credited to the terrain model described a trench half again as wide as
+        the one specified. The sub-cell fallbacks (nearest-cell path, centroid cell)
+        still guarantee a feature too narrow to claim a centre is not lost.
         """
         data = np.full((20, 20), 50.0, dtype="float32")
         path = _make_dem(tmp_path, data)
@@ -967,11 +1030,295 @@ class TestStrategyCConveyances:
         ew = _mock_ew("swale", geom, depth=1.0, width=2.0, companion_berm=False)
         result = b.burn_earthworks([ew])
 
-        assert np.array_equal(result[:8, :], data[:8, :])
-        assert np.array_equal(result[12:, :], data[12:, :])
-        # The corridor itself is cut, and only the corridor.
-        assert result[9:11, 6:14].max() < 50.0
-        assert result[:8, :].min() == 50.0 and result[12:, :].min() == 50.0
+        cut_rows = np.where((result < data).any(axis=1))[0]
+        assert cut_rows.min() >= 9 and cut_rows.max() <= 10, (
+            f"a 2 m swale cut rows {cut_rows} — wider than it was drawn"
+        )
+        assert np.array_equal(result[:9, :], data[:9, :])
+        assert np.array_equal(result[11:, :], data[11:, :])
+
+    def test_a_drawn_swale_is_cut_to_the_width_it_was_drawn(self, tmp_path):
+        """Cell count over length tracks the drawn top width, not a cell more.
+
+        This is the whole of the At-grid over-count. ``n_cells / length`` on Swale 22
+        read 4.19 m against a drawn 3.00 m, and ``rasterisable_capacity`` — correctly —
+        reported the trench that produced it, so At grid sat 2.10x the drawn section.
+
+        Drawn on a **diagonal**, because that is where the two rasterisations differ and
+        because a contour swale is never axis-aligned. Along a grid axis ``all_touched``
+        costs almost nothing (4.07 m against 4.04 m here); off-axis it claims a whole
+        extra cell of width, and the Quail Island swales are all off-axis.
+        """
+        import math
+
+        data = np.full((220, 220), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+
+        angle = math.radians(17.0)
+        length = 150.0
+        line = [(25.0, 25.0),
+                (25.0 + length * math.cos(angle), 25.0 + length * math.sin(angle))]
+        ew = _mock_ew("swale", make_mock_line_geom(line), depth=1.0, width=3.0,
+                      bottom_width_m=1.0, companion_berm=False)
+        b = DEMBurner(path)
+        b.burn_earthworks([ew])
+        drawn_width = next(iter(b.burned_masks.values())).sum() / length
+        assert 2.8 <= drawn_width <= 3.4, (
+            f"drawn 3.0 m, burned {drawn_width:.2f} m wide"
+        )
+
+        # The comparison that names what changed.
+        touched = b._rasterize(
+            b._to_shapely(make_mock_line_geom(line)).buffer(1.5),
+            all_touched=True).sum() / length
+        assert touched > drawn_width + 0.8, (
+            f"all_touched {touched:.2f} m vs centres {drawn_width:.2f} m — expected the "
+            f"all_touched corridor to be visibly wider, so this test is not proving "
+            f"anything about which one the burn uses"
+        )
+
+    def test_a_battered_swale_holds_its_drawn_section(self, tmp_path):
+        """The tapered cut conserves the trapezoid, which is the point of cutting it.
+
+        Burned as a rectangle at full depth, a 10 / 6 / 1 m section held 10 m²/m for an
+        8 m²/m design — and that is before the footprint's own over-claim. The
+        distance-transform taper puts it back: what the burner reports as storage is what
+        the drawn section holds, which is what lets At grid be read against Geometric.
+
+        Deliberately a wide feature. A 3 m swale on a 1 m grid is 3 or 4 cells depending
+        on where its edges fall between cell centres, so its section is 2.0–3.0 m²/m
+        whatever the burn does — a real limit of the grid, and not what this is testing.
+        """
+        data = np.full((60, 300), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(10.0, 30.0), (290.0, 30.0)])
+        ew = _mock_ew("swale", geom, depth=1.0, width=10.0, bottom_width_m=6.0,
+                      companion_berm=False)
+        b.burn_earthworks([ew])
+        held = next(iter(b.burned_cut.values()))
+        drawn = ((10.0 + 6.0) / 2.0) * 1.0 * 280.0    # trapezoid section x length
+        assert held == pytest.approx(drawn, rel=0.10), (
+            f"burned trench holds {held:,.0f} m³ against a drawn {drawn:,.0f} m³"
+        )
+
+    def test_a_vertical_walled_channel_is_still_cut_square(self, tmp_path):
+        """No batter drawn, no batter cut — the taper must not invent one.
+
+        The converse of the trapezoid case, and the one that keeps
+        ``rasterisable_capacity``'s rectangular branch honest: a channel specified with
+        equal top and bottom widths is a rectangle, and the burn owes it full depth
+        across its whole floor.
+        """
+        data = np.full((60, 300), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        geom = make_mock_line_geom([(10.0, 30.0), (290.0, 30.0)])
+        ew = _mock_ew("swale", geom, depth=1.0, width=10.0, bottom_width_m=10.0,
+                      companion_berm=False)
+        b.burn_earthworks([ew])
+        result = b.burn_earthworks([ew])
+        mask = next(iter(b.burned_masks.values()))
+        cut = b.original[mask] - result[mask]
+        assert cut.min() == pytest.approx(1.0, abs=1e-3)
+        assert cut.max() == pytest.approx(1.0, abs=1e-3)
+
+    def test_burn_order_does_not_change_the_result(self, tmp_path):
+        """Two features whose rims touch must burn the same either way round.
+
+        The invert datum is a single minimum over a one-cell-wide rim. Read off the
+        accumulating DEM, one neighbouring cell that an earlier feature has already cut
+        drags the whole floor down with it — so the answer depended on the order of the
+        feature list. On the Quail Island design, Swale 27 shares **exactly one** rim
+        cell with Swale 25; that cell had been cut to 71.78 m against a natural 72.44 m,
+        and Swale 27 was floored 0.66 m too deep, ponding 1.94 m for a 1.00 m design and
+        reporting Δ +94%.
+        """
+        data = np.full((20, 30), 50.0, dtype="float32")
+        path = _make_dem(tmp_path, data)
+
+        # Adjacent corridors, close enough that each lies in the other's rim.
+        a = _mock_ew("swale", make_mock_line_geom([(4.0, 9.0), (26.0, 9.0)]),
+                     depth=1.0, width=2.0, companion_berm=False)
+        b_ew = _mock_ew("swale", make_mock_line_geom([(4.0, 12.0), (26.0, 12.0)]),
+                        depth=1.0, width=2.0, companion_berm=False)
+        a.name, b_ew.name = "A", "B"
+
+        forward = DEMBurner(path).burn_earthworks([a, b_ew])
+        reverse = DEMBurner(path).burn_earthworks([b_ew, a])
+        assert np.allclose(forward, reverse), (
+            "burning the same design in a different order produced a different DEM"
+        )
+        # And each is cut to its own design depth, not to its neighbour's floor.
+        assert forward.min() == pytest.approx(49.0)
+
+    def test_over_excavation_is_warned_even_on_flat_ground(self, tmp_path):
+        """Relief across the footprint is the wrong question; the cut is the right one.
+
+        A footprint can be internally flat and still be cut far below its design depth,
+        because the datum is the lowest cell of the *rim*: a dip just outside the
+        footprint takes the whole floor down with it. Swale 27 was cut 2.23 m mean for a
+        1.00 m design — 517 m³ moved for 232 m³ of storage — with 0.67 m of relief, and
+        the old ``relief > depth`` gate said nothing.
+        """
+        data = np.full((20, 30), 50.0, dtype="float32")
+        # Row 8 is the rim above the trench: put one cell of it 2.5 m down, and the
+        # whole otherwise-flat strip is floored to that rather than to its own ground.
+        data[8, 14] = 47.5
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        ew = _mock_ew("swale", make_mock_line_geom([(4.0, 10.0), (26.0, 10.0)]),
+                      depth=1.0, width=2.0, companion_berm=False)
+        ew.name = "Swale 27"
+        b.burn_earthworks([ew])
+        assert any("excavation" in w for w in b.warnings), (
+            f"over-excavation went unreported: {b.warnings}"
+        )
+
+    def _bermed_swale(self, tmp_path, keyed, slope_along=0.0):
+        """A contour swale with a companion berm on 5% ground. Returns (burner, dem, ew)."""
+        rows, cols = 120, 300
+        data = np.fromfunction(
+            lambda r, c: 100.0 - r * 0.05 - c * slope_along, (rows, cols)
+        ).astype("float32")
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+        ew = _mock_ew("swale", make_mock_line_geom([(20.0, 60.0), (280.0, 60.0)]),
+                      depth=1.0, width=3.0, bottom_width_m=1.0, companion_berm=True)
+        ew.key_into_banks = keyed
+        return b, b.burn_earthworks([ew]), ew
+
+    def test_the_companion_berm_is_built_to_a_level_crest(self, tmp_path):
+        """Level, not a constant raise — otherwise the crest follows the slope.
+
+        ``dem[mask] += height`` made the bank highest where the water was shallowest,
+        so the pool ran out of its low end and the berm impounded nothing it was
+        credited with. Measured on the Quail Island design the raised bank ran
+        1.44–3.53 m tall against a declared 1.22 m and still held almost nothing.
+        """
+        b, out, ew = self._bermed_swale(tmp_path, keyed=False)
+        raised = out > b.original
+        assert raised.any(), "no berm was built"
+        crest = out[raised]
+        assert crest.max() - crest.min() < 1e-3, (
+            f"berm crest spans {crest.max() - crest.min():.3f} m — it is following the "
+            f"ground rather than being levelled"
+        )
+        assert ew.berm_crest_elevation == pytest.approx(float(crest.max()), abs=1e-3)
+
+    def test_the_dialog_height_is_the_bank_the_burn_builds(self, tmp_path):
+        """What the user is told while drawing must be what the burner lays down.
+
+        The dialog used to quote ``√(0.75 × section)`` — a 1:1 triangular ridge — while
+        the burn spread the same spoil across a band as wide as the swale to a level
+        crest. Same earth, different shape: 1.22 m against 0.50 m for a 3 / 1 / 1 m
+        swale, so the readout was 2.4× the bank that actually appeared.
+
+        The centreline sits at a half-cell offset deliberately. Placed so its buffer
+        edges fall exactly on cell centres, a 3 m swale claims four cells rather than
+        three, cuts half again the spoil, and builds a 0.75 m bank — a real ±half-cell
+        grid effect that no drawn-dimension estimate can predict, and one the At-grid
+        column exists to expose.
+        """
+        rows, cols = 140, 320
+        data = np.full((rows, cols), 100.0, dtype="float32")
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path = _make_dem(tmp_path, data)
+        b = DEMBurner(path)
+
+        ew = _mock_ew("swale", make_mock_line_geom([(20.0, 70.5), (300.0, 70.5)]),
+                      depth=1.0, width=3.0, bottom_width_m=1.0, companion_berm=True)
+        ew.key_into_banks = False
+        b.burn_earthworks([ew])
+
+        predicted = berm_height_estimate(1.0, 3.0, 1.0)
+        low, mean, high = ew.berm_height_m
+        assert mean == pytest.approx(predicted, abs=0.02), (
+            f"dialog predicts {predicted:.2f} m, burn builds {mean:.2f} m"
+        )
+        # Flat ground, so there is nothing for the crest to vary against.
+        assert high - low < 0.02
+
+    def test_a_level_crest_over_uneven_ground_is_reported_as_a_range(self, tmp_path):
+        """One elevation over ground that is not one elevation — so height varies.
+
+        A single "0.98 m" hides it: Swale 29 on the Quail Island design stands 0.60 m at
+        one end and 1.73 m at the other. The bank is reported as (min, mean, max) so the
+        panel can say so, and past a fall greater than the bank's own mean height the
+        burner warns that the run wants segmenting.
+        """
+        rows, cols = 140, 320
+        # Falls along the swale as well as across it, so the ground under the bank runs
+        # downhill while its crest does not.
+        data = np.fromfunction(
+            lambda r, c: 100.0 - r * 0.02 - c * 0.03, (rows, cols)).astype("float32")
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        b = DEMBurner(_make_dem(tmp_path, data))
+
+        ew = _mock_ew("swale", make_mock_line_geom([(20.0, 70.5), (300.0, 70.5)]),
+                      depth=1.0, width=3.0, bottom_width_m=1.0, companion_berm=True)
+        ew.name = "Swale 29"
+        ew.key_into_banks = False
+        b.burn_earthworks([ew])
+
+        low, mean, high = ew.berm_height_m
+        assert low < mean < high, (low, mean, high)
+        assert high - low > mean, (
+            f"fixture is not uneven enough to exercise the warning: "
+            f"{low:.2f}–{high:.2f} m against a {mean:.2f} m mean")
+        assert any("companion berm falls" in w for w in b.warnings), b.warnings
+
+    def test_an_even_berm_is_not_warned_about(self, tmp_path):
+        """Level crests are always somewhat uneven; only a fall past the mean matters."""
+        rows, cols = 140, 320
+        data = np.full((rows, cols), 100.0, dtype="float32")
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        b = DEMBurner(_make_dem(tmp_path, data))
+        ew = _mock_ew("swale", make_mock_line_geom([(20.0, 70.5), (300.0, 70.5)]),
+                      depth=1.0, width=3.0, bottom_width_m=1.0, companion_berm=True)
+        ew.key_into_banks = False
+        b.burn_earthworks([ew])
+        assert not any("companion berm falls" in w for w in b.warnings), b.warnings
+
+    def test_the_berm_is_built_from_the_spoil_the_trench_produced(self, tmp_path):
+        b, out, _ = self._bermed_swale(tmp_path, keyed=False)
+        cut = float(np.clip(b.original - out, 0.0, None).sum())
+        fill = float(np.clip(out - b.original, 0.0, None).sum())
+        assert fill == pytest.approx(cut * 0.75, rel=0.02), (
+            f"{fill:,.0f} m³ of bank from {cut:,.0f} m³ of cut — the 0.75 compaction "
+            f"allowance is not being conserved"
+        )
+
+    def test_keying_the_berm_into_the_banks_makes_it_hold_water(self, tmp_path):
+        """A bank open at its ends impounds nothing; closing them is what makes it real.
+
+        Note this is *not* ``extend_to_abutments``, the dam version — walking outward
+        along the alignment's own bearing. A swale is laid along a contour, so the
+        ground off each end is at the same elevation as the ground under it and that
+        walk keys into nothing: measured on this fixture it changed the ponded volume
+        by 0 m³. A return at each end does the job.
+        """
+        open_b, open_dem, _ = self._bermed_swale(tmp_path / "open", keyed=False)
+        keyed_b, keyed_dem, _ = self._bermed_swale(tmp_path / "keyed", keyed=True)
+
+        open_pond = open_b.get_ponding_layer(open_dem).sum()
+        keyed_pond = keyed_b.get_ponding_layer(keyed_dem).sum()
+        assert keyed_pond > open_pond * 1.15, (
+            f"keyed {keyed_pond:,.0f} m³ vs open {open_pond:,.0f} m³ — closing the ends "
+            f"made no material difference, so the berm is still leaking round them"
+        )
+
+    def test_a_keyed_berm_uses_no_more_earth_than_an_open_one(self, tmp_path):
+        """The spoil is fixed by the cut, so keying in spreads it, never invents it."""
+        open_b, open_dem, _ = self._bermed_swale(tmp_path / "open2", keyed=False)
+        keyed_b, keyed_dem, _ = self._bermed_swale(tmp_path / "keyed2", keyed=True)
+        open_fill = float(np.clip(open_dem - open_b.original, 0.0, None).sum())
+        keyed_fill = float(np.clip(keyed_dem - keyed_b.original, 0.0, None).sum())
+        assert keyed_fill == pytest.approx(open_fill, rel=0.02)
 
     def test_sub_cell_diversion_snaps_and_warns(self, tmp_path):
         data = np.full((20, 20), 50.0, dtype="float32")
@@ -1157,6 +1504,120 @@ class TestDamStageStorage:
         assert not any("bank" in w.lower() for w in b.warnings)
 
 
+class TestFeatureStorage:
+    """What a feature impounds is measured by flooding it, not by filling its footprint.
+
+    The distinction is invisible on flat ground and is the whole answer on a slope. A
+    swale with a companion berm keyed into its banks holds water **above natural
+    ground**, which stands deeper than the trench and reaches further up the hill than
+    the trench does. A footprint integrated to its own one-cell rim can see neither: the
+    rim's minimum is the *uphill* lip, and water crossing that lip runs into rising
+    ground and cannot leave, so the lip is not an outlet and the level it implies is too
+    low. On Swale 5 of the Quail Island design that cost 439 m³ against a pond of 1,095.
+    """
+
+    def _hillside(self, tmp_path, slope=0.05, rows=120, cols=160):
+        """Planar ground falling south — the case a footprint integral gets wrong."""
+        data = np.fromfunction(
+            lambda r, c: 60.0 - r * slope, (rows, cols)).astype("float32")
+        return _make_dem(tmp_path, data)
+
+    def _contour_swale(self, y=60.0):
+        return _mock_ew(
+            "swale", make_mock_line_geom([(30.0, y), (130.0, y)]),
+            depth=1.0, width=3.0, bottom_width_m=1.0,
+            companion_berm=True, key_into_banks=True,
+        )
+
+    def test_the_pond_is_larger_than_the_trench_it_is_held_in(self, tmp_path):
+        b = DEMBurner(self._hillside(tmp_path))
+        ew = self._contour_swale()
+        b.burn_earthworks([ew])
+        trench = next(iter(b.burned_cut.values()))
+        pond = b.feature_storage(ew).volume_m3
+
+        assert trench > 0.0
+        assert pond > trench * 1.2, (
+            f"a keyed berm on falling ground impounds beyond its trench, but the pond "
+            f"({pond:,.0f} m³) is barely past the cut ({trench:,.0f} m³)"
+        )
+
+    def test_a_bare_trench_on_flat_ground_holds_only_its_trench(self, tmp_path):
+        """The converse — without a bank to retain anything the two must agree.
+
+        This is what stops the flood being read as a licence to inflate. Where there is
+        no structure holding water above ground, the pond *is* the hole.
+        """
+        data = np.full((80, 160), 50.0, dtype="float32")
+        b = DEMBurner(_make_dem(tmp_path, data))
+        ew = _mock_ew("swale", make_mock_line_geom([(30.0, 40.0), (130.0, 40.0)]),
+                      depth=1.0, width=6.0, bottom_width_m=2.0, companion_berm=False)
+        b.burn_earthworks([ew])
+        trench = next(iter(b.burned_cut.values()))
+        pond = b.feature_storage(ew).volume_m3
+        assert pond == pytest.approx(trench, rel=0.05)
+
+    def test_the_pond_is_attributed_by_region_not_by_window(self, tmp_path):
+        """A natural hollow that shares the crop is not this feature's water.
+
+        Summing the window would credit the swale with the pothole beside it. The new
+        ponding is labelled and only the regions touching the feature's own burn mask
+        are counted, so the hollow — which ponds identically before and after — is both
+        subtracted by the baseline *and* excluded by attribution.
+        """
+        data = np.fromfunction(
+            lambda r, c: 60.0 - r * 0.05, (120, 160)).astype("float32")
+        data[20:30, 120:140] -= 5.0          # a deep pothole, well off the alignment
+        b = DEMBurner(_make_dem(tmp_path, data))
+        ew = self._contour_swale()
+        b.burn_earthworks([ew])
+        storage = b.feature_storage(ew)
+
+        hollow = np.zeros(b.shape, dtype=bool)
+        hollow[20:30, 120:140] = True
+        r_lo, r_hi, c_lo, c_hi = b._feature_cell_bounds(ew)
+        assert hollow[max(0, r_lo - 64):r_hi + 65, max(0, c_lo - 64):c_hi + 65].any(), (
+            "fixture is wrong: the hollow must fall inside the flood window to be a test"
+        )
+        assert storage.volume_m3 > 0.0
+        assert storage.volume_m3 < 5.0 * 10.0 * 20.0, (
+            "the pothole's volume has been credited to the swale"
+        )
+
+    def test_it_reports_what_stands_above_natural_ground(self, tmp_path):
+        """The two figures the retaining-structure warning is gated on."""
+        b = DEMBurner(self._hillside(tmp_path))
+        ew = self._contour_swale()
+        b.burn_earthworks([ew])
+        s = b.feature_storage(ew)
+        assert 0.0 < s.above_ground_m3 < s.volume_m3
+        assert s.retained_depth_m > 0.0
+        assert s.level_m is not None
+
+    def test_it_is_order_independent(self, tmp_path):
+        """Two neighbouring swales measure the same whichever was burned first.
+
+        The point of flooding the feature *alone*: read off the running array instead,
+        one rim cell a neighbour has already trenched takes the whole datum with it.
+        """
+        b = DEMBurner(self._hillside(tmp_path))
+        a = self._contour_swale(y=60.0)
+        c = self._contour_swale(y=64.0)
+        b.burn_earthworks([a, c])
+        first = (b.feature_storage(a).volume_m3, b.feature_storage(c).volume_m3)
+        b.burn_earthworks([c, a])
+        second = (b.feature_storage(a).volume_m3, b.feature_storage(c).volume_m3)
+        assert first == pytest.approx(second)
+
+    def test_a_feature_that_ponds_nothing_reports_zero(self, tmp_path):
+        b = DEMBurner(self._hillside(tmp_path))
+        ew = _mock_ew("swale", make_mock_line_geom([(500.0, 500.0), (600.0, 500.0)]),
+                      depth=1.0, width=3.0, bottom_width_m=1.0)
+        s = b.feature_storage(ew)
+        assert s.volume_m3 == 0.0
+        assert s.level_m is None
+
+
 class TestDamWindowedFlood:
     """The dam flood runs on a crop around the dam, growing until the pond fits."""
 
@@ -1209,16 +1670,29 @@ class TestDamWindowedFlood:
         assert not _pond_touches_edge(centre)
         assert _pond_touches_edge(np.zeros((3, 3)))  # tiny window always grows
 
-    def test_dam_cell_bounds_clamped(self, tmp_path):
+    def test_feature_cell_bounds_clamped(self, tmp_path):
         b = DEMBurner(self._long_valley_dem(tmp_path))
-        r_lo, r_hi, c_lo, c_hi = b._dam_cell_bounds(self._dam(97.0))
+        r_lo, r_hi, c_lo, c_hi = b._feature_cell_bounds(self._dam(97.0))
         assert 0 <= r_lo <= r_hi < 300
         assert 0 <= c_lo <= c_hi < 40
 
-    def test_dam_cell_bounds_bad_geometry_full_dem(self, tmp_path):
+    def test_feature_cell_bounds_bad_geometry_full_dem(self, tmp_path):
         from unittest.mock import MagicMock
         b = DEMBurner(self._long_valley_dem(tmp_path))
         bad = MagicMock()
         bad.asJson.side_effect = RuntimeError("no geometry")
         dam = _mock_ew("dam", bad, width=2.0, crest_elevation=97.0)
-        assert b._dam_cell_bounds(dam) == (0, 299, 0, 39)
+        assert b._feature_cell_bounds(dam) == (0, 299, 0, 39)
+
+    def test_feature_cell_bounds_takes_a_polygon(self, tmp_path):
+        """Generalised from the dam-only version, and a basin is why.
+
+        Every feature's pond is now flooded in its own window, not just a dam's, so the
+        bounds helper has to accept the polygon types too. ``.bounds`` is a shapely
+        property common to both, so this only ever needed the name to stop lying.
+        """
+        b = DEMBurner(self._long_valley_dem(tmp_path))
+        basin = _mock_ew("basin", make_mock_polygon_geom((5.0, 100.0, 25.0, 140.0)))
+        r_lo, r_hi, c_lo, c_hi = b._feature_cell_bounds(basin)
+        assert 0 <= r_lo < r_hi < 300
+        assert 0 <= c_lo < c_hi < 40

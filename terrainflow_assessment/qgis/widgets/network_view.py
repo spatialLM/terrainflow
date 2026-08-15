@@ -17,9 +17,11 @@ it. Both are shown, because storage alone made that look like a broken feature.
 
 Data contract — ``set_network(nodes, edges, exit_m3)``:
   nodes : list of dicts, each
-    {index, id, name, ew_type, colour, elevation, capacity_m3, stored_m3,
-     soaked_m3, drain_hours, fill_pct, overflowed, overflow_m3, catchment_m2,
-     is_terminal, enabled, has_water}
+    {index, id, name, ew_type, colour, elevation, crest_elevation, capacity_m3,
+     stored_m3, soaked_m3, drain_hours, fill_pct, overflowed, overflow_m3,
+     catchment_m2, is_terminal, enabled, has_water}
+  ``elevation`` is the ground at the feature's centroid (it orders the network);
+  ``crest_elevation`` is the dam's design crest, and None for everything else.
   edges : {from_id: (to_id_or_None, is_user_link)}
   exit_m3 : total water leaving the site
 """
@@ -34,6 +36,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import help_text as H
+
 _WATER = "#1273b5"
 _SOAKED = "#79b8dd"   # same token the scorecard uses for infiltrated water
 _WARN = "#b9770e"
@@ -42,6 +46,40 @@ _INK = "#22302e"
 _MUTED = "#5f7176"
 _FAINT = "#8fa0a4"
 _GLYPH = {"swale": "∿", "basin": "▢", "dam": "▮", "berm": "⌒", "diversion": "↘"}
+
+
+def _capacity_text(node):
+    """Capacity as the node prints it — the measured pond, with the drawn figure beside.
+
+    Both, whenever they differ by more than rounding. The bar fills against the measured
+    one, and that figure is routinely twice the drawn section on a swale whose companion
+    berm is keyed into the banks, because the bank holds water above natural ground and
+    further up the hill than the trench reaches. A number that size shown alone would look
+    like a mistake; shown alone in the *other* direction it caused a real one — sizing
+    against the drawn section reports a swale full while most of its pond is empty.
+    """
+    cap = node.get("capacity_m3", 0.0) or 0.0
+    drawn = node.get("drawn_capacity_m3", cap) or 0.0
+    if not node.get("capacity_is_measured") or abs(cap - drawn) < max(1.0, 0.01 * drawn):
+        return f"{cap:,.0f} m³"
+    return f"{cap:,.0f} m³ · {drawn:,.0f} drawn"
+
+
+def _capacity_tooltip(node):
+    cap = node.get("capacity_m3", 0.0) or 0.0
+    drawn = node.get("drawn_capacity_m3", cap) or 0.0
+    if not node.get("capacity_is_measured"):
+        return ("Storage capacity from the drawn cross-section. No terrain measurement "
+                "yet — load a DEM to see what the ground actually holds here.")
+    tip = (f"{cap:,.0f} m³ is what this feature impounds on the actual ground, measured "
+           f"by flooding it on the DEM. The fill bar is against that figure.\n\n"
+           f"{drawn:,.0f} m³ is the drawn cross-section less freeboard — the number you "
+           f"can check by hand and the one a contractor builds to.")
+    if cap > drawn * 1.2:
+        tip += ("\n\nThe difference is water the bank holds above natural ground, and up "
+                "the slope behind it. No cross-section can predict it; it depends on "
+                "this hillside.")
+    return tip
 
 
 class _FillBar(QWidget):
@@ -103,9 +141,9 @@ class _NodeCard(QFrame):
         h.addWidget(elev)
         h.addStretch(1)
 
-        cap = QLabel(f"{node['capacity_m3']:,.0f} m³")
+        cap = QLabel(_capacity_text(node))
         cap.setStyleSheet(f"font-size: 11.5px; color: {_MUTED};")
-        cap.setToolTip("Storage capacity (potential)")
+        cap.setToolTip(_capacity_tooltip(node))
         h.addWidget(cap)
 
         if node["enabled"] and node["has_water"]:
@@ -114,7 +152,7 @@ class _NodeCard(QFrame):
             wtxt = "full" if full else f"{node['fill_pct']:.0f}%"
             water = QLabel(f"💧 {node['stored_m3']:,.0f} · {wtxt}")
             water.setStyleSheet(f"font-size: 11.5px; font-weight: 600; color: {wcol};")
-            water.setToolTip("Water held (ponded) · fill")
+            water.setToolTip(H.NETWORK_WATER_HELD)
             h.addWidget(water)
 
             # Infiltration is capture too, and for a wide shallow feature it can be
@@ -126,10 +164,7 @@ class _NodeCard(QFrame):
                 soak = QLabel(f"↓ {soaked:,.0f}")
                 soak.setStyleSheet(
                     f"font-size: 11.5px; font-weight: 600; color: {_SOAKED};")
-                soak.setToolTip(
-                    "Soaked into the ground over the event — captured, but not held "
-                    "as standing water, so it does not fill the feature."
-                )
+                soak.setToolTip(H.NETWORK_SOAKED)
                 h.addWidget(soak)
 
             # How long standing water takes to soak away. Lancaster sizes earthworks
@@ -168,8 +203,16 @@ class _NodeCard(QFrame):
         self.setToolTip(node.get("summary", ""))
 
     def _elev_text(self, node):
-        if node["ew_type"] == "dam":
-            return f"crest {node['elevation']:.0f} m"
+        """Ground under the feature — except a dam, which is described by its crest.
+
+        ``elevation`` is a DEM sample at the geometry centroid, so labelling it "crest"
+        for a dam printed the ground *under* the wall: Dam 15 read "crest 54 m" against
+        a crest of 56.12 m. A dam drawn but not yet given a crest falls back to the
+        ground, unlabelled, rather than naming a figure that is not the crest.
+        """
+        crest = node.get("crest_elevation") if node["ew_type"] == "dam" else None
+        if crest is not None:
+            return f"crest {crest:.0f} m"
         return f"{node['elevation']:.0f} m"
 
     def set_selected(self, sel):
@@ -533,7 +576,7 @@ class NetworkView(QWidget):
         exit_lbl.setStyleSheet(
             f"color: {_FAINT}; font-size: 11px; padding: 6px 2px 2px;"
         )
-        exit_lbl.setToolTip("Runoff not held by any feature")
+        exit_lbl.setToolTip(H.NETWORK_SITE_EXIT)
         self._lay.addWidget(exit_lbl)
 
         # The chart shares the list's data; only the arrangement differs. Rank comes

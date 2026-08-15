@@ -25,6 +25,13 @@ class PluginState:
     output_dir: str = field(default_factory=lambda: tempfile.mkdtemp(prefix="tfa_"))
     ponding_raster_path: str | None = None
 
+    # The arrays the verification pass already read off disk, handed forward to the
+    # event-pond layers. Both views describe the same pools on the same grid, and
+    # re-reading and re-aligning the rasters a second time is how they would come to
+    # disagree — the baseline alignment in particular has three failure modes and a
+    # fallback to zeros. None until an earthworks re-analysis has run.
+    pond_context: dict | None = None
+
     # ------------------------------------------------------------------ Layer tree
     # Abbreviated run parameters ("120mm·24h·C0.40·1ha") shown on the stage groups.
     # Frozen when Baseline runs, not read live from the panel: Analysis and Design
@@ -47,7 +54,9 @@ class PluginState:
     # ------------------------------------------------------------------ Earthworks
     burner: Any | None = None             # DEMBurner instance
     earthwork_manager: Any | None = None  # EarthworkManager (set in controller __init__)
-    ew_layers: dict = field(default_factory=dict)
+    # earthwork type → layer id. Named for what it holds: the values are ids
+    # resolved through _layers.resolve_layer, never layer objects.
+    ew_layer_ids: dict = field(default_factory=dict)
     ew_group: Any | None = None
 
     # ------------------------------------------------------------------ Flow-graph cache
@@ -77,7 +86,6 @@ class PluginState:
     catchment_labels_layer_id: str | None = None
     throughflow_layer_id: str | None = None
     connections_layer_id: str | None = None
-    stress_points_layer_id: str | None = None
     spillway_layer_id: str | None = None
     stress_points_layer_id: str | None = None   # where features overtop locally
 
@@ -128,6 +136,24 @@ class PluginState:
     post_report: Any | None = None
     comparison: Any | None = None
     verification: Any | None = None       # VerificationResult (terrain vs analytic, §4)
+    # Design-tier results, retained for the report. The live assessment recomputes
+    # these on every edit and used to drop them on the floor, which is the only
+    # reason the report needed a simulation to exist: BalanceResult already carries
+    # capture %, per-feature water, cut/fill and the mass-balance flag.
+    # balance_stores is kept alongside because the stores hold per-feature
+    # cut_vol_m3/fill_vol_m3 that BalanceResult.per_feature does not — recomputing
+    # them invites the diversion width/bed-width trap in calculate_cut_volume.
+    balance: Any | None = None            # BalanceResult (design tier, live)
+    balance_stores: list | None = None    # EarthworkStore list it was built from
+    # {cut_m3, fill_m3} the burn actually moved, measured off the two elevation
+    # surfaces. Distinct from the analytic cut/fill above, which assumes flat ground —
+    # see earthwork_design.burn_quantities.
+    burn_quantities: dict | None = None
+    # Spillway review rows are built for the panel table; the report needs the same
+    # figures and cannot reach the earthworks controller to ask for them.
+    spillway_rows: list | None = None
+    spillway_context: dict | None = None
+    report_last_path: str | None = None
     # Verified-vs-design tracking (Workbench scorecard chip). edits_since_verify is
     # None until the first burn; 0 right after a burn; incremented per design edit.
     verified_delta_pct: float | None = None
@@ -160,3 +186,35 @@ class PluginState:
         self.flow_domain_mask = None
         self.flow_grid_meta = None
         self.invalidate_catchment_cache()
+
+    def invalidate_results(self):
+        """Drop every result derived from terrain. Call when the terrain changes.
+
+        A design file's Open path has always done this — nothing computed against the
+        previous DEM describes the new one, and a stale verification chip reading green
+        for a design that has not been analysed once is the failure the format exists to
+        avoid. Swapping the DEM in the picker is the same event and was not doing it, so
+        a baseline computed on one grid survived alongside a burner built on another.
+        That is not merely stale: the two rasters then have different extents, the
+        subtraction that isolates earthwork storage is skipped, and every measured figure
+        silently carries whatever ponded there naturally.
+
+        State only — the panel half (buttons, summary labels) stays with the controller
+        that owns the panel, so this can be called from any of them.
+        """
+        self.baseline_result = None
+        self.earthworks_result = None
+        self.sim_result = None
+        self.baseline_report = None
+        self.post_report = None
+        self.comparison = None
+        self.verification = None
+        self.verified_delta_pct = None
+        self.edits_since_verify = None
+        self.balance = None
+        self.balance_stores = None
+        self.burn_quantities = None
+        self.spillway_rows = None
+        self.spillway_context = None
+        self.modified_dem_path = None
+        self.pond_context = None

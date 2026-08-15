@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pytest
 
+from terrainflow_assessment.modules.burn_strategy import overtopping_warning
 from terrainflow_assessment.modules.earthwork_design import capacity_breakdown
 from terrainflow_assessment.modules.reporting import (
     BaselineReport,
@@ -17,8 +18,10 @@ from terrainflow_assessment.modules.reporting import (
     attribute_ponding_volume,
     build_verification,
     compare,
-    export_html,
+    event_pond_depth,
     format_live_assessment,
+    level_for_volume,
+    overtopping_spill,
     raster_ponding_volume,
 )
 from terrainflow_assessment.modules.water_balance import BalanceResult
@@ -316,80 +319,63 @@ class TestBuildFillTimelineChart:
 # export_html
 # ---------------------------------------------------------------------------
 
-class TestExportHTML:
-    def test_creates_file(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        result = export_html(
-            ComparisonResult(baseline=_baseline(), post=_post()),
-            out,
+class TestHtmlOutputKeepsWhatTheLegacyReportHad:
+    """The old export_html built its own document from a ComparisonResult.
+
+    It is gone: both formats now render the shared model. These assert that the
+    content the legacy tests protected still reaches the HTML by that route, so
+    the convergence lost nothing.
+    """
+
+    def _html(self, comparison=None, **kw):
+        from terrainflow_assessment.modules.report_html import render_html
+        from terrainflow_assessment.modules.report_model import (
+            ReportData,
+            build_report,
         )
-        assert os.path.exists(out)
-        assert result == out
+        comparison = comparison or ComparisonResult(
+            baseline=_baseline(), post=_post())
+        data = ReportData(site_name=comparison.baseline.site_name
+                          if comparison.baseline else "Unnamed Site",
+                          baseline=comparison.baseline,
+                          comparison=comparison, **kw)
+        return render_html(build_report(data))
 
-    def test_file_contains_site_name(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(
-            ComparisonResult(baseline=_baseline(site_name="MyFarm"), post=_post()),
-            out,
+    def test_writes_a_file(self, tmp_path):
+        from terrainflow_assessment.modules.report_html import write_html
+        from terrainflow_assessment.modules.report_model import (
+            ReportData,
+            build_report,
         )
-        content = open(out, encoding="utf-8").read()
-        assert "MyFarm" in content
-
-    def test_html_has_doctype(self, tmp_path):
         out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        assert "<!DOCTYPE html>" in content
+        result = write_html(out, build_report(ReportData(baseline=_baseline())))
+        assert os.path.exists(out) and result == out
 
-    def test_html_has_sections(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        for section in ["Site Summary", "Before / After", "Earthwork Summary", "Methodology"]:
-            assert section in content
+    def test_site_name_reaches_the_page(self):
+        html = self._html(ComparisonResult(
+            baseline=_baseline(site_name="MyFarm"), post=_post()))
+        assert "MyFarm" in html
 
-    def test_overflow_yes_shown(self, tmp_path):
-        ew = _post().earthwork_summary[0].copy()
-        ew["overflowed"] = True
-        ew["first_overflow_hr"] = 0.6
-        p = _post(earthwork_summary=[ew])
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=p), out)
-        content = open(out, encoding="utf-8").read()
-        assert "Yes" in content
+    def test_has_doctype(self):
+        assert "<!DOCTYPE html>" in self._html()
 
-    def test_no_overflow_shown(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        assert "No" in content
+    def test_has_the_headline_sections(self):
+        html = self._html()
+        for section in ("Your scheme in one page", "Where your water goes today",
+                        "How the storm plays out over time",
+                        "Inputs, method and limits"):
+            assert section in html, section
 
-    def test_methodology_text_included(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(
-            ComparisonResult(baseline=_baseline(), post=_post()),
-            out,
-            methodology_text="Custom methodology note.",
-        )
-        content = open(out, encoding="utf-8").read()
-        assert "Custom methodology note." in content
+    def test_before_and_after_figures_survive(self):
+        html = self._html()
+        assert "Before and after the earthworks" in html
+        assert "Fastest flow at the boundary" in html
 
-    def test_none_baseline_no_crash(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=None, post=None), out)
-        assert os.path.exists(out)
+    def test_exit_points_survive(self):
+        assert "Where water leaves the boundary" in self._html()
 
-    def test_exit_points_in_html(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        assert "Exit Point" in content
-
-    def test_cut_fill_summary_in_html(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        assert "Net cut" in content
+    def test_none_baseline_no_crash(self):
+        assert self._html(ComparisonResult(baseline=None, post=None))
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +414,228 @@ class TestImpoundedVolume:
         assert impounded_volume(baseline, dammed, 2.0) == pytest.approx(4.0)
 
 
+class TestOvertoppingSpill:
+    """Does a pool leave over the wall that made it, and along how much of it."""
+
+    def _valley(self):
+        """A channel at 10 m between banks at 20 m, dammed across at 12 m.
+
+        row 2 is the channel; the dam occupies col 3 and stands at 12.0, so the pool
+        upstream fills to 12.0 and its only way out is over the dam.
+        """
+        ground = np.full((5, 7), 20.0)
+        ground[2, :] = 10.0
+        ground[2, 3] = 12.0            # the wall, across the channel
+        pond = np.zeros((5, 7))
+        pond[2, 0:3] = 2.0             # water to 12.0 upstream of it
+        crest = np.zeros((5, 7), dtype=bool)
+        crest[2, 3] = True
+        return ground, pond, crest
+
+    def test_pool_that_leaves_over_its_own_wall_is_reported(self):
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert len(got) == 1, got
+        assert got[0].name == "Dam A"
+        assert got[0].pour_level_m == pytest.approx(12.0)
+        assert got[0].length_m == pytest.approx(1.0)      # one 1 m cell of crest
+        assert got[0].pool_volume_m3 == pytest.approx(6.0)
+
+    def test_a_lower_way_out_means_no_overtopping(self):
+        """A notch in the bank below the crest takes the water instead."""
+        ground, pond, crest = self._valley()
+        ground[1, 1] = 11.0            # saddle in the bank, below the 12.0 wall
+        pond[2, 0:3] = 1.0             # so the pool only fills to 11.0
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert got == []
+
+    def test_length_is_the_whole_crest_at_the_pour_level(self):
+        """A level crest spills along all of itself, not at the one cell D8 picks."""
+        ground = np.full((5, 7), 20.0)
+        ground[1:4, :] = 10.0
+        ground[1:4, 3] = 12.0          # a three-cell-wide wall, all at one level
+        pond = np.zeros((5, 7))
+        pond[1:4, 0:3] = 2.0
+        crest = np.zeros((5, 7), dtype=bool)
+        crest[1:4, 3] = True
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert got[0].length_m == pytest.approx(3.0)
+
+    def test_length_cannot_exceed_the_drawn_wall(self):
+        """Diagonal cell runs over-count; the wall's own length is the ceiling."""
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 0.4)])
+        assert got[0].length_m == pytest.approx(0.4)
+
+    def test_alt_saddle_reports_the_next_way_out(self):
+        ground, pond, crest = self._valley()
+        ground[1, 1] = 13.0            # higher than the wall, so still overtops
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert got[0].alt_saddle_m == pytest.approx(13.0)
+
+    def test_built_ground_is_not_a_natural_saddle(self):
+        """A dam's keyed returns are its own wall, not the next way out.
+
+        They sit outside the recorded mask, so without ``built`` they come back as the
+        alternative at the dam's own level and the advice reads "raise the crest 0.00 m"
+        — which is what the real Quail Island design produced.
+        """
+        ground = np.full((5, 7), 20.0)
+        ground[1:4, 0:3] = 10.0        # the basin
+        ground[1:4, 3] = 12.0          # the wall, three cells of it
+        ground[0, 1] = 15.0            # the genuine natural saddle
+        pond = np.zeros((5, 7))
+        pond[1:4, 0:3] = 2.0           # filled to 12.0
+        crest = np.zeros((5, 7), dtype=bool)
+        crest[2, 3] = True             # only the drawn line's own contact cell
+        built = np.zeros((5, 7), dtype=bool)
+        built[1:4, 3] = True           # the wall AND its keyed returns
+
+        loose = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert loose[0].alt_saddle_m == pytest.approx(12.0)   # its own wall
+
+        tight = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                  built=built)
+        assert tight[0].alt_saddle_m == pytest.approx(15.0)   # real ground
+
+    def test_a_cut_is_not_a_barrier(self):
+        """An empty crest mask contributes nothing — a hole cannot be overtopped."""
+        ground, pond, _ = self._valley()
+        empty = np.zeros((5, 7), dtype=bool)
+        assert overtopping_spill(pond, ground, 1.0, [("Swale A", empty, 10.0)]) == []
+
+
+class TestOvertoppingWarning:
+    def test_names_the_length_and_asks_for_a_spillway(self):
+        msg = overtopping_warning("Dam 15", 34.0, 56.12, alt_saddle_m=57.9)
+        assert "Dam 15" in msg and "56.12" in msg and "34 m" in msg
+        assert "spillway" in msg
+        # The length exists to contradict the single channel the stream layer draws. It
+        # used to call that an "artefact of the flow routing", which Round 14 disproved:
+        # flow leaves a pool at many cells, the flat is resolved by distance so one of them
+        # takes most of the flux, and the Streams layer only draws what clears its
+        # contributing-area threshold. The claim the message must still make is that the
+        # water does not all go where the map shows a channel.
+        assert "at once" in msg
+        assert "stream layer" in msg
+        assert "artefact" not in msg
+        assert "1.78 m" in msg     # how much crest would have to rise to miss it
+
+    def test_a_designed_spillway_makes_it_a_model_caveat_not_a_fault(self):
+        msg = overtopping_warning("Dam 15", 34.0, 56.12, has_spillway=True)
+        assert "not cut into the terrain" in msg
+        assert "Nothing is designed to take it" not in msg
+
+    def test_no_length_no_warning(self):
+        assert overtopping_warning("Dam 15", 0.0, 56.12) is None
+
+    def test_an_alternative_at_the_same_level_reports_no_freeboard(self):
+        """"Raising the crest 0.00 m" is worse than saying nothing.
+
+        A crest seeded from the highest ground the line touches lands exactly on the
+        bank — both Quail Island dams do — so the honest statement is that the abutment
+        has no freeboard, not a rise of zero.
+        """
+        for alt in (56.12, 56.124):
+            msg = overtopping_warning("Dam 15", 24.0, 56.12, alt_saddle_m=alt)
+            assert "Raising the crest" not in msg
+            assert "no freeboard at the abutment" in msg
+            assert "round the end of the wall" in msg
+
+
+class TestLevelForVolume:
+    def test_flat_bed_is_volume_over_area(self):
+        # Four cells at 10.0 m, 1 m² each, 2 m³ → 0.5 m of water at 10.5 m.
+        assert level_for_volume([10.0] * 4, 1.0, 2.0) == pytest.approx(10.5)
+
+    def test_only_the_wetted_cells_count(self):
+        """A stepped bed fills from the bottom, not across the whole region.
+
+        Cells at 10, 11, 12, 13. 0.5 m³ over 1 m² cells cannot reach 11.0 (that would
+        take 1.0 m³), so it stands 0.5 m deep over the one lowest cell. Dividing the
+        volume by the whole region's area instead would put it at 10.125 m — under
+        water that is not there, and a pond drawn four times too wide.
+        """
+        assert level_for_volume([10.0, 11.0, 12.0, 13.0], 1.0, 0.5) == pytest.approx(10.5)
+
+    def test_level_rises_across_the_step_once_the_first_cell_is_full(self):
+        # 1.0 m³ exactly fills to 11.0; a further 1.0 m³ spreads over two cells.
+        assert level_for_volume([10.0, 11.0, 12.0], 1.0, 2.0) == pytest.approx(11.5)
+
+    def test_ceiling_caps_at_the_spill_level(self):
+        # More water than the pool can hold is overflow, not a taller pond.
+        assert level_for_volume([10.0] * 4, 1.0, 999.0, ceiling=10.4) == pytest.approx(10.4)
+
+    def test_empty_region_returns_none(self):
+        assert level_for_volume([], 1.0, 5.0) is None
+
+
+class TestEventPondDepth:
+    """The part-full pond: smaller and shallower, not the full pond faded."""
+
+    def _bowl(self):
+        # A 1-D valley in a 5x5 grid: one row of bed at 10, 11, 12, brim-full to 12.
+        ground = np.full((5, 5), 20.0)
+        ground[2, 1], ground[2, 2], ground[2, 3] = 11.0, 10.0, 12.0
+        full = np.zeros((5, 5))
+        full[2, 1], full[2, 2], full[2, 3] = 1.0, 2.0, 0.0   # water surface at 12.0
+        return ground, full
+
+    def _mask_at(self, cells):
+        m = np.zeros((5, 5), dtype=bool)
+        for r, c in cells:
+            m[r, c] = True
+        return m
+
+    def test_part_full_pond_stands_in_the_bottom(self):
+        ground, full = self._bowl()
+        # 1 m³ of the pond's 3 m³: it stands 1 m deep over the single lowest cell and
+        # does not reach the 11.0 m cell beside it.
+        got = event_pond_depth(full, ground, 1.0,
+                               [("A", self._mask_at([(2, 2)]))], {"A": 1.0})
+        assert got[2, 2] == pytest.approx(1.0)
+        assert got[2, 1] == pytest.approx(0.0)
+        assert got.sum() == pytest.approx(1.0)
+
+    def test_a_full_feature_reproduces_the_capacity_pond(self):
+        ground, full = self._bowl()
+        got = event_pond_depth(full, ground, 1.0,
+                               [("A", self._mask_at([(2, 2)]))], {"A": 3.0})
+        assert got == pytest.approx(full)
+
+    def test_more_water_than_capacity_does_not_overtop(self):
+        ground, full = self._bowl()
+        got = event_pond_depth(full, ground, 1.0,
+                               [("A", self._mask_at([(2, 2)]))], {"A": 500.0})
+        assert got.sum() == pytest.approx(full.sum())
+
+    def test_natural_water_already_there_is_added_back(self):
+        """``stored_m3`` is what the feature adds; the hollow's own water is not gone."""
+        ground, full = self._bowl()
+        existing = np.zeros((5, 5))
+        existing[2, 2] = 1.0                      # 1 m³ ponds here with no earthwork
+        got = event_pond_depth(full, ground, 1.0,
+                               [("A", self._mask_at([(2, 2)]))], {"A": 1.0},
+                               existing=existing)
+        assert got.sum() == pytest.approx(2.0)
+
+    def test_a_feature_with_no_water_draws_nothing(self):
+        ground, full = self._bowl()
+        got = event_pond_depth(full, ground, 1.0,
+                               [("A", self._mask_at([(2, 2)]))], {"A": 0.0})
+        assert not got.any()
+
+    def test_joined_features_fill_their_shared_pool_together(self):
+        """One sheet of water, one level — the pair's volume, not each one's own."""
+        ground, full = self._bowl()
+        got = event_pond_depth(
+            full, ground, 1.0,
+            [("A", self._mask_at([(2, 2)])), ("B", self._mask_at([(2, 1)]))],
+            {"A": 1.0, "B": 2.0},
+        )
+        assert got.sum() == pytest.approx(3.0)
+
+
 class TestAttributePondingVolume:
     def _pond_band(self):
         # A single connected pond: row 2, cols 1-3, depth 1.0 → 3 cells
@@ -445,35 +653,123 @@ class TestAttributePondingVolume:
         # Footprint touches one cell of a 3-cell pond → the *whole* connected region
         # (incl. cells outside the footprint, i.e. a dam pool) attributes to it.
         pond = self._pond_band()
-        per_name, unattr = attribute_ponding_volume(
+        got = attribute_ponding_volume(
             pond, 1.0, [("A", self._mask_at([(2, 1)]))]
         )
-        assert per_name["A"] == pytest.approx(3.0)
-        assert unattr == pytest.approx(0.0)
+        assert got.per_name["A"] == pytest.approx(3.0)
+        assert got.unattributed_m3 == pytest.approx(0.0)
+        assert got.groups == []
 
     def test_region_touching_no_footprint_is_unattributed(self):
         pond = self._pond_band()
-        per_name, unattr = attribute_ponding_volume(
+        got = attribute_ponding_volume(
             pond, 1.0, [("A", self._mask_at([(0, 0)]))]
         )
-        assert per_name["A"] == pytest.approx(0.0)
-        assert unattr == pytest.approx(3.0)
+        assert got.per_name["A"] == pytest.approx(0.0)
+        assert got.unattributed_m3 == pytest.approx(3.0)
 
-    def test_region_goes_to_largest_overlap(self):
+    def test_shared_region_belongs_to_neither_feature(self):
+        """A pool two features both reach is theirs jointly, and no one's severally.
+
+        This replaces a largest-overlap rule. On the Quail Island design that rule put
+        a basin and the dam on its downhill lip — one structure, one sheet of water —
+        at Δ +211% and Δ −100% respectively, for a 3,593 m³ pool neither of them holds
+        alone. The volume was never wrong; awarding it was.
+        """
         pond = self._pond_band()
         footprints = [
             ("A", self._mask_at([(2, 1)])),           # overlap 1
-            ("B", self._mask_at([(2, 2), (2, 3)])),   # overlap 2 → wins
+            ("B", self._mask_at([(2, 2), (2, 3)])),   # overlap 2
         ]
-        per_name, unattr = attribute_ponding_volume(pond, 1.0, footprints)
-        assert per_name["B"] == pytest.approx(3.0)
-        assert per_name["A"] == pytest.approx(0.0)
+        got = attribute_ponding_volume(pond, 1.0, footprints)
+        assert got.per_name["A"] == pytest.approx(0.0)
+        assert got.per_name["B"] == pytest.approx(0.0)
+        assert len(got.groups) == 1
+        assert got.groups[0]["names"] == ("A", "B")
+        assert got.groups[0]["volume_m3"] == pytest.approx(3.0)
+        assert got.groups[0]["overlaps"] == {"A": 1, "B": 2}
+
+    def test_three_features_on_one_pool_form_one_group(self):
+        pond = self._pond_band()
+        footprints = [
+            ("A", self._mask_at([(2, 1)])),
+            ("B", self._mask_at([(2, 2)])),
+            ("C", self._mask_at([(2, 3)])),
+        ]
+        got = attribute_ponding_volume(pond, 1.0, footprints)
+        assert len(got.groups) == 1
+        assert got.groups[0]["names"] == ("A", "B", "C")
+        assert got.groups[0]["volume_m3"] == pytest.approx(3.0)
+
+    def test_joining_is_transitive(self):
+        # A shares a pool with B; B shares a different pool with C. No cut separates
+        # A's water from C's, so all three are one set.
+        arr = np.zeros((5, 8), dtype="float64")
+        arr[1, 1:3] = 1.0          # A + B
+        arr[3, 4:6] = 1.0          # B + C
+        a = np.zeros((5, 8), dtype=bool)
+        b = np.zeros((5, 8), dtype=bool)
+        c = np.zeros((5, 8), dtype=bool)
+        a[1, 1] = True
+        b[1, 2] = b[3, 4] = True
+        c[3, 5] = True
+        got = attribute_ponding_volume(arr, 1.0, [("A", a), ("B", b), ("C", c)])
+        assert len(got.groups) == 1
+        assert got.groups[0]["names"] == ("A", "B", "C")
+        assert got.groups[0]["volume_m3"] == pytest.approx(4.0)
+
+    def test_a_joined_feature_brings_its_solo_pool_into_the_set(self):
+        """Otherwise the set is measured on part of its water and all of its capacity.
+
+        Dam 3 holds 158 m³ alone and 321 m³ jointly with Swale 6. Scoring only the
+        joint pool against both capacities reported Δ −33%; counting the dam's own
+        pool into the set puts the pair within 1% of what the grid holds.
+        """
+        arr = np.zeros((5, 8), dtype="float64")
+        arr[1, 1:3] = 1.0          # shared by A and B
+        arr[3, 1:3] = 1.0          # A alone
+        a = np.zeros((5, 8), dtype=bool)
+        b = np.zeros((5, 8), dtype=bool)
+        a[1, 1] = a[3, 1] = True
+        b[1, 2] = True
+        got = attribute_ponding_volume(arr, 1.0, [("A", a), ("B", b)])
+        assert got.per_name["A"] == pytest.approx(0.0)
+        assert len(got.groups) == 1
+        assert got.groups[0]["volume_m3"] == pytest.approx(4.0)
+
+    def test_separate_pools_with_the_same_members_merge_into_one_group(self):
+        # Two disconnected pools, both reached by A and B: one group, both volumes.
+        arr = np.zeros((5, 7), dtype="float64")
+        arr[1, 1:3] = 1.0
+        arr[3, 1:3] = 1.0
+        masks = {"A": np.zeros((5, 7), dtype=bool), "B": np.zeros((5, 7), dtype=bool)}
+        masks["A"][1, 1] = masks["A"][3, 1] = True
+        masks["B"][1, 2] = masks["B"][3, 2] = True
+        got = attribute_ponding_volume(arr, 1.0, list(masks.items()))
+        assert len(got.groups) == 1
+        assert got.groups[0]["volume_m3"] == pytest.approx(4.0)
+
+    def test_volume_is_conserved_across_the_three_buckets(self):
+        """Grouping moves water between buckets; it must never create or lose any."""
+        arr = np.zeros((6, 8), dtype="float64")
+        arr[1, 1:4] = 1.0          # shared by A and B
+        arr[3, 1:3] = 2.0          # A alone
+        arr[5, 5:7] = 0.5          # nobody
+        a = np.zeros((6, 8), dtype=bool)
+        b = np.zeros((6, 8), dtype=bool)
+        a[1, 1] = a[3, 1] = True
+        b[1, 3] = True
+        got = attribute_ponding_volume(arr, 1.0, [("A", a), ("B", b)])
+        total = (sum(got.per_name.values())
+                 + sum(g["volume_m3"] for g in got.groups)
+                 + got.unattributed_m3)
+        assert total == pytest.approx(float(arr.sum()))
 
     def test_no_footprints_all_unattributed(self):
         pond = self._pond_band()
-        per_name, unattr = attribute_ponding_volume(pond, 1.0, [])
-        assert per_name == {}
-        assert unattr == pytest.approx(3.0)
+        got = attribute_ponding_volume(pond, 1.0, [])
+        assert got.per_name == {}
+        assert got.unattributed_m3 == pytest.approx(3.0)
 
 
 class TestBuildVerification:
@@ -579,48 +875,41 @@ class TestBuildVerification:
         assert v.terrain_total_m3 == 0.0
 
 
-class TestExportHtmlVerification:
-    def _summary_with_terrain(self):
-        base = _post().earthwork_summary[0].copy()
-        base.update(terrain_ponding_m3=180.0, capacity_delta_pct=-10.0, routing_only=False)
-        sub = {
-            "name": "Swale 2", "type": "swale", "capacity_m3": 50.0,
-            "peak_fill_pct": 40.0, "overflowed": False, "first_overflow_hr": None,
-            "terrain_ponding_m3": None, "capacity_delta_pct": None, "routing_only": True,
-        }
-        return [base, sub]
+class TestHtmlVerificationSurvivesConvergence:
+    """The legacy report had its own verification block; the shared model has
+    the volume ladder. Assert the same facts reach the HTML."""
 
-    def _comparison(self):
+    def _html(self, verification):
+        from terrainflow_assessment.modules.report_html import render_html
+        from terrainflow_assessment.modules.report_model import (
+            ReportData,
+            build_report,
+        )
+        return render_html(build_report(ReportData(
+            baseline=_baseline(), verification=verification)))
+
+    def test_ladder_and_caveats_present(self):
         v = VerificationResult(
-            analytic_total_m3=250.0, terrain_total_m3=230.0, delta_m3=-20.0,
-            delta_pct=-8.0, unattributed_m3=5.0,
-            per_feature=[], caveats=["Site total is robust; per-feature is indicative."],
-        )
-        c = ComparisonResult(
-            baseline=_baseline(),
-            post=_post(earthwork_summary=self._summary_with_terrain()),
-            verification=v,
-        )
-        return c
+            analytic_total_m3=1000.0, terrain_total_m3=950.0,
+            unattributed_m3=12.0, caveats=["A caveat about attribution."],
+            per_feature=[
+                {"name": "Swale 1", "analytic_m3": 1000.0,
+                 "geometric_m3": 1250.0, "rasterisable_m3": 1100.0,
+                 "terrain_m3": 950.0, "delta_pct": -13.6},
+                {"name": "Swale 8", "analytic_m3": 80.0,
+                 "geometric_m3": 100.0, "routing_only": True},
+            ])
+        html = self._html(v)
+        assert "Checked against the ground" in html
+        assert "Design storage" in html and "At this grid" in html
+        assert "Δ vs grid" in html
+        assert "n/a — sub-cell" in html          # sub-cell feature flagged
+        assert "A caveat about attribution." in html
 
-    def test_verification_section_and_columns(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(self._comparison(), out)
-        content = open(out, encoding="utf-8").read()
-        assert "Non-circular Verification" in content
-        assert "Terrain Ponding (m³)" in content
-        assert "Terrain-derived storage" in content
-        assert "routing-only" in content          # sub-cell feature flagged
-        assert "180.0" in content                  # resolvable feature terrain volume
-        assert "Unattributed terrain ponding" in content
-
-    def test_no_verification_still_renders(self, tmp_path):
-        out = str(tmp_path / "report.html")
-        export_html(ComparisonResult(baseline=_baseline(), post=_post()), out)
-        content = open(out, encoding="utf-8").read()
-        # No verification attached → section omitted, table still present
-        assert "Non-circular Verification" not in content
-        assert "Earthwork Summary" in content
+    def test_no_verification_says_so(self):
+        html = self._html(None)
+        assert "Checked against the ground" in html
+        assert "nothing has been measured against the ground" in html
 
 
 # ---------------------------------------------------------------------------
@@ -783,14 +1072,37 @@ class TestVerificationSeparatesTheThreeGaps:
 
     def test_a_large_resolution_penalty_is_named_in_the_caveats(self):
         v = self._build(183.0, self.BREAKDOWN)
-        assert any("Swale 2" in c and "grid represents it" in c for c in v.caveats)
+        assert any("Swale 2" in c and "cannot hold its drawn section" in c
+                   for c in v.caveats)
+
+    def test_the_caveat_points_at_the_cell_size_and_names_the_capacity(self):
+        """The burn now cuts the drawn section, so what is left is the grid.
+
+        Before ``tapered_invert``, ``level_invert`` squared every drawn channel off to a
+        full-depth rectangle whatever its cross-section, and the copy had to say so —
+        a finer DEM would not have closed that gap. Now the burn tapers to the two
+        widths the feature carries, so a material gap means the cells genuinely cannot
+        hold the section, and the copy has to say *that* instead.
+        """
+        v = self._build(183.0, self.BREAKDOWN)
+        caveat = [c for c in v.caveats if "Swale 2" in c][0]
+        assert "cannot hold its drawn section" in caveat
+        assert "Read Geometric" in caveat
+
+    def test_a_grid_that_cannot_hold_the_section_is_described_the_other_way(self):
+        under = {"Swale 2": {"design": 112.0, "geometric": 140.0,
+                             "rasterisable": 100.0, "freeboard_m3": 28.0,
+                             "resolution_penalty_m3": -40.0}}
+        caveat = [c for c in self._build(99.0, under).caveats if "Swale 2" in c][0]
+        assert "cannot hold its drawn section" in caveat
+        assert "-29%" in caveat
 
     def test_a_small_resolution_penalty_is_not_flagged(self):
         small = {"Swale 2": {"design": 112.0, "geometric": 140.0,
                              "rasterisable": 143.0, "freeboard_m3": 28.0,
                              "resolution_penalty_m3": 3.0}}
         v = self._build(142.0, small)
-        assert not any("grid represents it" in c for c in v.caveats)
+        assert not any("cannot hold its drawn section" in c for c in v.caveats)
 
     def test_the_delta_caveat_states_what_is_being_compared(self):
         v = self._build(183.0, self.BREAKDOWN)
@@ -806,6 +1118,88 @@ class TestVerificationSeparatesTheThreeGaps:
         )
         assert v.per_feature[0]["routing_only"] is True
         assert v.per_feature[0]["terrain_m3"] is None
+
+
+class TestTheRowSaysWhenAtGridIsNotACapacity:
+    """A near-zero Δ read as reassurance about a volume it never tested.
+
+    Δ compares measured against *at-grid*, so a swale burned as a flat-floored trench
+    24% above its drawn section reported "+0%" in green while the real gap — Geometric
+    against At-grid — sat in a different pair of columns entirely. The row now carries
+    the flag both renderers style from.
+
+    The trigger is the measured gap rather than a width-vs-cell-size proxy: with no
+    batter run the burn lays a rectangle however wide the footprint, so width predicts
+    nothing about whether the section survived.
+    """
+
+    def _row(self, breakdown, terrain=183.0, min_dim=1.0, name="Swale 2"):
+        from terrainflow_assessment.modules.reporting import build_verification
+        return build_verification(
+            analytic_by_name={name: 112.0},
+            terrain_by_name={name: terrain},
+            baseline_total_m3=0.0, earthworks_total_m3=terrain,
+            min_dims={name: min_dim}, cell_size=1.0,
+            breakdowns={name: breakdown} if breakdown else None,
+        ).per_feature[0]
+
+    OVERSTATED = {"design": 112.0, "geometric": 140.0, "rasterisable": 187.0,
+                  "freeboard_m3": 28.0, "resolution_penalty_m3": 47.0}
+    CLEAN = {"design": 112.0, "geometric": 140.0, "rasterisable": 143.0,
+             "freeboard_m3": 28.0, "resolution_penalty_m3": 3.0}
+
+    def test_a_material_gap_flags_the_row(self):
+        row = self._row(self.OVERSTATED)
+        assert row["section_overstated"] is True
+        assert row["section_gap_pct"] == pytest.approx(47.0 / 140.0 * 100.0)
+
+    def test_a_gap_the_other_way_flags_too(self):
+        """The grid holding *less* than the drawn section is equally not a capacity."""
+        under = dict(self.OVERSTATED, rasterisable=100.0,
+                     resolution_penalty_m3=-40.0)
+        row = self._row(under, terrain=99.0)
+        assert row["section_overstated"] is True
+        assert row["section_gap_pct"] < 0
+
+    def test_a_small_gap_leaves_the_row_clean(self):
+        row = self._row(self.CLEAN, terrain=142.0)
+        assert row["section_overstated"] is False
+        assert row["section_gap_pct"] == pytest.approx(3.0 / 140.0 * 100.0)
+
+    def test_the_flag_and_the_caveats_never_disagree(self):
+        from terrainflow_assessment.modules.reporting import build_verification
+        v = build_verification(
+            analytic_by_name={"Swale 2": 112.0, "Swale 3": 112.0},
+            terrain_by_name={"Swale 2": 183.0, "Swale 3": 142.0},
+            baseline_total_m3=0.0, earthworks_total_m3=325.0,
+            min_dims={"Swale 2": 1.0, "Swale 3": 1.0}, cell_size=1.0,
+            breakdowns={"Swale 2": self.OVERSTATED, "Swale 3": self.CLEAN},
+        )
+        flagged = {f["name"] for f in v.per_feature if f["section_overstated"]}
+        named = {n for n in ("Swale 2", "Swale 3")
+                 if any(n in c and "cannot hold its drawn section" in c
+                        for c in v.caveats)}
+        assert flagged == named == {"Swale 2"}
+
+    def test_a_sub_cell_feature_is_never_flagged(self):
+        """It claims no measured volume at all, so there is nothing to overstate."""
+        row = self._row(self.OVERSTATED, min_dim=0.3)
+        assert row["routing_only"] is True
+        assert row["section_overstated"] is False
+
+    def test_a_dam_is_never_flagged(self):
+        """No drawn cross-section to be overstated against — see barrier_impounded."""
+        row = self._row({"design": 2148.0, "geometric": 2148.0,
+                         "rasterisable": 2148.0, "freeboard_m3": 0.0,
+                         "resolution_penalty_m3": 0.0,
+                         "barrier_impounded": True}, terrain=2148.0)
+        assert row["barrier_impounded"] is True
+        assert row["section_overstated"] is False
+
+    def test_no_breakdown_means_nothing_to_compare(self):
+        row = self._row(None)
+        assert row["section_overstated"] is False
+        assert row["section_gap_pct"] == pytest.approx(0.0)
 
 
 class TestBarrierImpoundedVerification:

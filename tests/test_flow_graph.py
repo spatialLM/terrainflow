@@ -465,3 +465,51 @@ class TestGuards:
                                       is_sink=np.array([False, False, False, True]))
         assert res.unresolved_cells == 2
         assert res.is_exhaustive()
+
+
+class TestTieBreak:
+    """The tie-break was undocumented and untested, and it decides level-crest routing.
+
+    ``best`` starts at 0.0 with a strict ``>``, so a level neighbour is never chosen and,
+    among equal slopes, the earliest offset in ``_OFFSETS`` wins. On a resolved flat the
+    synthetic gradient is an integer multiple of a small epsilon, so exact ties are the
+    normal case rather than a corner one — and before Round 14 either the scan order or the
+    comparison operator could have been changed with the whole suite staying green.
+    """
+
+    def test_an_exact_tie_goes_to_the_first_offset_scanned(self):
+        # A symmetric pit: the centre cell's eight neighbours are all exactly 1.0 lower,
+        # so every cardinal is tied and every diagonal is tied. _OFFSETS is scanned
+        # NW, N, NE, W, E, SW, S, SE, and slope de-weights diagonals by sqrt(2), so the
+        # first *cardinal* wins outright: N.
+        z = np.full((3, 3), 10.0)
+        z[1, 1] = 11.0
+        nxt, _ = d8_from_dem(z, 1.0, 1.0)
+        assert nxt.reshape(3, 3)[1, 1] == 0 * 3 + 1        # (0, 1) — due north
+
+    def test_a_diagonal_only_tie_goes_to_north_west(self):
+        # Knock out every cardinal so only the four diagonals are candidates. NW is first.
+        z = np.full((3, 3), 12.0)
+        z[1, 1] = 11.0
+        for r, c in ((0, 0), (0, 2), (2, 0), (2, 2)):
+            z[r, c] = 10.0
+        nxt, _ = d8_from_dem(z, 1.0, 1.0)
+        assert nxt.reshape(3, 3)[1, 1] == 0 * 3 + 0        # (0, 0) — north-west
+
+    def test_a_level_neighbour_is_never_chosen(self):
+        # The `> 0.0` rule, stated as a test: equal ground is not downhill, which is why a
+        # flat has to be resolved upstream before these pointers mean anything.
+        z = np.array([[5.0, 5.0, 5.0],
+                      [5.0, 5.0, 5.0],
+                      [5.0, 5.0, 4.0]])
+        nxt, is_sink = d8_from_dem(z, 1.0, 1.0)
+        # Only the cells touching the one low corner drain; the rest are sinks.
+        assert is_sink.reshape(3, 3)[0, 0]
+        assert not is_sink.reshape(3, 3)[1, 1]
+        assert nxt.reshape(3, 3)[1, 1] == 2 * 3 + 2
+
+    def test_the_scan_order_is_the_documented_one(self):
+        from terrainflow_assessment.modules.flow_graph import _OFFSETS
+
+        assert _OFFSETS == ((-1, -1), (-1, 0), (-1, 1), (0, -1),
+                            (0, 1), (1, -1), (1, 0), (1, 1))

@@ -10,8 +10,10 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
     line_cells           — connected, in-bounds cell path along a polyline
     enforce_monotonic_path — breach a strictly-downhill invert along a carved path
     level_invert         — excavate a footprint to a flat floor below its spill level
-    battered_invert      — stepped approximation of battered walls
-    rasterisable_capacity — storage the grid can actually represent (resolution penalty)
+    tapered_invert       — excavate a footprint as its true battered section
+    battered_invert      — stepped approximation of battered walls (superseded)
+    rasterisable_capacity — storage the grid can represent, modelled (see its docstring:
+                           prefer ``DEMBurner.burned_storage``, which measures it)
     steep_ground_warning — advisory when a level floor over-excavates one end
     sub_cell_warning     — advisory when a feature is narrower than one cell
     ponding_resolution_warning — advisory when a DEM exceeds the ponding memory cap
@@ -19,7 +21,13 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
 Design rules baked in (spec §3):
 * **Storage features get a level floor** (``level_invert``), referenced to their
   natural pour point, so a basin or swale holds its design volume on sloping ground
-  instead of the wedge a constant-depth translation leaves behind.
+  instead of the wedge a constant-depth translation leaves behind. Level along the
+  feature — but across it the floor follows the **drawn section** (``tapered_invert``),
+  so a trapezoidal channel is cut as a trapezoid rather than squared off to a
+  full-depth rectangle a third to a half larger than it was specified.
+* The spill datum is read from the feature's **own** ground, never from a DEM other
+  features have already been burned into: it is a single minimum over a one-cell rim,
+  so one neighbouring cell that has been cut takes the whole floor down with it.
 * Conveyances — and only conveyances — get a **connected, monotonic downhill 1-cell
   path** by breaching (``enforce_monotonic_path``), so depression-filling can't erase
   the drain and flow actually reaches the outlet. Applying this to a swale guaranteed
@@ -145,6 +153,14 @@ def level_invert(dem, mask, depth: float, spill_elev: float):
     Referencing the floor to *spill_elev* (the natural pour point — the lowest rim
     cell) rather than to the ground directly above it is what makes the pond fill
     evenly to the level at which it would actually overflow.
+
+    *spill_elev* must be read from the feature's **own** ground — the original terrain
+    plus whatever this feature builds on it — and never from a DEM other features have
+    already been burned into. The datum is a single minimum over a one-cell-wide rim, so
+    one neighbouring cell that has been cut lowers the whole floor by that cut's depth:
+    Swale 27 on the Quail Island design shares exactly one rim cell with Swale 25, was
+    floored 0.66 m too low because of it, and ponded 1.94 m for a 1.00 m design. The
+    caller owns that choice; see ``DEMBurner._datum_surface``.
     """
     import numpy as np
 
@@ -153,6 +169,74 @@ def level_invert(dem, mask, depth: float, spill_elev: float):
         return out
     floor = spill_elev - depth
     out[mask] = np.minimum(out[mask], floor)
+    return out
+
+
+def taper_reach(mask, batter_run: float, cell_size: float = 1.0):
+    """Per-cell fraction of full depth for a battered section, over *mask*.
+
+    ``0`` at the footprint edge, ``1`` once a cell is ``batter_run`` inside it, linear
+    between — so ``depth × reach`` is the trapezoid's depth at that offset. Returns
+    ``None`` when there is no batter to apply or scipy is unavailable, meaning "cut it
+    flat".
+
+    Shared by :func:`tapered_invert` and the companion-berm spoil calculation, because
+    the bank is built from the earth the trench produced and those two must agree about
+    how much that is. They did not for one revision: the berm was sized from a
+    full-depth rectangular cut while the trench was tapered, so it was handed roughly
+    half again the spoil the excavation actually yields.
+    """
+    import numpy as np
+
+    inside = np.asarray(mask, dtype=bool)
+    if not inside.any() or not batter_run or batter_run <= 0:
+        return None
+    try:
+        from scipy.ndimage import distance_transform_edt
+    except ImportError:  # pragma: no cover - scipy is a hard dependency in practice
+        return None
+
+    # The outermost cells sit half a cell in from the true boundary, so the transform
+    # reports 1.0 for them; subtracting half a cell puts the taper on the real edge.
+    dist = distance_transform_edt(inside, sampling=(cell_size, cell_size))
+    return np.clip((dist - cell_size / 2.0) / float(batter_run), 0.0, 1.0)
+
+
+def tapered_invert(dem, mask, depth: float, batter_run: float, spill_elev: float,
+                   cell_size: float = 1.0):
+    """Excavate *mask* as a **true battered section**, deepening away from the edge.
+
+    Every cell is floored at ``spill_elev − depth × min(1, x / batter_run)``, where ``x``
+    is its distance to the nearest cell outside the footprint. That is the trapezoid,
+    exactly: at ``x = 0`` the cut is nothing, at ``x ≥ batter_run`` it is full depth, and
+    in between it follows the batter. Integrated over a strip of top width ``T`` and
+    bottom width ``b`` it gives ``(T + b) / 2 × depth`` per metre — the drawn section.
+
+    This replaces a nested-erosion staircase (``battered_invert``), which was wrong in
+    two ways that a grid makes worse. Its volume is ``depth/n × Σ Aᵢ`` over ``n`` eroded
+    footprints, which for a strip works out to ``depth × L × [T − (T−b)(n+1)/2n]`` — with
+    the shipped ``n = 3`` that is **16.7% under** the trapezoid it is approximating, and
+    it converges only as ``1/n``. And the erosions themselves vanish once
+    ``batter_run / n`` drops below a cell, so raising ``n`` to close the gap is exactly
+    what stops the steps existing. A distance transform has neither problem: it is one
+    O(N) pass, it is as accurate as the cell size allows at any batter run, and it
+    degrades gracefully — a footprint too narrow to hold the batter simply comes out
+    shallower, which is the truth about that grid.
+
+    Falls back to a level floor when scipy is unavailable or the batter is not positive.
+    """
+    import numpy as np
+
+    if mask is None or not mask.any():
+        return dem.copy()
+    reach = taper_reach(mask, batter_run, cell_size)
+    if reach is None:
+        return level_invert(dem, mask, depth, spill_elev)
+
+    inside = np.asarray(mask, dtype=bool)
+    out = dem.copy()
+    floors = spill_elev - depth * reach[inside]
+    out[inside] = np.minimum(out[inside], floors)
     return out
 
 
@@ -175,33 +259,25 @@ def battered_invert(dem, step_masks, spill_elev: float):
 def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
                           top_width: float, bottom_width: float, cell_size: float,
                           batter_run: float = 0.0):
-    """Storage the burned raster can actually represent, in m³.
+    """Storage the burned raster can represent, in m³ — **the estimate, not the answer.**
 
-    The design geometry and the grid rarely agree, and the difference is not an
-    error — it is the resolution penalty, and it is usually **positive**. A 2.0 m
-    swale with 1:1 batters has a 0.75 m²/m trapezoidal section, but on a 1 m grid the
-    sloping walls cannot be represented: it burns as a 2-cell rectangular trench at
-    1.0 m²/m, a third more. A sub-metre feature is widened to one whole cell, likewise.
+    Prefer ``DEMBurner.burned_storage``, which is this same quantity measured off the
+    hole that was actually cut. This function is the answer before any burn has run, and
+    a model standing beside a burn is precisely the arrangement that has now gone wrong
+    twice: Round 3, when it discounted for a batter the burner never cut and every swale
+    on the site read ``Measured`` a flat +50% above ``At grid``; and again when the burn
+    learned to taper, at which point the smooth trapezoid below became the over-estimate
+    for any footprint too narrow to hold the taper. Both times the ground was right and
+    the yardstick was wrong. ``capacity_breakdown`` now takes the measurement when it has
+    one and falls back here when it does not.
 
-    Reporting this separately is what lets the Verify stage compare like with like:
-    measured ponding against *this* number isolates burn correctness, while the gap
-    between this and the true geometric volume is the honest cost of the cell size.
-
-    Two conditions must *both* hold before the trapezoidal section survives to the
-    grid, because this figure is only meaningful if it describes the same hole the
-    burner actually cut:
-
-    * ``batter_run > 0`` — the burner steps its walls (``battered_invert``) only when
-      the feature carries a batter run; otherwise it levels a flat floor at full depth
-      (``level_invert``), which is a rectangle however wide the footprint is.
-    * The footprint is wide enough (roughly three cells) to hold those steps; anything
-      narrower collapses to the rectangle the grid can hold.
-
-    Discounting for a batter that was never cut is how a correctly-burned 3.00 m swale
-    on a 1.00 m DEM came to report ``Measured`` 50% above ``At grid``: the trapezoid
-    branch scaled the reference by ``mean_width/top_width`` (2/3 for a 3 m/1 m section)
-    while the burn had laid down a full-depth rectangle. The ground was right and the
-    yardstick was wrong.
+    The model: a trapezoidal section survives to the grid when the feature carries a
+    batter run and its footprint is wide enough (roughly three cells) to hold it;
+    otherwise the grid can only hold a flat-bottomed trench, and this returns the
+    rectangle. ``batter_run`` for a channel is derived from its own two widths — see
+    ``earthwork_design.channel_batter_run`` — rather than read from the basin-only
+    ``batter_run_m`` field, which is what used to make every drawn channel look
+    vertical-walled to this function *and* to the burner.
     """
     if n_cells <= 0 or depth <= 0 or cell_area <= 0:
         return 0.0
@@ -218,6 +294,13 @@ def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
     return rectangular * (mean_width / top_width)
 
 
+# How much more earth than storage counts as worth saying out loud. A level floor always
+# costs a little more than its nominal volume — the ground is never flat — so a bare
+# ratio > 1 would fire on everything. Past ~1.3 the extra excavation is a real cost the
+# user is paying without having asked for it.
+_OVER_EXCAVATION_RATIO = 1.3
+
+
 def steep_ground_warning(name: str, relief: float, depth: float,
                          cut_m3=None, storage_m3=None):
     """Advisory when a level floor means cutting deeper than the design depth.
@@ -227,14 +310,32 @@ def steep_ground_warning(name: str, relief: float, depth: float,
     further across than the feature is deep, the uphill end is cut deeper than asked
     for, and on a 10% slope that can be ~70% more earth moved for the same storage.
     The user should be told in cubic metres, not warned off in the abstract.
+
+    **Gated on the measured cut, with relief as a fallback.** ``relief > depth`` is a
+    proxy, and it misses the case that matters most: the datum is the lowest cell of the
+    rim, so a footprint that is *internally* flat but sits beside a dip is floored to the
+    dip and cut deep throughout, with no relief across it to notice. Swale 27 on the
+    Quail Island design was cut 2.23 m mean for a 1.00 m design — 517 m³ of excavation
+    for 232 m³ of storage — with 0.67 m of relief, and this stayed silent. Where the cut
+    has actually been measured, ask it directly.
     """
-    if relief is None or depth <= 0 or relief <= depth:
+    over_cut = (cut_m3 and storage_m3
+                and cut_m3 > storage_m3 * _OVER_EXCAVATION_RATIO)
+    steep = relief is not None and depth > 0 and relief > depth
+    if not (over_cut or steep):
         return None
-    msg = (
-        f"'{name}': the footprint falls {relief:.1f} m across, more than its "
-        f"{depth:.1f} m design depth. A level floor means cutting up to {relief:.1f} m "
-        f"at the uphill end"
-    )
+
+    if steep:
+        msg = (
+            f"'{name}': the footprint falls {relief:.1f} m across, more than its "
+            f"{depth:.1f} m design depth. A level floor means cutting up to "
+            f"{relief:.1f} m at the uphill end"
+        )
+    else:
+        msg = (
+            f"'{name}': a level floor referenced to the lowest point of its rim cuts "
+            f"this well below its {depth:.1f} m design depth"
+        )
     if cut_m3 and storage_m3:
         msg += f" — {cut_m3:,.0f} m³ of excavation for {storage_m3:,.0f} m³ of storage"
     msg += (
@@ -242,6 +343,172 @@ def steep_ground_warning(name: str, relief: float, depth: float,
         "on the low side."
     )
     return msg
+
+
+def berm_variation_warning(name: str, min_h: float, max_h: float, mean_h: float):
+    """Advisory when a level crest means a berm of very uneven height, else ``None``.
+
+    A companion berm is built to one elevation — that is what makes it hold water — but
+    the ground under it is not one elevation, so its *height* is ``crest − ground`` and
+    changes along the run. On an alignment that is off contour, that variation is large:
+    Swale 29 on the Quail Island design stands **0.60 m at one end and 1.73 m at the
+    other**, and its mean of 0.98 m describes neither.
+
+    Fires on the same principle as :func:`steep_ground_warning` — the ground has fallen
+    further than the structure is tall, so one end is being built double while the other
+    barely needs a bank.
+
+    **Deliberately set at the tail, and the population is why.** Measured over the 32
+    companion berms of the Quail Island design, ``max ÷ min`` runs 1.36 to 2.90 with a
+    **median of 2.06**: on an off-contour design the *typical* berm is already twice as
+    tall at one end as the other, and the distribution is one tight unimodal band with no
+    gap in it to put a threshold. Anything looser fires on nearly everything —
+    ``> 1.5 ×`` catches 94%, ``> 2.0 ×`` catches 56% — which is the noise the Verify
+    table's dagger already had to be rescued from. So this names the genuine outlier
+    only (3% here), and the *range* is reported unconditionally on every berm, which is
+    what actually keeps the reader informed. A warning is for "go and do something"; the
+    range is for "know what you are building".
+
+    The fix, where it does fire, is to split the run into segments each at its own level
+    — which is what the trench wants for the same reason (STRETCH_GOALS §5).
+    """
+    if min_h is None or max_h is None or not mean_h or mean_h <= 0:
+        return None
+    spread = max_h - min_h
+    if spread <= mean_h:
+        return None
+    return (
+        f"'{name}': the ground under its companion berm falls {spread:.1f} m, more than "
+        f"the {mean_h:.1f} m the bank averages — so a level crest means building it "
+        f"{max_h:.1f} m tall at one end and {min_h:.1f} m at the other. Consider "
+        f"splitting the swale into segments, each at its own level."
+    )
+
+
+# When a bank stops being a bank. Both measured over the 36 storage features of the Quail
+# Island design, whose ponds were flooded individually: retained depth runs 0.00–3.13 m
+# with a **median of 0.77 m**, and 28% of a typical pond stands above natural ground. So
+# retaining *something* is what a companion berm is for, and a threshold anywhere near the
+# median fires on everything — 0.5 m catches 31 of 36. Past a metre of head the population
+# thins sharply (4 of 36) and the consequence changes: that is a structure whose failure
+# releases a wave rather than a puddle. The volume arm catches the other shape of the same
+# risk — a shallower bank holding a great deal, like Swale 5 at 0.91 m and 603 m³.
+_RETAINED_DEPTH_M = 1.0
+_RETAINED_VOLUME_M3 = 500.0
+
+
+def impoundment_warning(name: str, retained_depth_m=None, above_ground_m3=None,
+                        has_spillway=False):
+    """Advisory when a feature has stopped being a swale and become a small dam.
+
+    Sizing against measured terrain storage is honest, and it has a consequence worth
+    saying out loud: much of that storage is water held **above natural ground** by a bank
+    of spoil. A trench that fails spills into itself. A metre of head behind a companion
+    berm fails downhill, all at once, and the volume it releases is
+    ``above_ground_m3`` — not the pond total, because the part below natural ground stays
+    in the hole.
+
+    Fires on either arm because the risk has two shapes: deep head behind a short bank,
+    or modest head behind a long one holding a great deal. Neither is a reason not to
+    build it — keyed berms are ordinary practice and they are why the design holds what it
+    holds — but both are a reason to give it a designed overflow instead of letting it
+    choose its own low point, and to build the bank properly rather than tip spoil.
+
+    ``has_spillway`` softens the wording where the user has already designed one; the
+    structural point still stands, so it is said either way.
+    """
+    depth = retained_depth_m or 0.0
+    volume = above_ground_m3 or 0.0
+    if depth < _RETAINED_DEPTH_M and volume < _RETAINED_VOLUME_M3:
+        return None
+
+    msg = (
+        f"'{name}' is retaining water, not just holding it: {depth:.1f} m stands above "
+        f"natural ground at the bank, impounding {volume:,.0f} m³ that would run "
+        f"downhill if the bank gave way."
+    )
+    if has_spillway:
+        msg += (
+            " Check the spillway is sized for the peak inflow and that the bank is built "
+            "and compacted as a water-retaining structure, not tipped spoil."
+        )
+    else:
+        msg += (
+            " Give it a designed spillway rather than letting it overtop at its own "
+            "lowest point, and build the bank as a water-retaining structure. Storage "
+            "this size may be consented work — check with your regional council."
+        )
+    return msg
+
+
+def overtopping_warning(name: str, length_m: float, pour_level_m: float,
+                        alt_saddle_m=None, has_spillway: bool = False):
+    """Advisory when a pool's only way out is over the structure holding it.
+
+    Measured, not assumed: the pool's rim was walked and its lowest point is this
+    feature's own crest (see :func:`~terrainflow_assessment.modules.reporting.overtopping_spill`).
+    Water leaving over an earth embankment is how one fails, and it is the thing a
+    spillway exists to prevent — so the fact is worth saying whether or not the crest
+    was deliberate.
+
+    The length is stated because it is the number that is not obvious. A level crest spills
+    along its whole length at once, and the discharge per metre — the thing that decides
+    whether the face erodes — follows from that length, not from wherever the flow map
+    happens to draw a channel.
+
+    The stream layer used to show one thread over the wall for two reasons, and Round 14
+    measured both. Flow really does leave the pool at many cells (23 for Dam 15), but flat
+    resolution routed each cell to its *nearest* exit, so 87% of the flux went through one
+    of them; and the Streams layer only draws cells over a contributing-area threshold,
+    which a shared crest never reaches. Neither was "D8 forcing the overflow through one
+    cell", which is what this used to say.
+
+    Round 15 fixed the first: the flux is now spread evenly along the crest, which is what
+    the length below has always described. Only the threshold is left, so a wall with no
+    channel drawn on it means the layer's cut-off and nothing more.
+
+    ``has_spillway`` changes what the message can honestly claim. The burn does not cut
+    a spillway notch into the terrain, so the flow analysis routes overflow over the
+    crest **whether or not one is designed**. With a spillway sited this is therefore a
+    limit of the model rather than a fault in the design, and it says so; without one it
+    is the design.
+    """
+    if not length_m or length_m <= 0:
+        return None
+
+    where = f"'{name}' fills to {pour_level_m:.2f} m and leaves over its own crest"
+    span = (f", along about {length_m:.0f} m of it at once — not at the one place the "
+            f"stream layer draws a channel, which is where the flow map concentrates it "
+            f"rather than where the water goes")
+
+    if has_spillway:
+        return (
+            f"{where}{span}. A spillway is designed here, but it is not cut into the "
+            f"terrain model, so the analysis cannot route water through it: on the "
+            f"ground the spillway takes this flow, and these figures describe the "
+            f"structure without it."
+        )
+
+    tail = ""
+    if alt_saddle_m is not None and alt_saddle_m != float("inf"):
+        rise = alt_saddle_m - pour_level_m
+        # A centimetre, not a float epsilon: below that the two ways out are the same
+        # level, and "raise the crest 0.00 m" is worse than saying nothing.
+        if rise >= 0.01:
+            tail = (f" Raising the crest {rise:.2f} m would send it to the natural "
+                    f"saddle at {alt_saddle_m:.2f} m instead.")
+        else:
+            # A crest seeded from the highest ground the line touches lands exactly on
+            # the bank, so the pond reaches the crest and the abutment at the same
+            # moment. Raising one without the other just moves the failure to the end
+            # of the wall, where there is no structure at all.
+            tail = (" The bank beside it stands at the same level, so there is no "
+                    "freeboard at the abutment: raising the crest alone would send the "
+                    "water round the end of the wall rather than over it.")
+    return (
+        f"{where}{span}. Nothing is designed to take it — give it a spillway, or the "
+        f"overflow chooses its own place to cut and takes the bank with it.{tail}"
+    )
 
 
 def sub_cell_warning(name: str, min_dimension, cell_size: float):

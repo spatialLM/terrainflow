@@ -391,11 +391,32 @@ class TestBermHeightEstimate:
         h = berm_height_estimate(0.5, 2.0)
         assert h == round(h, 2)
 
-    def test_consistent_with_capacity_formula(self):
-        # berm_height = sqrt(cross_section * 0.75); `width` is the declared TOP width
+    def test_it_is_the_bank_the_burn_builds(self):
+        """Spoil spread across a band as wide as the swale, to a level crest.
+
+        This replaces ``√(0.75 × section)`` — the height of a 1:1 triangular ridge of
+        the same volume. Both hold the same earth; they are not the same bank, and the
+        dialog was quoting the triangle while the burner built the flat top. For a
+        3 / 1 / 1 m swale that is 1.22 m against 0.50 m.
+        """
         depth, width = 0.5, 2.0
-        top_width = width
-        bottom_width = max(0.1, top_width - 2 * depth)
-        cs = ((bottom_width + top_width) / 2) * depth
-        expected = round((cs * 0.75) ** 0.5, 2)
-        assert berm_height_estimate(depth, width) == pytest.approx(expected)
+        bottom_width = max(0.1, width - 2 * depth)
+        cs = ((bottom_width + width) / 2) * depth
+        assert berm_height_estimate(depth, width) == pytest.approx(
+            round(cs * 0.75 / width, 2))
+
+    def test_the_bank_holds_the_spoil_it_was_built_from(self):
+        """height x band width == spoil per metre — the property that defines it."""
+        for depth, top, bottom in ((1.0, 3.0, 1.0), (0.5, 2.0, 1.0), (1.5, 6.0, 2.0)):
+            h = berm_height_estimate(depth, top, bottom)
+            spoil = ((top + bottom) / 2) * depth * 0.75
+            assert h * top == pytest.approx(spoil, abs=0.02)
+
+    def test_it_honours_the_stored_bottom_width(self):
+        """The dialog used to omit it, so every swale was costed at 1:1 side slopes."""
+        steep = berm_height_estimate(1.0, 3.0, bottom_width=2.5)
+        shallow = berm_height_estimate(1.0, 3.0, bottom_width=0.5)
+        assert steep > shallow
+
+    def test_zero_width_is_safe(self):
+        assert berm_height_estimate(1.0, 0.0) == 0.0
