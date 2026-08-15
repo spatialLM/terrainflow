@@ -140,12 +140,18 @@ class AnalysisWorker(QThread):
         cond_path = os.path.join(self.output_dir, f"conditioned_dem_{self.label}.tif")
         domain_path = os.path.join(self.output_dir, f"domain_{self.label}.tif")
 
-        fa.save_result(acc_array, acc_path, "flow accumulation (cell count)")
-        fa.save_result(fdir_array, fdir_path, fa.get_fdir_description())
-        fa.save_result(stream_acc, stream_path, "stream accumulation")
+        # Every raster declares its own nodata. An untagged GeoTIFF is read back by
+        # pysheds as nodata=0, which for the D-infinity direction grid means "due
+        # east" — so each east-flowing cell would return as a routing self-loop and
+        # the simulation would quietly disagree with the flow map it was built from.
+        fa.save_result(acc_array, acc_path, "flow accumulation (cell count)",
+                       nodata=np.nan)
+        fa.save_result(fdir_array, fdir_path, fa.get_fdir_description(),
+                       nodata=fa.get_fdir_nodata())
+        fa.save_result(stream_acc, stream_path, "stream accumulation", nodata=np.nan)
 
         runoff_vol = fa.get_runoff_volume_raster(runoff_mm, cell_area_m2)
-        fa.save_result(runoff_vol, runoff_path, "runoff volume (m³)")
+        fa.save_result(runoff_vol, runoff_path, "runoff volume (m³)", nodata=np.nan)
 
         # Standing water, valued by what the pond passes. Written because the accumulation
         # beside it stops meaning contributing area inside a pool — a contracted pond holds
@@ -155,7 +161,8 @@ class AnalysisWorker(QThread):
         pond_flow = result.get("pond_flow")
         if pond_flow is not None and np.any(pond_flow):
             pond_path = os.path.join(self.output_dir, f"ponds_{self.label}.tif")
-            fa.save_result(pond_flow, pond_path, "pond throughflow (cell count)")
+            fa.save_result(pond_flow, pond_path, "pond throughflow (cell count)",
+                           nodata=np.nan)
 
         # The conditioned surface drives the design-tier catchment labelling
         # (flow_graph.d8_from_dem). Saved rather than kept in memory because the
@@ -165,11 +172,17 @@ class AnalysisWorker(QThread):
         # flat gradient, which is integer multiples of 1e-5 m. float32's spacing passes that
         # around 600 m elevation, so on a hill country site the gradient would be rounded
         # out of existence on the way to disk and every flat cell would come back a sink.
+        #
+        # It inherits the source DEM's sentinel, not NaN: this is the raster
+        # `d8_from_dem` conditions its routing on, and it has to be able to tell an
+        # interior hole from ground. Untagged, the hole reads as an elevation of
+        # -9999 — a pit ten kilometres deep that captures the catchment around it.
         conditioned = np.array(result.get("conditioned_dem", fa.dem), dtype="float64")
         fa.save_result(conditioned, cond_path, "hydrologically conditioned DEM",
-                       dtype="float64")
+                       dtype="float64", nodata=fa.nodata)
 
         # The site itself — the capture-% denominator. Most specific area wins.
+        # No nodata: this is a mask, and its 0 means "outside the site", not "unknown".
         domain = self._build_domain_mask(fa, shape, transform)
         fa.save_result(domain.astype("float32"), domain_path, "analysis domain (1 = site)")
         domain_cells = int(domain.sum())
@@ -182,7 +195,8 @@ class AnalysisWorker(QThread):
             throughflow_path = os.path.join(
                 self.output_dir, f"throughflow_{self.label}.tif")
             fa.save_result(np.array(result["runoff_accumulation"]), throughflow_path,
-                           "event throughflow (m³ per cell, CN-weighted)")
+                           "event throughflow (m³ per cell, CN-weighted)",
+                           nodata=np.nan)
         else:
             throughflow_path = runoff_path
 

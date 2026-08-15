@@ -734,6 +734,93 @@ class TestGetProfileAndSave:
         assert os.path.exists(out)
 
 
+class TestResultRasterNodata:
+    """A result raster has to declare what "no data" means in it.
+
+    ``pysheds.io.read_raster`` defaults to 0 for an untagged file. Under
+    D-infinity a direction of 0.0 rad is "flows due east", so on an east-facing
+    slope the round trip through disk marks most of the catchment as no-data and
+    routing through it collapses — the simulation then disagrees with the flow map
+    it was built from, with nothing to say so.
+    """
+
+    @pytest.fixture
+    def east_plane(self, tmp_path):
+        """A plane draining due east: every D-infinity angle is 0.0 rad."""
+        col = np.arange(25, dtype="float32").reshape(1, -1)
+        data = np.repeat(100.0 - col, 25, axis=0)
+        return _write_raster(str(tmp_path / "east.tif"), data)
+
+    def test_fdir_nodata_is_nan_under_dinf_and_zero_under_d8(self):
+        from terrainflow_assessment.modules.flow_analysis import fdir_nodata
+        assert np.isnan(fdir_nodata("dinf"))
+        assert fdir_nodata("d8") == 0
+
+    def test_profile_carries_the_nodata_it_is_given(self, sloped_dem):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        assert "nodata" in fa.get_profile()
+        assert fa.get_profile(nodata=-9999.0)["nodata"] == -9999.0
+
+    def test_saved_fdir_declares_its_nodata_on_disk(self, east_plane, tmp_path):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(east_plane)
+        fa.run(routing="dinf")
+        out = str(tmp_path / "fdir.tif")
+        fa.save_result(np.array(fa.fdir), out, fa.get_fdir_description(),
+                       nodata=fa.get_fdir_nodata())
+        with rasterio.open(out) as src:
+            assert src.nodata is not None and np.isnan(src.nodata)
+
+    def test_accumulation_survives_the_round_trip(self, east_plane, tmp_path):
+        """Write the direction grid, read it back, accumulate: same answer."""
+        from pysheds.grid import Grid
+
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(east_plane)
+        fa.run(routing="dinf")
+        in_memory = float(np.nansum(np.array(fa.acc)))
+
+        out = str(tmp_path / "fdir.tif")
+        fa.save_result(np.array(fa.fdir), out, fa.get_fdir_description(),
+                       nodata=fa.get_fdir_nodata())
+
+        grid = Grid.from_raster(east_plane)
+        # No nodata= here on purpose: it has to come off the file.
+        reread = grid.read_raster(out)
+        acc = grid.accumulation(reread, routing="dinf")
+
+        assert float(np.nansum(np.array(acc))) == pytest.approx(in_memory, rel=1e-6)
+
+    def test_untagged_fdir_loses_the_catchment(self, east_plane, tmp_path):
+        """The counterexample the fix exists for — an untagged file still breaks.
+
+        Kept so the guard above has something to be a guard against: if pysheds
+        ever stops defaulting to 0 this fails, and the fix can be reconsidered
+        rather than cargo-culted.
+        """
+        from pysheds.grid import Grid
+
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(east_plane)
+        fa.run(routing="dinf")
+        in_memory = float(np.nansum(np.array(fa.acc)))
+
+        out = str(tmp_path / "untagged.tif")
+        fa.save_result(np.array(fa.fdir), out, fa.get_fdir_description())
+        with rasterio.open(out) as src:
+            assert src.nodata is None
+
+        grid = Grid.from_raster(east_plane)
+        acc = grid.accumulation(grid.read_raster(out), routing="dinf")
+
+        assert float(np.nansum(np.array(acc))) < in_memory
+
+
 # ---------------------------------------------------------------------------
 # AnalysisWorker — exercises _do_analysis (QThread stubbed by conftest)
 # ---------------------------------------------------------------------------

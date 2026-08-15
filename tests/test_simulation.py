@@ -518,6 +518,37 @@ def _make_sloped_dem(tmp_path, name="dem.tif", shape=(10, 10)):
     return path
 
 
+class TestFdirNodata:
+    """How the simulation decides what "no direction" means when it reads a grid.
+
+    Never by leaving it to pysheds, which assumes 0 — the D-infinity angle for
+    due east — and would retire every east-flowing cell in the catchment.
+    """
+
+    def test_prefers_what_the_file_declares(self, tmp_path):
+        from terrainflow_assessment.modules.simulation import _fdir_nodata
+        path = _make_sloped_dem(tmp_path, "tagged.tif")   # written with nodata=-9999
+        assert _fdir_nodata(path, "dinf") == -9999.0
+
+    def test_falls_back_to_the_routing_rule_for_an_untagged_file(self, tmp_path):
+        from terrainflow_assessment.modules.simulation import _fdir_nodata
+        path = str(tmp_path / "untagged.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=4, width=4, count=1,
+            dtype="float32", crs="EPSG:32632",
+            transform=from_bounds(0, 0, 4, 4, 4, 4),
+        ) as dst:
+            dst.write(np.zeros((4, 4), dtype="float32"), 1)
+        assert np.isnan(_fdir_nodata(path, "dinf"))
+        assert _fdir_nodata(path, "d8") == 0
+
+    def test_falls_back_when_the_file_cannot_be_opened(self, tmp_path):
+        from terrainflow_assessment.modules.simulation import _fdir_nodata
+        missing = str(tmp_path / "does_not_exist.tif")
+        assert np.isnan(_fdir_nodata(missing, "dinf"))
+        assert _fdir_nodata(missing, "d8") == 0
+
+
 class TestRunSimulationBranches:
     def test_rainfall_too_short_raises_value_error(self, tmp_path):
         """Line 282: ValueError when rainfall_data has <2 entries."""

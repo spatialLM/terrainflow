@@ -1262,6 +1262,15 @@ class EarthworksController(G.LayerTreeMixin):
                 dem = src.read(1).astype("float64")
                 transform = src.transform
                 nodata = src.nodata
+            if nodata is None:
+                # A conditioned surface written before the analysis worker started
+                # tagging its output. Handing None to d8_from_dem leaves an interior
+                # hole looking like ground at -9999 — a ten-kilometre pit that
+                # captures the catchment around it and labels it as drained. The
+                # session DEM's own sentinel is the right value; the conditioned
+                # surface is derived from it and inherits its holes.
+                info = self._state.dem_info
+                nodata = getattr(info, "nodata", None) if info is not None else None
             cell_w, cell_h = abs(transform.a), abs(transform.e)
 
             next_flat, is_sink = d8_from_dem(dem, cell_w, cell_h, nodata=nodata)

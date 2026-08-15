@@ -22,6 +22,23 @@ from pysheds.grid import Grid
 UNROUTED_WARN_FRACTION = 0.005
 
 
+def fdir_nodata(routing):
+    """The value that means "no direction here" in a flow-direction raster.
+
+    Routing-dependent, and getting it wrong is not a cosmetic error. Under D8 the
+    ESRI codes are the eight powers of two, so ``0`` is genuinely spare and is what
+    pysheds itself uses. Under D-infinity the value *is* an angle in radians and
+    ``0.0`` means "flows due east" — an ordinary cell on any east-facing slope — so
+    the only safe sentinel is NaN. Declare 0 there and every east-flowing cell comes
+    back as no-data, routing to itself.
+
+    Module-level rather than a method because both ends of the round trip need it:
+    ``AnalysisWorker`` when it writes the raster, ``simulation`` when it reads one
+    back. A hand-copy in the second place is how the two ends drift apart.
+    """
+    return np.nan if routing == 'dinf' else 0
+
+
 def unrouted_flow_warning(n_cells, flow_cells, domain_cells,
                           threshold=UNROUTED_WARN_FRACTION):
     """Advisory when water stops inside the site with nowhere to go.
@@ -772,16 +789,31 @@ class FlowAnalysis:
             return "D-infinity flow direction (angle in radians, CCW from east)"
         return "D8 flow direction (ESRI codes: 1=E 2=SE 4=S 8=SW 16=W 32=NW 64=N 128=NE)"
 
-    def get_profile(self, dtype="float32"):
-        """rasterio write profile for result GeoTIFFs."""
+    def get_fdir_nodata(self):
+        """No-data value for this instance's flow-direction raster.
+
+        See :func:`fdir_nodata` — the rule lives there so the read side can share it.
+        """
+        return fdir_nodata(self.routing)
+
+    def get_profile(self, dtype="float32", nodata=None):
+        """rasterio write profile for result GeoTIFFs.
+
+        ``nodata`` is written into the file rather than left off. An untagged
+        GeoTIFF is not neutral: ``pysheds.io.read_raster`` falls back to ``0``
+        when the file declares nothing, so a D-infinity direction raster comes
+        back with every due-east cell marked no-data and routing through it
+        collapses into a self-loop.
+        """
         return {
             "driver": "GTiff", "dtype": dtype,
             "crs": self.crs, "transform": self.transform,
             "width": self.grid.shape[1], "height": self.grid.shape[0],
-            "count": 1, "compress": "lzw",
+            "count": 1, "compress": "lzw", "nodata": nodata,
         }
 
-    def save_result(self, array, output_path, band_description="", dtype="float32"):
+    def save_result(self, array, output_path, band_description="", dtype="float32",
+                    nodata=None):
         """Save a result array to GeoTIFF.
 
         float32 is right for every output whose values are metres of water or counts of
@@ -792,8 +824,14 @@ class FlowAnalysis:
         disk, and ``flow_graph.d8_from_dem`` — which needs a *strictly* positive drop —
         then reads a genuine flat and turns every cell of it into a ``LABEL_SINK``. Pass
         ``dtype="float64"`` for that raster; a site near sea level never shows the fault.
+
+        ``nodata`` is likewise the caller's choice, because it differs per raster:
+        NaN for the float measures, ``get_fdir_nodata()`` for the direction grid,
+        the source DEM's sentinel for the conditioned surface, and None for a mask
+        whose 0 is a real value. Leaving it off entirely is the one wrong answer —
+        see ``get_profile``.
         """
-        profile = self.get_profile(dtype)
+        profile = self.get_profile(dtype, nodata=nodata)
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(array.astype(dtype), 1)
             if band_description:

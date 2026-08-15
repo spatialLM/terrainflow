@@ -62,6 +62,20 @@ class TestD8FromDem:
         assert is_sink.reshape(z.shape)[2, 2]           # nodata drains nowhere
         assert nxt2d[1, 2] != 2 * 5 + 2                 # and nothing drains into it
 
+    def test_without_nodata_a_hole_becomes_a_capturing_pit(self):
+        """Why a caller must supply nodata when the raster declares none.
+
+        Unmasked, the sentinel is just an elevation — ten kilometres down. The hole
+        stops being excluded and starts collecting the catchment around it, which
+        is how an interior gap in a clipped tile silently steals its neighbours'
+        drainage. Counterexample to the test above; the two differ only in the
+        ``nodata=`` argument.
+        """
+        z = _tilted(5, 5)
+        z[2, 2] = -9999.0
+        nxt, _ = d8_from_dem(z, 1.0, 1.0)               # nodata not passed
+        assert nxt.reshape(z.shape)[1, 2] == 2 * 5 + 2  # neighbour drains into it
+
     def test_flat_dem_is_all_sinks(self):
         nxt, is_sink = d8_from_dem(np.full((4, 4), 7.0), 1.0, 1.0)
         assert is_sink.all()

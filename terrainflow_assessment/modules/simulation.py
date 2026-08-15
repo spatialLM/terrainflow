@@ -24,6 +24,8 @@ from typing import Optional
 import numpy as np
 import rasterio
 
+from terrainflow_assessment.modules.flow_analysis import fdir_nodata
+
 _log = logging.getLogger(__name__)
 
 
@@ -403,6 +405,23 @@ from terrainflow_assessment.qgis.workers.simulation_worker import (  # noqa: E40
 # Core simulation logic
 # ---------------------------------------------------------------------------
 
+def _fdir_nodata(fdir_path, routing):
+    """No-data value to read ``fdir_path`` with — never left to pysheds to guess.
+
+    Prefers what the file itself declares, which since the writer started tagging
+    them is the right answer by construction. The routing-derived fallback covers a
+    raster written before that, where the alternative is pysheds' own default of 0
+    — the value that means "due east" under D-infinity.
+    """
+    try:
+        with rasterio.open(fdir_path) as src:
+            if src.nodata is not None:
+                return src.nodata
+    except Exception:
+        pass
+    return fdir_nodata(routing)
+
+
 def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
                     rainfall_data, routing='dinf', cn_zones_data=None,
                     earthwork_stores=None, progress_callback=None):
@@ -434,7 +453,11 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
 
     _p(5, "Loading flow direction...")
     grid = Grid.from_raster(dem_path)
-    fdir = grid.read_raster(fdir_path)
+    # Explicit, not inferred. pysheds falls back to nodata=0 for an untagged file,
+    # and under D-infinity 0.0 rad is "due east" — so every east-flowing cell would
+    # be read as no-data and route to itself, and the simulation would disagree with
+    # the flow map it is supposed to be replaying.
+    fdir = grid.read_raster(fdir_path, nodata=_fdir_nodata(fdir_path, routing))
 
     _p(8, "Building CN raster...")
     if cn_zones_data:
