@@ -15,6 +15,8 @@ import numpy as np
 import rasterio
 from pysheds.grid import Grid
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 # Below this share of the site's runoff, unrouted cells are not worth interrupting for:
 # a handful of nodata holes on the edge of a tile is normal and says nothing about the
 # design. Set from the Quail Island measurement, where 1.4% was worth reporting and a
@@ -660,8 +662,7 @@ class FlowAnalysis:
                 outlet_points = [(x, y)]
 
         def _acc_at(x, y):
-            col = int((x - self.transform.c) / self.transform.a)
-            row = int((y - self.transform.f) / self.transform.e)
+            row, col = xy_to_rc(self.transform, x, y)
             row = max(0, min(acc_array.shape[0] - 1, row))
             col = max(0, min(acc_array.shape[1] - 1, col))
             return int(acc_array[row, col])

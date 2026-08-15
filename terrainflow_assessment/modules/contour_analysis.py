@@ -15,6 +15,8 @@ import math
 
 import numpy as np
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 _log = logging.getLogger(__name__)
 
 # Colour grammar shared by every "how much water arrives here" display: the ranked
@@ -290,8 +292,7 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
         values = []
         for dist in steps:
             pt = geom.interpolate(dist)
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             if 0 <= row < slope_deg.shape[0] and 0 <= col < slope_deg.shape[1]:
                 val = float(slope_deg[row, col])
                 if not np.isnan(val):
@@ -355,8 +356,7 @@ def rank_by_flow_crossing(contours, acc_path, n_samples=50):
         peak = 0.0
         for dist in steps:
             pt = geom.interpolate(dist)
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             if 0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]:
                 v = float(acc[row, col])
                 if v > peak:
@@ -815,8 +815,7 @@ def find_swale_segments(contours, acc_path,
         n_s = max(2, int(seg_geom.length / max(cell_w, 1.0)))
         for d in np.linspace(0, seg_geom.length, n_s):
             p = seg_geom.interpolate(d)
-            c = int((p.x - transform.c) / transform.a)
-            r = int((p.y - transform.f) / transform.e)
+            r, c = xy_to_rc(transform, p.x, p.y)
             if 0 <= r < slope_arr.shape[0] and 0 <= c < slope_arr.shape[1]:
                 vals.append(float(slope_arr[r, c]))
         return float(np.mean(vals)) if vals else None
@@ -839,8 +838,7 @@ def find_swale_segments(contours, acc_path,
         profile = []  # (distance_along_contour, acc_value)
         for d in dists:
             pt = geom.interpolate(d)
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             v = float(acc[row, col]) if (
                 0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]
             ) else 0.0
@@ -1041,8 +1039,7 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
         vals = []
         for d in dists:
             pt = geom.interpolate(float(d))
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             v = float(acc[row, col]) if (
                 0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]
             ) else 0.0

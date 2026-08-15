@@ -14,6 +14,8 @@ Provides:
 
 from dataclasses import dataclass
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 from ..core.sizing.primitives import trapezoid_section
 from .catchment import SCSRunoff
 
@@ -386,8 +388,7 @@ def snap_point_to_contour_elevation(point_xy, dem_path):
     try:
         with rasterio.open(dem_path) as src:
             transform = src.transform
-            col = int((x - transform.c) / transform.a)
-            row = int((y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, x, y)
             if 0 <= row < src.height and 0 <= col < src.width:
                 val = src.read(1)[row, col]
                 nodata = src.nodata
@@ -440,8 +441,7 @@ def sample_peak_inflow(qgs_geom, acc_path, n_samples=30):
         peak = 0.0
         for dist in steps:
             pt = shapely_geom.interpolate(dist)
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             if 0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]:
                 v = float(acc[row, col])
                 if v > peak:
@@ -513,8 +513,7 @@ def sample_total_inflow(qgs_geom, acc_path):
         total = 0.0
         for dist in np.arange(0.0, total_len + step, step):
             pt = shapely_geom.interpolate(min(dist, total_len))
-            col = int((pt.x - transform.c) / transform.a)
-            row = int((pt.y - transform.f) / transform.e)
+            row, col = xy_to_rc(transform, pt.x, pt.y)
             if not (0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]):
                 continue
             if (row, col) in seen:

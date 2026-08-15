@@ -19,6 +19,8 @@ import rasterio
 from shapely.affinity import translate
 from shapely.geometry import LineString
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 
 def _thin_to_centreline(mask):
     """Reduce a boolean ridge mask to single-cell-wide centrelines.
@@ -853,8 +855,7 @@ class YeomansKeylineAnalysis:
         return pts, (float(np.mean(elevs)) if elevs else base_elev)
 
     def _sample_dem(self, x, y, default):
-        col = int((x - self.transform.c) / self.transform.a)
-        row = int((y - self.transform.f) / self.transform.e)
+        row, col = xy_to_rc(self.transform, x, y)
         if 0 <= row < self.dem.shape[0] and 0 <= col < self.dem.shape[1]:
             v = self.dem[row, col]
             if not np.isnan(v):

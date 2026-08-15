@@ -58,6 +58,7 @@ from terrainflow_assessment.modules.footprint import (
     min_dimension,
     pour_point,
     rasterize_footprint,
+    xy_to_rc,
 )
 from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_length
 
@@ -1869,8 +1870,7 @@ class DEMBurner:
             # nothing at all, silently. Claim its centroid cell instead.
             try:
                 c = polygon.centroid
-                col = int((c.x - self.transform.c) / self.transform.a)
-                row = int((c.y - self.transform.f) / self.transform.e)
+                row, col = xy_to_rc(self.transform, c.x, c.y)
                 if 0 <= row < self.shape[0] and 0 <= col < self.shape[1]:
                     mask[row, col] = True
             except Exception:
@@ -1983,10 +1983,9 @@ class DEMBurner:
         # -10,000 m, burning a trench that deep along its whole length.
         start_elev = None
         for x0, y0 in coords:
-            col0 = max(0, min(self.shape[1] - 1,
-                              int((x0 - self.transform.c) / self.transform.a)))
-            row0 = max(0, min(self.shape[0] - 1,
-                              int((y0 - self.transform.f) / self.transform.e)))
+            r0, c0 = xy_to_rc(self.transform, x0, y0)
+            row0 = max(0, min(self.shape[0] - 1, r0))
+            col0 = max(0, min(self.shape[1] - 1, c0))
             z0 = float(dem[row0, col0])
             if np.isfinite(z0):
                 start_elev = z0
@@ -2035,8 +2034,7 @@ class DEMBurner:
                     # nearest cell so the graded invert still carves ≥ 1 cell — but
                     # only when the sample lies within the DEM (an off-extent point
                     # stays a no-op, never a spurious edge-cell burn).
-                    col = int((x - self.transform.c) / self.transform.a)
-                    row = int((y - self.transform.f) / self.transform.e)
+                    row, col = xy_to_rc(self.transform, x, y)
                     if 0 <= row < self.shape[0] and 0 <= col < self.shape[1]:
                         dem[row, col] = min(float(dem[row, col]), burn_elev)
 
@@ -2184,8 +2182,7 @@ class DEMBurner:
             if norm == 0:
                 continue
             dx, dy = dx / norm, dy / norm
-            row = int((ey - self.transform.f) / self.transform.e)
-            col = int((ex - self.transform.c) / self.transform.a)
+            row, col = xy_to_rc(self.transform, ex, ey)
             # A hole at the abutment is not "below the crest": NaN fails the comparison,
             # so `keyed` stays False rather than being asserted off a -9999 that reads
             # ten kilometres down. You cannot key a wall into ground that is not there.
@@ -2198,8 +2195,7 @@ class DEMBurner:
                 x += dx * step
                 y += dy * step
                 reach += step
-                row = int((y - self.transform.f) / self.transform.e)
-                col = int((x - self.transform.c) / self.transform.a)
+                row, col = xy_to_rc(self.transform, x, y)
                 if not (0 <= row < self.shape[0] and 0 <= col < self.shape[1]):
                     break
                 if self.original[row, col] >= crest:
@@ -2383,11 +2379,10 @@ class DEMBurner:
         if line is None:
             return 0, rows - 1, 0, cols - 1
         minx, miny, maxx, maxy = line.bounds
-        c_lo = int((minx - self.transform.c) / self.transform.a)
-        c_hi = int((maxx - self.transform.c) / self.transform.a)
-        # transform.e is negative (north-up): larger y → smaller row
-        r_lo = int((maxy - self.transform.f) / self.transform.e)
-        r_hi = int((miny - self.transform.f) / self.transform.e)
+        # transform.e is negative (north-up): larger y → smaller row, so the
+        # two corners come back in an order that depends on the sign — sorted below.
+        r_lo, c_lo = xy_to_rc(self.transform, minx, maxy)
+        r_hi, c_hi = xy_to_rc(self.transform, maxx, miny)
         r_lo, r_hi = sorted((r_lo, r_hi))
         c_lo, c_hi = sorted((c_lo, c_hi))
         return (

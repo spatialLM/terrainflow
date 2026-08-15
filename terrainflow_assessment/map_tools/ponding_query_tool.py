@@ -10,6 +10,8 @@ from rasterio.features import shapes as rasterio_shapes
 from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 
 class PondingQueryTool(QgsMapTool):
     """
@@ -105,8 +107,7 @@ class PondingQueryTool(QgsMapTool):
     # ---------------------------------------------------------------- internals
 
     def _map_to_rowcol(self, x, y):
-        col = int((x - self.transform.c) / self.transform.a)
-        row = int((y - self.transform.f) / self.transform.e)
+        row, col = xy_to_rc(self.transform, x, y)
         return row, col
 
     def _flood_fill(self, start_row, start_col):

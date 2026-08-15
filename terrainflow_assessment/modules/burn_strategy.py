@@ -43,6 +43,8 @@ All functions are pure (grid indices + numpy arrays in, values out) and unit-agn
 
 from __future__ import annotations
 
+from terrainflow_assessment.modules.footprint import xy_to_rc
+
 
 def bresenham(r0: int, c0: int, r1: int, c1: int) -> list[tuple[int, int]]:
     """Integer (row, col) cells along the segment (r0, c0) → (r1, c1), endpoints included."""
@@ -79,13 +81,10 @@ def line_cells(coords, transform, shape) -> list[tuple[int, int]]:
     feature still yields ≥ 1 cell (the nearest-cell snap).
     """
     rows, cols = shape
-    a, e, c0, f = transform.a, transform.e, transform.c, transform.f
 
-    idx: list[tuple[int, int]] = []
-    for x, y in coords:
-        col = int((x - c0) / a)
-        row = int((y - f) / e)
-        idx.append((row, col))
+    idx: list[tuple[int, int]] = [
+        xy_to_rc(transform, x, y) for x, y in coords
+    ]
 
     raw: list[tuple[int, int]] = []
     if len(idx) == 1:

@@ -25,6 +25,7 @@ import numpy as np
 import rasterio
 
 from terrainflow_assessment.modules.flow_analysis import fdir_nodata
+from terrainflow_assessment.modules.footprint import xy_to_rc
 
 _log = logging.getLogger(__name__)
 
@@ -774,8 +775,7 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
                 import rasterio
                 with rasterio.open(dem_path) as src:
                     t = src.transform
-                    col = int((centroid.x - t.c) / t.a)
-                    row = int((centroid.y - t.f) / t.e)
+                    row, col = xy_to_rc(t, centroid.x, centroid.y)
                     if 0 <= row < src.height and 0 <= col < src.width:
                         centroid_row = row
                         centroid_col = col

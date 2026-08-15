@@ -23,6 +23,8 @@ Pure numpy + shapely + rasterio.features: no QGIS.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from rasterio.features import rasterize
 
@@ -30,6 +32,26 @@ from rasterio.features import rasterize
 # touches. Footprints use all_touched so a narrow or diagonal feature is never lost —
 # a 0.8 m swale on a 1 m grid still claims the cells it crosses.
 DEFAULT_ALL_TOUCHED = True
+
+
+def xy_to_rc(transform, x, y):
+    """Map coordinate → the ``(row, col)`` of the cell it falls in.
+
+    Floor, not ``int()``. ``int()`` truncates toward zero, so a point in the band
+    immediately *north* or *west* of the grid divides to something like -0.4 and
+    truncates to 0 — passing a ``0 <= row < rows`` bounds check as though it were
+    inside. Anything drawn just off the top or left edge was therefore burned into
+    row 0 or column 0 instead of being rejected as outside the DEM, and the dam
+    abutment walk marched along column 0 looking for ground.
+
+    Returns out-of-range indices rather than clamping or raising, on purpose.
+    "Which cell is this in" and "is that cell on the grid" are different questions,
+    and the second one has a different answer at each call site — skip the feature,
+    stop the walk, warn the user. Clamping here would silently pick one of them.
+    """
+    col = math.floor((x - transform.c) / transform.a)
+    row = math.floor((y - transform.f) / transform.e)
+    return int(row), int(col)
 
 
 def rasterize_footprint(shapely_geom, shape, transform,

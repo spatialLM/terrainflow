@@ -12,6 +12,7 @@ from terrainflow_assessment.modules.footprint import (
     outlet_cell,
     pour_point,
     rasterize_footprint,
+    xy_to_rc,
 )
 
 CELL = 1.0
@@ -198,3 +199,43 @@ class TestGuards:
     def test_pour_point_with_no_usable_elevation_anywhere(self):
         dem = np.full((ROWS, COLS), -9999.0)
         assert pour_point(dem, _block_mask(4, 7, 4, 7), nodata=-9999.0) == (None, None)
+
+
+class TestXyToRc:
+    """Map coordinate → cell, by floor rather than truncation.
+
+    CELL is 1.0 and the grid's top-left corner is (0.0, 12.0), so a point at
+    y = 12.5 or x = -0.5 is half a cell outside the grid to the north or west.
+    """
+
+    def test_a_point_inside_maps_to_its_own_cell(self):
+        assert xy_to_rc(TRANSFORM, 0.5, 11.5) == (0, 0)
+        assert xy_to_rc(TRANSFORM, 3.2, 8.7) == (3, 3)
+        assert xy_to_rc(TRANSFORM, 11.9, 0.1) == (11, 11)
+
+    def test_a_cell_centre_maps_to_that_cell(self):
+        for r in range(ROWS):
+            for c in range(COLS):
+                x = TRANSFORM.c + (c + 0.5) * TRANSFORM.a
+                y = TRANSFORM.f + (r + 0.5) * TRANSFORM.e
+                assert xy_to_rc(TRANSFORM, x, y) == (r, c)
+
+    def test_just_north_of_the_grid_is_out_of_range_not_row_zero(self):
+        row, _ = xy_to_rc(TRANSFORM, 5.0, 12.5)
+        assert row == -1, (
+            "int() truncates -0.5 to 0, so the point passes a `0 <= row` bounds "
+            "check and the feature is burned into the top row of the DEM")
+
+    def test_just_west_of_the_grid_is_out_of_range_not_column_zero(self):
+        _, col = xy_to_rc(TRANSFORM, -0.5, 5.0)
+        assert col == -1
+
+    def test_the_south_and_east_edges_were_never_affected(self):
+        """Only the north/west band truncates the wrong way — pinned as the contrast."""
+        row, _ = xy_to_rc(TRANSFORM, 5.0, -0.5)
+        _, col = xy_to_rc(TRANSFORM, 12.5, 5.0)
+        assert row == 12 and col == 12          # past the far edge either way
+
+    def test_bounds_checking_is_left_to_the_caller(self):
+        """Out of range comes back as out of range, not clamped and not raised."""
+        assert xy_to_rc(TRANSFORM, -40.0, 60.0) == (-48, -40)
