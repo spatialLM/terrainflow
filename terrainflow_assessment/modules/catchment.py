@@ -91,10 +91,45 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     scale = min(1.0, (_MAX_PREVIEW_CELLS / n_cells) ** 0.5)
     if scale < 1.0:
         _p(10, f"Downsampling DEM to {scale * 100:.0f}% for preview...")
-        work_dem = _zoom(dem, scale, order=1).astype("float32")
+        # NaN is nodata here, and bilinear interpolation touching a NaN yields NaN
+        # — so a hole grew a ring one to two cells wide into perfectly good
+        # terrain and the catchment lost a band around every one of them.
+        #
+        # The ring semantics, chosen and stated: fill each hole with its nearest
+        # real elevation *before* zooming, so the interpolation near an edge is
+        # over real terrain rather than over NaN, then drop only the output cells
+        # whose source window was more than half nodata. A cell straddling the
+        # edge of a hole therefore survives, carrying the terrain beside it, and
+        # only cells genuinely inside the hole are lost. Filling with zero instead
+        # would drag the interpolated edge toward sea level, which is worse than
+        # the ring.
+        valid = np.isfinite(dem)
+        if valid.all():
+            filled = dem
+        else:
+            from scipy.ndimage import distance_transform_edt
+            _, (ir, ic) = distance_transform_edt(
+                ~valid, return_distances=True, return_indices=True)
+            filled = dem[ir, ic]
+        work_dem = _zoom(filled, scale, order=1).astype("float32")
+        keep = _zoom(valid.astype("float32"), scale, order=1) >= 0.5
+        work_dem[~keep] = np.nan
+
+        # Derived from the shape zoom *actually produced*, not from the scale that
+        # was asked for. `zoom` rounds the row and column counts independently, so
+        # the true factor differs per axis by up to half a cell over the raster —
+        # enough to walk the boundary rasterisation off the terrain it is meant to
+        # cut. Rotation is not scaled because a rotated grid is refused upstream
+        # (`dem_loader` compares b and d against zero); carrying b and d through
+        # unscaled would be wrong if one ever arrived, so assert instead of guess.
+        nrows_z, ncols_z = work_dem.shape
+        if abs(transform.b) > 1e-12 or abs(transform.d) > 1e-12:
+            raise ValueError(
+                "This DEM's grid is rotated. Nothing downstream of here handles "
+                "rotation; reproject it to an axis-aligned grid first.")
         work_transform = Affine(
-            transform.a / scale, transform.b, transform.c,
-            transform.d, transform.e / scale, transform.f,
+            transform.a * (cols / float(ncols_z)), 0.0, transform.c,
+            0.0, transform.e * (rows / float(nrows_z)), transform.f,
         )
     else:
         work_dem = dem
@@ -132,11 +167,16 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
         [(line, 1) for line in boundary_lines],
         out_shape=work_dem.shape,
         transform=work_transform,
-        fill=0, dtype="uint8",
+        # `all_touched` as the fill above uses. A boundary line is a one-cell-wide
+        # thing to begin with; rasterised without it the line breaks wherever it
+        # crosses a cell shallowly, and the pour point is chosen from these cells.
+        fill=0, all_touched=True, dtype="uint8",
     ).astype(bool)
 
-    seed_rows, seed_cols = np.where(boundary_line_mask)
-    if seed_rows.size == 0:
+    # `.any()`, not a second `np.where`: the extraction the pour point needs is
+    # done where it is used, and doing it here as well only produced two full
+    # index arrays over the raster to ask one boolean question.
+    if not boundary_line_mask.any():
         raise RuntimeError(
             "Site boundary line did not intersect the DEM. "
             "Check that both layers use the same CRS."

@@ -622,3 +622,130 @@ class TestDrainDownHours:
     def test_a_deep_narrow_basin_on_clay_breaches_the_48h_guide(self):
         from terrainflow_assessment.modules.catchment import drain_down_hours
         assert drain_down_hours(500.0, 300.0, 1.5) > 48.0
+
+
+class TestPreviewDownsampleHygiene:
+    """The preview path halves a big DEM before delineating. Three things it
+    got wrong, none of which a square unclipped DEM can show."""
+
+    def _big_dem(self, tmp_path, hole=False, rows=900, cols=900):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        data = np.fromfunction(
+            lambda r, c: 100.0 - r * 0.05 + 0.0002 * (c - cols / 2) ** 2,
+            (rows, cols), dtype=float).astype("float32")
+        if hole:
+            data[400:410, 400:410] = -9999.0
+        path = str(tmp_path / f"big_{'hole' if hole else 'clean'}.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=rows, width=cols, count=1,
+            dtype="float32", crs="EPSG:2193",
+            transform=from_origin(1_750_000.0, 5_900_000.0, 2.0, 2.0),
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(data, 1)
+        return path
+
+    def test_a_hole_does_not_grow_a_ring_of_lost_terrain(self):
+        """Bilinear interpolation touching a NaN yields NaN, so a hole spread one
+        cell into terrain that was perfectly good and the catchment lost a band
+        around every one of them.
+
+        Swept across alignments because the size of the ring depends on where the
+        hole lands relative to the output grid: on a lucky offset there is none at
+        all, which is how a single fixture can miss this entirely.
+        """
+        import numpy as np
+        from scipy.ndimage import distance_transform_edt
+        from scipy.ndimage import zoom as _zoom
+
+        scale = 0.7857
+
+        def lost_naive(dem):
+            return int(np.isnan(_zoom(dem, scale, order=1)).sum())
+
+        def lost_guarded(dem):
+            valid = np.isfinite(dem)
+            _, (ir, ic) = distance_transform_edt(
+                ~valid, return_distances=True, return_indices=True)
+            out = _zoom(dem[ir, ic], scale, order=1)
+            out[_zoom(valid.astype("float64"), scale, order=1) < 0.5] = np.nan
+            return int(np.isnan(out).sum())
+
+        better = 0
+        for offset in range(100, 112):
+            dem = np.full((200, 200), 50.0)
+            dem[offset:offset + 3, offset:offset + 3] = np.nan
+            naive, guarded = lost_naive(dem), lost_guarded(dem)
+            assert guarded <= naive, (
+                f"offset {offset}: the guard lost more, {guarded} vs {naive}")
+            better += guarded < naive
+        assert better >= 8, (
+            f"the guard recovered terrain at only {better} of 12 alignments")
+
+    def test_what_survives_is_terrain_not_a_slide_toward_zero(self):
+        """Filling the hole with zero before zooming would drag the interpolated
+        edge to sea level, which is worse than the ring it removes."""
+        import numpy as np
+        from scipy.ndimage import distance_transform_edt
+        from scipy.ndimage import zoom as _zoom
+
+        dem = np.full((200, 200), 50.0)
+        dem[100:103, 100:103] = np.nan
+
+        valid = np.isfinite(dem)
+        _, (ir, ic) = distance_transform_edt(
+            ~valid, return_distances=True, return_indices=True)
+        out = _zoom(dem[ir, ic], 0.7857, order=1)
+        out[_zoom(valid.astype("float64"), 0.7857, order=1) < 0.5] = np.nan
+
+        kept = out[np.isfinite(out)]
+        assert float(kept.min()) > 49.0, (
+            f"a kept cell came back at {kept.min():.1f} m — filled with zero, not "
+            "with the terrain beside it")
+
+    def test_the_scaled_transform_matches_the_shape_zoom_produced(self):
+        """`zoom` rounds each axis independently, so the achieved factor is not
+        the requested one and the boundary rasterises onto shifted ground."""
+        import numpy as np
+        from scipy.ndimage import zoom as _zoom
+
+        rows, cols = 901, 899
+        scale = 0.5
+        out = _zoom(np.zeros((rows, cols), dtype="float32"), scale, order=1)
+        nrows, ncols = out.shape
+
+        requested = 1.0 / scale
+        achieved_r = rows / float(nrows)
+        achieved_c = cols / float(ncols)
+        assert (achieved_r, achieved_c) != (requested, requested), (
+            "pick a shape where the rounding actually bites")
+        # The old form used `requested` for both axes; over the whole raster that
+        # is most of a cell of drift.
+        drift_m = abs(achieved_c - requested) * ncols * 2.0
+        assert drift_m > 1.0, f"only {drift_m:.2f} m of drift — not worth asserting"
+
+    def test_a_rotated_grid_is_refused_rather_than_quietly_mis_scaled(self, tmp_path):
+        """The rotation terms were carried through unscaled. Nothing downstream
+        handles rotation at all, so a refusal beats a silently skewed grid."""
+        import numpy as np
+        import pytest
+        import rasterio
+        from rasterio.transform import Affine
+
+        from terrainflow_assessment.modules.catchment import fast_contributing_area
+
+        rows = cols = 900
+        path = str(tmp_path / "rotated.tif")
+        rotated = (Affine.translation(1_750_000.0, 5_900_000.0)
+                   * Affine.rotation(15.0) * Affine.scale(2.0, -2.0))
+        with rasterio.open(
+            path, "w", driver="GTiff", height=rows, width=cols, count=1,
+            dtype="float32", crs="EPSG:2193", transform=rotated, nodata=-9999.0,
+        ) as dst:
+            dst.write(np.full((rows, cols), 50.0, dtype="float32"), 1)
+
+        with pytest.raises(ValueError, match="rotated"):
+            fast_contributing_area(path, "unused.gpkg")

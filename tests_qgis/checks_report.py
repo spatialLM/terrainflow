@@ -302,7 +302,8 @@ def check_report_html_without_simulation(dem_path):
 
         out = _export(h, str(tmp / "plan.html"), selected="HTML (*.html)")
         h.assert_no_errors("html export without simulation")
-        text = open(out, encoding="utf-8").read()
+        with open(out, encoding="utf-8") as handle:
+            text = handle.read()
         assert text.startswith("<!DOCTYPE html>")
         assert "Your scheme in one page" in text
 
@@ -314,7 +315,8 @@ def check_report_html_is_self_contained(dem_path):
         h.add_earthwork("swale", line_across_valley())
         h.panel.analysis_inputs_changed.emit()
         out = _export(h, str(tmp / "plan.html"), selected="HTML (*.html)")
-        text = open(out, encoding="utf-8").read()
+        with open(out, encoding="utf-8") as handle:
+            text = handle.read()
 
         assert "data:image/png;base64," in text, (
             "maps and charts must be embedded, not linked")
@@ -345,7 +347,8 @@ def check_report_html_and_pdf_agree(dem_path):
         h.assert_no_errors("both formats from one state")
         _assert_pdf(pdf, "pdf half of the pair")
 
-        text = open(html_path, encoding="utf-8").read()
+        with open(html_path, encoding="utf-8") as handle:
+            text = handle.read()
         # Every figure the model produced has to be in the HTML; the PDF's side
         # is covered by rendering its pages into the shot diff.
         import html as _h

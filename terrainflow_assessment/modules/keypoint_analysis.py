@@ -446,8 +446,12 @@ class DrainageLineAnalysis:
 
         return results
 
-    # How far either side of a candidate the valley is measured, in cells.
-    _CROSS_SCAN = 200
+    #: How far either side of a candidate the valley is measured, in **metres**.
+    #:
+    #: It was 200 cells, which is 400 m on a 2 m DEM and 50 m on a 0.25 m one — the
+    #: same constant meaning two entirely different questions depending on the
+    #: survey. A valley is a physical width, so the reach is one too.
+    _CROSS_SCAN_M = 400.0
 
     def _valley_cross_width(self, row, col, fill_elev):
         """
@@ -468,10 +472,26 @@ class DrainageLineAnalysis:
         ``TestValleyCrossWidthEquivalence``.
         """
         _, cols = self.dem.shape
-        lo = max(0, col - self._CROSS_SCAN)
-        hi = min(cols, col + self._CROSS_SCAN + 1)
+        reach = max(1, int(round(self._CROSS_SCAN_M / max(self.cell_w, 1e-9))))
+        lo = max(0, col - reach)
+        hi = min(cols, col + reach + 1)
         # No guard for hi <= lo: an inverted slice is empty and already counts zero.
-        return int(np.count_nonzero(self.dem[row, lo:hi] <= fill_elev)) * self.cell_w
+        band = self.dem[row, lo:hi] <= fill_elev
+
+        # **Contiguous with the candidate**, not every below-fill cell in the window.
+        # Counting the whole window folded a separate gully two hundred cells away
+        # into this dam's wall, and the score is `acc / (width + 1)` — so an
+        # unrelated hollow made a good site look like a bad one. Walk out from the
+        # candidate in both directions and stop at the first cell that stands above
+        # the crest, which is where the wall would actually end.
+        here = col - lo
+        if here < 0 or here >= band.size or not band[here]:
+            return 0.0
+        left = band[:here][::-1]
+        right = band[here + 1:]
+        stop_l = int(np.argmin(left)) if (~left).any() else left.size
+        stop_r = int(np.argmin(right)) if (~right).any() else right.size
+        return float(1 + stop_l + stop_r) * self.cell_w
 
     # ---------------------------------------------------------------------- cultivation elevations
 
