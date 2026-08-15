@@ -589,6 +589,74 @@ class TestCatchmentPolygons:
         assert isinstance(result, list)
 
 
+class TestOutletCellCentres:
+    """row -> y must be the cell *centre*: ``f + (row + 0.5) * e``, e negative.
+
+    Adding ``+cell_h/2`` instead puts the point one full cell north of its own
+    cell — the same defect ``keypoint_analysis._rc_to_xy`` documents as fixed
+    there. On the top edge that lands outside the raster altogether, so the
+    outlet seeds nothing and the catchment is silently missing.
+
+    Note the round-trip check deliberately avoids row 0: ``_acc_at`` converts
+    back with ``int()``, which truncates -0.5 to 0 and would mask the fault for
+    that one row. Row 0 is covered by the in-raster check instead.
+    """
+
+    @staticmethod
+    def _loaded(dem):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(dem)
+        return fa
+
+    def test_top_edge_outlet_lands_inside_the_raster(self, sloped_dem):
+        fa = self._loaded(sloped_dem)
+        acc = np.zeros((25, 25))
+        acc[0, 10] = 500.0          # only cell over threshold, on the top edge
+
+        outlets = fa._find_boundary_outlets(acc, 100)
+
+        assert len(outlets) == 1
+        _, y = outlets[0]
+        top = fa.transform.f
+        bottom = top + 25 * fa.transform.e
+        assert bottom < y < top, f"y={y} falls outside the raster (top={top})"
+        assert y == pytest.approx(top + 0.5 * fa.transform.e)
+
+    @pytest.mark.parametrize("row,col", [(24, 3), (7, 0), (7, 24), (24, 24)])
+    def test_boundary_outlet_round_trips_to_its_own_cell(self, sloped_dem, row, col):
+        fa = self._loaded(sloped_dem)
+        acc = np.zeros((25, 25))
+        acc[row, col] = 500.0
+
+        (x, y), = fa._find_boundary_outlets(acc, 100)
+
+        back_col = int((x - fa.transform.c) / fa.transform.a)
+        back_row = int((y - fa.transform.f) / fa.transform.e)
+        assert (back_row, back_col) == (row, col)
+
+    def test_max_acc_fallback_seeds_the_max_acc_cell(self, sloped_dem):
+        fa = self._loaded(sloped_dem)
+        fa.run()
+
+        seen = {}
+        orig = fa.grid.catchment
+
+        def _spy(*args, **kwargs):
+            seen.update(x=kwargs.get("x"), y=kwargs.get("y"))
+            return orig(*args, **kwargs)
+
+        fa.grid.catchment = _spy
+        # No boundary cell clears this, so it falls back to the max-acc cell.
+        fa.get_catchment_polygons(stream_threshold=10**9)
+
+        row, col = np.unravel_index(np.argmax(np.array(fa.acc)), fa.acc.shape)
+        assert seen["x"] == pytest.approx(
+            fa.transform.c + (col + 0.5) * fa.transform.a)
+        assert seen["y"] == pytest.approx(
+            fa.transform.f + (row + 0.5) * fa.transform.e)
+
+
 # ---------------------------------------------------------------------------
 # get_fdir_description / get_profile / save_result
 # ---------------------------------------------------------------------------

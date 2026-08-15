@@ -628,8 +628,6 @@ class FlowAnalysis:
         if self.fdir is None or self.acc is None:
             raise RuntimeError("Run flow analysis first.")
 
-        cell_w = abs(self.transform.a)
-        cell_h = abs(self.transform.e)
         acc_array = np.array(self.acc)
 
         if not outlet_points:
@@ -637,8 +635,11 @@ class FlowAnalysis:
             if not outlet_points:
                 max_idx = np.unravel_index(np.argmax(acc_array), acc_array.shape)
                 row, col = max_idx
-                x = self.transform.c + col * self.transform.a + cell_w / 2
-                y = self.transform.f + row * self.transform.e + cell_h / 2
+                # transform.e is negative (north-up), so the centre of a cell is half a
+                # cell *down* from its top edge: (row + 0.5) * e. Adding +cell_h/2
+                # instead seeds a point one full cell north of the intended cell.
+                x = self.transform.c + (col + 0.5) * self.transform.a
+                y = self.transform.f + (row + 0.5) * self.transform.e
                 outlet_points = [(x, y)]
 
         def _acc_at(x, y):
@@ -746,8 +747,8 @@ class FlowAnalysis:
         min_dist = cell_w * 20
         kept = []
         for acc, r, c in candidates:
-            x = self.transform.c + c * self.transform.a + cell_w / 2
-            y = self.transform.f + r * self.transform.e + abs(self.transform.e) / 2
+            x = self.transform.c + (c + 0.5) * self.transform.a
+            y = self.transform.f + (r + 0.5) * self.transform.e
             too_close = any(
                 (x - kx) ** 2 + (y - ky) ** 2 < min_dist ** 2
                 for _, kx, ky in kept
