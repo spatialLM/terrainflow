@@ -895,3 +895,35 @@ def check_section_after_a_spilled_table_is_not_drawn_on_the_cover(dem_path):
         f"cursor y is {builder._y:.1f}, expected {expected_y:.1f} — measured from "
         f"the top margin rather than from where the frame actually sits")
 
+
+
+def check_export_puts_the_operators_selection_back(dem_path):
+    """Selections are cleared so they cannot print — then restored.
+
+    The clear runs over every vector layer in the project, including the operator's
+    own cadastre and asset layers, because the live layout map draws whatever it is
+    handed. Destroying a selection somebody built by hand is not an acceptable price
+    for exporting a document.
+    """
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    with PluginHarness(dem_path) as h, workdir() as tmp:
+        h.run_baseline()
+
+        own = QgsVectorLayer(
+            f"Point?crs={h.dem_layer.crs().authid()}", "Operator assets", "memory")
+        centre = h.dem_layer.extent().center()
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromPointXY(centre))
+        own.dataProvider().addFeatures([feature])
+        own.updateExtents()
+        h.project.instance().addMapLayer(own)
+        own.selectAll()
+        held = list(own.selectedFeatureIds())
+        assert held, "nothing was selected to begin with"
+
+        _export(h, str(tmp / "selection.pdf"))
+        h.assert_no_errors("export with an operator selection")
+
+        assert list(own.selectedFeatureIds()) == held, (
+            "the export destroyed a selection that was not its to clear")

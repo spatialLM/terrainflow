@@ -95,7 +95,7 @@ class ReportingController:
         """
         from terrainflow_assessment.modules.report_model import build_report
 
-        self._clear_interactive_state()
+        held_selections = self._clear_interactive_state()
         data = self._collect(site)
         report = build_report(data)
 
@@ -117,6 +117,7 @@ class ReportingController:
             # Consumed synchronously, so nothing outlives the export. Both
             # outputs embed what they need and survive output_dir being cleared.
             _rmtree(work)
+            self._restore_selections(held_selections)
 
     def _clear_interactive_state(self):
         """Drop feature selections before the maps are drawn.
@@ -132,14 +133,38 @@ class ReportingController:
         live ``QgsLayoutItemMap`` the PDF path uses. The canvas rubber band is
         a third mechanism and is cleared by the plugin's export wiring, because
         it belongs to the earthworks controller.
+
+        Every vector layer in the project is cleared, including the operator's own
+        cadastre and asset layers — the live ``QgsLayoutItemMap`` draws whatever it
+        is given and a selection is not a plugin concept. So the ids are returned
+        and :meth:`_restore_selections` puts them back: exporting a document is not
+        a reason to destroy a selection the operator spent time building.
         """
         from qgis.core import QgsMapLayer
 
+        held = {}
         for layer in self._project.instance().mapLayers().values():
             try:
                 if (layer.type() == QgsMapLayer.VectorLayer
                         and layer.selectedFeatureCount()):
+                    held[layer.id()] = list(layer.selectedFeatureIds())
                     layer.removeSelection()
+            except Exception:
+                continue
+        return held
+
+    def _restore_selections(self, held):
+        """Put back what :meth:`_clear_interactive_state` took, where it still exists.
+
+        A layer removed during the export simply drops out; ids that no longer match
+        a feature are ignored by ``selectByIds``.
+        """
+        for layer_id, fids in (held or {}).items():
+            layer = resolve_layer(self._project, layer_id)
+            if layer is None:
+                continue
+            try:
+                layer.selectByIds(fids)
             except Exception:
                 continue
 

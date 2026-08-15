@@ -141,11 +141,17 @@ class TerrainFlowAssessmentPlugin:
         self._reporting = ReportingController(*args)
         self._design_file = DesignFileController(*args)
 
+        # Two controllers need a sibling rather than another copy of one. Wired here,
+        # where both already exist, because a controller that builds its own copy of
+        # another gets a second set of signal connections and loses whatever state the
+        # original was keeping.
+        #
         # The fill simulation must split runoff and cascade overflow exactly as the
-        # design tier does, or the comparative report shows two networks as one. Both
-        # are produced by the earthworks controller's live assessment, so the
-        # simulation asks it for them rather than resolving a second opinion.
+        # design tier does, or the comparative report shows two networks as one; the
+        # re-analysis renders through the baseline's layer helper, which owns the
+        # exit-marker rescaling.
         self._simulation.design_tier = self._earthworks
+        self._earthworks.baseline = self._baseline
 
         self._wire_signals()
         self._wire_project_persistence()

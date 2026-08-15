@@ -57,7 +57,6 @@ class PluginState:
     # earthwork type → layer id. Named for what it holds: the values are ids
     # resolved through _layers.resolve_layer, never layer objects.
     ew_layer_ids: dict = field(default_factory=dict)
-    ew_group: Any | None = None
 
     # ------------------------------------------------------------------ Flow-graph cache
     # The design-tier catchment labelling is storm-independent: it depends only on the

@@ -529,3 +529,36 @@ def check_two_features_sharing_a_name_are_verified_apart(dem_path):
         analytic = sorted(r["analytic_m3"] for r in rows)
         assert analytic == [40.0, 90.0], (
             f"each row must carry its own feature's capacity, got {analytic}")
+
+
+def check_reanalysis_exit_markers_rescale_with_the_baseline(dem_path):
+    """The re-analysis renders through the plugin's own BaselineController.
+
+    It used to build a throwaway one per run. That copy connects `scaleChanged` in
+    its constructor and is then dropped, so every re-analysis left another connection
+    to a dead controller — and the exit-marker layer ids it collected went with it,
+    which is why earthworks exit markers never resized on zoom while the baseline's
+    did.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        baseline_ctl = h.plugin._baseline
+        before = set(baseline_ctl._exit_layer_ids)
+        assert before, "the baseline produced no exit-marker layer to track"
+
+        ew = h.add_earthwork("swale", line_across_valley())
+        ew.capacity_m3 = 50.0
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("re-analysis")
+
+        after = set(baseline_ctl._exit_layer_ids)
+        assert after > before, (
+            "the re-analysis's exit markers were not registered for rescaling — "
+            f"{len(before)} before, {len(after)} after")
+
+        # And the rescale itself still runs over all of them.
+        h.canvas.setExtent(h.dem_layer.extent())
+        baseline_ctl.on_map_scale_changed()
+        h.assert_no_errors("rescale after a re-analysis")
+        assert set(baseline_ctl._exit_layer_ids) == after, (
+            "a rescale dropped layers that are still on the map")

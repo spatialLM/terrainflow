@@ -515,7 +515,10 @@ class DesignFileController(LayerTreeMixin, QObject):
                 continue
             if layer is None:
                 continue
-            self._project.add_layer(layer)
+            # Under the site group with everything else the user drew — a raw
+            # add_layer drops it loose at the top of the legend, expanded, which is
+            # exactly what the placement rule exists to prevent (mirrors the DEM above).
+            self.place(layer, G.SITE)
             # Selecting it in the combo fires the panel's change signal, which is what
             # sets the corresponding path on the state — no need to set it here.
             self._panel.set_area_layer(kind, layer)

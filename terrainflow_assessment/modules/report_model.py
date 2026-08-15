@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from terrainflow_assessment.modules.reporting import (
+    CAPTURE_GOOD_PCT,
+    capture_tone,
     cut_fill_sentence,
     drain_wording,
     fill_wording,
@@ -480,11 +482,8 @@ def _page_how_to_read(data):
 
 
 def _capture_tone(pct):
-    if pct >= 80:
-        return "good"
-    if pct >= 40:
-        return "warn"
-    return "bad"
+    # One band for the panel and the page — see reporting.CAPTURE_GOOD_PCT.
+    return capture_tone(pct)
 
 
 def _storm_line(b):
@@ -615,7 +614,7 @@ def _condition_checks(data):
     rows = []
 
     if bal.total_inflow_m3:
-        held = bal.capture_pct >= 80
+        held = bal.capture_pct >= CAPTURE_GOOD_PCT
         rows.append(["Holds the storm",
                      "yes" if held else "partly",
                      f"{fmt_pct(bal.capture_pct)} of runoff stays on the block"])

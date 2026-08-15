@@ -1288,3 +1288,43 @@ class TestLiveAssessmentAgainstRealBalanceOutput:
         html = format_live_assessment(result, have_flow=True)
         assert "Swale 1" in html
         assert "400 → 400 m³" in html
+
+
+class TestOneCaptureBand:
+    """The panel scorecard, the live readout and the printed page grade the same
+    percentage. Green on screen and amber on paper is a contradiction the reader
+    cannot resolve, so the thresholds and colours have one definition."""
+
+    def test_the_band_is_where_the_wording_is(self):
+        from terrainflow_assessment.modules import reporting as R
+
+        assert (R.CAPTURE_GOOD_PCT, R.CAPTURE_FAIR_PCT) == (80.0, 40.0)
+        assert set(R.CAPTURE_COLOURS) == {"good", "warn", "bad"}
+
+    def test_tone_and_colour_agree_across_the_band(self):
+        from terrainflow_assessment.modules import reporting as R
+
+        for pct, tone in ((100, "good"), (80, "good"), (79.9, "warn"),
+                          (40, "warn"), (39.9, "bad"), (0, "bad")):
+            assert R.capture_tone(pct) == tone, pct
+            assert R.capture_colour(pct) == R.CAPTURE_COLOURS[tone], pct
+
+    def test_the_report_grades_by_the_shared_band(self):
+        from terrainflow_assessment.modules import reporting as R
+        from terrainflow_assessment.modules.report_model import _capture_tone
+
+        for pct in (0, 39.9, 40, 79.9, 80, 100):
+            assert _capture_tone(pct) == R.capture_tone(pct), pct
+
+    def test_moving_the_threshold_moves_every_readout(self):
+        """The point of the exercise: one edit, not four."""
+        from terrainflow_assessment.modules import reporting as R
+        from terrainflow_assessment.modules.report_model import _capture_tone
+
+        original = R.CAPTURE_GOOD_PCT
+        try:
+            R.CAPTURE_GOOD_PCT = 90.0
+            assert R.capture_tone(85) == "warn"
+            assert _capture_tone(85) == "warn"
+        finally:
+            R.CAPTURE_GOOD_PCT = original

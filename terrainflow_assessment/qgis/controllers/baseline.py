@@ -8,6 +8,7 @@ layer creation, before/after toggling, and shared raster styling helpers.
 from __future__ import annotations
 
 import os
+import re
 
 from qgis.core import (
     QgsFeature,
@@ -342,17 +343,31 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         src = layer.source()
         if os.path.exists(src.split("|")[0]):
             return src.split("|")[0]
-        import tempfile
-        path = tempfile.mktemp(suffix=".gpkg")
+        # Inside the session's output dir, under a name derived from the layer, so it
+        # is cleaned up with everything else at unload. `tempfile.mktemp` wrote outside
+        # it — never cleaned — and hands back a name anything could claim in between.
         from qgis.core import QgsVectorFileWriter
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", layer.name()) or "area"
+        path = os.path.join(self._state.output_dir, f"area_{safe}_{layer.id()[-8:]}.gpkg")
         save_options = QgsVectorFileWriter.SaveVectorOptions()
         save_options.driverName = "GPKG"
         save_options.fileEncoding = "UTF-8"
-        QgsVectorFileWriter.writeAsVectorFormatV3(
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(
             layer, path,
             self._project.transform_context(),
             save_options,
         )
+        # A failed write used to be indistinguishable from "no boundary was set", and
+        # the analysis then ran over the whole DEM instead of the area the user drew.
+        code = result[0] if isinstance(result, (tuple, list)) else result
+        if code != QgsVectorFileWriter.WriterError.NoError:
+            message = (result[1] if isinstance(result, (tuple, list)) and len(result) > 1
+                       else "")
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"Could not save '{layer.name()}' for the analysis"
+                f"{f': {message}' if message else ''} — it will be ignored.")
+            return None
         return path
 
     # ---------------------------------------------------------------- Baseline analysis

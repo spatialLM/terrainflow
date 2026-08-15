@@ -64,6 +64,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # Layer nodes whose visibility we are already listening to, so a rebuilt
         # layer does not accumulate connections.
         self._watched_layer_ids = set()
+        # Set by the plugin: the one BaselineController. The re-analysis renders its
+        # results through the same helper the baseline does, and the exit-marker ids
+        # have to land on the controller that owns the `scaleChanged` connection.
+        self.baseline = None
 
     def _watch_visibility(self, layer_id):
         """Clear the highlight when this layer is unticked.
@@ -3244,7 +3248,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         from qgis.core import QgsRuleBasedRenderer
 
         crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
-        self._state.ew_group = self.group_for(G.DRAWN)
 
         # Registry-driven: the type registry is the single source of layer styling
         # (matching the panel's draw-button colours); a future register_type() gets
@@ -3447,10 +3450,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     def _on_earthworks_complete(self, result):
         self._state.earthworks_result = result
-        # Delegate layer loading to baseline controller's helper via the shared project
-        from terrainflow_assessment.qgis.controllers.baseline import BaselineController
-        bl = BaselineController(self._state, self._panel, self._project,
-                                self._iface, self._canvas)
+        # The plugin's own BaselineController renders these layers, not a throwaway
+        # copy. A fresh one connects `scaleChanged` in its constructor and is then
+        # dropped, so every re-analysis left another connection to a dead controller —
+        # and the exit-marker ids it collected went with it, which is why earthworks
+        # exit markers never rescaled on zoom while the baseline's did.
+        bl = self.baseline
         bl._load_result_layers(result, is_earthworks=True)
         self._load_burned_dem_layer(bl)
         if result.get("ponding"):

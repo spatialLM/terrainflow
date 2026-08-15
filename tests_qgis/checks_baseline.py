@@ -149,3 +149,55 @@ def check_a_rerun_clears_the_previous_verification(dem_path):
         assert h.state.verified_delta_pct is None
         assert h.panel._stepper.state("verify") != "done", (
             "Verify still reads green against a baseline it never measured")
+
+
+def check_an_area_layer_is_written_inside_the_output_dir(dem_path):
+    """A memory area layer has to be materialised for the analysis to read it.
+
+    That write used `tempfile.mktemp`, which lands outside the session directory —
+    never cleaned up, and a name anything could claim between the call and the write.
+    """
+    import os
+
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    with PluginHarness(dem_path) as h:
+        layer = QgsVectorLayer(
+            f"Polygon?crs={h.dem_layer.crs().authid()}", "Drawn area", "memory")
+        extent = h.dem_layer.extent()
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromRect(extent))
+        layer.dataProvider().addFeatures([feature])
+        layer.updateExtents()
+
+        path = h.plugin._baseline._layer_to_path(layer)
+        assert path, "the area layer was not written at all"
+        assert os.path.exists(path), f"{path} was reported but not written"
+        assert os.path.commonpath([path, h.state.output_dir]) == h.state.output_dir, (
+            f"{path} is outside the session directory {h.state.output_dir}")
+
+
+def check_an_unwritable_area_layer_says_so(dem_path):
+    """A failed write was indistinguishable from "no boundary was set", and the
+    analysis then silently ran over the whole DEM instead of the drawn area."""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    with PluginHarness(dem_path) as h:
+        layer = QgsVectorLayer(
+            f"Polygon?crs={h.dem_layer.crs().authid()}", "Drawn area", "memory")
+        feature = QgsFeature()
+        feature.setGeometry(QgsGeometry.fromRect(h.dem_layer.extent()))
+        layer.dataProvider().addFeatures([feature])
+        layer.updateExtents()
+
+        original = h.state.output_dir
+        h.state.output_dir = original + "/does/not/exist"
+        h.bar.messages.clear()
+        try:
+            path = h.plugin._baseline._layer_to_path(layer)
+        finally:
+            h.state.output_dir = original
+
+        assert path is None, f"a failed write reported success: {path}"
+        assert any("could not save" in text.lower() for _, _, text in h.bar.messages), (
+            f"the failed write was silent: {h.bar.messages}")

@@ -141,13 +141,33 @@ _LIVE_GOOD, _LIVE_MID, _LIVE_BAD = "#1e8449", "#b9770e", "#c0392b"
 _LIVE_MUTED = "#566573"
 _LIVE_FILL = "#2e86c1"
 
+# ---------------------------------------------------------------------------
+# The capture band — one definition, three readouts
+# ---------------------------------------------------------------------------
+# The panel scorecard, the live assessment and the printed report all grade the
+# same capture percentage, and a design that reads green on screen and amber on
+# paper is a bug the reader has no way to resolve. The thresholds and the three
+# colours live here, beside the wording they are graded alongside, for the same
+# reason ``round_volume`` does.
 
-def _capture_colour(pct):
-    if pct >= 80:
-        return _LIVE_GOOD
-    if pct >= 40:
-        return _LIVE_MID
-    return _LIVE_BAD
+CAPTURE_GOOD_PCT = 80.0     # at or above: the design holds the storm
+CAPTURE_FAIR_PCT = 40.0     # at or above: it holds a useful share of it
+
+CAPTURE_COLOURS = {"good": _LIVE_GOOD, "warn": _LIVE_MID, "bad": _LIVE_BAD}
+
+
+def capture_tone(pct):
+    """Grade a capture percentage: ``"good"`` / ``"warn"`` / ``"bad"``."""
+    if pct >= CAPTURE_GOOD_PCT:
+        return "good"
+    if pct >= CAPTURE_FAIR_PCT:
+        return "warn"
+    return "bad"
+
+
+def capture_colour(pct):
+    """The hex colour for a capture percentage's grade."""
+    return CAPTURE_COLOURS[capture_tone(pct)]
 
 
 def _mini_bar(pct, colour, back="#d6dbdf"):
@@ -338,7 +358,7 @@ def format_live_assessment(result, have_flow):
     parts = []
 
     if have_flow:
-        colour = _capture_colour(r.capture_pct)
+        colour = capture_colour(r.capture_pct)
         parts.append(
             f"<span style='font-size:20px;font-weight:bold;color:{colour};'>"
             f"{r.capture_pct:.0f}%</span> "

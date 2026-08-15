@@ -11,6 +11,8 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from terrainflow_assessment.modules.reporting import capture_colour
+
 _WATER = "#1273b5"
 _SOAKED = "#79b8dd"
 
@@ -21,11 +23,12 @@ _LEAVES = "#c6d1d3"
 
 
 def _score_colour(pct):
-    if pct >= 80:
-        return "#1e8449"
-    if pct >= 40:
-        return "#b9770e"
-    return "#c0392b"
+    """The same band the report grades against — see reporting.CAPTURE_GOOD_PCT.
+
+    Green on screen and amber on paper for one design is a contradiction the
+    reader has no way to resolve, so there is one definition of the band.
+    """
+    return capture_colour(pct)
 
 
 class _BudgetBand(QWidget):
