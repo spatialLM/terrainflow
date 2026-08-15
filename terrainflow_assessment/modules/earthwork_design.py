@@ -32,6 +32,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 import rasterio
+from shapely.geometry import LineString
 from shapely.geometry import shape as shapely_shape
 
 from terrainflow_assessment.core.registry.earthwork_types import get_type
@@ -1503,6 +1504,42 @@ class DEMBurner:
         return rasterize_footprint(shapely_geom, self.shape, self.transform,
                                    all_touched=all_touched)
 
+    def _band_chainage(self, mask, coords):
+        """``(rows, cols, chainage)`` for the cells of *mask*, along the polyline.
+
+        Chainage is the distance from the line's start to the closest point on it —
+        what a graded invert needs in order to know how deep to cut each cell.
+
+        Vectorised over segments × cells rather than looped, because it can be: an
+        alignment has a handful of vertices and its band a few thousand cells, so the
+        whole projection is a couple of small array operations. The obvious
+        alternative, one ``line.project(Point(...))`` per cell, puts a shapely call
+        back in an inner loop, which is what this was rewritten to remove.
+        """
+        rows, cols = np.nonzero(mask)
+        xs = self.transform.c + (cols + 0.5) * self.transform.a
+        ys = self.transform.f + (rows + 0.5) * self.transform.e
+
+        pts = np.asarray(coords, dtype="float64")
+        starts, ends = pts[:-1], pts[1:]
+        deltas = ends - starts                             # (S, 2)
+        seg_len2 = (deltas ** 2).sum(axis=1)               # (S,)
+        seg_len = np.sqrt(seg_len2)
+        cumulative = np.concatenate(([0.0], np.cumsum(seg_len)))
+
+        # Projection parameter of every cell onto every segment, clamped to the
+        # segment so a cell beside a bend projects to the vertex, not past it.
+        qx = xs[None, :] - starts[:, 0:1]
+        qy = ys[None, :] - starts[:, 1:2]
+        safe = np.where(seg_len2 > 0.0, seg_len2, 1.0)[:, None]
+        t = np.clip((qx * deltas[:, 0:1] + qy * deltas[:, 1:2]) / safe, 0.0, 1.0)
+
+        gap2 = (qx - t * deltas[:, 0:1]) ** 2 + (qy - t * deltas[:, 1:2]) ** 2
+        nearest = np.argmin(gap2, axis=0)
+        cell = np.arange(t.shape[1])
+        chainage = cumulative[nearest] + t[nearest, cell] * seg_len[nearest]
+        return rows, cols, chainage
+
     def _line_path_cells(self, line):
         """Connected in-bounds cell path along *line* (nearest-cell snap fallback)."""
         try:
@@ -2009,34 +2046,32 @@ class DEMBurner:
 
         gradient_frac = ew.gradient_pct / 100.0
 
-        for seg_i in range(len(coords) - 1):
-            x1, y1 = coords[seg_i]
-            x2, y2 = coords[seg_i + 1]
-            seg_dist = cum_dist[seg_i + 1] - cum_dist[seg_i]
-            if seg_dist == 0:
-                continue
-            n_steps = max(2, int(seg_dist / self.cell_size * 3))
-            for step in range(n_steps + 1):
-                t = step / n_steps
-                x = x1 + t * (x2 - x1)
-                y = y1 + t * (y2 - y1)
-                dist_along = cum_dist[seg_i] + t * seg_dist
-                target_floor = start_elev - dist_along * gradient_frac
+        # The whole channel in one pass. This used to walk the line at three samples
+        # per cell and, for *each* sample, buffer a point, rasterise it over the full
+        # raster and run a full-array minimum — on the working DEM that is billions of
+        # cell-touches for one drain, to burn a band a couple of cells wide.
+        #
+        # The band is the same shape either way: the samples overlapped heavily and
+        # their union is the buffered line, which the mask comment below already noted.
+        # So buffer once, rasterise once, and give each cell in the band its own invert
+        # from how far along the line it sits.
+        band = self._rasterize(LineString(coords).buffer(ew.width / 2.0))
+        if not band.any():
+            # Sub-cell channel: the buffer rasterised to nothing. The centreline's cell
+            # path keeps the graded invert carving at least one connected cell, which is
+            # what the per-sample nearest-cell snap did. Only when the band is empty —
+            # adding it unconditionally would widen every channel by its centreline and
+            # change which cells the breach below sees. Off-extent cells are not in the
+            # path, so a drain off the DEM stays a no-op rather than burning an edge.
+            for r, c in self._line_path_cells(line):
+                band[r, c] = True
 
-                from shapely.geometry import Point
-                pt_geom = Point(x, y).buffer(ew.width / 2)
-                cell_mask = self._rasterize(pt_geom)
-                burn_elev = target_floor - ew.depth
-                if cell_mask.any():
-                    dem[cell_mask] = np.minimum(dem[cell_mask], burn_elev)
-                else:
-                    # Sub-cell channel: the buffer rasterised empty. Snap to the
-                    # nearest cell so the graded invert still carves ≥ 1 cell — but
-                    # only when the sample lies within the DEM (an off-extent point
-                    # stays a no-op, never a spurious edge-cell burn).
-                    row, col = xy_to_rc(self.transform, x, y)
-                    if 0 <= row < self.shape[0] and 0 <= col < self.shape[1]:
-                        dem[row, col] = min(float(dem[row, col]), burn_elev)
+        if band.any():
+            rows, cols, chainage = self._band_chainage(band, coords)
+            burn = start_elev - chainage * gradient_frac - ew.depth
+            # np.minimum, so a cell already lower keeps its level and a hole stays a
+            # hole — NaN propagates rather than the drain inventing ground to cut.
+            dem[rows, cols] = np.minimum(dem[rows, cols], burn)
 
         # A diversion IS a conveyance, so it gets the monotonic breach that swales
         # no longer do: the graded invert plus nearest-cell snapping can leave

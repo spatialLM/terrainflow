@@ -6,6 +6,7 @@ import rasterio
 from rasterio.transform import from_bounds
 
 from terrainflow_assessment.modules.earthwork_design import DEMBurner
+from terrainflow_assessment.modules.footprint import xy_to_rc
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
 
 # ---------------------------------------------------------------------------
@@ -432,3 +433,123 @@ class TestBurnedRaised:
         assert set(b.burned_raised) == set(before)
         for key, mask in before.items():
             assert (b.burned_raised[key] == mask).all()
+
+
+class TestDiversionBurnEquivalence:
+    """The one-rasterise burn cuts the same channel the per-sample one did.
+
+    The old burn walked the line at three samples per cell and, for each sample,
+    buffered a point, rasterised it over the whole raster and ran a full-array
+    minimum — billions of cell-touches per drain on a real DEM, to cut a band a few
+    cells wide. `_reference_burn` below is that algorithm, kept as the thing the
+    rewrite is measured against.
+
+    They agree closely but not bit-for-bit, and both differences are understood:
+
+    **Depth.** A cell used to take the *deepest* invert among every sample disc that
+    brushed it, which on a falling grade is the one furthest along the line — up to
+    a disc radius plus a cell past the cell's own position. It now takes the invert
+    for where it actually sits, projected onto the line. Bounded by
+    ``(width/2 + cell) × gradient``, and the new answer is the better one: the old
+    bias was an artefact of how the samples were spaced, not a property of the drain.
+
+    **Footprint.** Rasterising many overlapping discs with ``all_touched`` and
+    unioning the result claims marginally more cells than rasterising their union
+    polygon, because a cell merely brushed by any one disc counts. The difference is
+    a couple of cells on the rounded ends.
+    """
+
+    @staticmethod
+    def _reference_burn(burner, dem, line, ew, start_elev):
+        from shapely.geometry import Point
+
+        from terrainflow_assessment.modules.burn_strategy import enforce_monotonic_path
+
+        dem = dem.copy()
+        coords = list(line.coords)
+        cum = [0.0]
+        for i in range(1, len(coords)):
+            dx = coords[i][0] - coords[i - 1][0]
+            dy = coords[i][1] - coords[i - 1][1]
+            cum.append(cum[-1] + (dx ** 2 + dy ** 2) ** 0.5)
+        grad = ew.gradient_pct / 100.0
+
+        for seg_i in range(len(coords) - 1):
+            x1, y1 = coords[seg_i]
+            x2, y2 = coords[seg_i + 1]
+            seg = cum[seg_i + 1] - cum[seg_i]
+            if seg == 0:
+                continue
+            n_steps = max(2, int(seg / burner.cell_size * 3))
+            for step in range(n_steps + 1):
+                t = step / n_steps
+                x, y = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                burn = start_elev - (cum[seg_i] + t * seg) * grad - ew.depth
+                cell_mask = burner._rasterize(Point(x, y).buffer(ew.width / 2))
+                if cell_mask.any():
+                    dem[cell_mask] = np.minimum(dem[cell_mask], burn)
+        # The real burn breaches one-cell humps along the alignment afterwards. Not
+        # part of what changed, so the reference does it too.
+        return enforce_monotonic_path(dem, burner._line_path_cells(line))
+
+    @staticmethod
+    def _setup(tmp_path, coords, width, grad, flat=False):
+        data = (np.full((40, 40), 100.0) if flat else
+                np.fromfunction(lambda r, c: 100.0 - r * 0.1 - c * 0.05, (40, 40)))
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        ew = _mock_ew("diversion", make_mock_line_geom(coords),
+                      depth=0.4, width=width, gradient_pct=grad)
+        got = b.burn_earthworks([ew])
+        line = b._to_shapely(ew.geometry)
+        r0, c0 = xy_to_rc(b.transform, *coords[0])
+        want = TestDiversionBurnEquivalence._reference_burn(
+            b, b.original, line, ew, float(b.original[r0, c0]))
+        return b, got, want
+
+    @pytest.mark.parametrize("coords,width,grad", [
+        ([(5.0, 20.0), (35.0, 20.0)], 3.0, 1.0),                # straight, due east
+        ([(5.0, 5.0), (35.0, 35.0)], 3.0, 2.0),                 # diagonal
+        ([(5.0, 30.0), (20.0, 20.0), (35.0, 28.0)], 4.0, 0.5),  # dog-leg
+        ([(8.0, 12.0), (30.0, 12.0)], 6.0, 0.0),                # wide, flat grade
+    ])
+    def test_inverts_agree_where_both_burns_cut(self, tmp_path, coords, width, grad):
+        b, got, want = self._setup(tmp_path, coords, width, grad)
+
+        cut_new = got < b.original - 1e-9
+        cut_old = want < b.original - 1e-9
+        both = cut_new & cut_old
+        assert both.sum() > 10, "the fixture barely cut anything — bad geometry"
+
+        # See the class docstring: the old burn biased deeper by up to a disc radius
+        # plus a cell of chainage. With no gradient the two must agree exactly.
+        tol = (width / 2.0 + b.cell_size) * (grad / 100.0) + 1e-3
+        worst = float(np.nanmax(np.abs(got[both] - want[both])))
+        assert worst <= tol, f"diverged by {worst:.4f} m, bound {tol:.4f} m"
+
+    @pytest.mark.parametrize("coords,width,grad", [
+        ([(5.0, 20.0), (35.0, 20.0)], 3.0, 1.0),
+        ([(5.0, 5.0), (35.0, 35.0)], 3.0, 2.0),
+        ([(5.0, 30.0), (20.0, 20.0), (35.0, 28.0)], 4.0, 0.5),
+        ([(8.0, 12.0), (30.0, 12.0)], 6.0, 0.0),
+    ])
+    def test_the_band_is_the_same_channel(self, tmp_path, coords, width, grad):
+        b, got, want = self._setup(tmp_path, coords, width, grad)
+
+        cut_new = got < b.original - 1e-9
+        cut_old = want < b.original - 1e-9
+
+        assert not (cut_new & ~cut_old).any(), (
+            f"{int((cut_new & ~cut_old).sum())} cells burned that the per-sample "
+            f"burn never touched — the channel got wider")
+        dropped = int((cut_old & ~cut_new).sum())
+        assert dropped <= max(3, 0.05 * cut_old.sum()), (
+            f"{dropped} of {int(cut_old.sum())} cells lost — more than the rounded "
+            f"ends can account for")
+
+    def test_a_sub_cell_drain_still_carves_a_connected_path(self, tmp_path):
+        """The buffer rasterises empty, so the centreline path is the fallback."""
+        b, got, _ = self._setup(tmp_path, [(5.0, 20.4), (35.0, 20.4)], 0.05, 1.0,
+                                flat=True)
+        cut = got < b.original - 1e-9
+        assert cut.any(), "a sub-cell drain burned nothing at all"
+        assert cut.sum() >= 25, f"only {int(cut.sum())} cells — the path is broken"
