@@ -1442,3 +1442,72 @@ class TestUnattributedIsAParameter:
         from terrainflow_assessment.modules.reporting import build_verification
 
         assert build_verification({}, {}, 0.0, 0.0, {}, 1.0).unattributed_m3 == 0.0
+
+
+class TestNodataInsideAFootprint:
+    """A hole in the DEM must not decide what the water around it does.
+
+    A clipped DEM has NaN outside the clip, and an interior hole — a building
+    removed, a lake masked out, a tile with no return — puts NaN *inside* a
+    footprint. The three functions that measure ponding all have to answer the
+    same way there, because the report prints their answers side by side: a
+    volume that silently drops the cell, next to a depth raster with a nodata
+    pixel in the middle of a pond, reads as two different measurements of the
+    same water.
+
+    The policy is **mask, don't propagate**: a cell with no ground under it
+    holds no water, contributes nothing, and does not poison its neighbours.
+    """
+
+    def _pond(self):
+        """A 4x4 pond 0.5 m deep in a 6x6 grid, one footprint over all of it."""
+        ponding = np.zeros((6, 6))
+        ponding[1:5, 1:5] = 0.5
+        ground = np.full((6, 6), 100.0)
+        ground[1:5, 1:5] = 99.5
+        foot = np.zeros((6, 6), dtype=bool)
+        foot[1:5, 1:5] = True
+        return ponding, ground, [("Pond 1", foot)]
+
+    def test_raster_volume_skips_a_nodata_depth(self):
+        ponding, _, _ = self._pond()
+        assert raster_ponding_volume(ponding, 1.0) == pytest.approx(8.0)
+        ponding[2, 2] = np.nan
+        # The one cell drops out; the rest is unchanged and the total is finite.
+        assert raster_ponding_volume(ponding, 1.0) == pytest.approx(7.5)
+
+    def test_attribution_skips_a_nodata_depth(self):
+        ponding, _, foots = self._pond()
+        ponding[2, 2] = np.nan
+        result = attribute_ponding_volume(ponding, 1.0, foots)
+        assert result.per_name["Pond 1"] == pytest.approx(7.5)
+        assert result.unattributed_m3 == pytest.approx(0.0)
+
+    def test_event_depth_leaves_no_nodata_in_the_raster(self):
+        """The regression: one NaN bed cell used to come back out as a NaN pixel.
+
+        ``spill`` is the maximum of bed+depth over the pool, so a single NaN made
+        the ceiling NaN for every cell in it, and ``level - g`` wrote NaN back at
+        the hole. The raster goes to a map and to ``.sum()``, and neither can say
+        what a nodata pixel in the middle of a pond means.
+        """
+        ponding, ground, foots = self._pond()
+        ground[2, 2] = np.nan
+        got = event_pond_depth(ponding, ground, 1.0, foots, {"Pond 1": 4.0})
+        assert not np.isnan(got).any(), "a nodata cell reached the depth raster"
+        assert got[2, 2] == pytest.approx(0.0), "the hole itself holds nothing"
+
+    def test_event_depth_still_places_the_water_it_was_given(self):
+        """Masking the hole must not lose the volume — it is solved over the rest."""
+        ponding, ground, foots = self._pond()
+        clean = event_pond_depth(ponding, ground, 1.0, foots, {"Pond 1": 4.0})
+        ground[2, 2] = np.nan
+        holed = event_pond_depth(ponding, ground, 1.0, foots, {"Pond 1": 4.0})
+        assert holed.sum() == pytest.approx(clean.sum(), rel=1e-6)
+
+    def test_a_pool_that_is_all_nodata_is_skipped(self):
+        ponding, ground, foots = self._pond()
+        ground[1:5, 1:5] = np.nan
+        got = event_pond_depth(ponding, ground, 1.0, foots, {"Pond 1": 4.0})
+        assert not np.isnan(got).any()
+        assert got.sum() == pytest.approx(0.0)

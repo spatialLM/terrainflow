@@ -883,7 +883,19 @@ def event_pond_depth(ponding, ground, cell_area_m2, footprints, stored_by_name,
                 continue
             cells = order[starts[rid]:starts[rid + 1]]
             g = bed_flat[cells]
-            spill = float((bed_flat[cells] + pond_flat[cells]).max())
+            # A cell with no ground elevation cannot be said to hold water, and it
+            # must not decide the answer for the cells around it either: one NaN
+            # made ``spill`` NaN for the whole pool, and left a NaN in the depth
+            # raster that every downstream sum then had to know to avoid. The rest
+            # of this module masks nodata rather than propagating it — `raster_
+            # ponding_volume` and `attribute_ponding_volume` both do — so this
+            # does the same and the pool is solved over the ground that exists.
+            solid = np.isfinite(g)
+            if not solid.all():
+                cells, g = cells[solid], g[solid]
+                if cells.size == 0:
+                    continue
+            spill = float((g + pond_flat[cells]).max())
             level = level_for_volume(g, cell_area_m2, share, ceiling=spill)
             if level is None:
                 continue
