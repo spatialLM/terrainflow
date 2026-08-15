@@ -3646,6 +3646,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         features, with impoundment, freeboard and the grid's fidelity all reported as
         separate terms rather than folded into the same number.
         """
+        from terrainflow_assessment.modules.reporting import (
+            fmt_volume,
+            round_volume,
+        )
+
         if v is None:
             return ""
         freeboard = sum(f.get("freeboard_m3", 0.0) for f in v.per_feature)
@@ -3653,19 +3658,22 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         impounded = sum(f.get("impoundment_m3", 0.0) for f in v.per_feature)
         reference = sum(f.get("rasterisable_m3", 0.0) for f in v.per_feature)
 
+        # Through `fmt_volume`, like every other volume the document prints. This
+        # sentence is quoted verbatim into the report, so a raw `:,.0f` here claims
+        # a precision the rest of the page is careful not to — see `round_volume`.
         parts = [
             f"Δ {v.delta_pct:+.0f}% — the finished site ponds "
-            f"{v.terrain_total_m3:,.0f} m³ against the {reference:,.0f} m³ these "
-            f"features hold on their own."
+            f"{fmt_volume(v.terrain_total_m3)} against the {fmt_volume(reference)} "
+            f"these features hold on their own."
         ]
         if impounded > 1:
-            parts.append(f"Of that, {impounded:,.0f} m³ is water the banks hold above "
-                         f"natural ground — beyond any drawn cross-section.")
+            parts.append(f"Of that, {fmt_volume(impounded)} is water the banks hold "
+                         f"above natural ground — beyond any drawn cross-section.")
         if abs(freeboard) > 1:
-            parts.append(f"Freeboard accounts for a further {freeboard:,.0f} m³ "
+            parts.append(f"Freeboard accounts for a further {fmt_volume(freeboard)} "
                          f"deliberately kept empty.")
         if abs(penalty) > 1:
-            parts.append(f"The grid cut the drawn trench {penalty:+,.0f} m³ "
+            parts.append(f"The grid cut the drawn trench {round_volume(penalty):+,} m³ "
                          f"differently; where that is large, Geometric is the capacity "
                          f"figure.")
         return " ".join(parts)

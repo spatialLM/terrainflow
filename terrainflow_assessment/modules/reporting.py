@@ -330,20 +330,62 @@ def unique_names(rows, key="name"):
     attributes one feature's measured storage to another. Returns a list of
     display names positionally matching ``rows``.
     """
-    seen = {}
-    for row in rows:
-        name = row.get(key) or "Unnamed"
-        seen[name] = seen.get(name, 0) + 1
+    return _lettered([row.get(key) or "Unnamed" for row in rows])
+
+
+def _suffix(n):
+    """0 -> 'a', 25 -> 'z', 26 -> 'aa', 27 -> 'ab' — spreadsheet-column lettering.
+
+    `chr(ord('a') + n)` ran off the end of the alphabet at the 27th duplicate and
+    printed `{`, `|`, `}`. Twenty-seven features sharing one name is unlikely; a
+    document with a brace in a feature label is not something to ship on the
+    strength of unlikely.
+    """
+    out = ""
+    n = int(n)
+    while True:
+        out = chr(ord("a") + n % 26) + out
+        n = n // 26 - 1
+        if n < 0:
+            return out
+
+
+def _lettered(names):
+    """Disambiguate a list of names positionally, leaving unique ones untouched."""
+    counts = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
     used = {}
     out = []
-    for row in rows:
-        name = row.get(key) or "Unnamed"
-        if seen[name] == 1:
+    for name in names:
+        if counts[name] == 1:
             out.append(name)
             continue
         used[name] = used.get(name, 0) + 1
-        out.append(f"{name} ({chr(ord('a') + used[name] - 1)})")
+        out.append(f"{name} ({_suffix(used[name] - 1)})")
     return out
+
+
+def disambiguate(pairs):
+    """``[(id, name), ...]`` -> ``{id: display name}``, built **once** per document.
+
+    The report used to call :func:`unique_names` in three places on three different
+    inputs — the balance rows twice and the earthwork list once — and not at all in
+    the volume ladder. Three inputs means three letterings: "Swale 3 (a)" on one
+    page could be a different feature from "(a)" on the next, and the ladder showed
+    two identical rows. One map keyed on identity settles it for the whole document.
+
+    Ordering is the caller's, so the letters follow the order the reader meets the
+    features in. A duplicate id keeps its first name.
+    """
+    ordered, seen = [], set()
+    for fid, name in pairs:
+        if fid in seen:
+            continue
+        seen.add(fid)
+        ordered.append((fid, name or "Unnamed"))
+    display = _lettered([name for _fid, name in ordered])
+    return {fid: display[i] for i, (fid, _name) in enumerate(ordered)}
 
 
 def format_live_assessment(result, have_flow):
@@ -1087,7 +1129,8 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         joined = " + ".join(group["names"])
         caveats.append(
             f"{joined} impound one continuous pool, so it is measured once for the set: "
-            f"{group['terrain_m3']:,.0f} m³ against {group['rasterisable_m3']:,.0f} m³ "
+            f"{fmt_volume(group['terrain_m3'])} against "
+            f"{fmt_volume(group['rasterisable_m3'])} "
             f"at grid. Neither holds it alone, so neither carries a Δ of its own."
         )
 

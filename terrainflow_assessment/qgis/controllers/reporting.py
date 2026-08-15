@@ -184,7 +184,9 @@ class ReportingController:
         images = {}
         if data.balance is not None and data.balance.per_feature:
             png = os.path.join(work, "network.png")
-            if render_flow_network(build_flow_graph(data.balance), path=png):
+            graph = build_flow_graph(
+                data.balance, getattr(data, "display_names", None))
+            if render_flow_network(graph, path=png):
                 images["network"] = png
 
         comparison = data.comparison

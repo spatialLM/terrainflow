@@ -31,6 +31,7 @@ from terrainflow_assessment.modules.reporting import (
     CAPTURE_GOOD_PCT,
     capture_tone,
     cut_fill_sentence,
+    disambiguate,
     drain_wording,
     fill_wording,
     fmt_area_ha,
@@ -213,6 +214,9 @@ class ReportData:
     spillway_context: Optional[dict] = None
     area_subtotals: Optional[list] = None
     edits_since_verify: Optional[int] = None
+    # {feature id: display name}, built once by build_report so a letter means the
+    # same feature on every page. See _display_names.
+    display_names: dict = field(default_factory=dict)
     natural_ponding_m3: Optional[float] = None
     # {cut_m3, fill_m3} the burn moved. None before a burn — the measured
     # earthmoving does not exist until the design has been cut into the terrain.
@@ -278,8 +282,40 @@ def _reason_for_design(data):
 # build_report
 # ---------------------------------------------------------------------------
 
+def _display_names(data):
+    """One ``{id: display name}`` for the whole document.
+
+    The enabled earthworks first, because that is the population and the order the
+    reader meets them in; any balance row for a feature not in that list follows.
+    Built once so a letter means the same feature on every page — three separate
+    letterings meant "(a)" on the design page could be a different swale from "(a)"
+    on the network page, and the volume ladder, which lettered nothing at all,
+    could print two identical rows.
+    """
+    pairs = []
+    for e in (data.earthworks or []):
+        if getattr(e, "enabled", True):
+            pairs.append((getattr(e, "id", None), getattr(e, "name", "")))
+    for f in (getattr(data.balance, "per_feature", None) or []):
+        pairs.append((f.get("id"), f.get("name")))
+    return disambiguate(pairs)
+
+
+def _shown(data, row, fallback_key="name"):
+    """A row's display name: the document's, or its own where it has no id."""
+    fid = row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
+    names = getattr(data, "display_names", None) or {}
+    if fid in names:
+        return names[fid]
+    if isinstance(row, dict):
+        return row.get(fallback_key) or "Unnamed"
+    return getattr(row, fallback_key, "") or "Unnamed"
+
+
 def build_report(data):
     """Assemble the whole document. Never raises on missing data."""
+    # Before any section is built: every page reads the same map.
+    data.display_names = _display_names(data)
     report = Report(
         title=f"{data.site_name} — Site Water Plan",
         subtitle="Drainage and earthwork assessment — TerrainFlow",
@@ -861,7 +897,7 @@ def _page_network(data):
         "chain: this shows where each one hands its water on, and which ones "
         "hand it to nowhere in particular.")))
 
-    graph = build_flow_graph(bal)
+    graph = build_flow_graph(bal, getattr(data, "display_names", None))
 
     # Findings before the picture: they are what the reader has to act on, and
     # putting them after a full-page diagram orphans them onto a page of their
@@ -890,18 +926,27 @@ def _page_network(data):
     return out
 
 
-def build_flow_graph(balance):
+def build_flow_graph(balance, display_names=None):
     """The overflow network as pure data — nodes, edges and readable chains.
 
     ``per_feature`` already carries the whole graph: ``target_id`` is the next
     feature, ``is_user_link`` says whether you drew that link or it was followed
     downhill, and ``is_terminal`` marks water leaving the block. Ranks come from
     ``simulation.layer_nodes``, which exists for exactly this.
+
+    ``display_names`` is the document's one ``{id: name}`` map. Passed in rather
+    than derived here, so the diagram labels a feature the same way the pages
+    around it do; without one it letters the balance rows on their own, which is
+    right for a caller that has nothing else to be consistent with.
     """
     from terrainflow_assessment.modules.simulation import layer_nodes
 
     per = list(getattr(balance, "per_feature", None) or [])
-    names = unique_names(per)
+    if display_names:
+        names = [display_names.get(f.get("id")) or f.get("name") or "Unnamed"
+                 for f in per]
+    else:
+        names = unique_names(per)
     by_id = {}
     nodes = []
     for i, f in enumerate(per):
@@ -978,7 +1023,7 @@ def _page_water_shared(data):
         "goes next — if it says 'off the block', that is a decision worth making "
         "on purpose.")))
 
-    names = unique_names(bal.per_feature)
+    names = [_shown(data, f) for f in bal.per_feature]
     by_id = {f.get("id"): names[i] for i, f in enumerate(bal.per_feature)}
     soak_header = ("Soaked away" if bal.counts_infiltration
                    else "Could soak away")
@@ -1107,7 +1152,7 @@ def _page_build_schedule(data):
         fill_by_id[getattr(st, "id", None)] = getattr(st, "fill_vol_m3", 0.0)
 
     enabled = [e for e in data.earthworks if getattr(e, "enabled", True)]
-    names = unique_names([{"name": getattr(e, "name", "")} for e in enabled])
+    names = [_shown(data, e) for e in enabled]
     rows = []
     for i, e in enumerate(enabled):
         rows.append([
@@ -1231,7 +1276,7 @@ def _page_verification(data):
         "features interfere with one another.")))
     out.append(_map_ref(data, "ponding",
                         "Water held before and after the earthworks."))
-    out.extend(_volume_ladder(v))
+    out.extend(_volume_ladder(v, data))
 
     if v.caveats:
         out.append(Callout(tone="info", title="Attribution caveats",
@@ -1282,13 +1327,17 @@ def _impoundment_note(v):
     sections = sum(f.get("section_m3") or 0.0 for f in v.per_feature)
     if sections <= 0 or impounded <= sections * 0.05:
         return ""
-    return (f"  Across the design these features impound {impounded:,.0f} m³ more than "
-            f"the {sections:,.0f} m³ of trench drawn for them — water the banks hold "
+    return (f"  Across the design these features impound {fmt_volume(impounded)} more "
+            f"than the {fmt_volume(sections)} of trench drawn for them — water the banks hold "
             f"above natural ground, and the reason At this grid exceeds Geometric.")
 
 
-def _volume_ladder(v):
+def _volume_ladder(v, data=None):
     """Rule 1: four figures, in derivation order, never merged.
+
+    ``data`` carries the document's ``display_names``. This table lettered nothing
+    at all while two other pages lettered from two different inputs, so it could
+    print two rows reading "Swale 3" with no way to tell which was which.
 
     They are four different questions about one earthwork, not four estimates of one
     number. The first two are **calculated** from the drawn dimensions; the last two are
@@ -1316,14 +1365,14 @@ def _volume_ladder(v):
     rows = []
     for f in v.per_feature:
         if f.get("routing_only"):
-            rows.append([f.get("name", ""), fmt_volume(f.get("analytic_m3")),
+            rows.append([_shown(data, f), fmt_volume(f.get("analytic_m3")),
                          fmt_volume(f.get("geometric_m3")),
                          "n/a — sub-cell", "n/a — sub-cell", "n/a — sub-cell"])
             continue
         if f.get("merged_with"):
             # One pool, two owners. Printing a share of it under either name would
             # report the sharing rule; the pool gets its own table below.
-            rows.append([f.get("name", ""), fmt_volume(f.get("analytic_m3")),
+            rows.append([_shown(data, f), fmt_volume(f.get("analytic_m3")),
                          fmt_volume(f.get("geometric_m3")),
                          fmt_volume(f.get("rasterisable_m3")),
                          "shared pool", "see below"])

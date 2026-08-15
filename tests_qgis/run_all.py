@@ -151,6 +151,7 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
     body = []
 
     deadline = time.monotonic() + timeout_s
+    saw_result = False
 
     while True:
         remaining = deadline - time.monotonic()
@@ -179,6 +180,7 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
         if stripped.startswith("RESULT "):
             _, _mod, p, f = stripped.split()
             passed, failed = int(p), int(f)
+            saw_result = True
             continue
         if stripped.startswith("--- ") or (body and not stripped.startswith("  ")):
             body.append(stripped)
@@ -189,6 +191,24 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
         print(stripped, flush=True)
 
     proc.wait()
+    if not saw_result:
+        # The worker died before reporting. Counted, loudly: returning (0, 0) here
+        # meant a module whose QGIS subprocess aborted contributed nothing at all —
+        # no pass, no fail, no message — so the run announced "0 failed" while
+        # thirty-odd checks had never executed and eleven screenshots were quietly
+        # absent from the diff. A suite that can lose a whole module without saying
+        # so cannot be used to gate anything.
+        culprit = last_started or "(before the first check)"
+        print(f"CRASHED during {culprit} (exit {proc.returncode})")
+        short = module_name.replace("checks_", "")
+        body.append(
+            f"\n--- {module_name}.{culprit}\n\n"
+            f"    The QGIS subprocess exited with code {proc.returncode} before reporting a\n"
+            "    result, so none of this module's checks were counted. Re-run it\n"
+            "    on its own to see where it goes:\n"
+            f"        .\\run_qgis_tests.ps1 {short}"
+        )
+        return passed, failed + 1, body
     return passed, failed, body
 
 

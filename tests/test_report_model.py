@@ -1076,3 +1076,89 @@ class TestEarthmoving:
         t = self._table(self._report())
         assert "Site totals only" in t.note
         assert len(t.rows) == 2
+
+
+class TestOneNameMapForTheWholeDocument:
+    """A letter has to mean the same feature on every page.
+
+    The report called `unique_names` three times on three different inputs — the
+    balance rows twice, the earthwork list once — and not at all in the volume
+    ladder. So "Swale 3 (a)" on the design page could be a different feature from
+    "(a)" on the network page, and the ladder printed two identical rows.
+    """
+
+    class _Ew:
+        enabled = True
+
+        def __init__(self, fid, name):
+            self.id = fid
+            self.name = name
+            self.length_m = 100.0
+            self.top_width_m = 2.0
+            self.bottom_width_m = 1.0
+            self.depth = 0.5
+            self.type = "swale"
+
+    def _colliding(self):
+        return _data(
+            earthworks=[self._Ew("id-a", "Swale 3"), self._Ew("id-b", "Swale 3")],
+            balance=_balance(per_feature=[
+                _feature(id="id-b", name="Swale 3"),
+                _feature(id="id-a", name="Swale 3"),
+            ]),
+        )
+
+    def test_the_map_letters_each_id_once(self):
+        from terrainflow_assessment.modules.report_model import _display_names
+
+        names = _display_names(self._colliding())
+        assert set(names) == {"id-a", "id-b"}
+        assert sorted(names.values()) == ["Swale 3 (a)", "Swale 3 (b)"]
+
+    def test_the_letter_survives_a_different_row_order(self):
+        """The balance lists them b-then-a; the letters follow the earthworks."""
+        from terrainflow_assessment.modules.report_model import _display_names
+
+        names = _display_names(self._colliding())
+        assert names["id-a"] == "Swale 3 (a)"
+        assert names["id-b"] == "Swale 3 (b)"
+
+    def test_every_page_uses_the_same_letters(self):
+        from terrainflow_assessment.modules.report_model import build_report
+
+        data = self._colliding()
+        report = build_report(data)
+        text = _text_of(report)
+        assert "Swale 3 (a)" in text and "Swale 3 (b)" in text
+        # And never the bare colliding name on its own line in a table cell.
+        for section in report.sections:
+            for row in getattr(section, "rows", []) or []:
+                if isinstance(row, (list, tuple)) and row:
+                    assert row[0] != "Swale 3", (
+                        f"an undisambiguated row survived: {row}")
+
+    def test_a_unique_name_is_left_alone(self):
+        from terrainflow_assessment.modules.report_model import _display_names
+
+        data = _data(earthworks=[self._Ew("id-a", "North Swale")],
+                     balance=_balance(per_feature=[_feature(id="id-a",
+                                                            name="North Swale")]))
+        assert _display_names(data) == {"id-a": "North Swale"}
+
+
+class TestLetteringPastTheAlphabet:
+    def test_the_27th_duplicate_is_aa_not_a_brace(self):
+        from terrainflow_assessment.modules.reporting import _suffix
+
+        assert _suffix(0) == "a"
+        assert _suffix(25) == "z"
+        assert _suffix(26) == "aa"
+        assert _suffix(27) == "ab"
+        assert _suffix(51) == "az"
+        assert _suffix(52) == "ba"
+
+    def test_no_suffix_falls_outside_the_alphabet(self):
+        from terrainflow_assessment.modules.reporting import _suffix
+
+        for n in range(200):
+            assert _suffix(n).isalpha(), (n, _suffix(n))
