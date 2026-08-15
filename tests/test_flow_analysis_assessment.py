@@ -832,7 +832,7 @@ class TestAnalysisWorker:
         finished_log = []
         error_log = []
         worker.progress.connect(lambda p, m: progress_log.append((p, m)))
-        worker.finished.connect(lambda r: finished_log.append(r))
+        worker.completed.connect(lambda r: finished_log.append(r))
         worker.error.connect(lambda e: error_log.append(e))
         return progress_log, finished_log, error_log
 

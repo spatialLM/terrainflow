@@ -3387,7 +3387,7 @@ class EarthworksController(G.LayerTreeMixin):
             runoff_coefficient=self._panel.runoff_coefficient,
         )
         self._state.analysis_worker.progress.connect(self._panel.set_earthworks_progress)
-        self._state.analysis_worker.finished.connect(self._on_earthworks_complete)
+        self._state.analysis_worker.completed.connect(self._on_earthworks_complete)
         self._state.analysis_worker.error.connect(self._on_analysis_error)
         self._state.analysis_worker.start()
 

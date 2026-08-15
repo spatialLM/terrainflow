@@ -428,7 +428,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     """
     Run the time-stepped simulation and return results.
 
-    Parameters and return value match SimulationWorker.finished signal.
+    Parameters and return value match SimulationWorker.completed signal.
     Can also be called directly (without QThread) for testing.
     """
     from pysheds.grid import Grid

@@ -17,11 +17,17 @@ class AnalysisWorker(QThread):
     Signals
     -------
     progress(int pct, str message)
-    finished(dict result_paths)
+    completed(dict result_paths)
     error(str traceback)
+
+    ``completed`` rather than ``finished``: ``QThread`` already defines a
+    ``finished()`` signal, emitted by Qt when ``run()`` returns, and declaring one
+    of our own shadowed it. That made the standard ``finished -> deleteLater``
+    teardown unreachable — the only thing a connection could ever see was our own
+    dict, emitted from inside ``run()`` while the thread is still very much alive.
     """
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(dict)
+    completed = pyqtSignal(dict)
     error = pyqtSignal(str)
 
     def __init__(self, dem_path, output_dir, stream_threshold, cn, moisture,
@@ -303,7 +309,7 @@ class AnalysisWorker(QThread):
         crest_warning = crest_spread_warning(crest_unplaced, domain_cells)
 
         self.progress.emit(100, "Analysis complete.")
-        self.finished.emit({
+        self.completed.emit({
             "label": self.label,
             "flow_accumulation": acc_path,
             "flow_direction": fdir_path,

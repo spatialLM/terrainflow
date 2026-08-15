@@ -116,7 +116,7 @@ class SimulationController(G.LayerTreeMixin):
             soil_name=self._panel.earthwork_soil_name,
         )
         self._state.sim_worker.progress.connect(self._panel.set_simulation_progress)
-        self._state.sim_worker.finished.connect(self._on_simulation_complete)
+        self._state.sim_worker.completed.connect(self._on_simulation_complete)
         self._state.sim_worker.error.connect(
             lambda tb: self._iface.messageBar().pushCritical(
                 "TerrainFlow Assessment", "Simulation failed — see Python console."

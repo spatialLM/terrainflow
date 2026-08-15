@@ -31,11 +31,14 @@ class SimulationWorker(QThread):
     Signals
     -------
     progress(int, str)
-    finished(dict)
+    completed(dict)
     error(str)
+
+    ``completed`` rather than ``finished`` — see AnalysisWorker: QThread already
+    has a ``finished()`` signal and ours was shadowing it.
     """
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(dict)
+    completed = pyqtSignal(dict)
     error = pyqtSignal(str)
 
     def __init__(self, dem_path, fdir_path, output_dir, cn, moisture,
@@ -68,6 +71,6 @@ class SimulationWorker(QThread):
                 earthwork_stores=self.earthwork_stores,
                 progress_callback=self.progress.emit,
             )
-            self.finished.emit(result)
+            self.completed.emit(result)
         except Exception:
             self.error.emit(traceback.format_exc())
