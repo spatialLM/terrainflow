@@ -204,7 +204,6 @@ class ReportData:
     current_tag: str = ""            # re-derived at export; differs when stale
 
     baseline: Any = None             # BaselineReport
-    baseline_result: Optional[dict] = None
     balance: Any = None              # BalanceResult (design tier)
     balance_stores: Optional[list] = None
     earthworks: Optional[list] = None  # Earthwork objects, for the build schedule
@@ -212,7 +211,6 @@ class ReportData:
     comparison: Any = None           # ComparisonResult — optional enrichment
     spillway_rows: Optional[list] = None
     spillway_context: Optional[dict] = None
-    area_subtotals: Optional[list] = None
     edits_since_verify: Optional[int] = None
     # {feature id: display name}, built once by build_report so a letter means the
     # same feature on every page. See _display_names.
@@ -225,7 +223,6 @@ class ReportData:
     inputs: dict = field(default_factory=dict)   # panel settings, for the appendix
     dem: dict = field(default_factory=dict)      # provenance
     maps: dict = field(default_factory=dict)     # key -> reason-if-unavailable
-    charts: dict = field(default_factory=dict)   # key -> True when renderable
 
     # ---- derived predicates, so the rules below read as prose ----
     @property
@@ -646,7 +643,7 @@ def _summary_cards(data):
         cards.append(("The storm", f"{b.rainfall_mm:.0f} mm / {b.duration_hr:.0f} hr",
                       f"{b.runoff_mm:.0f} mm of runoff"))
     if bal is not None:
-        n = len([f for f in bal.per_feature])
+        n = len(bal.per_feature)
         cards.append(("Storage built", fmt_volume(bal.total_capacity_m3),
                       f"across {n} feature{'s' if n != 1 else ''}"))
         cards.append(("Soil to move", fmt_volume(bal.total_cut_m3),

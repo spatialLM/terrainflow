@@ -480,7 +480,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
             # at_top: a spillway sits ON a swale, so it has to paint over that
             # swale's band. Inserted in place rather than re-sorted afterwards —
-            # see the warning on _groups.reorder().
+            # see the note on _groups.add_layer().
             self.place(layer, G.DRAWN, at_top=True)
             self._state.spillway_layer_id = layer.id()
         except Exception as exc:
@@ -3772,12 +3772,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         burned_masks = getattr(self._state.burner, "burned_masks", None) or {}
         burned_cut = getattr(self._state.burner, "burned_cut", None) or {}
-        # The terrain capacities the design tier already computed and cached on each
-        # feature (see ``_refresh_terrain_capacity``). Reusing them here rather than
-        # re-flooding costs nothing and guarantees the Verify table and the live
-        # assessment cannot disagree about what a feature holds.
-        terrain_by_id = {}
-
         # Keyed by `ew.id`, never by name. The default name is
         # f"{type} {len(manager)+1}", counted over *all* earthworks, so deleting one
         # and drawing another reproduces a name that is already in use — the same
@@ -3810,6 +3804,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             else:
                 min_dims[key] = min_dimension(geom) if geom is not None else None
 
+            # NB the terrain capacity cached on the feature by
+            # ``_refresh_terrain_capacity`` is deliberately *not* read here. This
+            # table's measured column comes from the whole-design flood
+            # (``added.per_name``), which is the only figure that can see two
+            # features sharing one pool; a per-feature cache cannot.
+            #
             # The cells the burn actually claimed, straight from the burner. Re-deriving
             # them here is what let the two drift: this buffered a line by
             # max(width/2, cell_size) with all_touched while _burn_swale buffered by
@@ -3817,10 +3817,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # wider than the trench, inflating n_cells, inflating the At-grid reference
             # and biasing every Δ negative. Falls back to re-deriving only when no burn
             # has run on this grid.
-            terrain = getattr(ew, "terrain_capacity_m3", None)
-            if terrain is not None:
-                terrain_by_id[key] = float(terrain)
-
             mask = burned_masks.get(getattr(ew, "id", None))
             if mask is None or mask.shape != shape:
                 mask = np.zeros(shape, dtype=bool)

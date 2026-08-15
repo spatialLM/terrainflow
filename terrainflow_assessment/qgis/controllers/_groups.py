@@ -188,6 +188,14 @@ def add_layer(project, layer, path=SITE, site_name="", tag="",
     Added with ``addMapLayer(layer, False)`` so QGIS does not also drop it at the
     top of the flat legend, then attached to the group — and collapsed, which is
     the whole point of routing every layer through here.
+
+    ``at_top`` inserts at index 0, and it is the **only** way to control render
+    order here. There is no re-sort function, deliberately: a group had one, and
+    re-stacking means removing layer nodes, which QGIS Desktop's layer-tree
+    registry bridge reads as "the user deleted this layer" and acts on — every
+    earthwork blinked into the panel and vanished, and disabling the bridge did
+    not stop it. Headless there is no bridge, so tests_qgis cannot see any of
+    that. Insert in the right place instead of re-ordering afterwards.
     """
     grp = group(project, path, site_name, tag)
     project.instance().addMapLayer(layer, False)
@@ -197,106 +205,6 @@ def add_layer(project, layer, path=SITE, site_name="", tag="",
         if not visible:
             node.setItemVisibilityChecked(False)
     return node
-
-
-def reorder(project, order, path=SITE, site_name="", tag=""):
-    """Re-stack a group's layers to a declared order, top of the legend first.
-
-    Needed because the annotation layers — spillways, stress points, overflow
-    connections — are destroyed and rebuilt on every refresh, and ``addLayer``
-    appends. Appended means bottom of the group, and bottom of the group means
-    painted *underneath*: a spillway sited correctly on a swale was drawn beneath
-    that swale's band and was invisible, while a spillway sited wrongly (out in a
-    paddock, over nothing) was the only one you could see. The map was showing the
-    mistakes and hiding the correct work.
-
-    ``at_top=True`` alone cannot fix it: the three layers refresh independently, so
-    whichever refreshed last would win. The order has to be reasserted, not seeded.
-
-    *order* is a list of layer names. ``"__earthworks__"`` stands for every layer
-    not otherwise named, keeping the five earthwork bands together as one block
-    wherever it appears. Names not present are skipped.
-
-    .. warning::
-       **Do not call this to fix render order.** Removing a layer node in QGIS
-       Desktop makes the layer-tree registry bridge delete the layer from the
-       project — every earthwork blinks into the panel and vanishes again, and
-       ``bridge.setEnabled(False)`` does not prevent it. Insert in the right place
-       instead: ``place(layer, path, at_top=True)``. Kept only because a caller
-       may one day genuinely need to re-sort a group whose layers it owns
-       outright, and then it should be doing so with its eyes open.
-    """
-    from qgis.core import QgsLayerTreeLayer
-
-    grp = group(project, path, site_name, tag)
-
-    # Direct children only. findLayers() recurses, and removing a node that
-    # actually lives in a nested group leaves the clone behind as a duplicate —
-    # which then multiplies on every refresh until the tree is large enough to
-    # stall rendering.
-    children = [n for n in grp.children() if isinstance(n, QgsLayerTreeLayer)]
-    if len(children) < 2:
-        return grp
-
-    by_name = {}
-    for node in children:
-        layer = node.layer()
-        if layer is not None:
-            by_name.setdefault(layer.name(), []).append(node)
-
-    named = {name for name in order if name != "__earthworks__"}
-    rest = [n for name, ns in by_name.items() if name not in named for n in ns]
-
-    sequence = []
-    for name in order:
-        if name == "__earthworks__":
-            sequence.extend(rest)
-        else:
-            sequence.extend(by_name.get(name, []))
-
-    if len(sequence) != len(children):     # something unaccounted for — leave it alone
-        return grp
-    if [n.layer().id() for n in sequence] == [n.layer().id() for n in children]:
-        return grp                          # already in order; don't churn the tree
-
-    # A QgsLayerTreeLayer cannot be reparented, so rebuild the group: drop every
-    # child, then re-add in the wanted order.
-    #
-    # The hazard is QGIS Desktop's layer-tree registry bridge. It treats "node
-    # removed from the tree" as "the user deleted this layer" and removes it from
-    # the project — which destroys it. Half a second after a refresh, every
-    # earthwork layer disappears from the panel and the map goes blank.
-    #
-    # Headless there is no bridge, so removal is harmless and the whole check
-    # suite is blind to this. It has to be switched off around the surgery, and
-    # switched back on again whatever happens.
-    bridge = None
-    try:
-        bridge = project.instance().layerTreeRegistryBridge()
-    except Exception:
-        bridge = None
-
-    layers = [n.layer() for n in sequence]
-    if any(layer is None for layer in layers):
-        return grp
-
-    if bridge is not None:
-        bridge.setEnabled(False)
-    try:
-        for node in children:
-            grp.removeChildNode(node)
-        for layer in layers:
-            # Belt and braces: if anything did drop the layer, put it back rather
-            # than leaving a hole in the design.
-            if project.instance().mapLayer(layer.id()) is None:
-                project.instance().addMapLayer(layer, False)
-            node = grp.addLayer(layer)
-            if node is not None:
-                node.setExpanded(False)
-    finally:
-        if bridge is not None:
-            bridge.setEnabled(True)
-    return grp
 
 
 def clear_group(project, path=SITE, site_name="", tag=""):
@@ -339,13 +247,6 @@ class LayerTreeMixin:
             site_name=getattr(self._panel, "site_name", ""),
             tag=getattr(self._state, "run_tag", ""),
             visible=visible, at_top=at_top,
-        )
-
-    def restack(self, order, path=SITE):
-        return reorder(
-            self._project, order, path,
-            site_name=getattr(self._panel, "site_name", ""),
-            tag=getattr(self._state, "run_tag", ""),
         )
 
     def group_for(self, path=SITE):

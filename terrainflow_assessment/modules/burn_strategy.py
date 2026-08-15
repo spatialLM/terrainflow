@@ -11,7 +11,6 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
     enforce_monotonic_path — breach a strictly-downhill invert along a carved path
     level_invert         — excavate a footprint to a flat floor below its spill level
     tapered_invert       — excavate a footprint as its true battered section
-    battered_invert      — stepped approximation of battered walls (superseded)
     rasterisable_capacity — storage the grid can represent, modelled (see its docstring:
                            prefer ``DEMBurner.burned_storage``, which measures it)
     steep_ground_warning — advisory when a level floor over-excavates one end
@@ -229,8 +228,9 @@ def tapered_invert(dem, mask, depth: float, batter_run: float, spill_elev: float
     in between it follows the batter. Integrated over a strip of top width ``T`` and
     bottom width ``b`` it gives ``(T + b) / 2 × depth`` per metre — the drawn section.
 
-    This replaces a nested-erosion staircase (``battered_invert``), which was wrong in
-    two ways that a grid makes worse. Its volume is ``depth/n × Σ Aᵢ`` over ``n`` eroded
+    This replaces the nested-erosion staircase this module used to carry, which was
+    wrong in
+    two ways that a grid makes worse. Its volume was ``depth/n × Σ Aᵢ`` over ``n`` eroded
     footprints, which for a strip works out to ``depth × L × [T − (T−b)(n+1)/2n]`` — with
     the shipped ``n = 3`` that is **16.7% under** the trapezoid it is approximating, and
     it converges only as ``1/n``. And the erosions themselves vanish once
@@ -254,22 +254,6 @@ def tapered_invert(dem, mask, depth: float, batter_run: float, spill_elev: float
     out = dem.copy()
     floors = spill_elev - depth * reach[inside]
     out[inside] = np.minimum(out[inside], floors)
-    return out
-
-
-def battered_invert(dem, step_masks, spill_elev: float):
-    """Excavate nested *step_masks* to a stepped approximation of battered walls.
-
-    ``step_masks`` is an ordered list of ``(mask, depth)`` pairs, outermost/shallowest
-    first, as produced by successively shrinking the footprint. Each step is levelled
-    to ``spill_elev − depth`` deepest-last, so the deeper inner steps win. This is how
-    a trapezoidal or battered section is represented on a grid — the walls become
-    stairs, and how well they approximate the true batter is exactly what
-    :func:`rasterisable_capacity` reports.
-    """
-    out = dem.copy()
-    for mask, depth in sorted(step_masks, key=lambda pair: pair[1]):
-        out = level_invert(out, mask, depth, spill_elev)
     return out
 
 

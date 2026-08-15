@@ -196,6 +196,13 @@ def time_of_concentration(sheet=None, shallow=None, channel=None, p2_mm=None,
 
     *channel_hours* replaces the channel calculation with a value already worked out
     by :func:`mixed_channel_hours`, for a path whose section changes along its length.
+
+    The over-long-sheet-leg warning looks unreachable and is not. Both builders of
+    these tuples — :func:`split_flow_path` and :func:`profile_leg_slopes` — clip the
+    sheet leg at ``MAX_SHEET_FLOW_M`` and give the remainder to the shallow leg, so
+    nothing in the plugin can trigger it. It is for a caller assembling the legs
+    itself: :func:`sheet_flow_hours` clips silently, and without the warning that
+    caller would get a quietly shortened path and no way to know.
     """
     warnings = []
 

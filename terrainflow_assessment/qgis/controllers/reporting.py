@@ -227,7 +227,6 @@ class ReportingController:
             run_tag=state.run_tag or "",
             current_tag=self._current_tag(),
             baseline=state.baseline_report,
-            baseline_result=state.baseline_result,
             balance=state.balance,
             balance_stores=state.balance_stores,
             earthworks=self._earthworks(),

@@ -396,7 +396,3 @@ class AnalysisWorker(AbortMixin, QThread):
 
         return domain_mask(shape, transform, polygons=groups, valid=valid)
 
-    def _flow_dir_description(self):
-        if self.routing == 'dinf':
-            return "D-infinity flow direction (angle in radians, CCW from east)"
-        return "D8 flow direction (ESRI codes)"

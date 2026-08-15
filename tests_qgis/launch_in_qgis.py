@@ -149,11 +149,10 @@ def drive():
                 _plugin._state.earthwork_manager.add(ew)
             _plugin._earthworks._refresh_ew_layer()
 
-            # Force the reorder to actually do work. With earthworks alone the
-            # group is already in DRAW_ORDER, so reorder() returns early and the
-            # surgery — the part the registry bridge punishes — never runs. A
-            # placed spillway adds a layer that must sit above the bands, which
-            # is the case that goes wrong in the field.
+            # A placed spillway is the case that goes wrong in the field: it adds
+            # a layer that must sit above the earthwork bands. With earthworks
+            # alone the group is already in draw order and nothing exercises the
+            # placement at all.
             swale = next(e for e in _plugin._state.earthwork_manager.get_all()
                          if e.type == "swale")
             mid = swale.geometry.interpolate(

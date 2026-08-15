@@ -966,24 +966,6 @@ class TestAnalysisWorker:
         assert len(errors) == 0
         assert finished[0]["exit_points"] == []
 
-    def test_flow_dir_description_dinf(self):
-        from terrainflow_assessment.modules.flow_analysis import AnalysisWorker
-        w = AnalysisWorker(
-            dem_path="x", output_dir="x", stream_threshold=1, cn=1,
-            moisture="normal", rainfall_mm=1.0, duration_hours=1.0,
-            routing="dinf",
-        )
-        assert "D-infinity" in w._flow_dir_description()
-
-    def test_flow_dir_description_d8(self):
-        from terrainflow_assessment.modules.flow_analysis import AnalysisWorker
-        w = AnalysisWorker(
-            dem_path="x", output_dir="x", stream_threshold=1, cn=1,
-            moisture="normal", rainfall_mm=1.0, duration_hours=1.0,
-            routing="d8",
-        )
-        assert "D8" in w._flow_dir_description()
-
 
 class TestUnroutedFlow:
     """Water the routing could not place has to be counted, not quietly dropped.

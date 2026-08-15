@@ -77,7 +77,6 @@ class StageStepper(QWidget):
             state = self._states[key]
             is_active = key == self._current
             glyph = "✎" if is_active and state != "stale" else _STATE_GLYPHS[state]
-            colour = "#2e7d55" if is_active else _STATE_COLOURS.get(state, "#8fa0a4")
             underline = "#2e7d55" if is_active else "transparent"
             text_colour = "#2e7d55" if is_active else (
                 "#5f7176" if state == "done" else "#8fa0a4"
@@ -93,8 +92,7 @@ class StageStepper(QWidget):
                 "  font-size: 10px; font-weight: 600;"
                 "  background: transparent;"
                 "} "
+                # The glyph is part of the button's text, so it takes the text
+                # colour above — there is no separate label to colour.
                 "QPushButton:hover { background: #eef1f0; color: #22302e; }"
             )
-            # Glyph colour rides on the text colour; active overrides via
-            # the shared colour above (kept simple — one label per button).
-            _ = colour

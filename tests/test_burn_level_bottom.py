@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 
 from terrainflow_assessment.modules.burn_strategy import (
-    battered_invert,
     impoundment_warning,
     level_invert,
     rasterisable_capacity,
@@ -171,28 +170,6 @@ class TestLevelInvert:
         assert np.array_equal(out, dem)
 
 
-class TestBatteredInvert:
-    def test_steps_deepen_inward(self):
-        dem = np.full((30, 30), 50.0)
-        outer = np.zeros((30, 30), dtype=bool)
-        outer[10:20, 10:20] = True
-        inner = np.zeros((30, 30), dtype=bool)
-        inner[12:18, 12:18] = True
-        out = battered_invert(dem, [(outer, 0.5), (inner, 1.5)], 50.0)
-        assert out[10, 10] == pytest.approx(49.5)    # outer step
-        assert out[15, 15] == pytest.approx(48.5)    # inner step, deeper
-
-    def test_holds_less_than_a_vertical_cut_of_the_same_depth(self):
-        dem = np.full((30, 30), 50.0)
-        outer = np.zeros((30, 30), dtype=bool)
-        outer[10:20, 10:20] = True
-        inner = np.zeros((30, 30), dtype=bool)
-        inner[12:18, 12:18] = True
-        battered = _ponded_m3(battered_invert(dem, [(outer, 0.5), (inner, 1.5)], 50.0))
-        vertical = _ponded_m3(level_invert(dem, outer, 1.5, 50.0))
-        assert battered < vertical
-
-
 class TestRasterisableCapacity:
     def test_a_narrow_channel_collapses_to_a_rectangle(self):
         """Below ~3 cells across, the grid cannot hold the batter at all.
@@ -217,8 +194,8 @@ class TestRasterisableCapacity:
         Regression for the field-test finding: a 3.00 m swale on a 1.00 m DEM cleared
         the three-cell width test and was discounted by ``mean_width/top_width`` (2/3),
         so ``Measured`` read a flat +50% against ``At grid`` on every such swale while
-        the burn was in fact correct. ``batter_run_m`` is 0 on a drawn swale, and
-        ``DEMBurner`` only calls ``battered_invert`` when it is positive.
+        the burn was in fact correct. ``batter_run_m`` is 0 on a drawn swale, so the
+        burner levels a flat floor and the grid holds a rectangle.
         """
         v = rasterisable_capacity(500, 1.0, 1.0, top_width=3.0,
                                   bottom_width=1.0, cell_size=1.0, batter_run=0.0)

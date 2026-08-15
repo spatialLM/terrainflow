@@ -47,7 +47,6 @@ class PluginState:
     # ------------------------------------------------------------------ Before/after layer IDs
     baseline_layer_ids: list[str] = field(default_factory=list)
     earthworks_layer_ids: list[str] = field(default_factory=list)
-    accumulation_layer_id: str | None = None
     slope_class_layer_id: str | None = None
     slope_vectors_layer_id: str | None = None
 
