@@ -154,7 +154,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, ~2-4 min. Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, ~6 min (149 checks). Exit code gates.
 .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
 .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
 .\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
@@ -171,6 +171,15 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
   instead of stalling. Assert on them with `h.dialogs.of("warning")`.
 - Nothing is quarantined at present. `run_all.OPT_IN_MODULES` still exists for it —
   a module named there runs only when asked for by name.
+- **Workers run inline** (`make_workers_synchronous` aliases `start = run`), which is what
+  makes the suite deterministic — and what makes every concurrency fault invisible:
+  `isRunning()` is never True, so a double-start or a teardown-during-run cannot be
+  constructed. A module opts out with a top-level `REAL_THREADS = True`
+  (`checks_threading.py`). Don't reach for it elsewhere. Inside such a module the
+  harness's own helpers stop being synchronous — `h.run_baseline()` returns while the
+  thread runs, so touching `state.analysis_worker` afterwards commits the very bug under
+  test; use `run_baseline_and_wait`. Determinism comes from parking a worker on a
+  `threading.Event`, never from racing real work.
 - Renders the real panel/dialogs/canvas to PNGs in `tests_qgis/_shots/` — **open them**;
   that is how the UI gets verified. Rendering is deterministic, so a plain run reports
   exactly which images a change moved. A changed image is information, not a failure.
