@@ -635,6 +635,36 @@ class TestOutletCellCentres:
         back_row = int((y - fa.transform.f) / fa.transform.e)
         assert (back_row, back_col) == (row, col)
 
+    def test_bottom_edge_outlet_still_delineates_a_catchment(self, tmp_path):
+        """The other half of the same defect: how pysheds reads the seed back.
+
+        ``grid.catchment`` defaults to ``snap="corner"``, the nearest grid
+        intersection, resolved with ``np.around``. A cell centre sits exactly half
+        a cell from a corner, so every seed is a ``.5`` index and banker's rounding
+        picks by parity. On an even-height raster the last row — 19.5 here — rounds
+        *up* to 20, off the raster, and the catchment comes back empty: the site's
+        real outlet is the one seed guaranteed to be discarded.
+        """
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        r = np.arange(20).reshape(-1, 1)
+        c = np.arange(21).reshape(1, -1)
+        data = (100.0 - r * 1.0 + np.abs(c - 10) * 0.5).astype("float32")
+        dem = _write_raster(str(tmp_path / "valley.tif"), data)
+
+        fa = FlowAnalysis()
+        fa.load_dem(dem)
+        fa.run(routing="dinf")
+
+        outlets = fa._find_boundary_outlets(np.array(fa.acc), 30)
+        assert outlets, "no boundary outlet found — fixture is not draining south"
+        bottom = fa.transform.f + 19.5 * fa.transform.e
+        assert any(y == pytest.approx(bottom) for _, y in outlets), (
+            "expected an outlet on the last row")
+
+        polys = fa.get_catchment_polygons(stream_threshold=30)
+        assert polys, "the bottom-edge outlet delineated no catchment"
+        assert max(p["area_m2"] for p in polys) > 0
+
     def test_max_acc_fallback_seeds_the_max_acc_cell(self, sloped_dem):
         fa = self._loaded(sloped_dem)
         fa.run()

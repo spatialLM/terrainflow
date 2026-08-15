@@ -655,15 +655,23 @@ class FlowAnalysis:
 
         results = []
         for i, (x, y) in enumerate(outlet_points_sorted):
+            # snap="center" — "the cell this point falls in", which is what an outlet
+            # coordinate means. pysheds defaults to "corner", i.e. the nearest grid
+            # intersection, and resolves it with np.around. A cell centre is exactly
+            # half a cell off a corner, so every seed lands on a .5 index and
+            # banker's rounding decides by parity: row 150.5 floors to 150, row 151.5
+            # rounds up to 152 — the wrong cell — and the bottom row, 299.5, rounds to
+            # 300 and off the raster, returning no catchment at all. np.floor, which
+            # "center" uses, is the only resolution that means what we asked.
             try:
                 try:
                     catch_mask = self.grid.catchment(
                         x=x, y=y, fdir=self.fdir, xytype="coordinate",
-                        routing=self.routing
+                        routing=self.routing, snap="center"
                     )
                 except TypeError:
                     catch_mask = self.grid.catchment(
-                        x=x, y=y, fdir=self.fdir, xytype="coordinate"
+                        x=x, y=y, fdir=self.fdir, xytype="coordinate", snap="center"
                     )
             except Exception:
                 continue
