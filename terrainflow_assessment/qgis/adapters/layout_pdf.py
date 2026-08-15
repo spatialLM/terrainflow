@@ -689,8 +689,19 @@ class ReportLayoutBuilder:
 
         ``applyDefaultSettings`` alone produced a "0 m" bar on a real extent, so
         the segment size is derived from the map width instead.
+
+        Unless the map is in a geographic CRS, where its extent is in degrees and
+        every length here would be fiction. A missing scale bar is a visible
+        absence; a plausible wrong one is not, and it is the more dangerous of
+        the two on a drawing somebody digs from.
         """
         from qgis.core import QgsLayoutItemScaleBar, QgsUnitTypes
+
+        crs = getattr(spec, "crs", None)
+        if crs is not None and crs.isGeographic():
+            _log.debug("scale bar omitted: map CRS %s is geographic",
+                       crs.authid())
+            return
 
         try:
             bar = QgsLayoutItemScaleBar(self.layout)

@@ -32,3 +32,46 @@ def remove_layer(project, layer_id):
             project.instance().removeMapLayer(layer)
         except Exception:
             pass
+
+
+class MissingDemCrs(RuntimeError):
+    """No DEM is loaded, so there is no coordinate system to place a layer in."""
+
+
+def dem_crs(state):
+    """The session DEM's CRS, as a string a layer URI or ``setCrs`` accepts.
+
+    Every geometry this plugin creates carries DEM grid coordinates, in metres.
+    The fallback here used to be ``"EPSG:4326"`` — which declares those metres to
+    be degrees, puts the site a few hundred metres off the coast of Ghana, and
+    says nothing about it. On a workflow that has no meaning outside a projected
+    CRS there is no defensible default, so this raises instead. The callers all
+    sit behind a handler that reports; a refusal the operator can act on beats a
+    layer that draws in the wrong hemisphere.
+    """
+    info = getattr(state, "dem_info", None)
+    wkt = getattr(info, "crs_wkt", None) if info is not None else None
+    if not wkt:
+        raise MissingDemCrs(
+            "No DEM is loaded, so there is no coordinate system to draw this in. "
+            "Load a DEM first.")
+    return wkt
+
+
+def dem_crs_or_project(state, project):
+    """:func:`dem_crs`, falling back to the project's CRS rather than raising.
+
+    For layers that are display furniture rather than measurements — where being
+    drawn in the operator's CRS is merely unhelpful, not wrong.
+    """
+    try:
+        return dem_crs(state)
+    except MissingDemCrs:
+        return project.instance().crs().toWkt()
+
+
+def crs_object(wkt):
+    """A ``QgsCoordinateReferenceSystem`` from what :func:`dem_crs` returns."""
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    return QgsCoordinateReferenceSystem(wkt)

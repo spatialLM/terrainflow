@@ -32,7 +32,11 @@ from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.qgis.controllers import _groups as G
-from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
+from terrainflow_assessment.qgis.controllers._layers import (
+    dem_crs,
+    remove_layer,
+    resolve_layer,
+)
 from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
@@ -495,7 +499,7 @@ class SimulationController(G.LayerTreeMixin):
         if not self._state.sim_ew_centroids:
             return
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"Point?crs={crs_str}", "Earthwork Fill Status", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([

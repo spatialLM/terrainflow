@@ -145,7 +145,7 @@ def render_map_image(layers, extent=None, size_px=(1200, 800), dpi=200,
     job.waitForFinished()
     image = job.renderedImage()
     if image is not None and not image.isNull() and decorations:
-        draw_decorations(image, shown)
+        draw_decorations(image, shown, projected=not crs.isGeographic())
     return image
 
 
@@ -167,13 +167,20 @@ def _label_text(metres):
     return f"{metres / 1000:g} km" if metres >= 1000 else f"{metres:g} m"
 
 
-def draw_decorations(image, extent, margin_px=None):
+def draw_decorations(image, extent, margin_px=None, projected=True):
     """Paint a scale bar and a north arrow onto a rendered map.
 
     Metres per pixel comes straight from the extent the image was rendered at,
     so the bar is exact rather than estimated — which is also why ``extent``
     must be the *fitted* extent and not the one that was asked for: ``setExtent``
     widens to the output aspect and the two differ.
+
+    That arithmetic is only metres if the extent is. ``projected=False`` says the
+    map was rendered in a geographic CRS, where the extent is in degrees and the
+    same division is out by roughly five orders of magnitude — a bar that looks
+    entirely reasonable and is wrong. The north arrow still holds, so it is drawn
+    and the bar is not: a missing scale is a visible absence, and an incorrect one
+    is not.
 
     Both decorations sit on a translucent white plate. The maps underneath run
     from bare white to dark bush to deep navy water, and no corner is reliably
@@ -203,28 +210,30 @@ def draw_decorations(image, extent, margin_px=None):
         painter.setFont(font)
         ink = QColor("#22302e")
 
-        # ---- scale bar, bottom left
-        plate_w = bar_px + 2 * margin * 0.6
-        plate_h = bar_h + font_px + margin * 0.9
-        left = margin
-        top = height - margin - plate_h
-        _plate(painter, QRectF(left, top, plate_w, plate_h), QColor, QBrush,
-               QPen, Qt)
+        # ---- scale bar, bottom left. Omitted outright on a geographic CRS: the
+        # extent is in degrees there and any length this drew would be fiction.
+        if projected:
+            plate_w = bar_px + 2 * margin * 0.6
+            plate_h = bar_h + font_px + margin * 0.9
+            left = margin
+            top = height - margin - plate_h
+            _plate(painter, QRectF(left, top, plate_w, plate_h), QColor, QBrush,
+                   QPen, Qt)
 
-        x0 = left + margin * 0.6
-        y0 = top + plate_h - margin * 0.45 - bar_h
-        # Two segments, filled and hollow, so the bar can be read as halves.
-        painter.setPen(QPen(ink, max(1.0, bar_h * 0.22)))
-        for i in range(2):
-            rect = QRectF(x0 + i * bar_px / 2.0, y0, bar_px / 2.0, bar_h)
-            painter.setBrush(QBrush(ink if i == 0 else QColor(255, 255, 255)))
-            painter.drawRect(rect)
+            x0 = left + margin * 0.6
+            y0 = top + plate_h - margin * 0.45 - bar_h
+            # Two segments, filled and hollow, so the bar reads as halves.
+            painter.setPen(QPen(ink, max(1.0, bar_h * 0.22)))
+            for i in range(2):
+                rect = QRectF(x0 + i * bar_px / 2.0, y0, bar_px / 2.0, bar_h)
+                painter.setBrush(QBrush(ink if i == 0 else QColor(255, 255, 255)))
+                painter.drawRect(rect)
 
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(ink))
-        painter.drawText(
-            QRectF(x0, top + margin * 0.15, bar_px, font_px * 1.3),
-            Qt.AlignLeft | Qt.AlignVCenter, f"0 — {_label_text(bar_m)}")
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(ink))
+            painter.drawText(
+                QRectF(x0, top + margin * 0.15, bar_px, font_px * 1.3),
+                Qt.AlignLeft | Qt.AlignVCenter, f"0 — {_label_text(bar_m)}")
 
         # ---- north arrow, top right. Every map here is north-up.
         head = max(14, int(round(height * 0.035)))

@@ -29,7 +29,12 @@ from qgis.PyQt.QtWidgets import QMessageBox
 
 from terrainflow_assessment.modules.contour_analysis import INFLOW_RAMP_HEX
 from terrainflow_assessment.qgis.controllers import _groups as G
-from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
+from terrainflow_assessment.qgis.controllers._layers import (
+    crs_object,
+    dem_crs,
+    remove_layer,
+    resolve_layer,
+)
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 
 # Width, in mm, for the four inflow bands — the primary signal, not decoration.
@@ -144,7 +149,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         return "m³" if feats and feats[0].inflow_m3 is not None else "cells"
 
     def _display_contour_layer(self, contours):
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}",
                                "Candidate Contour Swales", "memory")
         pr = layer.dataProvider()
@@ -384,7 +389,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         )[:top_n]
         self._state.top_contour_features = ranked
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         remove_layer(self._project, self._state.top5_layer_id)
 
         layer = QgsVectorLayer(f"LineString?crs={crs_str}",
@@ -547,7 +552,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         """
         from terrainflow_assessment.modules.contour_analysis import class_breaks
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Contour Inflow (m³)", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
@@ -663,7 +668,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         remove_layer(self._project, self._state.segment_layer_id)
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}",
                                "Recommended Swale Segments", "memory")
         pr = layer.dataProvider()
@@ -809,7 +814,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             )
             return
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}",
                                "Swale Segment Inflow (m³)", "memory")
         pr = layer.dataProvider()
@@ -1165,7 +1170,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         layer = resolve_layer(self._project, self._state.drawn_keyline_layer_id)
         if layer is None:
-            crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            crs_str = dem_crs(self._state)
             layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Drawn Keylines", "memory")
             sym = QgsLineSymbol.createSimple({
                 "color": "150,90,30", "width": "1.6", "capstyle": "round",
@@ -1216,7 +1221,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             for lyr in self._project.instance().mapLayersByName(name):
                 self._project.instance().removeMapLayer(lyr)
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Keyline Design", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
@@ -1268,7 +1273,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         # Keypoint marker.
         kp_layer = QgsVectorLayer("Point", "Keyline Keypoint", "memory")
-        kp_layer.setCrs(self._project.instance().crs())
+        kp_layer.setCrs(crs_object(dem_crs(self._state)))
         kpr = kp_layer.dataProvider()
         kpr.addAttributes([QgsField("elevation", QMetaType.Double)])
         kp_layer.updateFields()
@@ -1289,7 +1294,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("Point", "Keypoints", "memory")
-        layer.setCrs(self._project.instance().crs())
+        layer.setCrs(crs_object(dem_crs(self._state)))
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("label",        QMetaType.QString),
@@ -1330,7 +1335,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("LineString", "Ridgelines (Water Divides)", "memory")
-        layer.setCrs(self._project.instance().crs())
+        layer.setCrs(crs_object(dem_crs(self._state)))
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("label",          QMetaType.QString),
@@ -1358,7 +1363,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             self._project.instance().removeMapLayer(lyr)
 
         layer = QgsVectorLayer("Point", "Recommended Pond Sites", "memory")
-        layer.setCrs(self._project.instance().crs())
+        layer.setCrs(crs_object(dem_crs(self._state)))
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("label",        QMetaType.QString),

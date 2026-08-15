@@ -48,7 +48,11 @@ from terrainflow_assessment.modules.swale_design import contour_to_swale_geometr
 from terrainflow_assessment.qgis import help_text as H
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _symbols as S
-from terrainflow_assessment.qgis.controllers._layers import resolve_layer
+from terrainflow_assessment.qgis.controllers._layers import (
+    crs_object,
+    dem_crs,
+    resolve_layer,
+)
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
@@ -408,7 +412,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not placed:
             return
         try:
-            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            crs = dem_crs(self._state)
             layer = QgsVectorLayer(f"LineString?crs={crs}", "Spillways", "memory")
             pr = layer.dataProvider()
             pr.addAttributes([
@@ -2344,7 +2348,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if not feats:
                 return
 
-            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            crs = dem_crs(self._state)
             layer = QgsVectorLayer(f"Point?crs={crs}", "Stress points", "memory")
             pr = layer.dataProvider()
             pr.addAttributes([
@@ -3058,7 +3062,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if not feats:
                 return
 
-            crs = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+            crs = dem_crs(self._state)
             layer = QgsVectorLayer(f"LineString?crs={crs}", "Overflow connections", "memory")
             pr = layer.dataProvider()
             pr.addAttributes([
@@ -3255,7 +3259,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
     def _ensure_ew_layers(self):
         from qgis.core import QgsRuleBasedRenderer
 
-        crs_str = self._state.dem_info.crs_wkt if self._state.dem_info else "EPSG:4326"
+        crs_str = dem_crs(self._state)
+        want = crs_object(crs_str)
 
         # Registry-driven: the type registry is the single source of layer styling
         # (matching the panel's draw-button colours); a future register_type() gets
@@ -3264,7 +3269,18 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             geom_type = cfg.geom_type
             display_name = f"{cfg.label}s"
             color_hex = cfg.style[1]
-            if resolve_layer(self._project, self._state.ew_layer_ids.get(ew_type)):
+            existing = resolve_layer(self._project, self._state.ew_layer_ids.get(ew_type))
+            if existing is not None:
+                # A layer keeps the CRS it was created with, forever, and nothing
+                # clears ew_layer_ids — so a feature drawn before a DEM was loaded
+                # left every later one declared in the CRS of that first moment.
+                # An empty one is replaced outright; a populated one is re-declared,
+                # which is all that is needed because the features carry DEM grid
+                # coordinates either way. Nothing is reprojected: the numbers were
+                # always right, only the label on them was wrong.
+                if existing.crs() != want:
+                    existing.setCrs(want)
+                    existing.triggerRepaint()
                 continue
 
             layer = QgsVectorLayer(f"{geom_type}?crs={crs_str}", display_name, "memory")
@@ -3847,8 +3863,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self.place(layer, G.RERUN, at_top=True)
             self._state.earthworks_layer_ids.append(layer.id())
 
-        crs_str = (self._state.dem_info.crs_wkt if self._state.dem_info
-                   else (crs.to_wkt() if crs else "EPSG:4326"))
+        crs_str = dem_crs(self._state)
         line = QgsVectorLayer(f"LineString?crs={crs_str}",
                               "Earthworks — Event Water Line", "memory")
         if not line.isValid():
@@ -3972,8 +3987,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if msg:
                 self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
 
-        crs_str = (self._state.dem_info.crs_wkt if self._state.dem_info
-                   else "EPSG:4326")
+        crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"Polygon?crs={crs_str}",
                                "Earthworks — Overtopping", "memory")
         if not layer.isValid():
@@ -4236,7 +4250,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             uri = f"LineString?crs={crs}" if crs else "LineString"
             layer = QgsVectorLayer(uri, "Slope Vectors", "memory")
             if crs is None:
-                layer.setCrs(self._project.instance().crs())
+                layer.setCrs(crs_object(dem_crs(self._state)))
             pr = layer.dataProvider()
             pr.addAttributes([QgsField("slope_deg", QMetaType.Double)])
             layer.updateFields()

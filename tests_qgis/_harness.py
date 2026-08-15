@@ -424,10 +424,19 @@ class PluginHarness:
             h.assert_no_errors("baseline")
     """
 
-    def __init__(self, dem_path=None, load_dem=True, load_boundary=True):
+    #: What the DEM fixture is written in. The project is pinned to the same thing
+    #: by default, which is realistic and is also a blind spot: any layer created
+    #: in the project's CRS instead of the DEM's draws in exactly the right place,
+    #: and any scale bar measured off a project extent reads in metres. Pass
+    #: ``project_crs`` to break that coincidence — see `checks_crs.py`.
+    DEM_CRS = "EPSG:2193"
+
+    def __init__(self, dem_path=None, load_dem=True, load_boundary=True,
+                 project_crs=None):
         self.dem_path = dem_path
         self._load_dem = load_dem and dem_path is not None
         self._load_boundary = load_boundary and self._load_dem
+        self.project_crs = project_crs or self.DEM_CRS
         self.dem_layer = None
         self.boundary_layer = None
 
@@ -441,7 +450,7 @@ class PluginHarness:
 
         project = QgsProject.instance()
         project.clear()
-        project.setCrs(QgsCoordinateReferenceSystem("EPSG:2193"))
+        project.setCrs(QgsCoordinateReferenceSystem(self.project_crs))
 
         self.main_window = QMainWindow()
         # Generous: the panel is a tall dock and a screenshot of it is clipped to
@@ -450,7 +459,8 @@ class PluginHarness:
         self.canvas = QgsMapCanvas(self.main_window)
         self.main_window.setCentralWidget(self.canvas)
         self.canvas.setCanvasColor(QColor(255, 255, 255))
-        self.canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:2193"))
+        self.canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem(self.project_crs))
         self.iface = StubIface(self.main_window, self.canvas)
 
         self.plugin = TerrainFlowAssessmentPlugin(self.iface)

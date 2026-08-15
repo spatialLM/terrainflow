@@ -33,6 +33,7 @@ from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from terrainflow_assessment.modules.reporting import BaselineReport
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _layers as L
+from terrainflow_assessment.qgis.controllers._layers import dem_crs
 from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
@@ -637,7 +638,7 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         from qgis.PyQt.QtGui import QFont
 
         layer = QgsVectorLayer(
-            "Point?crs=" + (self._state.dem_info.crs_wkt or "EPSG:4326"),
+            "Point?crs=" + dem_crs(self._state),
             f"{label} — Exit Points", "memory",
         )
         pr = layer.dataProvider()

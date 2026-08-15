@@ -343,7 +343,7 @@ class ReportingController:
             usable_layers,
         )
 
-        crs = self._project.crs()
+        crs = self._map_crs()
         frame = self._frame_extent(crs)
         specs = {}
         for key in ("design", "flow"):
@@ -361,6 +361,26 @@ class ReportingController:
                     layers, frame or layers_extent(layers, crs), crs,
                     height_mm=110.0)
         return specs
+
+    def _map_crs(self):
+        """The CRS the report's maps are drawn in — the DEM's, not the project's.
+
+        Every metre in this document is measured on the DEM's grid, and both
+        renderers stamp a scale bar in metres off the rendered extent. Render in a
+        geographic project CRS and that extent is in degrees, so "metres per pixel"
+        is out by about five orders of magnitude and the bar comes out plausible
+        and wrong. The project CRS is the operator's display choice; it is not a
+        property of anything this document measures.
+        """
+        from qgis.core import QgsCoordinateReferenceSystem
+
+        info = self._state.dem_info
+        wkt = getattr(info, "crs_wkt", None) if info is not None else None
+        if wkt:
+            crs = QgsCoordinateReferenceSystem(wkt)
+            if crs.isValid():
+                return crs
+        return self._project.crs()
 
     def _frame_extent(self, crs):
         """One frame for every map: the site boundary, where there is one.
