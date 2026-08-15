@@ -488,3 +488,44 @@ def check_simulation_runs(dem_path):
         if h.state.sim_result is not None:
             h.panel.sim_frame_changed.emit(0)
             h.assert_no_errors("simulation frame step")
+
+
+def check_two_features_sharing_a_name_are_verified_apart(dem_path):
+    """Verification is keyed by id, so a duplicate name cannot merge two features.
+
+    The default name is f"{type} {len(manager)+1}", counted over every earthwork, so
+    deleting one and drawing another reproduces a name already in use — the same
+    collision `_build_network_nodes` documents and was fixed for. Under name keying
+    the first of the pair disappeared from `analytic_by_name`, `min_dims`,
+    `breakdowns` and the footprint list, so its water read as zero and the surviving
+    row scored one feature's pond against the other's capacity.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+
+        a = h.add_earthwork("swale", line_across_valley(row=60), name="Swale 1")
+        b = h.add_earthwork("swale", line_across_valley(row=120), name="Swale 1")
+        assert a.name == b.name, "the fixture must actually collide"
+        assert a.id != b.id, "ids must still be distinct"
+        # Verification only considers features with a design capacity; the harness
+        # builds bare earthworks, so give them distinguishable ones. Different
+        # values on purpose — if the two rows were ever to merge, the survivor
+        # would carry one of these and the loss would be visible.
+        a.capacity_m3 = 40.0
+        b.capacity_m3 = 90.0
+
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("re-analysis with a duplicated name")
+
+        v = h.state.verification
+        assert v is not None, "no verification was produced"
+
+        rows = [r for r in v.per_feature if r["name"] == "Swale 1"]
+        assert len(rows) == 2, (
+            f"expected both features to be verified, got {len(rows)} row(s) — "
+            f"the collision collapsed them")
+
+        # Each was measured against its own capacity, not the other's.
+        analytic = sorted(r["analytic_m3"] for r in rows)
+        assert analytic == [40.0, 90.0], (
+            f"each row must carry its own feature's capacity, got {analytic}")

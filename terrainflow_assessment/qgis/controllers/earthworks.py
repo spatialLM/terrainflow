@@ -3613,6 +3613,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # assessment cannot disagree about what a feature holds.
         terrain_by_id = {}
 
+        # Keyed by `ew.id`, never by name. The default name is
+        # f"{type} {len(manager)+1}", counted over *all* earthworks, so deleting one
+        # and drawing another reproduces a name that is already in use — the same
+        # collision `_build_network_nodes` documents. Under name keying the first of
+        # the pair vanished from every one of these dicts, so its water read as zero
+        # and the verification scored one feature's pond against the other's
+        # capacity. `build_verification` treats the key as opaque; display names are
+        # put back below, once, from `name_by_id`.
+        name_by_id = {}
+
         analytic_by_name = {}
         min_dims = {}
         breakdowns = {}
@@ -3620,7 +3630,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         for ew in self._state.earthwork_manager.get_enabled():
             if getattr(ew, "capacity_m3", 0.0) <= 0:
                 continue
-            analytic_by_name[ew.name] = ew.capacity_m3
+            key = getattr(ew, "id", None) or ew.name
+            name_by_id[key] = ew.name
+            analytic_by_name[key] = ew.capacity_m3
             # Sub-cell check: channels key off the bottom width, polygons off their
             # equivalent strip width. Basins previously passed None, so a footprint
             # smaller than a cell still claimed its full analytic volume unflagged.
@@ -3629,9 +3641,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             except Exception:
                 geom = None
             if ew.type == "swale":
-                min_dims[ew.name] = getattr(ew, "bottom_width_m", None)
+                min_dims[key] = getattr(ew, "bottom_width_m", None)
             else:
-                min_dims[ew.name] = min_dimension(geom) if geom is not None else None
+                min_dims[key] = min_dimension(geom) if geom is not None else None
 
             # The cells the burn actually claimed, straight from the burner. Re-deriving
             # them here is what let the two drift: this buffered a line by
@@ -3642,7 +3654,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # has run on this grid.
             terrain = getattr(ew, "terrain_capacity_m3", None)
             if terrain is not None:
-                terrain_by_id[ew.name] = float(terrain)
+                terrain_by_id[key] = float(terrain)
 
             mask = burned_masks.get(getattr(ew, "id", None))
             if mask is None or mask.shape != shape:
@@ -3657,12 +3669,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                                                    all_touched=False)
                     except Exception:
                         mask = np.zeros(shape, dtype=bool)
-            footprints.append((ew.name, mask))
+            footprints.append((key, mask))
 
             # What this grid can actually represent — the reference the delta is
             # measured against, so the headline isolates burn error from cell size.
             try:
-                breakdowns[ew.name] = capacity_breakdown(
+                breakdowns[key] = capacity_breakdown(
                     ew, cell_size=cell_size, n_cells=int(mask.sum()),
                     terrain_storage_m3=getattr(ew, "terrain_capacity_m3", None),
                     cut_m3=burned_cut.get(getattr(ew, "id", None)))
@@ -3687,6 +3699,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             existing_by_name=existing.per_name,
             merged_groups=added.groups,
         )
+        # Ids did the arithmetic; names do the reading. Rewritten in one place so a
+        # collision can never make two rows indistinguishable — they were computed
+        # apart and only the label is shared.
+        for row in result.per_feature:
+            row["name"] = name_by_id.get(row["name"], row["name"])
+        for group in result.merged_groups:
+            group["names"] = tuple(name_by_id.get(n, n) for n in group.get("names", ()))
+
         result.unattributed_m3 = added.unattributed_m3
         # None when the subtraction was applied; a reason string when every measured
         # figure still carries whatever ponded there naturally.
@@ -3738,7 +3758,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not ctx or balance is None or not dem_path or not os.path.exists(dem_path):
             return
 
-        stored = {f["name"]: f.get("stored_m3", 0.0)
+        # Keyed to match `ctx["footprints"]`, which `_compute_verification` keys by
+        # `ew.id`. The balance rows carry both, so this is a lookup rather than a
+        # translation — but the two sides have to agree or every footprint misses its
+        # volume, `event_pond_depth` finds nothing to place, and the event layer is
+        # silently not built at all.
+        stored = {(f.get("id") or f["name"]): f.get("stored_m3", 0.0)
                   for f in (getattr(balance, "per_feature", None) or [])}
         if not stored:
             return
