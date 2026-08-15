@@ -253,8 +253,12 @@ class SimulationController(G.LayerTreeMixin):
         if self._state.baseline_report and self._state.post_report:
             comparison = compare(self._state.baseline_report, self._state.post_report)
             comparison.verification = self._state.verification  # terrain-vs-analytic (§4)
-            self._panel.set_report_summary(comparison)
             self._state.comparison = comparison
+            # Enrichment, not the source: the summary is the design tier's, and a
+            # simulation adds the two timing lines nothing else can support.
+            self._panel.set_report_summary(
+                self._state.balance, comparison=comparison,
+                burn=self._state.burn_quantities)
 
     def _merge_verification_into_summary(self, summary):
         """Copy per-feature terrain ponding + Δ from state.verification onto summary rows."""

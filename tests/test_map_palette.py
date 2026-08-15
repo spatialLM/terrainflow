@@ -120,3 +120,69 @@ class TestKeyHelpers:
     def test_visible_stops_stay_in_ramp_order(self):
         assert [label for _c, label in visible_stops(STREAMS)] == [
             label for _f, rgba, label in STREAMS if rgba[3]]
+
+
+class TestTheMapKeyNamesTheColoursTheMapUses:
+    """The comment above these constants used to claim a test asserted them.
+
+    It did not, and "Site boundary" printed red in the key while the map drew it
+    bright blue. A key that names a colour the map does not use is worse than no
+    key — the reader trusts it and looks for the wrong thing.
+    """
+
+    def test_the_boundary_swatch_is_the_colour_the_boundary_is_drawn_in(self):
+        from terrainflow_assessment.core.registry.map_palette import (
+            AREA_OUTLINES,
+            hex_of,
+        )
+        from terrainflow_assessment.modules.report_model import _BOUNDARY_COLOUR
+
+        assert _BOUNDARY_COLOUR == hex_of(AREA_OUTLINES["boundary"])
+
+    def test_the_watercourse_swatch_is_a_stop_of_the_stream_ramp(self):
+        from terrainflow_assessment.core.registry.map_palette import (
+            STREAMS,
+            stop_colour,
+        )
+        from terrainflow_assessment.modules.report_model import _map_legend
+
+        colour = stop_colour(STREAMS, "channel")
+        entries = _map_legend(_DataStub(), "flow")
+        watercourse = [e for e in entries if e.label == "Watercourse"]
+        assert watercourse, "the flow map's key lost its watercourse row"
+        assert watercourse[0].colour == colour
+
+    def test_the_exit_swatch_matches_the_exit_marker(self):
+        """`baseline.py` styles exit points 220,0,0."""
+        from terrainflow_assessment.modules.report_model import _EXIT_COLOUR
+
+        assert _EXIT_COLOUR.upper() == "#DC0000"
+
+    def test_the_spillway_and_link_swatches_match_their_symbols(self):
+        """`_symbols.spillway_symbol` uses #1273b5; `connection_symbol` 58,96,140."""
+        from terrainflow_assessment.modules.report_model import (
+            _CONNECTION_COLOUR,
+            _SPILLWAY_COLOUR,
+        )
+
+        assert _SPILLWAY_COLOUR.upper() == "#1273B5"
+        assert _CONNECTION_COLOUR.upper() == "#3A608C"
+
+    def test_a_stop_that_is_not_there_is_an_error_not_a_default(self):
+        import pytest
+
+        from terrainflow_assessment.core.registry.map_palette import (
+            STREAMS,
+            stop_colour,
+        )
+
+        with pytest.raises(KeyError):
+            stop_colour(STREAMS, "estuary")
+
+
+class _DataStub:
+    """The little `_map_legend` needs: it reads `earthworks` and nothing else here."""
+    earthworks = ()
+    balance = None
+    spillway_rows = ()
+    maps = {}

@@ -1152,16 +1152,25 @@ def compare(baseline: BaselineReport,
 # Chart helpers
 # ---------------------------------------------------------------------------
 
-def _fig_to_base64(fig):
-    """Convert a matplotlib Figure to a base64-encoded PNG string."""
+def _fig_to_base64(fig, dpi=None):
+    """Convert a matplotlib Figure to a base64-encoded PNG string.
+
+    The default is the report's export resolution, not matplotlib's. These were
+    saved at 100 dpi and then laid out by ``layout_pdf`` as
+    ``pixels / self.dpi * 25.4`` with ``self.dpi`` at 200 — so every one of them
+    printed at half the intended width, with axis labels around 5.5 pt, and the
+    ``min(1.0, ...)`` fit could not correct an image that was already too small.
+    """
+    from terrainflow_assessment.modules.report_charts import REPORT_DPI
+
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi or REPORT_DPI, bbox_inches="tight")
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("ascii")
 
 
 def _build_hydrograph_chart(baseline: BaselineReport,
-                             post: PostInterventionReport):
+                             post: PostInterventionReport, dpi=None):
     """
     Build a before/after outflow hydrograph chart.
     Returns base64 PNG string or None if matplotlib unavailable.
@@ -1196,12 +1205,12 @@ def _build_hydrograph_chart(baseline: BaselineReport,
     ax.grid(True, alpha=0.3)
     ax.spines[["top", "right"]].set_visible(False)
 
-    b64 = _fig_to_base64(fig)
+    b64 = _fig_to_base64(fig, dpi)
     plt.close(fig)
     return b64
 
 
-def _build_fill_timeline_chart(post: PostInterventionReport):
+def _build_fill_timeline_chart(post: PostInterventionReport, dpi=None):
     """
     Build a stacked fill-% chart showing each earthwork filling over time.
     Returns base64 PNG string or None.
@@ -1249,7 +1258,7 @@ def _build_fill_timeline_chart(post: PostInterventionReport):
     ax.grid(True, alpha=0.3)
     ax.spines[["top", "right"]].set_visible(False)
 
-    b64 = _fig_to_base64(fig)
+    b64 = _fig_to_base64(fig, dpi)
     plt.close(fig)
     return b64
 

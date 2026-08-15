@@ -1992,19 +1992,47 @@ class AssessmentPanel(QDockWidget):
     def set_sim_time_label(self, time_label):
         self._sim_time_lbl.setText(f"T = {time_label}")
 
-    def set_report_summary(self, comparison):
-        """Update the report section with before/after headline metrics."""
-        from .modules.reporting import ComparisonResult
-        if not isinstance(comparison, ComparisonResult):
+    def set_report_summary(self, balance, comparison=None, burn=None):
+        """Headline figures for the Report stage, from the design tier.
+
+        This took a ``ComparisonResult`` and nothing else, and the fill simulation
+        is its only producer — so the on-screen summary appeared only after a
+        simulation, for a document that has needed nothing but a baseline since the
+        report was rebuilt on the design tier. It is now fed from the same
+        ``BalanceResult`` the report itself prints, recomputed on every design edit.
+
+        A simulation still adds to it: peak reduction and delay are *timing* claims,
+        and nothing but a time-stepped run can support one, so those two lines
+        appear only when there is a ``comparison`` to take them from.
+
+        ``burn`` is the measured cut/fill from the last burn, preferred over the
+        analytic figures because it is what the ground actually gives up. Either
+        way it is phrased by ``cut_fill_sentence``: ``+340 m³`` reads as a credit
+        to anyone who is not an engineer, and the sign convention is written down
+        nowhere a landowner would look.
+        """
+        from .modules.reporting import cut_fill_sentence, fmt_volume
+
+        if balance is None:
+            self.clear_report_summary()
             return
-        text = (
-            f"<b>Water captured on-site:</b> {comparison.captured_pct:.0f}%<br>"
-            f"<b>Peak flow reduction:</b> {comparison.peak_reduction_pct:.0f}%<br>"
-            f"<b>Peak timing delay:</b> {comparison.peak_delay_hr:.1f} hr<br>"
-            f"<b>Exit volume reduction:</b> {comparison.exit_reduction_pct:.0f}%<br>"
-            f"<b>Net cut/fill balance:</b> {comparison.net_cut_fill_m3:+,.0f} m³"
-        )
-        self._report_summary_lbl.setText(text)
+
+        stored = max(0.0, balance.total_captured_m3 - balance.total_infiltration_m3)
+        lines = [
+            f"<b>Water captured on-site:</b> {balance.capture_pct:.0f}%",
+            f"<b>Held in your features:</b> {fmt_volume(stored)}",
+            f"<b>Soaked into the ground:</b> "
+            f"{fmt_volume(balance.total_infiltration_m3)}",
+            f"<b>Leaves the block:</b> {fmt_volume(balance.site_exit_m3)}",
+        ]
+        if comparison is not None:
+            lines.append(
+                f"<b>Peak flow reduction:</b> {comparison.peak_reduction_pct:.0f}% "
+                f"(delayed {comparison.peak_delay_hr:.1f} hr) — from the simulation")
+        cut = (burn or {}).get("cut_m3", balance.total_cut_m3)
+        fill = (burn or {}).get("fill_m3", balance.total_fill_m3)
+        lines.append(f"<b>Earthmoving:</b> {cut_fill_sentence(cut, fill)}")
+        self._report_summary_lbl.setText("<br>".join(lines))
 
     def clear_report_summary(self):
         """Drop the headline metrics — the design they described is gone."""

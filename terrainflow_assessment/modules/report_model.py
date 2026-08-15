@@ -21,6 +21,12 @@ omission is how a reader fails to notice that verification never ran.
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from terrainflow_assessment.core.registry.map_palette import (
+    AREA_OUTLINES,
+    STREAMS,
+    hex_of,
+    stop_colour,
+)
 from terrainflow_assessment.modules.reporting import (
     CAPTURE_GOOD_PCT,
     capture_tone,
@@ -349,9 +355,14 @@ def _page_summary(data):
                   "routing warnings on the flow network page. The capture "
                   f"figure as computed is {fmt_pct(bal.capture_pct)}."),
         ))
-    elif not bal.total_inflow_m3:
-        # A baseline exists, so this is not "no baseline" — it is "nothing
-        # drains into anything you drew", which is a design finding.
+    elif bal.per_feature and not sum(f.get("total_inflow_m3") or 0.0
+                                     for f in bal.per_feature):
+        # A baseline exists and every feature was measured, so this is not "no
+        # baseline" — it is "nothing drains into anything you drew", a design
+        # finding. Conditioned on the per-feature figures, not on
+        # `total_inflow_m3`: that is site-wide runoff and it is 0 whenever the
+        # design tier simply has no flow grid yet, which would print a diagnosis
+        # of a fault that may not exist.
         out.append(Hero(
             value=fmt_volume(bal.total_capacity_m3),
             label="of storage built — but no part of the block drains into it",
@@ -564,13 +575,19 @@ def _water_fate_table(bal, data=None):
         headers += ["Volume (simulated)", "Share (simulated)"]
         for row, key in zip(rows, ("held", "soaked", "leaves")):
             row += [fmt_volume(sim[key]), share(sim[key], sim["total"])]
+        # Both denominators are site-wide runoff (water_balance measures the
+        # calculated one over the whole domain). The note used to say the
+        # calculated shares divided "the water that reaches your earthworks",
+        # which is the one paragraph here meant to prevent a misreading and it
+        # instructed the reader wrongly. What actually differs is the method.
         notes.append(
-            "The two share columns are not measured against the same total: "
-            "the calculated shares divide the water that reaches your "
-            f"earthworks ({fmt_volume(total)}), the simulated ones divide the "
-            f"runoff the whole block generates ({fmt_volume(sim['total'])}). "
-            "Read each column against its own heading and do not subtract one "
-            "from the other.")
+            "Both share columns divide the runoff the whole block generates. "
+            f"They differ in method, not in denominator: the calculated column "
+            f"({fmt_volume(total)}) is the design-tier balance, which routes the "
+            f"event as one total; the simulated column ({fmt_volume(sim['total'])}) "
+            "is the same event stepped through time, so a feature that fills and "
+            "spills part-way through holds less than its capacity suggests. Where "
+            "the two disagree, the difference is timing.")
 
     if not bal.counts_infiltration:
         notes.append(
@@ -1466,13 +1483,16 @@ def _map_ref(data, key, caption):
     return MapRef(key=key, caption=full, legend=_map_legend(data, key))
 
 
-# Colours for the things on a map that are not earthworks and not a raster
-# ramp. They mirror qgis/controllers/_symbols.py; a key that names a colour the
-# map does not use is worse than no key, so these are asserted by test.
-_BOUNDARY_COLOUR = "#E23A2E"
-_EXIT_COLOUR = "#DC0000"
-_SPILLWAY_COLOUR = "#1273B5"
-_CONNECTION_COLOUR = "#3A608C"
+# Colours for the things on a map that are not earthworks and not a raster ramp.
+# A key that names a colour the map does not use is worse than no key: this said
+# "Site boundary" in red while the map drew it bright blue, under a comment
+# claiming a test asserted the pair. It did not. Every one of these is now
+# asserted against its source in tests/test_map_palette.py, and the boundary is
+# read from the palette rather than transcribed at all.
+_BOUNDARY_COLOUR = hex_of(AREA_OUTLINES["boundary"])
+_EXIT_COLOUR = "#DC0000"          # baseline.py exit-point marker, 220,0,0
+_SPILLWAY_COLOUR = "#1273B5"      # _symbols.spillway_symbol
+_CONNECTION_COLOUR = "#3A608C"    # _symbols.connection_symbol, 58,96,140
 
 
 def _type_colour(key):
@@ -1534,7 +1554,8 @@ def _map_legend(data, key):
         return [
             _ramp_entry("Surface runoff — diffuse to channel",
                         surface_runoff_ramp()),
-            LegendEntry(label="Watercourse", colour="#0E3487", kind="line"),
+            LegendEntry(label="Watercourse",
+                        colour=stop_colour(STREAMS, "channel"), kind="line"),
             LegendEntry(label="Boundary crossing", colour=_EXIT_COLOUR,
                         kind="point"),
             LegendEntry(label="Site boundary", colour=_BOUNDARY_COLOUR,

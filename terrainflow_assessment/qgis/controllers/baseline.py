@@ -27,6 +27,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QMetaType, QObject, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
+from terrainflow_assessment.core.registry.map_palette import AREA_OUTLINES
 from terrainflow_assessment.modules.dem_loader import compute_slope_raster, load_dem
 from terrainflow_assessment.modules.earthwork_design import DEMBurner
 from terrainflow_assessment.modules.reporting import BaselineReport
@@ -265,12 +266,12 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         "earthworks": "Earthworks Area",
     }
 
-    # Outline-only render colours (RGB) — distinct, high-contrast, and different
-    # from the red parcel outline so each drawn area stands out over the map.
+    # Outline-only render colours, from the palette the report's map key also
+    # reads. Transcribed separately, the key came to name a colour the map does
+    # not use — see map_palette.AREA_OUTLINES.
     _AREA_OUTLINE = {
-        "boundary": "0,162,232",     # bright blue
-        "analysis": "255,127,14",    # orange
-        "earthworks": "148,103,189",  # purple
+        kind: f"{r},{g},{b}"
+        for kind, (r, g, b, _a) in AREA_OUTLINES.items()
     }
 
     def draw_area(self, kind):

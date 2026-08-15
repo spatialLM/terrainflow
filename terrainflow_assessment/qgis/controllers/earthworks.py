@@ -2766,6 +2766,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._panel.set_live_assessment(self._network_footer(result))
             self._refresh_connections_layer(result, routing)
             self._panel.set_area_subtotals(self.compute_area_subtotals())
+            # The Report stage's on-screen headline, from the same BalanceResult the
+            # report itself prints. It used to come only from a ComparisonResult,
+            # which only a fill simulation produces — so the summary was blank for a
+            # document that has needed nothing but a baseline since it was rebuilt on
+            # the design tier.
+            self._panel.set_report_summary(
+                result, comparison=self._state.comparison,
+                burn=self._state.burn_quantities)
             self.refresh_stress_points_layer()
             drawn_result = None
             if geometry_settled:

@@ -927,3 +927,48 @@ def check_export_puts_the_operators_selection_back(dem_path):
 
         assert list(own.selectedFeatureIds()) == held, (
             "the export destroyed a selection that was not its to clear")
+
+
+def check_the_report_summary_appears_without_a_simulation(dem_path):
+    """It came only from a ComparisonResult, which only a fill simulation makes.
+
+    So the Report stage's on-screen headline stayed blank for a document that has
+    needed nothing but a baseline since it was rebuilt on the design tier — and
+    when it did appear it printed the signed cut/fill figure `cut_fill_sentence`
+    exists to replace.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", line_across_valley())
+        ew.capacity_m3 = 50.0
+        # add_earthwork goes straight to the manager, so nothing fires the live
+        # assessment the way an edit on the canvas does. This is that edit.
+        h.plugin._earthworks._recompute_live_assessment()
+        h.assert_no_errors("design analysis")
+        assert h.state.comparison is None, "a simulation ran; this checks the tier alone"
+
+        text = h.panel._report_summary_lbl.text()
+        assert "Run Baseline" not in text, "the summary is still idle after a design"
+        assert "captured on-site" in text, f"no capture headline: {text!r}"
+        assert "Earthmoving" in text, f"no earthmoving line: {text!r}"
+        assert "m³" not in text.split("Earthmoving")[1].split("<br>")[0][:2], (
+            "the earthmoving line leads with a bare signed volume")
+        assert "Peak flow reduction" not in text, (
+            "a timing claim with no simulation behind it")
+
+
+def check_a_simulation_adds_the_timing_lines(dem_path):
+    """Peak reduction and delay are timing claims, and only a time-stepped run
+    can support one — so they appear when there is a simulation and not before."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", line_across_valley())
+        ew.capacity_m3 = 50.0
+        h.panel.run_earthworks_requested.emit()
+        h.panel.run_simulation_requested.emit()
+        h.assert_no_errors("simulation")
+
+        text = h.panel._report_summary_lbl.text()
+        assert "Peak flow reduction" in text, f"no timing line after a run: {text!r}"
+        assert "from the simulation" in text, (
+            "the timing line does not say where it came from")

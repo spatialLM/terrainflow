@@ -21,6 +21,16 @@ import logging
 
 _log = logging.getLogger(__name__)
 
+#: The resolution every report figure is rendered at.
+#:
+#: It has to be the one ``layout_pdf`` lays them out against — that renderer sizes
+#: an image as ``pixels / dpi × 25.4 mm``, so a figure saved at any other value
+#: prints at the wrong size and there is no fitting rule that can recover it. The
+#: hydrograph and fill timeline were saved at 100 and laid out against 200, and so
+#: printed at half width with ~5.5 pt axis labels. HTML scales to the column, so
+#: the higher figure costs it nothing but sharpness.
+REPORT_DPI = 200
+
 _FALLBACK_TYPE_COLOUR = "#7f8c8d"
 
 
@@ -81,7 +91,7 @@ def _pyplot():
         return None
 
 
-def render_flow_network(graph, path=None, dpi=200):
+def render_flow_network(graph, path=None, dpi=REPORT_DPI):
     """Draw the overflow network. Returns PNG bytes, or writes to ``path``.
 
     ``graph`` is the dict from
@@ -157,16 +167,16 @@ def _write_b64(b64, path):
         return None
 
 
-def render_hydrograph(baseline, post, path):
+def render_hydrograph(baseline, post, path, dpi=REPORT_DPI):
     """Before/after outflow hydrograph. Simulation-only; None without one."""
     from terrainflow_assessment.modules.reporting import _build_hydrograph_chart
 
     if baseline is None or post is None:
         return None
-    return _write_b64(_build_hydrograph_chart(baseline, post), path)
+    return _write_b64(_build_hydrograph_chart(baseline, post, dpi=dpi), path)
 
 
-def render_fill_timeline(post, path):
+def render_fill_timeline(post, path, dpi=REPORT_DPI):
     """Per-feature fill over the storm. Simulation-only; None without one."""
     from terrainflow_assessment.modules.reporting import (
         _build_fill_timeline_chart,
@@ -174,7 +184,7 @@ def render_fill_timeline(post, path):
 
     if post is None:
         return None
-    return _write_b64(_build_fill_timeline_chart(post), path)
+    return _write_b64(_build_fill_timeline_chart(post, dpi=dpi), path)
 
 
 def _layout(nodes):

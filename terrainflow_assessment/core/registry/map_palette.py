@@ -133,3 +133,33 @@ def visible_stops(ramp):
     Returns ``[(hex, label), ...]`` low to high.
     """
     return [(hex_of(rgba), label) for _f, rgba, label in ramp if rgba[3]]
+
+
+# --------------------------------------------------------------------------- drawn areas
+
+#: The three areas the user can draw or pick — outline only, high contrast, and
+#: deliberately unlike the red a parcel layer usually comes in so each stands out
+#: over whatever basemap is underneath.
+#:
+#: Here rather than in the controller that draws them because the report's map key
+#: has to name the same colours. It named a different one: "Site boundary" printed
+#: red while the map drew it bright blue, under a comment claiming a test asserted
+#: the pair. There was no such test. There is now, and one definition to assert.
+AREA_OUTLINES = {
+    "boundary": (0, 162, 232, 255),      # bright blue
+    "analysis": (255, 127, 14, 255),     # orange
+    "earthworks": (148, 103, 189, 255),  # purple
+}
+
+
+def stop_colour(ramp, label):
+    """The hex of the ramp stop with this label, for a key that draws a line.
+
+    A watercourse is a line on the key and a graded raster on the map, so its
+    swatch is one stop of the ramp rather than the whole gradient. Reading it out
+    beats transcribing it: the transcription is what drifts.
+    """
+    for _f, rgba, name in ramp:
+        if name == label:
+            return hex_of(rgba)
+    raise KeyError(f"{label!r} is not a stop of this ramp")

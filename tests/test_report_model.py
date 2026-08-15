@@ -195,12 +195,25 @@ class TestSuppression:
         assert "78%" in _text_of(r)
 
     def test_zero_inflow_with_baseline_is_a_drainage_finding(self):
-        r = build_report(_data(balance=_balance(total_inflow_m3=0.0,
-                                                capture_pct=0.0)))
+        """Every feature measured, and not one of them receives anything."""
+        r = build_report(_data(balance=_balance(
+            total_inflow_m3=0.0, capture_pct=0.0,
+            per_feature=[_feature(total_inflow_m3=0.0)])))
         hero = _sections(r, Hero)[0]
         assert "0%" not in hero.value
         assert "drains into it" in hero.label
         assert "flow paths" in hero.sub
+
+    def test_no_flow_grid_is_not_reported_as_a_drainage_fault(self):
+        """`total_inflow_m3` is site-wide runoff and is 0 whenever the design tier
+        has no flow grid yet. Reading that as "nothing drains into your features"
+        diagnoses a fault that may not exist."""
+        r = build_report(_data(balance=_balance(total_inflow_m3=0.0,
+                                                capture_pct=0.0,
+                                                per_feature=[])))
+        heroes = _sections(r, Hero)
+        assert not any("drains into it" in h.label for h in heroes), (
+            "an unmeasured design was reported as a badly placed one")
 
     def test_drain_hours_none_never_renders_as_zero(self):
         r = build_report(_data(balance=_balance(
@@ -438,13 +451,15 @@ class TestTwoCaptureFigures:
         assert _cell(table, 0, "Volume (simulated)") == fmt_volume(9415.0)
         assert _cell(table, 2, "Volume (simulated)") == fmt_volume(11500.0)
 
-    def test_the_two_share_columns_declare_their_denominators(self):
-        """They divide different totals, and a reader will otherwise subtract
-        one from the other."""
+    def test_the_two_share_columns_say_what_actually_differs(self):
+        """Both divide site-wide runoff. The note used to claim the calculated
+        column divided "the water that reaches your earthworks" — the one
+        paragraph meant to prevent a misreading, instructing the reader wrongly."""
         table = _table(build_report(_data(comparison=_comparison())),
                        "Where the storm's water goes")
-        assert "not measured against the same total" in table.note
-        assert "do not subtract" in table.note
+        assert "divide the runoff the whole block generates" in table.note
+        assert "reaches your earthworks" not in table.note
+        assert "timing" in table.note
 
     def test_no_simulated_columns_without_a_simulation(self):
         table = _table(build_report(_data()), "Where the storm's water goes")
