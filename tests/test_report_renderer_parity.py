@@ -31,6 +31,7 @@ from terrainflow_assessment.modules.reporting import (
     ComparisonResult,
     PostInterventionReport,
     VerificationResult,
+    build_verification,
 )
 from terrainflow_assessment.modules.water_balance import BalanceResult
 from terrainflow_assessment.qgis.adapters import layout_pdf
@@ -67,6 +68,16 @@ class _Earthwork:
     gradient_pct, companion_berm = 1.0, False
 
 
+class _Store:
+    """One ``simulation.EarthworkStore``, as far as the report is concerned.
+
+    Only the three attributes ``_page_schedule`` reads off it. Keyed to
+    ``_Earthwork.id``, because the Cut and Fill columns join on the id and a
+    mismatch would print an em dash that looks like "not calculated".
+    """
+    id, cut_vol_m3, fill_vol_m3 = "a", 5120.0, 2480.0
+
+
 def _full_data():
     """Everything switched on, including the simulation enrichment."""
     return ReportData(
@@ -90,9 +101,25 @@ def _full_data():
             routing_warnings=["A routing warning."],
             per_feature=[_feature()]),
         earthworks=[_Earthwork()],
+        # The Cut/Fill columns of "Every feature, as drawn" come from here and
+        # nowhere else, so without a store the sweep reads a table whose last two
+        # columns are always blank and calls the renderers agreed.
+        balance_stores=[_Store()],
+        # Drives the Earthmoving table, which only exists once a burn has run.
+        burn_quantities={"cut_m3": 8120.0, "fill_m3": 3610.0},
+        # The one figure on the water-fate page that is about the land rather than
+        # the design.
+        natural_ponding_m3=420.0,
+        # The stale-measurements banner above the verification page.
+        edits_since_verify=2,
         verification=VerificationResult(
             analytic_total_m3=1000.0, terrain_total_m3=950.0,
             caveats=["A caveat."],
+            # Two features, one sheet of water. Its own table, and the only place
+            # that volume is counted — the members carry terrain_m3 None.
+            merged_groups=[{"names": ("Swale 1", "Dam 4"),
+                            "rasterisable_m3": 1800.0, "terrain_m3": 1712.0,
+                            "delta_pct": -4.9}],
             # Flagged: the sweep must see a row whose Δ carries the marker and whose
             # explanation lands under the table, since print has no tooltip to hide in.
             per_feature=[{"name": "Swale 1", "analytic_m3": 1000.0,
@@ -215,6 +242,33 @@ class TestContentAgreement:
                         continue
                     assert _escaped(text) in html, (
                         f"{text!r} from {section.title!r} is missing from the HTML")
+
+    @pytest.mark.parametrize("title", [
+        "Every feature, as drawn",                    # balance_stores -> Cut/Fill
+        "Earthmoving — drawn against measured",       # burn_quantities
+        "Features holding one pool between them",     # merged_groups
+        "These measurements are out of date",         # edits_since_verify
+    ])
+    def test_the_fixture_switches_this_section_on(self, title):
+        """The sweep above is only as wide as the fixture that feeds it.
+
+        Each of these sections is gated on a ``ReportData`` field, so a fixture
+        missing the field produces a document without the section and a sweep
+        that passes by having nothing to look at. That is the failure mode this
+        guards: drop a field from ``_full_data`` and the coverage it bought
+        disappears silently, which is how the Earthmoving table, the shared-pool
+        table and the stale banner went unswept until now.
+        """
+        report = build_report(_full_data())
+        titles = [getattr(s, "title", None) for s in report.sections]
+        assert title in titles, f"{title!r} is not in the document: {titles}"
+
+    def test_the_fixture_reaches_the_natural_ponding_prose(self):
+        """No title to assert on — this one is a sentence inside the water page."""
+        report = build_report(_full_data())
+        html = report_html.render_html(report)
+        assert "already collects in" in html, (
+            "natural_ponding_m3 is set on the fixture but no renderer said so")
 
     def test_every_headline_reaches_the_html(self):
         report = build_report(_full_data())
@@ -379,3 +433,62 @@ class TestSimulationEnrichment:
         data = _full_data()
         setattr(data.comparison, field, None)
         assert report_html.render_html(build_report(data))
+
+
+class TestMergedPoolEndToEnd:
+    """One sheet of water across two features, from the maths to the page.
+
+    The pieces were each tested and the path between them was not, which is the
+    gap that let a shared pool report +211% on the basin and −100% on the dam
+    holding it back: the volume is real, but it belongs to neither member alone.
+    ``build_verification`` answers that by making one row for the set and giving
+    the members no individual claim, and this asserts the whole chain — the row
+    is computed, the members stay silent, and the row reaches the document.
+    """
+
+    ANALYTIC = {"Swale 1": 1000.0, "Dam 4": 800.0}
+    MEASURED = 1712.0
+
+    def _verification(self):
+        return build_verification(
+            analytic_by_name=dict(self.ANALYTIC),
+            terrain_by_name={},          # neither feature holds it on its own
+            baseline_total_m3=0.0,
+            earthworks_total_m3=self.MEASURED,
+            min_dims={"Swale 1": 1.2, "Dam 4": 6.0},
+            cell_size=1.0,
+            merged_groups=[{"names": ("Swale 1", "Dam 4"),
+                            "volume_m3": self.MEASURED}],
+        )
+
+    def test_the_group_carries_the_comparison(self):
+        groups = self._verification().merged_groups
+        assert len(groups) == 1, "the pair should produce exactly one shared row"
+        group = groups[0]
+        reference = sum(self.ANALYTIC.values())
+        assert sorted(group["names"]) == ["Dam 4", "Swale 1"]
+        assert group["rasterisable_m3"] == pytest.approx(reference)
+        assert group["terrain_m3"] == pytest.approx(self.MEASURED)
+        # Measured against the members' at-grid figures summed — the same basis a
+        # lone feature is judged on, which is what makes the Δ comparable.
+        assert group["delta_pct"] == pytest.approx(
+            (self.MEASURED - reference) / reference * 100.0)
+
+    def test_a_group_of_one_is_not_a_shared_pool(self):
+        """A single-member group is a lone feature and must use the normal row."""
+        result = build_verification(
+            analytic_by_name={"Swale 1": 1000.0},
+            terrain_by_name={"Swale 1": 950.0},
+            baseline_total_m3=0.0, earthworks_total_m3=950.0,
+            min_dims={"Swale 1": 1.2}, cell_size=1.0,
+            merged_groups=[{"names": ("Swale 1",), "volume_m3": 950.0}],
+        )
+        assert result.merged_groups == []
+
+    def test_the_shared_row_reaches_the_html(self):
+        data = _full_data()
+        data.verification = self._verification()
+        html = report_html.render_html(build_report(data))
+        assert _escaped("Features holding one pool between them") in html
+        assert _escaped("Swale 1 + Dam 4") in html, (
+            "the shared pool's members are not named in the document")
