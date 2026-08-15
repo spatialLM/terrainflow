@@ -129,6 +129,9 @@ class PluginState:
     sim_ponding_masks: dict = field(default_factory=dict)
     sim_ponding_meta: dict | None = None
     sim_ponding_frame_layer_id: str | None = None
+    # The playback frame raster. Held by id like everything else, so
+    # swapping it never depends on matching a layer by its name.
+    sim_frame_layer_id: str | None = None
     sim_ponding_outline_layer_id: str | None = None
 
     # ------------------------------------------------------------------ Reporting

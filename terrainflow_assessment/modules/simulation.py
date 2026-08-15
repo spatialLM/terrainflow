@@ -636,11 +636,18 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
             data[data < 0] = out_meta["nodata"]
             dst.write(data, 1)
 
-        # Snapshot fill state for each store this frame
+        # Snapshot fill state for each store this frame.
+        #
+        # Keyed by `store.id`, not `store.name`. The default earthwork name counts all
+        # features, so deleting one and drawing another reproduces a name already in
+        # use — and two stores sharing a key means one of them silently overwrites the
+        # other's fill state in every frame. The display name travels in the value, so
+        # a caller drawing a label never has to key by it.
         frame_fills = {}
         for store in earthwork_stores:
             fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
-            frame_fills[store.name] = {
+            frame_fills[store.id or store.name] = {
+                "name": store.name,
                 "fill_pct": round(min(fill_pct, 100.0), 1),
                 "overflowed": store.overflowed,
                 "first_overflow_this_step": (
@@ -671,6 +678,9 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     for store in earthwork_stores:
         fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
         earthwork_summary.append({
+            # Carried alongside the name so consumers can join on identity rather
+            # than on a label two features can share.
+            "id": store.id,
             "name": store.name,
             "type": store.ew_type,
             "capacity_m3": round(store.capacity_m3, 1),

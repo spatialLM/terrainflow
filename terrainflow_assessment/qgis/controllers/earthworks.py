@@ -3703,6 +3703,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # collision can never make two rows indistinguishable — they were computed
         # apart and only the label is shared.
         for row in result.per_feature:
+            # `id` stays on the row as well as the label, so anything joining to these
+            # later — the simulation summary does — can match on identity rather than
+            # on a name two features can share.
+            row["id"] = row["name"]
             row["name"] = name_by_id.get(row["name"], row["name"])
         for group in result.merged_groups:
             group["names"] = tuple(name_by_id.get(n, n) for n in group.get("names", ()))

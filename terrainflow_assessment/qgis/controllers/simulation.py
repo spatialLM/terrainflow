@@ -147,6 +147,11 @@ class SimulationController(G.LayerTreeMixin):
 
     def _on_simulation_error(self, tb):
         self._panel.set_simulation_idle()
+        # The message says to look at the console, so put something there. This was
+        # bound and discarded, which made the instruction actively misleading —
+        # baseline and earthworks both print theirs.
+        print("TerrainFlow Assessment — simulation error:")
+        print(tb)
         self._iface.messageBar().pushCritical(
             "TerrainFlow Assessment", "Simulation failed — see Python console."
         )
@@ -188,7 +193,7 @@ class SimulationController(G.LayerTreeMixin):
             for ew in self._state.earthwork_manager.get_enabled():
                 shp = _shp(json.loads(ew.geometry.asJson()))
                 c = shp.centroid
-                self._state.sim_ew_centroids[ew.name] = QgsPointXY(c.x, c.y)
+                self._state.sim_ew_centroids[ew.id] = (QgsPointXY(c.x, c.y), ew.name)
         except Exception:
             pass
 
@@ -235,9 +240,12 @@ class SimulationController(G.LayerTreeMixin):
         v = self._state.verification
         if not v:
             return
-        by_name = {f["name"]: f for f in v.per_feature}
+        # Joined on id. `per_feature` rows carry display names, which two features
+        # can share, so matching on those merged one feature's terrain ponding onto
+        # the other's summary row.
+        by_id = {f.get("id") or f["name"]: f for f in v.per_feature}
         for row in summary:
-            feat = by_name.get(row.get("name"))
+            feat = by_id.get(row.get("id") or row.get("name"))
             if feat:
                 row["terrain_ponding_m3"] = feat["terrain_m3"]
                 row["capacity_delta_pct"] = feat["delta_pct"]
@@ -260,7 +268,10 @@ class SimulationController(G.LayerTreeMixin):
         try:
             with rasterio.open(ponding_path) as src:
                 capacity = src.read(1).astype("float32")
-                nodata = src.nodata or -9999.0
+                # `is not None`, not `or`: a raster that legitimately declares
+                # nodata=0.0 is falsy, and `or` would silently swap it for
+                # -9999 and leave every real hole unmasked.
+                nodata = src.nodata if src.nodata is not None else -9999.0
                 capacity[capacity == nodata] = 0.0
                 self._state.sim_ponding_capacity = capacity
                 self._state.sim_ponding_meta = dict(src.meta)
@@ -282,7 +293,7 @@ class SimulationController(G.LayerTreeMixin):
                     fill=0,
                     dtype="uint8",
                 )
-                self._state.sim_ponding_masks[ew.name] = (mask == 1) & (capacity > 0.001)
+                self._state.sim_ponding_masks[ew.id] = (mask == 1) & (capacity > 0.001)
             except Exception:
                 pass
 
@@ -331,21 +342,35 @@ class SimulationController(G.LayerTreeMixin):
             return
 
         partial = np.zeros_like(capacity, dtype="float32")
-        for name, mask in masks.items():
+        for key, mask in masks.items():
             if not np.any(mask):
                 continue
-            fd = fills.get(name)
+            fd = fills.get(key)
             fraction = min((fd["fill_pct"] / 100.0), 1.0) if fd else 0.0
             partial[mask] = capacity[mask] * fraction
 
-        frame_path = os.path.join(self._state.output_dir, "sim_ponding_frame.tif")
+        # Two filenames, alternated. The previous frame's layer still has its file
+        # open, and on Windows GDAL holds that lock — so rewriting the same path threw,
+        # the bare `except: return` below swallowed it, and playback sat on frame 0
+        # looking like a slow simulation rather than a failure. Removing the layer
+        # first is not enough on its own either: the provider closes lazily, so the
+        # lock can outlive the call. Writing to the file the live layer is *not* using
+        # sidesteps the question entirely.
+        self._sim_frame_slot = 1 - getattr(self, "_sim_frame_slot", 1)
+        frame_path = os.path.join(self._state.output_dir,
+                                  f"sim_ponding_frame_{self._sim_frame_slot}.tif")
         out_meta = dict(meta)
         out_meta.update(dtype="float32", nodata=-9999.0, count=1)
         data = np.where(partial > 0.001, partial, -9999.0).astype("float32")
         try:
             with rasterio.open(frame_path, "w", **out_meta) as dst:
                 dst.write(data, 1)
-        except Exception:
+        except Exception as exc:
+            # Said out loud. A frozen playback with no message is indistinguishable
+            # from a simulation that is simply still thinking.
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"Could not write the ponding frame — playback will not advance ({exc})")
             return
 
         remove_layer(self._project, self._state.sim_ponding_frame_layer_id)
@@ -390,10 +415,10 @@ class SimulationController(G.LayerTreeMixin):
         layer.updateFields()
 
         feats = []
-        for name, pt in self._state.sim_ew_centroids.items():
+        for pt, label in self._state.sim_ew_centroids.values():
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromPointXY(pt))
-            f.setAttributes([name, 0.0, 0])
+            f.setAttributes([label, 0.0, 0])
             feats.append(f)
         pr.addFeatures(feats)
 
@@ -460,9 +485,11 @@ class SimulationController(G.LayerTreeMixin):
 
         path = frame.get("inc" if mode == "inc" else "cum")
         if path and os.path.exists(path):
-            existing = self._project.instance().mapLayersByName("Simulation Frame")
-            for lyr in existing:
-                self._project.instance().removeMapLayer(lyr)
+            # By id, like every other layer the plugin owns. The name scan this
+            # replaces would have removed any layer of the user's called
+            # "Simulation Frame" along with ours.
+            remove_layer(self._project, self._state.sim_frame_layer_id)
+            self._state.sim_frame_layer_id = None
             layer = QgsRasterLayer(path, "Simulation Frame")
             if layer.isValid():
                 global_max = (
@@ -472,12 +499,14 @@ class SimulationController(G.LayerTreeMixin):
                 )
                 self._apply_stream_ramp(layer, global_max)
                 self.place(layer, G.VERIFY)
+                self._state.sim_frame_layer_id = layer.id()
 
         time_labels = self._state.sim_result.get("time_labels", [])
         time_str = time_labels[idx] if idx < len(time_labels) else "—"
 
         fills = frame.get("fills", {})
-        new_overflows = [name for name, fd in fills.items() if fd.get("first_overflow_this_step")]
+        new_overflows = [fd.get("name", key) for key, fd in fills.items()
+                         if fd.get("first_overflow_this_step")]
         overflow_str = ("  ⚠ OVERFLOW: " + ", ".join(new_overflows)) if new_overflows else ""
         self._panel.set_sim_time_label(time_str + overflow_str)
 
@@ -487,11 +516,11 @@ class SimulationController(G.LayerTreeMixin):
             pr = fill_layer.dataProvider()
             pr.truncate()
             feats = []
-            for name, pt in centroids.items():
-                fd = fills.get(name, {"fill_pct": 0.0, "overflowed": False})
+            for key, (pt, label) in centroids.items():
+                fd = fills.get(key, {"fill_pct": 0.0, "overflowed": False})
                 f = QgsFeature()
                 f.setGeometry(QgsGeometry.fromPointXY(pt))
-                f.setAttributes([name, fd["fill_pct"], 1 if fd["overflowed"] else 0])
+                f.setAttributes([label, fd["fill_pct"], 1 if fd["overflowed"] else 0])
                 feats.append(f)
             pr.addFeatures(feats)
             fill_layer.triggerRepaint()
