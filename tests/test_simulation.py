@@ -909,3 +909,205 @@ class TestLayerNodes:
     def test_a_missing_edge_entry_is_treated_as_terminal(self):
         layout = layer_nodes(["a", "b"], {"a": "b"})
         assert layout["b"][0] == 1
+
+
+# ---------------------------------------------------------------------------
+# The simulation and the design tier must describe one network, not two
+# ---------------------------------------------------------------------------
+
+class TestSimulationSharesTheDesignNetwork:
+    """The comparative report puts both tiers side by side, so a difference in how
+    they route or partition water is presented to the reader as a difference in the
+    *design*. These are the two places they used to diverge."""
+
+    def _pair_across_a_ridge(self):
+        """Two features the elevation heuristic links and the flow paths do not.
+
+        `upper` is highest, so "the highest feature below it" is `lower` — but they
+        sit on opposite sides of a ridge and no water can travel between them. The
+        walked routing says `upper` overflows off site.
+        """
+        from terrainflow_assessment.modules.simulation import EarthworkStore
+        upper = EarthworkStore(name="Upper", ew_type="swale", capacity_m3=10.0,
+                               area_m2=0.0, elevation=100.0, id="upper")
+        lower = EarthworkStore(name="Lower", ew_type="basin", capacity_m3=500.0,
+                               area_m2=0.0, elevation=50.0, id="lower")
+        return upper, lower
+
+    def test_overflow_follows_the_flow_path_not_the_elevation_order(self):
+        from terrainflow_assessment.modules.simulation import (
+            RoutingResult,
+            cascade_overflow,
+        )
+
+        upper, lower = self._pair_across_a_ridge()
+        upper.inflow_m3 = 100.0
+        routed = RoutingResult(edges={"upper": None, "lower": None},
+                               is_user={}, order=["upper", "lower"], warnings=[])
+        exited = cascade_overflow([upper, lower], time_hr=1.0, dt_hr=1.0,
+                                  routing=routed)
+
+        assert lower.stored_m3 == 0.0, (
+            "water crossed a ridge — the elevation heuristic, not the flow path")
+        assert exited == 90.0
+
+    def test_without_routing_the_heuristic_sends_it_over_the_ridge(self):
+        """The behaviour being replaced, pinned so the difference is not theoretical."""
+        from terrainflow_assessment.modules.simulation import cascade_overflow
+
+        upper, lower = self._pair_across_a_ridge()
+        upper.inflow_m3 = 100.0
+        exited = cascade_overflow([upper, lower], time_hr=1.0, dt_hr=1.0)
+
+        assert lower.stored_m3 == 90.0
+        assert exited == 0.0
+
+    def test_a_uniform_event_totals_the_same_as_the_design_tier(self):
+        """Timestep the same storm over the same catchments and the event totals must
+        land on the design tier's, which sees it as one lump. They are the two numbers
+        the report prints next to each other."""
+        from terrainflow_assessment.modules.simulation import (
+            RoutingResult,
+            cascade_overflow,
+        )
+        from terrainflow_assessment.modules.water_balance import run_water_balance
+
+        def _stores():
+            from terrainflow_assessment.modules.simulation import EarthworkStore
+            a = EarthworkStore(name="A", ew_type="swale", capacity_m3=60.0,
+                               area_m2=0.0, elevation=100.0, id="a")
+            b = EarthworkStore(name="B", ew_type="basin", capacity_m3=500.0,
+                               area_m2=0.0, elevation=50.0, id="b")
+            return a, b
+
+        routing = RoutingResult(edges={"a": "b", "b": None}, is_user={},
+                                order=["a", "b"], warnings=[])
+
+        # Design tier: one shot, each feature preloaded with its direct catchment.
+        d_a, d_b = _stores()
+        d_a.inflow_m3, d_b.inflow_m3 = 200.0, 40.0
+        balance = run_water_balance([d_a, d_b], duration_hr=1.0,
+                                    total_runoff_m3=240.0, routing=routing)
+
+        # Simulation: the same catchments, delivered in ten equal steps.
+        s_a, s_b = _stores()
+        exited = 0.0
+        for _ in range(10):
+            s_a.inflow_m3 += 20.0
+            s_b.inflow_m3 += 4.0
+            exited += cascade_overflow([s_a, s_b], time_hr=1.0, dt_hr=0.1,
+                                       routing=routing)
+
+        assert s_a.stored_m3 == d_a.stored_m3
+        assert s_b.stored_m3 == d_b.stored_m3
+        assert exited == balance.routed_exit_m3
+        assert s_b.total_inflow_m3 == d_b.total_inflow_m3, (
+            "the downstream feature saw a different volume in the two tiers")
+
+    def test_a_store_list_without_a_labelling_is_refused(self):
+        """There is no correct way to split runoff between features without it, and
+        the model that guessed — cumulative accumulation at the centroid, unpicked by
+        elevation — double-counted every upstream catchment."""
+        import pytest
+
+        from terrainflow_assessment.modules.simulation import (
+            EarthworkStore,
+            _run_simulation,
+        )
+
+        store = EarthworkStore(name="A", ew_type="swale", capacity_m3=1.0,
+                               area_m2=0.0, id="a")
+        with pytest.raises(ValueError, match="catchment"):
+            _run_simulation(
+                dem_path="nonexistent.tif", fdir_path="nonexistent.tif",
+                output_dir=".", cn=75, moisture="normal",
+                rainfall_data=[(0, 0.0), (60, 25.0)],
+                earthwork_stores=[store],
+            )
+
+
+class TestCatchmentPartition:
+    """The partition itself — how a step's runoff is split between features."""
+
+    def _partition(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.simulation import catchment_partition
+
+        # A 3x3 grid: top row to 'a', middle row to 'b', bottom row outside the domain.
+        labels = np.array([[0, 0, 0],
+                           [1, 1, 1],
+                           [-1, -1, -1]], dtype="int32")
+        return catchment_partition(labels, ["a", "b"], (3, 3))
+
+    def test_each_feature_gets_only_the_cells_it_intercepts_first(self):
+        import numpy as np
+
+        part = self._partition()
+        runoff = np.full((3, 3), 2.0)
+        share = part.shares(runoff)
+        assert list(share) == [6.0, 6.0]
+
+    def test_cells_outside_the_domain_belong_to_nobody(self):
+        import numpy as np
+
+        part = self._partition()
+        runoff = np.zeros((3, 3))
+        runoff[2, :] = 100.0        # the un-labelled row
+        assert list(part.shares(runoff)) == [0.0, 0.0]
+
+    def test_crediting_stores_never_double_counts_a_cell(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.simulation import EarthworkStore
+
+        part = self._partition()
+        a = EarthworkStore(name="A", ew_type="swale", capacity_m3=0.0,
+                           area_m2=0.0, id="a")
+        b = EarthworkStore(name="B", ew_type="swale", capacity_m3=0.0,
+                           area_m2=0.0, id="b")
+        part.credit([a, b], np.full((3, 3), 1.0))
+        assert (a.inflow_m3, b.inflow_m3) == (3.0, 3.0)
+        assert a.inflow_m3 + b.inflow_m3 <= 9.0
+
+    def test_a_feature_with_no_catchment_gets_nothing(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.simulation import EarthworkStore
+
+        part = self._partition()
+        ghost = EarthworkStore(name="G", ew_type="swale", capacity_m3=0.0,
+                               area_m2=0.0, id="not-in-the-labelling")
+        part.credit([ghost], np.full((3, 3), 1.0))
+        assert ghost.inflow_m3 == 0.0
+
+    def test_an_empty_labelling_credits_nothing(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.simulation import (
+            EarthworkStore,
+            catchment_partition,
+        )
+
+        part = catchment_partition(np.full((2, 2), -1, dtype="int32"), [], (2, 2))
+        store = EarthworkStore(name="A", ew_type="swale", capacity_m3=0.0,
+                               area_m2=0.0, id="a")
+        part.credit([store], np.ones((2, 2)))
+        assert store.inflow_m3 == 0.0
+
+    def test_a_labelling_from_a_different_grid_is_refused(self):
+        import numpy as np
+        import pytest
+
+        from terrainflow_assessment.modules.simulation import catchment_partition
+
+        with pytest.raises(ValueError, match="different DEM"):
+            catchment_partition(np.zeros((3, 3), dtype="int32"), ["a"], (4, 4))
+
+    def test_a_runoff_array_of_the_wrong_size_is_refused(self):
+        import numpy as np
+        import pytest
+
+        part = self._partition()
+        with pytest.raises(ValueError, match="cells"):
+            part.shares(np.ones((4, 4)))

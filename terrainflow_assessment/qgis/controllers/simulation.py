@@ -49,6 +49,10 @@ class SimulationController(G.LayerTreeMixin):
         self._sim_timer = QTimer()
         self._sim_timer.timeout.connect(self._advance_sim_frame)
 
+        # Set by the plugin: the EarthworksController, which owns the catchment
+        # labelling and the overflow routing this simulation must share.
+        self.design_tier = None
+
     # ---------------------------------------------------------------- Run
 
     def run_simulation(self):
@@ -122,6 +126,20 @@ class SimulationController(G.LayerTreeMixin):
             dem_path=dem_path,
         )
 
+        # The simulation splits runoff by the same direct-catchment labelling the
+        # design tier uses, and cascades along the same overflow network. Ask for them
+        # rather than guessing: a design loaded from file and never edited has had no
+        # live assessment, and there is no honest way to apportion runoff without one.
+        if stores and self.design_tier is not None:
+            self.design_tier.ensure_design_tier()
+        if stores and self._state.catchment_labels is None:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Run the design analysis before simulating — the simulation needs "
+                "each feature's catchment to know where the water goes.",
+            )
+            return
+
         self._state.sim_worker = SimulationWorker(
             dem_path=dem_path,
             fdir_path=fdir_path,
@@ -136,6 +154,9 @@ class SimulationController(G.LayerTreeMixin):
             routing=self._panel.routing,
             earthwork_stores=stores,
             soil_name=self._panel.earthwork_soil_name,
+            catchment_labels=self._state.catchment_labels,
+            catchment_label_ids=self._state.catchment_label_ids,
+            store_routing=self._state.balance_routing,
         )
         self._state.sim_worker.progress.connect(self._panel.set_simulation_progress)
         self._state.sim_worker.completed.connect(self._on_simulation_complete)

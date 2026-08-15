@@ -25,10 +25,15 @@ class SimulationWorker(AbortMixin, QThread):
     cn : int — default Curve Number
     moisture : str — 'dry', 'normal', or 'wet'
     rainfall_data : list of (time_min, cum_rainfall_mm)
-    routing : str — 'dinf' or 'd8'
+    routing : str — 'dinf' or 'd8' (the raster scheme, not the overflow network)
     cn_zones_data : list of dict (optional)
     earthwork_stores : list of EarthworkStore (optional)
     soil_name : str — default soil type for infiltration rate lookup
+    catchment_labels : int array — direct-catchment labelling, required whenever
+        there are stores; it is how runoff is split between features
+    catchment_label_ids : list — label index → earthwork id
+    store_routing : RoutingResult — the overflow network the design tier resolved,
+        so the simulation cascades along the same links the report draws
 
     Signals
     -------
@@ -45,7 +50,9 @@ class SimulationWorker(AbortMixin, QThread):
 
     def __init__(self, dem_path, fdir_path, output_dir, cn, moisture,
                  rainfall_data, routing='dinf', cn_zones_data=None,
-                 earthwork_stores=None, soil_name="Loam"):
+                 earthwork_stores=None, soil_name="Loam",
+                 catchment_labels=None, catchment_label_ids=None,
+                 store_routing=None):
         super().__init__()
         self.dem_path = dem_path
         self.fdir_path = fdir_path
@@ -57,6 +64,9 @@ class SimulationWorker(AbortMixin, QThread):
         self.cn_zones_data = cn_zones_data or []
         self.earthwork_stores = earthwork_stores or []
         self.soil_name = soil_name
+        self.catchment_labels = catchment_labels
+        self.catchment_label_ids = catchment_label_ids
+        self.store_routing = store_routing
 
     def _stage(self, pct, message):
         """Progress callback that doubles as the abort checkpoint.
@@ -81,6 +91,9 @@ class SimulationWorker(AbortMixin, QThread):
                 cn_zones_data=self.cn_zones_data,
                 earthwork_stores=self.earthwork_stores,
                 progress_callback=self._stage,
+                catchment_labels=self.catchment_labels,
+                catchment_label_ids=self.catchment_label_ids,
+                store_routing=self.store_routing,
             )
             self.completed.emit(result)
         except WorkerAborted:

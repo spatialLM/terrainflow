@@ -141,6 +141,12 @@ class TerrainFlowAssessmentPlugin:
         self._reporting = ReportingController(*args)
         self._design_file = DesignFileController(*args)
 
+        # The fill simulation must split runoff and cascade overflow exactly as the
+        # design tier does, or the comparative report shows two networks as one. Both
+        # are produced by the earthworks controller's live assessment, so the
+        # simulation asks it for them rather than resolving a second opinion.
+        self._simulation.design_tier = self._earthworks
+
         self._wire_signals()
         self._wire_project_persistence()
 

@@ -2648,6 +2648,22 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     # ---------------------------------------------------------------- Live assessment
 
+    def ensure_design_tier(self):
+        """Guarantee the catchment labelling and overflow routing exist.
+
+        Both come out of the live assessment, which runs on every design edit, so in
+        normal use they are simply there. They are *not* after a baseline re-run on a
+        design that was loaded from file and never touched — and the fill simulation
+        needs both: the labelling to split runoff between features, the routing to
+        cascade overflow along the same links the design tier and the report use.
+
+        Returns True when a labelling is available. Public because the simulation
+        controller asks for this; everything else here reaches it through an edit.
+        """
+        if self._state.catchment_labels is None or self._state.balance_routing is None:
+            self._recompute_live_assessment()
+        return self._state.catchment_labels is not None
+
     def _recompute_live_assessment(self, geometry_settled=True):
         """Design-tier: recompute the live analytical water balance → panel readout.
 
@@ -2734,6 +2750,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # print — which is why it used to demand a simulation first.
             self._state.balance = result
             self._state.balance_stores = stores
+            # The fill simulation cascades along this same network — see _state.
+            self._state.balance_routing = routing
 
             # Flow network (Live Assessment) — every earthwork, ordered high→low.
             nodes = self._build_network_nodes(all_ews, stores, result)

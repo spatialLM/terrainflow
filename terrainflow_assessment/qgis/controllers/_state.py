@@ -148,6 +148,11 @@ class PluginState:
     # them invites the diversion width/bed-width trap in calculate_cut_volume.
     balance: Any | None = None            # BalanceResult (design tier, live)
     balance_stores: list | None = None    # EarthworkStore list it was built from
+    # The overflow network the balance was routed through (RoutingResult from
+    # resolve_targets, walked along real flow paths). Retained because the fill
+    # simulation must cascade along the same links — routed separately, it produced a
+    # second network that the comparative report then presented as one.
+    balance_routing: Any | None = None
     # {cut_m3, fill_m3} the burn actually moved, measured off the two elevation
     # surfaces. Distinct from the analytic cut/fill above, which assumes flat ground —
     # see earthwork_design.burn_quantities.
@@ -216,6 +221,7 @@ class PluginState:
         self.edits_since_verify = None
         self.balance = None
         self.balance_stores = None
+        self.balance_routing = None
         self.burn_quantities = None
         self.spillway_rows = None
         self.spillway_context = None

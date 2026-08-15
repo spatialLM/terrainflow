@@ -344,6 +344,66 @@ def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
 
 
 
+class CatchmentPartition:
+    """Splits a runoff array between features by direct catchment.
+
+    Each cell belongs to the feature that is the **first** to intercept its runoff
+    (``flow_graph.label_direct_catchments``). Those catchments are mutually exclusive,
+    so a share is never counted twice and there is nothing to subtract afterwards —
+    which is the whole reason the simulation uses them rather than sampling the
+    cumulative accumulation raster. See ``water_balance`` for the double-count this
+    replaced.
+
+    One ``np.bincount`` answers for every feature at once, so the cost per timestep is
+    one pass over the domain regardless of how many features there are.
+    """
+
+    __slots__ = ("lab_flat", "inside", "label_index", "n_labels")
+
+    def __init__(self, lab_flat, inside, label_index):
+        self.lab_flat = lab_flat
+        self.inside = inside
+        self.label_index = label_index
+        self.n_labels = len(label_index)
+
+    def shares(self, values):
+        """Per-label totals of ``values`` (any array shaped like the labelling)."""
+        flat = np.asarray(values).ravel()
+        if flat.shape != self.lab_flat.shape:
+            raise ValueError(
+                f"expected an array of {self.lab_flat.size} cells, got {flat.size}")
+        return np.bincount(self.lab_flat[self.inside],
+                           weights=flat[self.inside],
+                           minlength=max(self.n_labels, 1))
+
+    def credit(self, stores, values):
+        """Add each store's share of ``values`` to its pending ``inflow_m3``."""
+        if not self.n_labels:
+            return
+        share = self.shares(values)
+        for store in stores:
+            idx = self.label_index.get(store.id)
+            if idx is not None and idx < share.size:
+                store.inflow_m3 += max(0.0, float(share[idx]))
+            # else: this feature intercepts nothing — no catchment, no inflow
+
+
+def catchment_partition(catchment_labels, catchment_label_ids, shape):
+    """Build a :class:`CatchmentPartition` over a labelling, checking it fits."""
+    labels_arr = np.asarray(catchment_labels)
+    if labels_arr.shape != tuple(shape):
+        raise ValueError(
+            f"catchment_labels is {labels_arr.shape}, but the grid is {tuple(shape)} — "
+            "the labelling was built on a different DEM."
+        )
+    lab_flat = labels_arr.ravel()
+    return CatchmentPartition(
+        lab_flat=lab_flat,
+        inside=lab_flat >= 0,
+        label_index={sid: i for i, sid in enumerate(catchment_label_ids or [])},
+    )
+
+
 def layer_nodes(node_ids, edges):
     """Lay a flow network out in ranks — ``{id: (rank, order)}``.
 
@@ -425,12 +485,35 @@ def _fdir_nodata(fdir_path, routing):
 
 def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
                     rainfall_data, routing='dinf', cn_zones_data=None,
-                    earthwork_stores=None, progress_callback=None):
+                    earthwork_stores=None, progress_callback=None,
+                    catchment_labels=None, catchment_label_ids=None,
+                    store_routing=None):
     """
     Run the time-stepped simulation and return results.
 
     Parameters and return value match SimulationWorker.completed signal.
     Can also be called directly (without QThread) for testing.
+
+    ``routing`` is the *raster* routing scheme (``'d8'`` / ``'dinf'``) — the flow
+    grid's own. The **overflow** network between features is ``store_routing``,
+    a ``RoutingResult`` from :func:`resolve_targets`; the two are unrelated and the
+    similar names are historical.
+
+    Feature inflow: the design tier and the simulation must answer the same question
+    with the same partition, or the comparative report shows two networks as one.
+    Both therefore split runoff by ``flow_graph.label_direct_catchments`` —
+    ``catchment_labels`` here — where each cell is credited to the feature that
+    *first* intercepts it. Those catchments are mutually exclusive, so summing them
+    never double-counts a shared hillside and no interception correction is needed.
+
+    That correction is the reason for the hard requirement below. The previous model
+    sampled the **cumulative** accumulation raster at each feature's centroid, which
+    counts every upstream feature's catchment again, and then unpicked it by
+    subtracting upstream capture ranked purely on centroid elevation — while
+    ``cascade_overflow`` added the upstream overflow back on top, so pass-through
+    water was double-counted regardless. ``water_balance.py`` removed exactly that
+    correction for exactly that reason. There is no correct fallback without a
+    labelling, so a store list arrives with one or the call fails.
     """
     from pysheds.grid import Grid
 
@@ -442,6 +525,12 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
 
     earthwork_stores = earthwork_stores or []
     scs = SCSRunoff()
+
+    if earthwork_stores and catchment_labels is None:
+        raise ValueError(
+            "The simulation needs the direct-catchment labelling to split runoff "
+            "between features. Run the design analysis first."
+        )
 
     _p(2, "Loading DEM for simulation...")
     with rasterio.open(dem_path) as src:
@@ -489,6 +578,9 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     n_steps = len(rainfall_data) - 1
     if n_steps < 1:
         raise ValueError("rainfall_data must have at least 2 entries.")
+
+    partition = (catchment_partition(catchment_labels, catchment_label_ids, shape)
+                 if earthwork_stores else None)
 
     frames = []
     cum_acc = np.zeros(shape, dtype="float64")
@@ -551,50 +643,19 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         total_runoff_m3_step = float(np.sum(dq_m3))
 
         if earthwork_stores:
-            # Sample the weighted accumulation raster at each earthwork's
-            # centroid to get the raw m³ of runoff flowing to that location.
-            # inc_acc[r,c] is the *cumulative* upstream runoff, so a downstream
-            # store would double-count water already intercepted by upstream stores.
-            # Fix: process highest-elevation stores first and subtract their
-            # captured volume from every downstream store's raw accumulation.
-            sorted_by_elev = sorted(
-                earthwork_stores, key=_top_down_key, reverse=True
-            )
-            # Map name → (raw_acc, captured_this_step) for upstream subtraction
-            captured_this_step: dict = {}
-
-            for store in sorted_by_elev:
-                r, c = store.centroid_row, store.centroid_col
-                if r is not None and c is not None:
-                    r = max(0, min(r, inc_acc.shape[0] - 1))
-                    c = max(0, min(c, inc_acc.shape[1] - 1))
-                    raw_inflow = max(0.0, float(inc_acc[r, c]))
-
-                    # Subtract volumes captured by all upstream (higher) stores
-                    upstream_captured = sum(
-                        captured_this_step.get(s.name, 0.0)
-                        for s in earthwork_stores
-                        if s is not store
-                        and s.elevation_known and store.elevation_known
-                        and s.elevation > store.elevation
-                    )
-                    actual_inflow = max(0.0, raw_inflow - upstream_captured)
-                    store.inflow_m3 += actual_inflow
-
-                    # Estimate this store's capture for downstream correction:
-                    # it can store at most (capacity - current stored) m³.
-                    available_space = max(
-                        0.0, store.capacity_m3 - store.stored_m3
-                    )
-                    captured_this_step[store.name] = min(
-                        actual_inflow, available_space
-                    )
-                # else: no raster position — store gets no inflow (centroid outside DEM)
+            # Each feature takes the runoff from the cells it is the FIRST to
+            # intercept. Mutually exclusive by construction, so there is nothing to
+            # subtract afterwards — the upstream feature's share simply is not in the
+            # downstream feature's total, and whatever the upstream one cannot hold
+            # arrives below as overflow through the cascade, once.
+            if partition is not None:
+                partition.credit(earthwork_stores, dq_m3)
 
             step_exit = cascade_overflow(
                 stores=earthwork_stores,
                 time_hr=time_hr,
                 dt_hr=dt_hr,
+                routing=store_routing,
             )
             total_site_outflow_m3 += step_exit
             outflow_ls = step_exit * 1000.0 / dt_s
