@@ -146,6 +146,14 @@ class AssessmentPanel(QDockWidget):
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
     reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
+    # The other three buttons under the earthworks table. Signals like every
+    # other control, rather than the plugin reaching in for `_ew_edit_btn` and
+    # connecting to a private widget — which is the one arrangement that breaks
+    # silently when the panel is rebuilt, because a renamed attribute is an
+    # AttributeError at wiring time and a *moved* one is no error at all.
+    edit_earthwork_requested_by_button = pyqtSignal()
+    delete_earthwork_requested = pyqtSignal()
+    toggle_earthwork_requested = pyqtSignal()
     place_spillway_requested = pyqtSignal(str)    # 'outflow' | 'inflow'
     # Same, but naming the feature by row — the Spillways list has its own rows and
     # should not have to reach through the flow network's selection to say which.
@@ -1228,6 +1236,9 @@ class AssessmentPanel(QDockWidget):
         # Connections
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
+        self._ew_edit_btn.clicked.connect(self.edit_earthwork_requested_by_button)
+        self._ew_delete_btn.clicked.connect(self.delete_earthwork_requested)
+        self._ew_toggle_btn.clicked.connect(self.toggle_earthwork_requested)
         self._before_after_check.toggled.connect(self.before_after_toggled)
         self._catchment_layer_check.toggled.connect(self.toggle_catchment_layer_requested)
 
@@ -1972,6 +1983,14 @@ class AssessmentPanel(QDockWidget):
         self._sim_progress.setVisible(True)
         self._sim_progress.setValue(pct)
         self._sim_progress.setFormat(f"{msg} ({pct}%)")
+
+    def sim_frame(self):
+        """Which playback frame the slider is showing."""
+        return self._sim_slider.value()
+
+    def set_sim_frame(self, index):
+        """Show a playback frame. Emits ``sim_frame_changed`` as a user drag would."""
+        self._sim_slider.setValue(int(index))
 
     def set_simulation_ready(self, result):
         self.set_simulation_idle()

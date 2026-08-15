@@ -245,9 +245,9 @@ class TerrainFlowAssessmentPlugin:
         p.earthwork_selected.connect(ew.highlight_selected_earthwork)
 
         # Earthworks table buttons
-        p._ew_edit_btn.clicked.connect(ew.edit_selected_earthwork)
-        p._ew_delete_btn.clicked.connect(ew.delete_selected_earthwork)
-        p._ew_toggle_btn.clicked.connect(ew.toggle_selected_earthwork)
+        p.edit_earthwork_requested_by_button.connect(ew.edit_selected_earthwork)
+        p.delete_earthwork_requested.connect(ew.delete_selected_earthwork)
+        p.toggle_earthwork_requested.connect(ew.toggle_selected_earthwork)
 
         # Direct-catchment layer (one colour per earthwork)
         p.toggle_catchment_layer_requested.connect(ew.toggle_catchment_layer)

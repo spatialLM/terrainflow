@@ -73,6 +73,10 @@ class ContourFeature:
         self.cell_area_m2 = cell_area_m2
         self.runoff_mm = runoff_mm
         self.selected = True   # user can deselect individual contours
+        # Position in the candidate list, set by whoever builds that list. The
+        # feature's only unique handle: elevation, rank and length can all be
+        # shared by two contours. -1 until it is in a list.
+        self.index = -1
 
     @property
     def inflow_m3(self):

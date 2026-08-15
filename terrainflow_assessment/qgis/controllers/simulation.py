@@ -641,8 +641,7 @@ class SimulationController(G.LayerTreeMixin):
         if not self._state.sim_result:
             return
         n = len(self._state.sim_result.get("frames", []))
-        slider = self._panel._sim_slider
-        next_idx = slider.value() + 1
+        next_idx = self._panel.sim_frame() + 1
         if next_idx >= n:
             next_idx = 0
-        slider.setValue(next_idx)
+        self._panel.set_sim_frame(next_idx)
