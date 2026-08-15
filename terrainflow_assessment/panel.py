@@ -1714,6 +1714,15 @@ class AssessmentPanel(QDockWidget):
     def set_earthworks_progress(self, pct, msg):
         self._run_ew_btn.set_progress(pct, f"{msg} ({pct}%)")
 
+    def set_earthworks_idle(self):
+        """Re-arm the button without claiming the Verify stage is done.
+
+        The terrain-capacity sweep borrows this button's progress bar — it is the
+        same DEM work on the same features — but it is a measurement, not a
+        verification, and `set_earthworks_complete` ticks the stage green.
+        """
+        self._run_ew_btn.set_done()
+
     def set_earthworks_complete(self, summary=""):
         self._run_ew_btn.set_done()
         self._earthworks_results_lbl.setText(summary)

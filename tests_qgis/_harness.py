@@ -111,8 +111,9 @@ def make_workers_synchronous():
     """
     from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
     from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
+    from terrainflow_assessment.qgis.workers.task_worker import TaskWorker
 
-    for cls in (AnalysisWorker, SimulationWorker):
+    for cls in (AnalysisWorker, SimulationWorker, TaskWorker):
         if getattr(cls, "_tf_sync_patched", False):
             continue
         cls.start = cls.run

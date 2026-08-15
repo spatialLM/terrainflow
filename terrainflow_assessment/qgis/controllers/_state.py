@@ -173,7 +173,13 @@ class PluginState:
     # ------------------------------------------------------------------ Workers (prevent GC)
     analysis_worker: Any | None = None
     sim_worker: Any | None = None
-    keypoint_worker: Any | None = None
+    # The heavy analyses that are not the baseline or the simulation, one slot per
+    # controller so a contour run and a design burn can proceed at once but two of
+    # either cannot. `keypoint_worker` was declared for this and never used; it is
+    # renamed because the slot now carries contours, segments, keypoints and the
+    # keyline, not keypoints alone.
+    contour_worker: Any | None = None
+    design_worker: Any | None = None
 
     # ------------------------------------------------------------------ Cache invalidation
     # Lives on the state rather than a controller so any controller can invalidate

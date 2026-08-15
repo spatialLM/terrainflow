@@ -56,6 +56,7 @@ from terrainflow_assessment.qgis.controllers._layers import (
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
+from terrainflow_assessment.qgis.workers.task_worker import TaskWorker
 
 
 class EarthworksController(G.LayerTreeMixin, MapToolMixin):
@@ -1077,6 +1078,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not self._state.dem_path:
             ew.terrain_capacity_m3 = None
             return
+        # The burn holds `state.burner` for several seconds on a worker thread, and
+        # this floods the same object. Two floods at once would interleave their
+        # `warnings` and share whatever scratch the burner keeps, so an edit made
+        # mid-burn leaves its capacity for the run that follows rather than racing
+        # this one. `_recompute_live_assessment` still redraws off the cached figures.
+        if worker_is_running(self._state, "design_worker"):
+            return
         try:
             from terrainflow_assessment.modules.earthwork_design import DEMBurner
             burner = self._state.burner or DEMBurner(self._state.dem_path)
@@ -1103,14 +1111,86 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """
         ews = [e for e in self._state.earthwork_manager.get_all() if e.enabled]
         if not ews or not self._state.dem_path:
-            return
+            return False
+        if worker_is_running(self._state, "design_worker"):
+            # Both this and the burn hold `state.burner`; see _refresh_terrain_capacity.
+            return False
+
+        from terrainflow_assessment.modules.earthwork_design import DEMBurner
+
+        burner = self._state.burner or DEMBurner(self._state.dem_path)
+        baseline_ponding = self._cached_baseline_ponding(
+            burner.shape, burner.transform)
+        # A flood per feature at ~0.1-0.3 s: on a forty-feature design that is ten
+        # seconds of frozen window, which is why it moved off the GUI thread.
+        # Measured here, applied to the features in the completion handler — an
+        # Earthwork is plain Python, but so is every other rule in this file about
+        # what the worker may touch, and one exception is how the rule stops being
+        # one. `feature_storage` reads the burner and nothing else.
+        def work(report):
+            measured = []
+            for i, ew in enumerate(ews):
+                report(int(5 + 90 * i / len(ews)),
+                       f"Measuring {ew.name} ({i + 1} of {len(ews)})…")
+                if ew.type == "dam":
+                    measured.append((ew, None))
+                    continue
+                try:
+                    measured.append(
+                        (ew, burner.feature_storage(
+                            ew, baseline_ponding=baseline_ponding)))
+                except Exception as exc:
+                    print(f"TerrainFlow Assessment — terrain capacity error: {exc}")
+                    measured.append((ew, False))
+            return measured
+
+        def _failed(tb):
+            # Its own handler: `_on_analysis_error` marks the Verify stage failed,
+            # and a measurement that could not be taken is not a verification that
+            # came back wrong. The readouts fall back to the drawn figures, which
+            # is what they show before any measurement anyway.
+            self._panel.set_earthworks_idle()
+            print("TerrainFlow Assessment — terrain measurement error:\n" + tb)
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Could not measure terrain storage — the readouts show the drawn "
+                "figures. See the Python console.")
+            self.recompute_catchments()
+            self._recompute_live_assessment()
+
+        worker = TaskWorker(work, label="terrain capacities")
+        worker.progress.connect(self._panel.set_earthworks_progress)
+        worker.completed.connect(self._on_terrain_capacities_ready)
+        worker.error.connect(_failed)
+        self._state.design_worker = worker
         self._iface.messageBar().pushInfo(
             "TerrainFlow Assessment",
             f"Measuring what {len(ews)} features hold on this terrain…")
-        for ew in ews:
-            self._refresh_terrain_capacity(ew, quiet=True)
-        for ew in ews:
+        self._panel.set_earthworks_progress(1, "Measuring terrain storage…")
+        worker.start()
+        return True
+
+    def _on_terrain_capacities_ready(self, measured):
+        for ew, storage in measured:
+            if storage is None:                     # a dam: capacity_m3 IS this figure
+                ew.terrain_capacity_m3 = (
+                    float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None)
+                continue
+            if storage is False:                    # measurement failed; say nothing new
+                ew.terrain_capacity_m3 = None
+                continue
+            ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
+            ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
+            ew.retained_depth_m = round(storage.retained_depth_m, 2)
+        for ew, _ in measured:
             self._warn_impoundment(ew)
+        self._panel.set_earthworks_idle()
+        # The scoring follows the measurement, as it did when this was inline. The
+        # capacities are the basis the assessment scores on, and painting first
+        # against the drawn figures shows every keyed swale full and then corrects
+        # itself — which is the flicker the restore path's own comment rules out.
+        self.recompute_catchments()
+        self._recompute_live_assessment()
 
     def _warn_impoundment(self, ew):
         """Surface the retaining-structure advisory for *ew*, if it has become one."""
@@ -1250,14 +1330,21 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 lambda: self._panel.refresh_earthwork_list(manager.get_all()),
                 self._refresh_ew_layer,
                 self._refresh_spillway_layer,
-                self._refresh_all_terrain_capacities,
-                self.recompute_catchments,
-                self._recompute_live_assessment,
             ):
                 try:
                     step()
                 except Exception as exc:
                     print(f"TerrainFlow Assessment — restore step failed: {exc}")
+
+            # Measuring is threaded now, so the two steps that consume it are
+            # chained to its completion rather than following it in this list. When
+            # nothing is measured there is nothing to wait for and they run here.
+            try:
+                if not self._refresh_all_terrain_capacities():
+                    self.recompute_catchments()
+                    self._recompute_live_assessment()
+            except Exception as exc:
+                print(f"TerrainFlow Assessment — restore step failed: {exc}")
 
             if source:
                 self._iface.messageBar().pushInfo(
@@ -3389,12 +3476,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         )
 
     def run_with_earthworks(self):
-        # Before the burn, not just before the start. The burn below is synchronous
-        # and takes seconds on a real DEM, so a guard at the `start()` call leaves a
-        # window where a second click is already partway through burning against the
-        # same state — and the two runs then race to assign `state.analysis_worker`,
-        # which is the only reference keeping the first thread alive.
-        if worker_is_running(self._state, "analysis_worker"):
+        # Both slots. The run is two stages now — a burn on `design_worker`, then
+        # the analysis it feeds on `analysis_worker` — and a second click during
+        # either would burn against state the first is still using, then race to
+        # assign the slot that is the only reference keeping its thread alive.
+        if (worker_is_running(self._state, "analysis_worker")
+                or worker_is_running(self._state, "design_worker")):
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
                 "An analysis is already running — wait for it to finish.")
@@ -3421,26 +3508,49 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             )
             return
 
-        modified_dem = self._state.burner.burn_earthworks(enabled)
-        # Surface Strategy-C honesty warnings (sub-cell features, resolution-cap
-        # degrade) so a 1-cell routing approximation is never silent.
-        for msg in getattr(self._state.burner, "warnings", []):
-            self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
+        # The burn is seconds of numpy on a real DEM and used to run right here, on
+        # the GUI thread, with no repaint possible — which is what put "Not
+        # Responding" over a plugin that was working. It goes to a worker; the
+        # analysis it feeds is started from the completion handler.
+        burner = self._state.burner
         mod_path = os.path.join(self._state.output_dir, "modified_dem.tif")
-        self._state.burner.save(modified_dem, mod_path)
-        self._state.modified_dem_path = mod_path
+        cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
 
-        # What the terrain model actually moved, measured here because both surfaces are
-        # in hand. The report prints it beside the drawn-section figure, which assumes
-        # flat ground and so understates a level cut on any real slope.
-        try:
+        def work(report):
             from terrainflow_assessment.modules.earthwork_design import burn_quantities
-            cell_area = (self._state.dem_info.cell_area_m2
-                         if self._state.dem_info else 1.0)
-            self._state.burn_quantities = burn_quantities(
-                self._state.burner.original, modified_dem, cell_area)
-        except Exception:
-            self._state.burn_quantities = None
+
+            report(5, "Cutting the design into the terrain…")
+            modified_dem = burner.burn_earthworks(enabled)
+            report(20, "Saving the burned surface…")
+            burner.save(modified_dem, mod_path)
+            # What the terrain model actually moved, measured here because both
+            # surfaces are in hand. The report prints it beside the drawn-section
+            # figure, which assumes flat ground and so understates a level cut on
+            # any real slope.
+            try:
+                moved = burn_quantities(burner.original, modified_dem, cell_area)
+            except Exception:
+                moved = None
+            return {"path": mod_path, "burn_quantities": moved,
+                    "warnings": list(getattr(burner, "warnings", []))}
+
+        worker = TaskWorker(work, label="burn")
+        worker.progress.connect(self._panel.set_earthworks_progress)
+        worker.completed.connect(self._on_burn_complete)
+        worker.error.connect(self._on_analysis_error)
+        self._state.design_worker = worker
+        self._panel.set_earthworks_progress(1, "Starting…")
+        worker.start()
+
+    def _on_burn_complete(self, burned):
+        """Back on the GUI thread: report the burn, then run the analysis on it."""
+        for msg in burned["warnings"]:
+            # Strategy-C honesty warnings (sub-cell features, resolution-cap
+            # degrade) so a 1-cell routing approximation is never silent.
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
+        self._state.modified_dem_path = burned["path"]
+        self._state.burn_quantities = burned["burn_quantities"]
+        mod_path = burned["path"]
 
         cell_area_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
         threshold_cells = int(

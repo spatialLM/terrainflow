@@ -51,6 +51,12 @@ class WorkerAborted(Exception):
     """Raised inside a worker's ``run()`` when cancellation was requested."""
 
 
+#: Every slot on ``PluginState`` that can hold a live QThread. A worker missing
+#: from here is one ``unload`` will not wait for, which is how a thread outlives
+#: the plugin and QGIS aborts on "Destroyed while thread is still running".
+WORKER_SLOTS = ("analysis_worker", "sim_worker", "contour_worker", "design_worker")
+
+
 def join_workers(state, timeout_ms=10_000):
     """Ask every live worker on *state* to stop, and wait until it has.
 
@@ -59,7 +65,7 @@ def join_workers(state, timeout_ms=10_000):
     empty list means nothing is still writing.
     """
     stragglers = []
-    for attr in ("analysis_worker", "sim_worker"):
+    for attr in WORKER_SLOTS:
         worker = getattr(state, attr, None)
         if worker is None:
             continue

@@ -21,7 +21,7 @@ controllers (QGIS glue) → modules (pure logic).
 | UI | `panel.py`, `earthwork_properties_dialog.py`, `design_intensity_dialog.py`, `rainfall_data_dialog.py` | All buttons/inputs/tooltips/tables + the signals they emit |
 | Widgets | `qgis/widgets/` (`network_view`, `verification_table`, `scorecard`, `stepper`, `tool_menu`, `run_button`) | Custom-painted panel components |
 | Controllers | `qgis/controllers/` (`baseline`, `contour`, `earthworks`, `simulation`, `reporting`, `_state`, `_layers`, `_groups`) | Per-feature QGIS glue: run analysis, render layers, styling |
-| Workers | `qgis/workers/` | Background threads (analysis, simulation) |
+| Workers | `qgis/workers/` | Background threads. `analysis_worker` / `simulation_worker` are bespoke; `task_worker.TaskWorker` runs any single callable off the GUI thread (contours, segments, keypoints, keyline, the burn, terrain capacities) |
 | Adapters | `qgis/adapters/` (`project`, `geom`, `map_image`, `layout_pdf`) | Thin `QgsProject`/geometry wrappers, plus offscreen map rendering and the PDF print-layout builder |
 | Modules | `modules/` | **Pure analysis logic, no QGIS UI** — the testable core |
 | Map tools | `map_tools/` | Interactive canvas clicking (draw, select, query, connect) |
@@ -154,7 +154,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, ~6 min (149 checks). Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, ~6 min (185 checks). Exit code gates.
 .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
 .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
 .\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
@@ -175,7 +175,8 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
   makes the suite deterministic — and what makes every concurrency fault invisible:
   `isRunning()` is never True, so a double-start or a teardown-during-run cannot be
   constructed. A module opts out with a top-level `REAL_THREADS = True`
-  (`checks_threading.py`). Don't reach for it elsewhere. Inside such a module the
+  (`checks_threading.py` for the analysis/simulation workers,
+  `checks_threading_tasks.py` for the `TaskWorker` ones). Don't reach for it elsewhere. Inside such a module the
   harness's own helpers stop being synchronous — `h.run_baseline()` returns while the
   thread runs, so touching `state.analysis_worker` afterwards commits the very bug under
   test; use `run_baseline_and_wait`. Determinism comes from parking a worker on a

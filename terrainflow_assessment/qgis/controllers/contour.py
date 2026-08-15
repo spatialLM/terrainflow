@@ -36,6 +36,8 @@ from terrainflow_assessment.qgis.controllers._layers import (
     resolve_layer,
 )
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
+from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
+from terrainflow_assessment.qgis.workers.task_worker import TaskWorker
 
 # Width, in mm, for the four inflow bands — the primary signal, not decoration.
 # Over aerial imagery width is the one channel the background cannot destroy: a
@@ -74,6 +76,51 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         # which fires selectionChanged, which would select rows again.
         self._syncing_selection = False
 
+    # ---------------------------------------------------------------- Threaded tasks
+
+    def _claim_worker(self, what):
+        """True if this controller's worker slot is free, having said so if not.
+
+        The four analyses here share one slot. They all read the same DEM and the
+        same accumulation raster and each takes seconds, so running two at once
+        buys nothing and costs the memory of two full grids — and the second would
+        overwrite ``contour_worker``, which is the only reference keeping the first
+        thread alive.
+        """
+        if worker_is_running(self._state, "contour_worker"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{what} is waiting — another analysis is still running.")
+            return False
+        return True
+
+    def _start_task(self, work, label, on_progress, on_done, on_failed, failure_title):
+        """Run *work* on this controller's worker and wire up its three outcomes.
+
+        *on_failed* re-arms the button; it is called on the error path only, since
+        the success path re-arms inside *on_done* where the summary text is known.
+        """
+        worker = TaskWorker(work, label=label)
+        worker.progress.connect(on_progress)
+        worker.completed.connect(on_done)
+
+        def _failed(tb):
+            on_failed()
+            # The console gets the traceback; the bar gets the headline. A message
+            # that says "see the console" with nothing in it is worse than silence.
+            print(f"TerrainFlow Assessment — {failure_title}:")
+            print(tb)
+            self._iface.messageBar().pushCritical(
+                "TerrainFlow Assessment",
+                f"{failure_title} — see the Python console.")
+
+        worker.error.connect(_failed)
+        self._state.contour_worker = worker
+        # Disabled at click time, not when the first progress arrives: the gap
+        # between them is a real window and a second click lands in it.
+        on_progress(1, "Starting…")
+        worker.start()
+
     # ---------------------------------------------------------------- Contour analysis
 
     def run_contour_analysis(self):
@@ -89,49 +136,65 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             )
             return
 
+        if not self._claim_worker("Contour analysis"):
+            return
+
         # Deactivate any contour-picking map tool so it can't outlive the layer
         # swap (its captured layer would become a dead reference → crash).
         self._reset_contour_map_tool()
 
         from terrainflow_assessment.modules.contour_analysis import analyse_contours
 
-        def _progress(pct, msg):
-            self._panel.set_contour_progress(pct, msg)
+        # Every setting is read here, on the GUI thread, and captured. Reaching back
+        # into the panel from inside the work would be reading Qt state off the
+        # worker thread — the fault this whole change exists to remove.
+        dem_path = self._state.dem_path
+        interval_m = self._panel.contour_interval_m
+        max_slope_deg = self._panel.max_slope_deg
+        usable_polygon = self._state.usable_polygon
+        cell_area_m2 = (self._state.dem_info.cell_area_m2
+                        if self._state.dem_info else None)
+        runoff_mm = (self._state.baseline_result or {}).get("runoff_mm")
+        min_length_m = self._panel.min_contour_length_m
 
-        try:
-            contours = analyse_contours(
-                dem_path=self._state.dem_path,
+        def work(report):
+            return analyse_contours(
+                dem_path=dem_path,
                 acc_path=acc_path,
-                interval_m=self._panel.contour_interval_m,
-                max_slope_deg=self._panel.max_slope_deg,
-                usable_polygon=self._state.usable_polygon,
-                progress_callback=_progress,
-                cell_area_m2=self._state.dem_info.cell_area_m2 if self._state.dem_info else None,
-                runoff_mm=(self._state.baseline_result or {}).get("runoff_mm"),
-                min_length_m=self._panel.min_contour_length_m,
+                interval_m=interval_m,
+                max_slope_deg=max_slope_deg,
+                usable_polygon=usable_polygon,
+                progress_callback=report,
+                cell_area_m2=cell_area_m2,
+                runoff_mm=runoff_mm,
+                min_length_m=min_length_m,
             )
-            self._state.contour_features = contours
-            # A fresh run replaces the candidates, so anything derived from the old
-            # ones (the top-N subset, the segments the overlay grades, and the two
-            # gradients drawn from them) is stale. Dropping the gradient layers
-            # matters more than it looks: the gradient switches the candidate
-            # contours off while it is up, so a stale one left behind would keep
-            # the new candidates hidden.
-            self._state.top_contour_features = []
-            self._state.segment_features = []
-            for attr in ("inflow_bands_layer_id", "segment_gradient_layer_id"):
-                remove_layer(self._project, getattr(self._state, attr))
-                setattr(self._state, attr, None)
-            self._panel.set_contour_complete()
-            self._panel.set_contour_results(contours)
-            self._display_contour_layer(contours)
-            self._panel.set_contour_legend(self._state.contour_breaks,
-                                           self._contour_value_unit())
-        except Exception as exc:
-            self._panel.set_contour_complete()
-            self._iface.messageBar().pushCritical(
-                "TerrainFlow Assessment", f"Contour analysis failed: {exc}"
-            )
+
+        self._start_task(work, "contours",
+                         self._panel.set_contour_progress,
+                         self._on_contours_ready,
+                         self._panel.set_contour_complete,
+                         "Contour analysis failed")
+
+    def _on_contours_ready(self, contours):
+        """Back on the GUI thread — every layer below belongs to it."""
+        self._state.contour_features = contours
+        # A fresh run replaces the candidates, so anything derived from the old
+        # ones (the top-N subset, the segments the overlay grades, and the two
+        # gradients drawn from them) is stale. Dropping the gradient layers
+        # matters more than it looks: the gradient switches the candidate
+        # contours off while it is up, so a stale one left behind would keep
+        # the new candidates hidden.
+        self._state.top_contour_features = []
+        self._state.segment_features = []
+        for attr in ("inflow_bands_layer_id", "segment_gradient_layer_id"):
+            remove_layer(self._project, getattr(self._state, attr))
+            setattr(self._state, attr, None)
+        self._panel.set_contour_complete()
+        self._panel.set_contour_results(contours)
+        self._display_contour_layer(contours)
+        self._panel.set_contour_legend(self._state.contour_breaks,
+                                       self._contour_value_unit())
 
     def _contour_value(self, feat):
         """The quantity the candidate contours are banded and ranked on.
@@ -618,41 +681,47 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             )
             return
 
+        if not self._claim_worker("Segment analysis"):
+            return
+
         from terrainflow_assessment.modules.contour_analysis import find_swale_segments
         from terrainflow_assessment.modules.swale_design import get_infiltration_rate
 
-        def _progress(pct, msg):
-            self._panel.set_segment_progress(pct, msg)
+        # Read on the GUI thread, captured for the worker. See run_contour_analysis.
+        kwargs = dict(
+            contours=self._state.contour_features,
+            acc_path=acc_path,
+            cell_area_m2=(self._state.dem_info.cell_area_m2
+                          if self._state.dem_info else 1.0),
+            runoff_mm=(self._state.baseline_result or {}).get("runoff_mm"),
+            min_acc_ha=self._panel.min_catchment_ha,
+            swale_depth_m=self._panel.swale_depth_m,
+            swale_width_m=self._panel.swale_width_m,
+            infiltration_mm_hr=get_infiltration_rate(self._panel.earthwork_soil_name),
+            duration_hr=self._panel.duration_hr,
+            rank_mode=self._panel.segment_rank_mode,
+            slope_path=self._state.slope_raster_path,
+            seg_max_slope_deg=self._panel.seg_max_slope_deg,
+        )
 
-        try:
-            segments = find_swale_segments(
-                contours=self._state.contour_features,
-                acc_path=acc_path,
-                cell_area_m2=self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0,
-                runoff_mm=(self._state.baseline_result or {}).get("runoff_mm"),
-                min_acc_ha=self._panel.min_catchment_ha,
-                swale_depth_m=self._panel.swale_depth_m,
-                swale_width_m=self._panel.swale_width_m,
-                infiltration_mm_hr=get_infiltration_rate(self._panel.earthwork_soil_name),
-                duration_hr=self._panel.duration_hr,
-                rank_mode=self._panel.segment_rank_mode,
-                slope_path=self._state.slope_raster_path,
-                seg_max_slope_deg=self._panel.seg_max_slope_deg,
-                progress_callback=_progress,
-            )
-            self._state.segment_features = segments
-            self._panel.set_segment_complete()
-            self._panel.set_segment_results(segments)
-            self._display_swale_segments(segments)
-            # A new set of segments needs a new overlay, not the previous one
-            # sitting over geometry that has moved.
-            if self._panel.segment_gradient_active:
-                self.show_segment_gradient(True)
-        except Exception as exc:
-            self._panel.set_segment_complete()
-            self._iface.messageBar().pushCritical(
-                "TerrainFlow Assessment", f"Segment analysis failed: {exc}"
-            )
+        def work(report):
+            return find_swale_segments(progress_callback=report, **kwargs)
+
+        self._start_task(work, "segments",
+                         self._panel.set_segment_progress,
+                         self._on_segments_ready,
+                         self._panel.set_segment_complete,
+                         "Segment analysis failed")
+
+    def _on_segments_ready(self, segments):
+        self._state.segment_features = segments
+        self._panel.set_segment_complete()
+        self._panel.set_segment_results(segments)
+        self._display_swale_segments(segments)
+        # A new set of segments needs a new overlay, not the previous one
+        # sitting over geometry that has moved.
+        if self._panel.segment_gradient_active:
+            self.show_segment_gradient(True)
 
     def _display_swale_segments(self, segments):
         from qgis.core import QgsTextBufferSettings
@@ -952,59 +1021,65 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                                 "Run baseline analysis first.")
             return
 
+        if not self._claim_worker("Keypoint analysis"):
+            return
+
         from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
 
-        self._panel.set_keypoint_progress(5, "Loading DEM…")
-        try:
-            cell_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 100.0
-            min_acc = max(50, int(1.0 * 10_000 / cell_m2))
+        # The boundary mask is built here rather than in the worker: it rasterises a
+        # project layer, and the vector layers belong to the GUI thread.
+        self._panel.set_keypoint_progress(5, "Building boundary mask…")
+        dem_path = self._state.dem_path
+        boundary_mask = self._get_keypoint_boundary_mask(dem_path)
+        cell_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 100.0
+        min_acc = max(50, int(1.0 * 10_000 / cell_m2))
+        n_keypoints = self._panel.keypoint_count
+        pond_path = (self._state.baseline_result or {}).get("pond_flow")
 
-            self._panel.set_keypoint_progress(15, "Building boundary mask…")
-            boundary_mask = self._get_keypoint_boundary_mask(self._state.dem_path)
-
-            self._panel.set_keypoint_progress(25, "Finding keypoints…")
+        def work(report):
+            report(25, "Finding keypoints…")
             # The pond raster goes with the accumulation: inside a contracted pond the
-            # accumulation is no longer contributing area, and every test in here reads it
-            # as if it were. Without it a reservoir floor comes back as a ridgeline.
-            ka = DrainageLineAnalysis(
-                self._state.dem_path, acc_path,
-                (self._state.baseline_result or {}).get("pond_flow"),
-            )
-            self._state.keyline_analysis = ka
-
+            # accumulation is no longer contributing area, and every test in here reads
+            # it as if it were. Without it a reservoir floor comes back as a ridgeline.
+            ka = DrainageLineAnalysis(dem_path, acc_path, pond_path)
             keypoints = ka.find_keypoints(
                 min_acc_cells=min_acc,
-                n_keypoints=self._panel.keypoint_count,
+                n_keypoints=n_keypoints,
                 boundary_mask=boundary_mask,
             )
-            self._state.found_keypoints = keypoints
-
-            self._panel.set_keypoint_progress(70, "Finding ridgelines…")
+            report(70, "Finding ridgelines…")
             ridgelines = ka.find_ridgelines(boundary_mask=boundary_mask)
+            return ka, keypoints, ridgelines
 
-            self._display_keypoints(keypoints)
-            self._display_ridgelines(ridgelines)
+        self._start_task(work, "keypoints",
+                         self._panel.set_keypoint_progress,
+                         self._on_keypoints_ready,
+                         lambda: self._panel.set_keypoint_complete(""),
+                         "Keypoint analysis failed")
 
-            if keypoints:
-                self._panel.set_keypoint_complete(
-                    f"{len(keypoints)} valley points | {len(ridgelines)} ridgeline segment(s)\n"
-                    "Click a row to zoom, or 'Recommend Pond Sites' for dam locations."
-                )
-            else:
-                self._panel.set_keypoint_complete(
-                    "No valley points found — try a larger DEM area or lower the\n"
-                    "number requested."
-                )
+    def _on_keypoints_ready(self, result):
+        ka, keypoints, ridgelines = result
+        # Held for "Recommend Pond Sites", which reuses the loaded rasters.
+        self._state.keyline_analysis = ka
+        self._state.found_keypoints = keypoints
 
-            self._panel.set_keypoint_results(
-                self._keypoint_result_items(keypoints, ridgelines)
+        self._display_keypoints(keypoints)
+        self._display_ridgelines(ridgelines)
+
+        if keypoints:
+            self._panel.set_keypoint_complete(
+                f"{len(keypoints)} valley points | {len(ridgelines)} ridgeline segment(s)\n"
+                "Click a row to zoom, or 'Recommend Pond Sites' for dam locations."
+            )
+        else:
+            self._panel.set_keypoint_complete(
+                "No valley points found — try a larger DEM area or lower the\n"
+                "number requested."
             )
 
-        except Exception:
-            import traceback
-            self._panel.set_keypoint_complete("")
-            QMessageBox.critical(self._panel, "Keypoint Analysis Error",
-                                 traceback.format_exc())
+        self._panel.set_keypoint_results(
+            self._keypoint_result_items(keypoints, ridgelines)
+        )
 
     def run_recommend_ponds(self):
         if not self._state.found_keypoints:
@@ -1107,42 +1182,57 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             return
         acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
 
+        if not self._claim_worker("Keyline analysis"):
+            return
+
         from terrainflow_assessment.modules.keypoint_analysis import (
             YeomansKeylineAnalysis,
         )
 
-        self._panel.set_keyline_progress(10, "Extracting primary valley…")
-        try:
-            ya = YeomansKeylineAnalysis(self._state.dem_path, acc_path=acc_path)
-            self._panel.set_keyline_progress(45, "Locating keypoint…")
+        dem_path = self._state.dem_path
+        n_runs = self._panel.keyline_runs
+        cross_grade = self._panel.keyline_cross_grade
+        spacing_m = self._panel.keyline_spacing_m
+
+        def work(report):
+            report(10, "Extracting primary valley…")
+            ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path)
+            report(45, "Locating keypoint…")
             keypoint = ya.find_keypoint()
             if keypoint is None:
-                self._panel.set_keyline_complete("")
-                self._iface.messageBar().pushWarning(
-                    "TerrainFlow Assessment",
-                    "No keypoint found — the DEM area may be too small or too flat.",
-                )
-                return
-
-            self._panel.set_keyline_progress(70, "Generating cultivation guides…")
+                return None, []
+            report(70, "Generating cultivation guides…")
             runs = ya.get_cultivation_runs(
-                keypoint,
-                n_runs=self._panel.keyline_runs,
-                cross_grade=self._panel.keyline_cross_grade,
-                spacing_m=self._panel.keyline_spacing_m,
+                keypoint, n_runs=n_runs, cross_grade=cross_grade,
+                spacing_m=spacing_m,
             )
-            # Clip to the usable area (analysis/earthworks polygon) when set.
-            runs = self._clip_runs_to_usable(runs)
-            self._display_keylines(runs, keypoint)
-            self._panel.set_keyline_complete(
-                f"Keyline at {keypoint['elevation']:.1f} m + "
-                f"{len(runs) - 1} cultivation guide(s)."
-            )
-        except Exception:
-            import traceback
+            return keypoint, runs
+
+        self._start_task(work, "keyline",
+                         self._panel.set_keyline_progress,
+                         self._on_keyline_ready,
+                         lambda: self._panel.set_keyline_complete(""),
+                         "Keyline analysis failed")
+
+    def _on_keyline_ready(self, result):
+        keypoint, runs = result
+        if keypoint is None:
             self._panel.set_keyline_complete("")
-            QMessageBox.critical(self._panel, "Keyline Analysis Error",
-                                 traceback.format_exc())
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "No keypoint found — the DEM area may be too small or too flat.",
+            )
+            return
+
+        # Clip to the usable area (analysis/earthworks polygon) when set. Left on
+        # this side because it reads `state.usable_polygon`, which the user can
+        # change while the analysis runs.
+        runs = self._clip_runs_to_usable(runs)
+        self._display_keylines(runs, keypoint)
+        self._panel.set_keyline_complete(
+            f"Keyline at {keypoint['elevation']:.1f} m + "
+            f"{len(runs) - 1} cultivation guide(s)."
+        )
 
     def activate_draw_keyline(self):
         """Let the user draw a keyline plough guide freehand, with the live slope
