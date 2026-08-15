@@ -10,8 +10,10 @@ import traceback
 
 from qgis.PyQt.QtCore import QThread, pyqtSignal
 
+from terrainflow_assessment.qgis.workers._lifecycle import AbortMixin, WorkerAborted
 
-class SimulationWorker(QThread):
+
+class SimulationWorker(AbortMixin, QThread):
     """
     Background worker for time-stepped fill simulation.
 
@@ -56,6 +58,15 @@ class SimulationWorker(QThread):
         self.earthwork_stores = earthwork_stores or []
         self.soil_name = soil_name
 
+    def _stage(self, pct, message):
+        """Progress callback that doubles as the abort checkpoint.
+
+        `_run_simulation` reports once per timestep, so cancellation lands within
+        one step rather than at the end of the event.
+        """
+        self.raise_if_aborted()
+        self.progress.emit(pct, message)
+
     def run(self):
         try:
             from terrainflow_assessment.modules.simulation import _run_simulation
@@ -69,8 +80,10 @@ class SimulationWorker(QThread):
                 routing=self.routing,
                 cn_zones_data=self.cn_zones_data,
                 earthwork_stores=self.earthwork_stores,
-                progress_callback=self.progress.emit,
+                progress_callback=self._stage,
             )
             self.completed.emit(result)
+        except WorkerAborted:
+            return
         except Exception:
             self.error.emit(traceback.format_exc())

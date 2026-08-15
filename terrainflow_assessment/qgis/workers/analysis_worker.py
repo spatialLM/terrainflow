@@ -9,8 +9,10 @@ import numpy as np
 import rasterio
 from qgis.PyQt.QtCore import QThread, pyqtSignal
 
+from terrainflow_assessment.qgis.workers._lifecycle import AbortMixin, WorkerAborted
 
-class AnalysisWorker(QThread):
+
+class AnalysisWorker(AbortMixin, QThread):
     """
     Background worker that runs FlowAnalysis and emits result paths.
 
@@ -60,10 +62,22 @@ class AnalysisWorker(QThread):
         self.sizing_basis = sizing_basis
         self.runoff_coefficient = runoff_coefficient
 
+    def _stage(self, pct, message):
+        """Report progress, and stop here if cancellation has been requested.
+
+        Every stage boundary already emits progress, so making that the abort
+        checkpoint costs nothing and puts one wherever the work can be interrupted
+        without leaving a half-written raster behind.
+        """
+        self.raise_if_aborted()
+        self.progress.emit(pct, message)
+
     def run(self):
         import traceback
         try:
             self._do_analysis()
+        except WorkerAborted:
+            return          # asked for, so not an error and not worth a banner
         except Exception:
             self.error.emit(traceback.format_exc())
 
@@ -73,7 +87,7 @@ class AnalysisWorker(QThread):
         from terrainflow_assessment.modules.catchment import SCSRunoff
         from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
 
-        self.progress.emit(5, "Loading DEM...")
+        self._stage(5, "Loading DEM...")
         fa = FlowAnalysis()
         fa.load_dem(self.dem_path)
 
@@ -86,7 +100,7 @@ class AnalysisWorker(QThread):
 
         scs = SCSRunoff()
 
-        self.progress.emit(10, "Building runoff model...")
+        self._stage(10, "Building runoff model...")
         runoff_weights = None
         if self.sizing_basis in ("rainfall", "coefficient"):
             # A uniform depth across the site, so CN zoning has nothing to vary —
@@ -116,7 +130,7 @@ class AnalysisWorker(QThread):
             eff_cn = scs.adjust_cn(self.cn, self.moisture)
             runoff_mm = scs.runoff_depth(self.rainfall_mm, eff_cn)
 
-        self.progress.emit(20, "Running flow analysis...")
+        self._stage(20, "Running flow analysis...")
         result = fa.run(routing=self.routing, runoff_weights=runoff_weights)
 
         acc_array = np.array(fa.acc)
@@ -136,7 +150,7 @@ class AnalysisWorker(QThread):
         stream_acc = np.where(stream_mask, acc_array, 0).astype("float32")
         stream_acc_max = float(stream_acc.max()) if stream_acc.max() > 0 else 1.0
 
-        self.progress.emit(50, "Saving rasters...")
+        self._stage(50, "Saving rasters...")
         os.makedirs(self.output_dir, exist_ok=True)
 
         acc_path = os.path.join(self.output_dir, f"flow_accumulation_{self.label}.tif")
@@ -206,7 +220,7 @@ class AnalysisWorker(QThread):
         else:
             throughflow_path = runoff_path
 
-        self.progress.emit(65, "Detecting exit points...")
+        self._stage(65, "Detecting exit points...")
         # Prefer the runoff-weighted accumulation (m³ per cell) for a truthful
         # per-cell flow, falling back to the uniform-storm volume raster.
         if runoff_weights is not None and "runoff_accumulation" in result:
@@ -258,7 +272,7 @@ class AnalysisWorker(QThread):
                 pass
             area_outflow[key] = entry
 
-        self.progress.emit(75, "Delineating catchments...")
+        self._stage(75, "Delineating catchments...")
         catchments = []
         if self.run_catchments:
             try:
@@ -268,7 +282,7 @@ class AnalysisWorker(QThread):
             except Exception:
                 pass
 
-        self.progress.emit(90, "Computing ponding...")
+        self._stage(90, "Computing ponding...")
         ponding_path = None
         ponded_volume_m3 = None
         try:
@@ -308,7 +322,7 @@ class AnalysisWorker(QThread):
         crest_unplaced = float(result.get("crest_residual", 0.0))
         crest_warning = crest_spread_warning(crest_unplaced, domain_cells)
 
-        self.progress.emit(100, "Analysis complete.")
+        self._stage(100, "Analysis complete.")
         self.completed.emit({
             "label": self.label,
             "flow_accumulation": acc_path,

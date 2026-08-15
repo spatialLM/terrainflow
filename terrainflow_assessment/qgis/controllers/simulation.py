@@ -34,6 +34,7 @@ from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
 from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
+from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
 
 
@@ -51,6 +52,27 @@ class SimulationController(G.LayerTreeMixin):
     # ---------------------------------------------------------------- Run
 
     def run_simulation(self):
+        """Start the fill simulation, re-arming the button on any path that does not.
+
+        The button is disabled on click, so every early return here — no DEM, no
+        stores, a refusal because one is already running — has to put it back or the
+        stage is dead until the panel is rebuilt.
+        """
+        started = False
+        try:
+            started = self._start_simulation()
+        finally:
+            if not started:
+                self._panel.set_simulation_idle()
+
+    def _start_simulation(self):
+        """Returns True once a worker is actually running."""
+        if worker_is_running(self._state, "sim_worker"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "A simulation is already running — wait for it to finish.")
+            return
+
         # Use earthworks DEM + flow direction when available, fall back to baseline
         if self._state.modified_dem_path and self._state.earthworks_result:
             dem_path = self._state.modified_dem_path
@@ -117,14 +139,17 @@ class SimulationController(G.LayerTreeMixin):
         )
         self._state.sim_worker.progress.connect(self._panel.set_simulation_progress)
         self._state.sim_worker.completed.connect(self._on_simulation_complete)
-        self._state.sim_worker.error.connect(
-            lambda tb: self._iface.messageBar().pushCritical(
-                "TerrainFlow Assessment", "Simulation failed — see Python console."
-            )
-        )
+        self._state.sim_worker.error.connect(self._on_simulation_error)
         self._state.sim_worker.start()
+        return True
 
     # ---------------------------------------------------------------- Completion
+
+    def _on_simulation_error(self, tb):
+        self._panel.set_simulation_idle()
+        self._iface.messageBar().pushCritical(
+            "TerrainFlow Assessment", "Simulation failed — see Python console."
+        )
 
     def _on_simulation_complete(self, result):
         self._state.sim_result = result

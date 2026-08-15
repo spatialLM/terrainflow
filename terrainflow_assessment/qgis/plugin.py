@@ -20,6 +20,7 @@ from terrainflow_assessment.qgis.controllers.design_file import DesignFileContro
 from terrainflow_assessment.qgis.controllers.earthworks import EarthworksController
 from terrainflow_assessment.qgis.controllers.reporting import ReportingController
 from terrainflow_assessment.qgis.controllers.simulation import SimulationController
+from terrainflow_assessment.qgis.workers._lifecycle import join_workers
 
 
 class TerrainFlowAssessmentPlugin:
@@ -49,8 +50,46 @@ class TerrainFlowAssessmentPlugin:
         self._create_panel()
 
     def unload(self):
+        """Take the plugin apart in the one order that is safe.
+
+        Reloading from the Plugin Manager calls this and then builds a second
+        plugin against the same QGIS. Anything left attached — a running thread, a
+        map tool, a signal on the canvas or the layer tree, the panel itself —
+        outlives the object it calls back into, and the failure shows up later as
+        a click doing nothing or QGIS aborting outright.
+
+        The order matters and is the reason this reads as a list:
+
+        1. stop the workers *first*, because everything below removes things they
+           are using, and step 5 deletes the directory they are writing into;
+        2. take our map tools off the canvas before the controllers holding them
+           go, or the next click on the map reaches a dead controller;
+        3. disconnect from objects QGIS owns and we do not — the canvas, the layer
+           tree, the project;
+        4. drop the panel and its ~60 signal connections;
+        5. only then remove the scratch directory.
+        """
         self._iface.removeToolBarIcon(self._action)
         self._iface.removePluginMenu("TerrainFlow", self._action)
+
+        # 1. Workers. Stragglers are workers that ignored the abort and are still
+        #    running; the directory removal below is skipped rather than racing them.
+        stragglers = join_workers(self._state)
+
+        # 2 + 3. Per-controller teardown: active map tool off the canvas, and the
+        #        canvas/layer-tree connections undone.
+        for name in ("_baseline", "_contour", "_earthworks",
+                     "_simulation", "_reporting", "_design_file"):
+            controller = getattr(self, name, None)
+            teardown = getattr(controller, "teardown", None)
+            if teardown is None:
+                continue
+            try:
+                teardown()
+            except Exception:
+                # One controller failing to tidy up must not strand the rest.
+                pass
+
         if getattr(self, "_persistence_wired", False):
             try:
                 instance = self._project.instance()
@@ -59,16 +98,29 @@ class TerrainFlowAssessmentPlugin:
             except Exception:
                 pass
             self._persistence_wired = False
-        # The per-session scratch directory is never reused; leaving it behind grows
-        # the temp folder by a DEM's worth of rasters every run.
+
+        # 4. The panel. `removeDockWidget` only un-docks it — the widget, and every
+        #    connection from its signals into the controllers, stays alive and
+        #    reachable without the `deleteLater`.
+        if self.panel:
+            self._iface.removeDockWidget(self.panel)
+            try:
+                self.panel.deleteLater()
+            except RuntimeError:
+                pass
+            self.panel = None
+
+        # 5. The per-session scratch directory is never reused; leaving it behind
+        #    grows the temp folder by a DEM's worth of rasters every run. Skipped
+        #    while anything is still writing into it — a leaked temp directory is a
+        #    far smaller problem than pulling files out from under a live thread.
+        if stragglers:
+            return
         try:
             import shutil
             shutil.rmtree(self._state.output_dir, ignore_errors=True)
         except Exception:
             pass
-        if self.panel:
-            self._iface.removeDockWidget(self.panel)
-            self.panel = None
 
     def toggle_panel(self):
         if self.panel:

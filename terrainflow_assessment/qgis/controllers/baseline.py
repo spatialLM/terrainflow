@@ -32,6 +32,8 @@ from terrainflow_assessment.modules.reporting import BaselineReport
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _layers as L
 from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
+from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
+from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
@@ -112,7 +114,7 @@ def _crs_label(crs):
     return crs.to_string()
 
 
-class BaselineController(G.LayerTreeMixin, QObject):
+class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
     # Emitted only after a baseline run *succeeds*. Earthworks that were restored before
     # the run — as happens when a design file is opened — hold no catchment labels yet, so
     # something has to re-score them once terrain results exist. Deliberately not emitted
@@ -133,6 +135,20 @@ class BaselineController(G.LayerTreeMixin, QObject):
             self._canvas.scaleChanged.connect(self.on_map_scale_changed)
         except Exception:
             pass
+
+    def teardown(self):
+        """Undo everything this controller attached to objects that outlive it.
+
+        The canvas belongs to QGIS, not to the plugin, so a `scaleChanged`
+        connection left behind keeps calling a controller whose panel and state
+        have been dismantled — every zoom, for the rest of the session.
+        """
+        try:
+            self._canvas.scaleChanged.disconnect(self.on_map_scale_changed)
+        except (TypeError, RuntimeError):
+            # Never connected, or the C++ canvas is already gone.
+            pass
+        self.release_tool()
 
     # ---------------------------------------------------------------- DEM / boundary
 
@@ -273,7 +289,7 @@ class BaselineController(G.LayerTreeMixin, QObject):
         tool.cancelled.connect(self._on_area_draw_cancelled)
         # Keep a reference so the tool is not garbage-collected while active.
         self._draw_area_tool = tool
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     def _on_area_drawn(self, kind, geometry):
         label = self._AREA_LABELS.get(kind, "Area")
@@ -342,6 +358,16 @@ class BaselineController(G.LayerTreeMixin, QObject):
     # ---------------------------------------------------------------- Baseline analysis
 
     def run_baseline(self):
+        # Reassigning `state.analysis_worker` while a thread is live drops the only
+        # reference to it and Python collects the wrapper mid-run, which aborts QGIS.
+        # Baseline and earthworks share that attribute, so "already running" includes
+        # a re-analysis started from the Design stage.
+        if worker_is_running(self._state, "analysis_worker"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "An analysis is already running — wait for it to finish.")
+            return
+
         if not self._state.dem_path:
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment", "Please select a DEM first."

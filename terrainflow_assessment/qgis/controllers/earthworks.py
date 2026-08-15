@@ -49,10 +49,12 @@ from terrainflow_assessment.qgis import help_text as H
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _symbols as S
 from terrainflow_assessment.qgis.controllers._layers import resolve_layer
+from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
+from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
 
 
-class EarthworksController(G.LayerTreeMixin):
+class EarthworksController(G.LayerTreeMixin, MapToolMixin):
     def __init__(self, state, panel, project, iface, canvas):
         self._state = state
         self._panel = panel
@@ -82,6 +84,30 @@ class EarthworksController(G.LayerTreeMixin):
         except Exception:
             pass
 
+    def teardown(self):
+        """Release the per-node visibility hooks and the active tool.
+
+        `_watched_layer_ids` accumulates one connection per layer the design has
+        ever created, all of them on layer-tree nodes owned by the project rather
+        than by the plugin. Left connected, each one calls back into a dead
+        controller the next time the user ticks a checkbox in the legend.
+        """
+        root = None
+        try:
+            root = self._project.instance().layerTreeRoot()
+        except (AttributeError, RuntimeError):
+            root = None
+        for layer_id in list(getattr(self, "_watched_layer_ids", ())):
+            try:
+                node = root.findLayer(layer_id) if root is not None else None
+                if node is not None:
+                    node.visibilityChanged.disconnect(
+                        self._on_layer_visibility_changed)
+            except (TypeError, RuntimeError, AttributeError):
+                pass
+        self._watched_layer_ids.clear()
+        self.release_tool()
+
     def _on_layer_visibility_changed(self, node):
         try:
             if not node.isVisible():
@@ -106,7 +132,7 @@ class EarthworksController(G.LayerTreeMixin):
                 )
             )
             tool.cancelled.connect(self._on_draw_cancelled)
-            self._canvas.setMapTool(tool)
+            self.use_tool(tool)
         elif mode == "full_contour":
             if contour_layer is None:
                 self._iface.messageBar().pushWarning(
@@ -119,14 +145,14 @@ class EarthworksController(G.LayerTreeMixin):
                 )
             )
             tool.cancelled.connect(self._on_draw_cancelled)
-            self._canvas.setMapTool(tool)
+            self.use_tool(tool)
         else:
             tool = DrawLineTool(self._canvas,
                                 slope_raster_path=self._state.slope_raster_path,
                                 tool_label="swale")
             tool.line_drawn.connect(lambda geom: self._on_geometry_drawn("swale", geom))
             tool.cancelled.connect(self._on_draw_cancelled)
-            self._canvas.setMapTool(tool)
+            self.use_tool(tool)
 
     def _no_contour_layer_message(self, what):
         """Say which precondition is missing, not just that one is.
@@ -180,7 +206,7 @@ class EarthworksController(G.LayerTreeMixin):
                             tool_label=ew_type)
         tool.line_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     def activate_draw_polygon(self, ew_type):
         tool = DrawPolygonTool(self._canvas,
@@ -188,7 +214,7 @@ class EarthworksController(G.LayerTreeMixin):
                                tool_label=ew_type)
         tool.polygon_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     # ---------------------------------------------------------------- Spillways
 
@@ -235,7 +261,7 @@ class EarthworksController(G.LayerTreeMixin):
         tool.rejected.connect(
             lambda dist, name=ew.name, k=kind: self._on_spillway_rejected(dist, name, k))
         tool.cancelled.connect(self._on_draw_cancelled)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
         prompt = ("Click where water ENTERS {name} from upslope."
                   if kind == "inflow" else
                   "Click where {name} should OVERFLOW.")
@@ -477,7 +503,7 @@ class EarthworksController(G.LayerTreeMixin):
             )
         )
         tool.cancelled.connect(self._on_draw_cancelled)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
         self._iface.messageBar().pushInfo(
             "TerrainFlow Assessment",
             "Click the feature that overflows, then the one it flows into.",
@@ -876,7 +902,7 @@ class EarthworksController(G.LayerTreeMixin):
         tool.geometry_edited.connect(self._on_vertex_drag)
         tool.edit_finished.connect(self._on_vertex_edit_finished)
         tool.session_ended.connect(self._on_draw_cancelled)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     def _on_vertex_drag(self, idx, geometry):
         """Throttled live tier during a drag: cheap geometry metrics + water balance.
@@ -3318,6 +3344,16 @@ class EarthworksController(G.LayerTreeMixin):
         )
 
     def run_with_earthworks(self):
+        # Before the burn, not just before the start. The burn below is synchronous
+        # and takes seconds on a real DEM, so a guard at the `start()` call leaves a
+        # window where a second click is already partway through burning against the
+        # same state — and the two runs then race to assign `state.analysis_worker`,
+        # which is the only reference keeping the first thread alive.
+        if worker_is_running(self._state, "analysis_worker"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "An analysis is already running — wait for it to finish.")
+            return
         if not self._state.dem_path or not self._state.burner:
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment", "Load a DEM and run baseline first."
@@ -4007,7 +4043,7 @@ class EarthworksController(G.LayerTreeMixin):
         tool = PondingQueryTool(self._canvas, self._state.ponding_raster_path)
         tool.ponding_selected.connect(self._on_ponding_selected)
         tool.no_ponding.connect(self._on_no_ponding)
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     def _on_ponding_selected(self, volume_m3, volume_l, cell_count, area_m2,
                               outline_geom, inflow_m3, fill_fraction):

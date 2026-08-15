@@ -86,7 +86,17 @@ def run_worker(module_name, patterns):
         return 0
 
     _harness.qgis_app()
-    _harness.make_workers_synchronous()
+    # Workers run inline unless a module says otherwise. A module opts out by
+    # declaring `REAL_THREADS = True`, which is only right for checks *about*
+    # concurrency: with `start = run` a worker has always finished by the time
+    # anyone can ask, so `isRunning()` is never True and the whole class of
+    # double-start and teardown-during-run faults is unobservable.
+    #
+    # Safe to do per module because each one already gets its own QGIS
+    # subprocess with a time limit, so a deadlocked thread reports as one failed
+    # module rather than wedging the run.
+    if not getattr(importlib.import_module(module_name), "REAL_THREADS", False):
+        _harness.make_workers_synchronous()
 
     dem_path = os.environ.get("TFA_CHECK_DEM")
     if not dem_path or not os.path.exists(dem_path):

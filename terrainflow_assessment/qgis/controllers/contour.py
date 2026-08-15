@@ -30,6 +30,7 @@ from qgis.PyQt.QtWidgets import QMessageBox
 from terrainflow_assessment.modules.contour_analysis import INFLOW_RAMP_HEX
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import remove_layer, resolve_layer
+from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 
 # Width, in mm, for the four inflow bands — the primary signal, not decoration.
 # Over aerial imagery width is the one channel the background cannot destroy: a
@@ -53,7 +54,11 @@ def _ramp_colour(i):
     return QColor(INFLOW_RAMP_HEX[max(0, min(i, len(INFLOW_RAMP_HEX) - 1))])
 
 
-class ContourController(G.LayerTreeMixin):
+class ContourController(G.LayerTreeMixin, MapToolMixin):
+    def teardown(self):
+        """Take this controller's tool off the canvas. Nothing else to undo."""
+        self.release_tool()
+
     def __init__(self, state, panel, project, iface, canvas):
         self._state = state
         self._panel = panel
@@ -1150,7 +1155,7 @@ class ContourController(G.LayerTreeMixin):
             lambda: self._canvas.unsetMapTool(self._canvas.mapTool())
         )
         self._draw_keyline_tool = tool
-        self._canvas.setMapTool(tool)
+        self.use_tool(tool)
 
     def _on_keyline_drawn(self, geom):
         self._canvas.unsetMapTool(self._canvas.mapTool())

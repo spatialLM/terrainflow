@@ -1495,7 +1495,10 @@ class AssessmentPanel(QDockWidget):
         # Connections
         self._sim_mode_combo.currentIndexChanged.connect(self._on_sim_mode_changed)
         self._sim_csv_browse.clicked.connect(self._browse_csv)
-        self._run_sim_btn.clicked.connect(self.run_simulation_requested)
+        # Disabled at click time, not when the first progress signal arrives. The
+        # controller refuses a second run anyway, but a button that stays lit through
+        # a minute of work reads as "nothing happened" and invites the second click.
+        self._run_sim_btn.clicked.connect(self._on_run_sim_clicked)
         self._sim_slider.valueChanged.connect(self.sim_frame_changed)
         self._sim_play_btn.toggled.connect(self.sim_play_toggled)
         self._sim_stop_btn.clicked.connect(lambda: self._sim_play_btn.setChecked(False))
@@ -1931,13 +1934,22 @@ class AssessmentPanel(QDockWidget):
         self._network.set_selected(index)
         self.earthwork_selected.emit(index)
 
+    def _on_run_sim_clicked(self):
+        self._run_sim_btn.setEnabled(False)
+        self.run_simulation_requested.emit()
+
+    def set_simulation_idle(self):
+        """Re-arm the Run Simulation button — on success, failure or refusal."""
+        self._run_sim_btn.setEnabled(True)
+        self._sim_progress.setVisible(False)
+
     def set_simulation_progress(self, pct, msg):
         self._sim_progress.setVisible(True)
         self._sim_progress.setValue(pct)
         self._sim_progress.setFormat(f"{msg} ({pct}%)")
 
     def set_simulation_ready(self, result):
-        self._sim_progress.setVisible(False)
+        self.set_simulation_idle()
         n = len(result.get("frames", []))
         self._sim_slider.setMaximum(max(0, n - 1))
         self._sim_controls_w.setVisible(True)
