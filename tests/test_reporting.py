@@ -1341,8 +1341,11 @@ class TestPoolsAreGroupedOnce:
         depth = np.zeros((3, 7))
         depth[1, 0:2] = 0.5
         depth[1, 4:6] = 0.5
-        a = np.zeros((3, 7), dtype=bool); a[1, 0] = True
-        b = np.zeros((3, 7), dtype=bool); b[1, 1] = True; b[1, 4] = True
+        a = np.zeros((3, 7), dtype=bool)
+        a[1, 0] = True
+        b = np.zeros((3, 7), dtype=bool)
+        b[1, 1] = True
+        b[1, 4] = True
         return depth, [("A", a), ("B", b)]
 
     def test_sharing_one_region_joins_the_features(self):
@@ -1364,9 +1367,13 @@ class TestPoolsAreGroupedOnce:
         depth = np.zeros((3, 9))
         depth[1, 0:2] = 0.5      # A + B
         depth[1, 4:6] = 0.5      # B + C
-        a = np.zeros((3, 9), dtype=bool); a[1, 0] = True
-        b = np.zeros((3, 9), dtype=bool); b[1, 1] = True; b[1, 4] = True
-        c = np.zeros((3, 9), dtype=bool); c[1, 5] = True
+        a = np.zeros((3, 9), dtype=bool)
+        a[1, 0] = True
+        b = np.zeros((3, 9), dtype=bool)
+        b[1, 1] = True
+        b[1, 4] = True
+        c = np.zeros((3, 9), dtype=bool)
+        c[1, 5] = True
         pools = group_pools(depth, [("A", a), ("B", b), ("C", c)])
         assert pools.members[pools.root_of_region[1]] == ("A", "B", "C"), (
             "no cut separates A's water from C's, so they are one set")
@@ -1410,7 +1417,8 @@ class TestPoolsAreGroupedOnce:
         depth[1, 1:4] = 1.0
         ground = np.full((3, 5), 10.0)
         ground[1, 1:4] = 9.0
-        mask = np.zeros((3, 5), dtype=bool); mask[1, 2] = True
+        mask = np.zeros((3, 5), dtype=bool)
+        mask[1, 2] = True
         footprints = [("A", mask)]
 
         fresh = event_pond_depth(depth, ground, 1.0, footprints, {"A": 1.5})

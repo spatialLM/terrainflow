@@ -286,15 +286,21 @@ class AnalysisWorker(AbortMixin, QThread):
         ponding_path = None
         ponded_volume_m3 = None
         try:
-            from terrainflow_assessment.modules.earthwork_design import DEMBurner
             from terrainflow_assessment.modules.reporting import raster_ponding_volume
-            burner = DEMBurner(self.dem_path)
-            ponding = burner.get_ponding_layer(burner.original)
+            # `ponded - ground`, off the two surfaces `FlowAnalysis.run` already
+            # conditioned. This used to build a second DEMBurner and re-run
+            # fill_pits and fill_depressions over the same DEM to arrive at the
+            # same answer — two more full reads and two more floodings per run,
+            # and at a coarser resolution, because get_ponding_layer downsamples
+            # past a cell cap and resamples back.
+            ponding = fa.ponding_depth()
+            if ponding is None:
+                raise RuntimeError("no conditioned surfaces to measure ponding from")
             ponding_path = os.path.join(self.output_dir, f"ponding_{self.label}.tif")
-            burner.save(ponding, ponding_path)
-            # Clipped to the domain so the figure describes the site, not whatever else
-            # the DEM happens to cover. get_ponding_layer resamples back to native shape,
-            # so cell_area_m2 is the right multiplier even when it downsampled to compute.
+            fa.save_result(ponding.astype("float32"), ponding_path,
+                           band_description="Ponding depth (m)", nodata=np.nan)
+            # Clipped to the domain so the figure describes the site, not whatever
+            # else the DEM happens to cover.
             ponded_volume_m3 = round(
                 raster_ponding_volume(np.where(domain, ponding, 0.0), cell_area_m2), 1)
         except Exception:

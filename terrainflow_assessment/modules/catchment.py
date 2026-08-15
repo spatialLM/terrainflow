@@ -503,6 +503,42 @@ class SCSRunoff:
         adjusted = self._AMC[moisture_condition](cn)
         return max(1.0, min(100.0, adjusted))
 
+    def adjust_cn_array(self, cn, moisture_condition):
+        """:meth:`adjust_cn` over a whole array, in one numpy expression.
+
+        The lambdas in ``_AMC`` are already array-safe — they are arithmetic — so
+        the only per-cell work was the clamp, and ``np.vectorize`` is a Python loop
+        with a numpy signature on it. Asserted equal to the scalar form by test.
+        """
+        adjusted = self._AMC[moisture_condition](np.asarray(cn, dtype="float64"))
+        return np.clip(adjusted, 1.0, 100.0)
+
+    @staticmethod
+    def runoff_depth_array(rainfall_mm, cn):
+        """:meth:`runoff_depth` over a whole array, closed form.
+
+        ``S = 25400/CN − 254; Ia = 0.2S; Q = (P−Ia)²/(P−Ia+S)`` where ``P > Ia``,
+        and zero elsewhere — including where CN is zero or less, which the scalar
+        form short-circuits. Asserted equal to it by test.
+
+        This was ``np.vectorize`` per cell per timestep: about 84 million Python
+        calls for a 2.8 M-cell site over 30 steps.
+        """
+        cn_arr = np.asarray(cn, dtype="float64")
+        valid = cn_arr > 0
+        # Guard the division rather than the result: 25400/0 warns and yields inf,
+        # and inf - 254 then propagates into arithmetic nothing masks afterwards.
+        s = np.where(valid, 25400.0 / np.where(valid, cn_arr, 1.0) - 254.0, 0.0)
+        ia = 0.2 * s
+        excess = np.asarray(rainfall_mm, dtype="float64") - ia
+        wet = excess > 0
+        # np.where evaluates both branches, so the divisor is guarded too: with
+        # CN and rainfall both zero it is 0/0, which is a NaN and a warning even
+        # though the branch is never selected.
+        denominator = np.where(wet, excess + s, 1.0)
+        runoff = np.where(wet, excess ** 2 / denominator, 0.0)
+        return np.where(valid, np.maximum(runoff, 0.0), 0.0)
+
     def runoff_depth(self, rainfall_mm, cn):
         """
         Calculate runoff depth (Q) from rainfall (P) and curve number (CN).
@@ -548,33 +584,29 @@ class SCSRunoff:
         """
         from rasterio.features import rasterize as _rasterize
 
-        cn_array = np.full(shape, float(default_cn), dtype="float32")
-        for geom, cn_val in zone_geoms_cn:
-            if geom is None or geom.is_empty:
-                continue
-            burned = _rasterize(
-                [(geom, float(cn_val))],
-                out_shape=shape, transform=transform,
-                fill=0.0, dtype="float32",
+        # One pass over the grid for every zone, not one pass per zone. rasterize
+        # burns the shapes in order, so later zones win where they overlap —
+        # exactly what the per-zone np.where did, at 1/n the cost.
+        shapes = [(geom, float(cn_val)) for geom, cn_val in zone_geoms_cn
+                  if geom is not None and not geom.is_empty]
+        if shapes:
+            cn_array = _rasterize(
+                shapes, out_shape=shape, transform=transform,
+                fill=float(default_cn), dtype="float32",
             )
-            cn_array = np.where(burned > 0, burned, cn_array)
+            # A zone whose CN is 0 would be indistinguishable from unburned fill,
+            # so anything non-positive falls back to the default rather than
+            # becoming a hole the runoff maths reads as "no runoff here".
+            cn_array = np.where(cn_array > 0, cn_array,
+                                np.float32(default_cn)).astype("float32")
+        else:
+            cn_array = np.full(shape, float(default_cn), dtype="float32")
 
-        adjusted = np.vectorize(
-            lambda cn: self.adjust_cn(float(cn), moisture)
-        )(cn_array)
-        return adjusted.astype("float32")
+        return self.adjust_cn_array(cn_array, moisture).astype("float32")
 
     def build_runoff_raster(self, cn_array, rainfall_mm):
         """Per-cell runoff depth (mm) from a moisture-adjusted CN raster."""
-        def _q(cn):
-            if cn <= 0:
-                return 0.0
-            S = (25400.0 / cn) - 254.0
-            Ia = 0.2 * S
-            if rainfall_mm <= Ia:
-                return 0.0
-            return max(0.0, (rainfall_mm - Ia) ** 2 / (rainfall_mm - Ia + S))
-        return np.vectorize(_q)(cn_array).astype("float32")
+        return self.runoff_depth_array(rainfall_mm, cn_array).astype("float32")
 
     @staticmethod
     def parse_hyetograph_csv(path):

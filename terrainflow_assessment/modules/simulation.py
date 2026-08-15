@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 import rasterio
+from rasterio.windows import Window
 
 from terrainflow_assessment.modules.flow_analysis import fdir_nodata
 from terrainflow_assessment.modules.footprint import xy_to_rc
@@ -583,6 +584,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
                  if earthwork_stores else None)
 
     frames = []
+    peak_arr = np.zeros(shape, dtype="float32")
     cum_acc = np.zeros(shape, dtype="float64")
     prev_q_mm = np.zeros(shape, dtype="float64")
 
@@ -605,9 +607,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         _p(pct, f"Timestep {i + 1}/{n_steps} — T = {time_min} min...")
 
         # SCS incremental runoff this step
-        q_cum_now = np.vectorize(
-            lambda c: scs.runoff_depth(p_cum, float(c)) if c > 0 else 0.0
-        )(cn_array).astype("float64")
+        q_cum_now = scs.runoff_depth_array(p_cum, cn_array)
         dq_mm = np.maximum(0.0, q_cum_now - prev_q_mm)
         prev_q_mm = q_cum_now
 
@@ -685,17 +685,25 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
             row[f"{store.name}_overflow"] = store.overflowed
         timestep_table.append(row)
 
-        # Save rasters
+        # Save rasters. NaN is masked as well as negatives: `data < 0` is False
+        # for NaN, so a NaN went into the frame, was missed again by `== -9999`
+        # on the way back in, and np.maximum then propagated it through the whole
+        # peak raster.
         inc_path = os.path.join(sim_dir, f"inc_{i:03d}.tif")
         cum_path = os.path.join(sim_dir, f"cum_{i:03d}.tif")
+        inc_out = np.where(np.isfinite(inc_acc) & (inc_acc >= 0),
+                           inc_acc, out_meta["nodata"]).astype("float32")
         with rasterio.open(inc_path, "w", **out_meta) as dst:
-            data = inc_acc.copy()
-            data[data < 0] = out_meta["nodata"]
-            dst.write(data, 1)
+            dst.write(inc_out, 1)
         with rasterio.open(cum_path, "w", **out_meta) as dst:
-            data = cum_arr.copy()
-            data[data < 0] = out_meta["nodata"]
-            dst.write(data, 1)
+            dst.write(np.where(np.isfinite(cum_arr) & (cum_arr >= 0),
+                               cum_arr, out_meta["nodata"]).astype("float32"), 1)
+
+        # The peak is a running maximum over what we already have in hand. Reading
+        # every frame back off disk afterwards was a second full pass over the
+        # whole simulation for a number computed here for free.
+        np.maximum(peak_arr, np.where(inc_out == out_meta["nodata"], 0.0, inc_out),
+                   out=peak_arr)
 
         # Snapshot fill state for each store this frame.
         #
@@ -720,15 +728,8 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         frames.append({"time_min": time_min, "inc": inc_path, "cum": cum_path,
                         "fills": frame_fills})
 
-    # Peak flow raster
-    _p(96, "Computing peak flow raster...")
-    peak_arr = np.zeros(shape, dtype="float32")
-    for frame in frames:
-        with rasterio.open(frame["inc"]) as src:
-            data = src.read(1).astype("float32")
-            data[data == -9999.0] = 0.0
-            peak_arr = np.maximum(peak_arr, data)
-
+    # Peak flow raster — accumulated in the timestep loop above.
+    _p(96, "Writing peak flow raster...")
     peak_path = os.path.join(sim_dir, "peak_flow.tif")
     with rasterio.open(peak_path, "w", **out_meta) as dst:
         peak_arr[peak_arr < 0] = out_meta["nodata"]
@@ -850,7 +851,11 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
                     if 0 <= row < src.height and 0 <= col < src.width:
                         centroid_row = row
                         centroid_col = col
-                        value = float(src.read(1)[row, col])
+                        # One cell through a window, not the whole band. This read
+                        # the entire DEM to sample a single elevation, once per
+                        # feature: about 410 MB of I/O for a design of 36.
+                        value = float(src.read(
+                            1, window=Window(col, row, 1, 1))[0, 0])
                         is_nodata = (
                             src.nodata is not None
                             and math.isclose(value, float(src.nodata), rel_tol=1e-9,

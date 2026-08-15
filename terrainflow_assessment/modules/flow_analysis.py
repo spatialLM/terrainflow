@@ -185,6 +185,13 @@ class FlowAnalysis:
         # the level surface has to be copied before it too.
         ponded = np.array(filled, dtype="float64", copy=True)
 
+        # Retained. Standing water is ``ponded - ground``, and the analysis worker
+        # used to get that number by building a second DEMBurner and re-running
+        # fill_pits and fill_depressions over the same DEM — two more full reads
+        # and two more floodings, for a surface already sitting in this frame.
+        self.ground = ground
+        self.ponded = ponded
+
         inflated = self.grid.resolve_flats(filled)
         # Keep the conditioned surface: it is what flow_graph derives its D8 pointers
         # from. Steepest descent on this array is provably acyclic (pits filled,
@@ -328,6 +335,19 @@ class FlowAnalysis:
     # is higher. Both are the library's own defaults (``_sgrid._d8_flowdir_numba``).
     FDIR_FLAT = -1
     FDIR_PIT = -2
+
+    def ponding_depth(self):
+        """Standing-water depth (m), from the surfaces :meth:`run` conditioned.
+
+        Full resolution, unlike ``DEMBurner.get_ponding_layer``, which downsamples
+        past a cell cap and resamples back. Returns None before a run.
+        """
+        ground = getattr(self, "ground", None)
+        ponded = getattr(self, "ponded", None)
+        if ground is None or ponded is None:
+            return None
+        depth = np.asarray(ponded, dtype="float64") - np.asarray(ground, dtype="float64")
+        return np.where(np.isfinite(depth), np.maximum(depth, 0.0), 0.0)
 
     def unrouted_flow(self):
         """Water that stops **inside** the site because the routing could not place it.
@@ -720,11 +740,17 @@ class FlowAnalysis:
                     safe_fdir = np.nan_to_num(fdir_array, nan=0.0)
                     bearings = (90.0 - np.degrees(safe_fdir)) % 360.0
                 else:
-                    d8_map = {64: 0, 128: 45, 1: 90, 2: 135,
-                              4: 180, 8: 225, 16: 270, 32: 315}
-                    bearings = np.vectorize(
-                        lambda v: d8_map.get(int(v), 0)
-                    )(fdir_array)
+                    # A lookup table indexed by the D8 code, not a dict read per
+                    # cell. The codes are powers of two up to 128, so a 129-entry
+                    # array covers them and anything else indexes to 0 — the same
+                    # answer the dict's default gave.
+                    d8_bearing = np.zeros(129, dtype="float64")
+                    for code, deg in ((64, 0), (128, 45), (1, 90), (2, 135),
+                                      (4, 180), (8, 225), (16, 270), (32, 315)):
+                        d8_bearing[code] = deg
+                    codes = np.clip(np.nan_to_num(fdir_array, nan=0.0),
+                                    0, 128).astype("int64")
+                    bearings = d8_bearing[codes]
                 weights = acc_array * local_catch
                 total_w = weights.sum()
                 if total_w > 0:

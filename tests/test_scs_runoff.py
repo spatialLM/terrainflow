@@ -369,3 +369,66 @@ class TestConstants:
 
     def test_storm_presets_has_at_least_4(self):
         assert len(SCSRunoff.STORM_PRESETS) >= 4
+
+
+class TestTheArrayFormsMatchTheScalarOnes:
+    """`np.vectorize` is a Python loop wearing a numpy signature: about 84 million
+    calls for a 2.8 M-cell site over 30 timesteps. The closed forms replace it, and
+    the only thing that matters about them is that they answer identically."""
+
+    def test_runoff_depth_array_matches_cell_by_cell(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        scs = SCSRunoff()
+        cn = np.array([[0.0, 1.0, 30.0], [61.0, 80.0, 100.0]])
+        for rainfall in (0.0, 0.5, 5.0, 25.0, 120.0, 400.0):
+            want = np.array([[scs.runoff_depth(rainfall, float(c)) for c in row]
+                             for row in cn])
+            got = scs.runoff_depth_array(rainfall, cn)
+            assert np.allclose(got, want), (rainfall, got, want)
+
+    def test_a_negative_curve_number_yields_no_runoff(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        got = SCSRunoff().runoff_depth_array(100.0, np.array([-5.0, 0.0, 70.0]))
+        assert got[0] == 0.0 and got[1] == 0.0 and got[2] > 0.0
+
+    def test_no_division_warning_where_the_curve_number_is_zero(self):
+        """Guarding the result rather than the division leaves 25400/0 = inf to
+        propagate through arithmetic that nothing masks afterwards."""
+        import warnings
+
+        import numpy as np
+
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with np.errstate(all="raise"):
+                got = SCSRunoff().runoff_depth_array(50.0, np.zeros((4, 4)))
+        assert np.all(np.isfinite(got))
+
+    def test_adjust_cn_array_matches_cell_by_cell(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        scs = SCSRunoff()
+        cn = np.array([[1.0, 30.0, 61.0], [80.0, 95.0, 100.0]])
+        for moisture in ("dry", "normal", "wet"):
+            want = np.array([[scs.adjust_cn(float(c), moisture) for c in row]
+                             for row in cn])
+            got = scs.adjust_cn_array(cn, moisture)
+            assert np.allclose(got, want), moisture
+
+    def test_the_clamp_still_holds_on_an_array(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.catchment import SCSRunoff
+
+        got = SCSRunoff().adjust_cn_array(np.array([0.1, 99.9]), "wet")
+        assert got.min() >= 1.0 and got.max() <= 100.0
