@@ -1354,6 +1354,20 @@ class DEMBurner:
       Diversion  → graded channel (grade-controlled depth)
     """
 
+    #: Holes are NaN in ``self.original`` and in everything derived from it.
+    #:
+    #: The sentinel is masked once, at the door, rather than guarded for at each of
+    #: the twenty-odd places the array is read. A raw -9999 is not an absence, it is
+    #: an elevation ten kilometres down, and it behaves like one: ``scipy.zoom`` used
+    #: to interpolate it into its neighbours, producing values like -4974.5 that match
+    #: no declared nodata, so ``fill_depressions`` filled a kilometre-deep phantom pit
+    #: and per-feature storage came back orders of magnitude too large. ``np.mean``
+    #: over a footprint clipped by a hole dragged a dam wall onto the upstream side.
+    #: ``internal_relief`` reported 10,049 m of fall and warned about steep ground.
+    #:
+    #: NaN has the property the sentinel lacks: it propagates instead of pretending.
+    #: Anything that reduces over the array uses a nan-aware form, and anything that
+    #: *writes* one converts back — see :meth:`save`.
     def __init__(self, dem_path):
         with rasterio.open(dem_path) as src:
             self.original = src.read(1).astype("float32")
@@ -1361,6 +1375,8 @@ class DEMBurner:
             self.crs = src.crs
             self.nodata = src.nodata
             self.shape = self.original.shape
+        if self.nodata is not None and np.isfinite(self.nodata):
+            self.original[self.original == self.nodata] = np.nan
         # Which DEM this burner is *of*. Everything it writes inherits this grid, so a
         # caller holding a burner built from one DEM while the session points at
         # another produces rasters that cannot be compared with the baseline's — worth
@@ -1417,7 +1433,15 @@ class DEMBurner:
         return modified
 
     def save(self, array, output_path):
-        """Save a DEM array to GeoTIFF with LZW compression."""
+        """Save a DEM array to GeoTIFF with LZW compression.
+
+        Holes go back out as the sentinel the file declares. Writing NaN under a
+        ``nodata=-9999`` tag would leave the two disagreeing, and the next reader to
+        mask on the declared value would find nothing to mask.
+        """
+        out = np.asarray(array, dtype="float32")
+        if self.nodata is not None and np.isfinite(self.nodata):
+            out = np.where(np.isfinite(out), out, self.nodata).astype("float32")
         with rasterio.open(
             output_path, "w",
             driver="GTiff", dtype="float32",
@@ -1425,9 +1449,28 @@ class DEMBurner:
             width=self.shape[1], height=self.shape[0],
             count=1, nodata=self.nodata, compress="lzw",
         ) as dst:
-            dst.write(array, 1)
+            dst.write(out, 1)
 
     # ------------------------------------------------------------------ helpers
+
+    def _ground_mean(self, mask):
+        """Mean ground level under *mask*, holes excluded; ``inf`` when it is all hole.
+
+        Used to choose which side of a line is the lower one. ``inf`` rather than NaN
+        because that comparison has to be total: NaN makes every ``<`` False, so a
+        side that is entirely hole would win or lose by whichever branch the code
+        falls through to rather than by ground level. ``inf`` states the intent —
+        a side we cannot see the ground of is never the lower one.
+
+        A plain ``np.mean`` over the raw band was how a dam wall ended up on the
+        upstream side of boundary-clipped sites: one -9999 cell is worth ten
+        kilometres of fall and drags the mean under any real terrain beside it.
+        """
+        if mask is None or not mask.any():
+            return np.inf
+        vals = self.original[mask]
+        vals = vals[np.isfinite(vals)]
+        return float(vals.mean()) if vals.size else np.inf
 
     def _to_shapely(self, qgs_geometry):
         try:
@@ -1595,10 +1638,8 @@ class DEMBurner:
             right = line.parallel_offset(half, "right")
             left_mask = self._rasterize(left.buffer(half))
             right_mask = self._rasterize(right.buffer(half)) & ~left_mask
-            left_mean = float(np.mean(self.original[left_mask])) if left_mask.any() else np.inf
-            right_mean = (
-                float(np.mean(self.original[right_mask])) if right_mask.any() else np.inf
-            )
+            left_mean = self._ground_mean(left_mask)
+            right_mean = self._ground_mean(right_mask)
             if np.isinf(left_mean) and np.isinf(right_mean):
                 return (line.buffer(half), line)
             chosen = left if left_mean <= right_mean else right
@@ -1655,7 +1696,7 @@ class DEMBurner:
         spill, _ = pour_point(self.original, mask, nodata=self.nodata)
         if spill is None:
             return dem
-        relief = internal_relief(self.original, mask)
+        relief = internal_relief(self.original, mask, nodata=self.nodata)
         dem = self._storage_invert(dem, footprint, mask, ew, spill,
                                    channel_batter_run(ew))
 
@@ -1687,7 +1728,10 @@ class DEMBurner:
         reach = taper_reach(swale_mask, channel_batter_run(ew), self.cell_size)
         floor = spill - ew.depth * (1.0 if reach is None else reach[swale_mask])
         cut_depths = np.clip(self.original[swale_mask] - floor, 0.0, None)
-        spoil_m3 = float(cut_depths.sum()) * (self.cell_size ** 2) * 0.75
+        # nansum: a hole in the footprint yields no spoil, because there is no ground
+        # there to dig. A plain sum would return NaN for the whole feature, and NaN
+        # passes the `spoil_m3 <= 0` guard in level_crest_from_spoil.
+        spoil_m3 = float(np.nansum(cut_depths)) * (self.cell_size ** 2) * 0.75
 
         try:
             offset = ew.buffer_radius_m + berm_width / 2
@@ -1709,9 +1753,9 @@ class DEMBurner:
                       & ~swale_mask & ~left_mask)
 
         if left_mask.any() and right_mask.any():
-            left_mean = float(np.mean(self.original[left_mask]))
-            right_mean = float(np.mean(self.original[right_mask]))
-            berm_mask = left_mask if left_mean < right_mean else right_mask
+            berm_mask = (left_mask
+                         if self._ground_mean(left_mask) < self._ground_mean(right_mask)
+                         else right_mask)
         elif left_mask.any():
             berm_mask = left_mask
         elif right_mask.any():
@@ -1841,7 +1885,7 @@ class DEMBurner:
         spill, _ = pour_point(self.original, mask, nodata=self.nodata)
         if spill is None:
             return dem
-        relief = internal_relief(self.original, mask)
+        relief = internal_relief(self.original, mask, nodata=self.nodata)
 
         dem = self._storage_invert(dem, polygon, mask, ew, spill,
                                    _as_float(getattr(ew, "batter_run_m", 0.0)))
@@ -1874,7 +1918,9 @@ class DEMBurner:
         """Record the over-excavation advisory, quantified in real cubic metres."""
         depth = _as_float(getattr(ew, "depth", 0.0))
         try:
-            cut = float(np.sum(
+            # nansum for the same reason as the spoil above: cells with no ground
+            # contribute no excavation, rather than making the whole figure NaN.
+            cut = float(np.nansum(
                 np.clip(self.original[mask] - burned_dem[mask], 0.0, None)
             )) * (self.cell_size ** 2)
             storage = float(mask.sum()) * (self.cell_size ** 2) * depth
@@ -1931,12 +1977,27 @@ class DEMBurner:
         if len(coords) < 2:
             return dem
 
-        x0, y0 = coords[0]
-        col0 = int((x0 - self.transform.c) / self.transform.a)
-        row0 = int((y0 - self.transform.f) / self.transform.e)
-        row0 = max(0, min(self.shape[0] - 1, row0))
-        col0 = max(0, min(self.shape[1] - 1, col0))
-        start_elev = float(dem[row0, col0])
+        # The grade datum, taken at the first vertex that sits on mapped ground rather
+        # than blindly at the first. A line starting in a nodata hole used to read the
+        # sentinel as an elevation and grade the entire channel away from about
+        # -10,000 m, burning a trench that deep along its whole length.
+        start_elev = None
+        for x0, y0 in coords:
+            col0 = max(0, min(self.shape[1] - 1,
+                              int((x0 - self.transform.c) / self.transform.a)))
+            row0 = max(0, min(self.shape[0] - 1,
+                              int((y0 - self.transform.f) / self.transform.e)))
+            z0 = float(dem[row0, col0])
+            if np.isfinite(z0):
+                start_elev = z0
+                break
+        if start_elev is None:
+            self.warnings.append(
+                f"{ew.name}: no point along this drain has an elevation to grade from "
+                f"— every vertex falls on ground the DEM does not cover. The drain was "
+                f"left unburned rather than cut to a guessed level."
+            )
+            return dem
 
         cum_dist = [0.0]
         for i in range(1, len(coords)):
@@ -2028,10 +2089,27 @@ class DEMBurner:
         else:
             work_dem = modified_dem
 
+        # A hole survives the downsample as a hole. `order=1` propagates NaN into the
+        # cells bordering one, so a ring of real terrain is lost around each hole; that
+        # is the deliberate trade. Interpolating the raw sentinel instead — which is
+        # what happened while the array carried -9999 — produced intermediate values
+        # like -4974.5 that match no declared nodata, so pysheds saw ordinary ground a
+        # kilometre down, `fill_depressions` filled the phantom pit, and baseline
+        # ponding and per-feature storage came back orders of magnitude too large.
+        hole = ~np.isfinite(work_dem)
+
         scaled_transform = Affine(
             base_transform.a / scale, base_transform.b, base_transform.c,
             base_transform.d, base_transform.e / scale, base_transform.f,
         )
+
+        # The temp raster is what pysheds reads, so its holes have to be the sentinel
+        # it is told to expect — NaN written under a numeric nodata tag is masked by
+        # neither convention.
+        write_nodata = (self.nodata if self.nodata is not None
+                        and np.isfinite(self.nodata) else -9999.0)
+        write_dem = (np.where(hole, write_nodata, work_dem).astype("float32")
+                     if hole.any() else work_dem)
 
         tmp = tempfile.mktemp(suffix=".tif")
         try:
@@ -2039,9 +2117,9 @@ class DEMBurner:
                 tmp, "w", driver="GTiff", dtype="float32",
                 crs=self.crs, transform=scaled_transform,
                 width=work_dem.shape[1], height=work_dem.shape[0],
-                count=1, nodata=self.nodata,
+                count=1, nodata=write_nodata,
             ) as dst:
-                dst.write(work_dem, 1)
+                dst.write(write_dem, 1)
 
             grid = Grid.from_raster(tmp)
             dem_raster = grid.read_raster(tmp)
@@ -2059,6 +2137,9 @@ class DEMBurner:
 
             ponding = np.array(depression_filled, dtype="float32") - work_dem
             ponding = np.clip(ponding, 0, None)
+            # No ground, no pond. Also keeps NaN out of the upsample below, which
+            # would otherwise spread it a second time on the way back to full size.
+            ponding[hole] = 0.0
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -2105,6 +2186,10 @@ class DEMBurner:
             dx, dy = dx / norm, dy / norm
             row = int((ey - self.transform.f) / self.transform.e)
             col = int((ex - self.transform.c) / self.transform.a)
+            # A hole at the abutment is not "below the crest": NaN fails the comparison,
+            # so `keyed` stays False rather than being asserted off a -9999 that reads
+            # ten kilometres down. You cannot key a wall into ground that is not there.
+            # The walk below is unaffected — it never stopped on a hole either way.
             if 0 <= row < self.shape[0] and 0 <= col < self.shape[1] \
                     and self.original[row, col] < crest:
                 keyed = True

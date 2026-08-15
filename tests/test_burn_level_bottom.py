@@ -510,13 +510,21 @@ class TestBurnerDefensivePaths:
         assert np.array_equal(b.burn_earthworks([ew]), data)
 
     def test_basin_over_nodata_is_a_no_op(self, tmp_path):
-        """No usable elevation under the footprint means no datum to level to."""
+        """No usable elevation under the footprint means no datum to level to.
+
+        Asserted against ``b.original`` rather than the raw file contents: the
+        burner masks the sentinel to NaN on load, so "unchanged" now means "still
+        every bit as much a hole", not "still literally -9999". ``save`` puts the
+        sentinel back — covered separately.
+        """
         data = np.full((20, 20), -9999.0, dtype="float32")
         b = _burner(tmp_path, data)
         ew = _mock_ew("basin", make_mock_polygon_geom((5.0, 5.0, 15.0, 15.0)),
                       depth=1.0)
         ew.batter_run_m = 0.0
-        assert np.array_equal(b.burn_earthworks([ew]), data)
+        out = b.burn_earthworks([ew])
+        assert np.isnan(out).all()
+        assert np.array_equal(np.isnan(out), np.isnan(b.original))
 
     def test_batter_wider_than_the_basin_degrades_to_a_single_cut(self, tmp_path):
         """An inset that erases the polygon must not erase the excavation."""
@@ -534,8 +542,130 @@ class TestBurnerDefensivePaths:
         ew = _mock_ew("swale", make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)]),
                       depth=0.5, width=2.0)
         ew.companion_berm = False
-        assert np.array_equal(b.burn_earthworks([ew]), data)
+        out = b.burn_earthworks([ew])
+        assert np.isnan(out).all()
 
+    def test_saving_puts_the_sentinel_back(self, tmp_path):
+        """Holes are NaN in memory and the declared sentinel on disk.
+
+        The two have to agree: NaN written under a ``nodata=-9999`` tag is masked by
+        neither convention, and the next reader sees a hole as ordinary ground.
+        """
+        data = np.full((6, 6), 50.0, dtype="float32")
+        data[2, 2] = -9999.0
+        b = _burner(tmp_path, data)
+        assert np.isnan(b.original[2, 2])
+
+        import rasterio
+
+        out_path = str(tmp_path / "saved.tif")
+        b.save(b.original, out_path)
+        with rasterio.open(out_path) as src:
+            back = src.read(1)
+            assert src.nodata == -9999.0
+        assert back[2, 2] == -9999.0
+        assert back[0, 0] == pytest.approx(50.0)
+
+class TestBurnerPartialHole:
+    """A hole *inside* an otherwise valid site — the case the all-nodata tests miss.
+
+    Every earlier nodata test made the whole tile nodata, where the burn is a no-op
+    and nothing gets measured. The damage from a raw sentinel happens when there is
+    real terrain beside it to contaminate: one -9999 cell is an elevation ten
+    kilometres down, and it dominates any mean, range or interpolation it reaches.
+    """
+
+    @staticmethod
+    def _sloping_with_hole(rows=30, cols=30, hole=(slice(4, 7), slice(4, 7))):
+        data = np.fromfunction(lambda r, c: 100.0 - r * 0.1, (rows, cols))
+        data = data.astype("float32")
+        data[hole] = -9999.0
+        return data
+
+    def test_hole_is_nan_not_an_elevation(self, tmp_path):
+        b = _burner(tmp_path, self._sloping_with_hole())
+        assert np.isnan(b.original[5, 5])
+        assert b.original[20, 20] == pytest.approx(98.0)
+        assert not (b.original < -1000).any(), "a sentinel survived the load"
+
+    def test_relief_ignores_the_hole(self, tmp_path):
+        """`internal_relief` over a footprint touching a hole is real relief.
+
+        Unmasked it reported ~10,049 m — the drop to the sentinel — and fired the
+        steep-ground advisory on flat paddock.
+        """
+        from terrainflow_assessment.modules.footprint import internal_relief
+        b = _burner(tmp_path, self._sloping_with_hole())
+        mask = np.zeros(b.shape, dtype=bool)
+        mask[3:9, 3:9] = True                       # straddles the hole
+
+        # Deliberately without nodata=: the masked array must be safe on its own,
+        # since that is how the call site read it for as long as the bug existed.
+        assert internal_relief(b.original, mask) < 1.0
+        assert internal_relief(b.original, mask, nodata=b.nodata) < 1.0
+
+    def test_side_selection_is_not_dragged_by_a_hole(self, tmp_path):
+        """The lower side is the lower *ground*, not the side containing a hole."""
+        data = np.full((20, 20), 50.0, dtype="float32")
+        data[2:5, 2:5] = -9999.0                    # hole on the otherwise-higher side
+        data[:, 12:] = 45.0                         # genuinely lower ground, right
+        b = _burner(tmp_path, data)
+
+        left = np.zeros(b.shape, dtype=bool)
+        left[0:8, 0:8] = True
+        right = np.zeros(b.shape, dtype=bool)
+        right[0:8, 12:20] = True
+
+        assert b._ground_mean(left) == pytest.approx(50.0)
+        assert b._ground_mean(right) == pytest.approx(45.0)
+        assert b._ground_mean(right) < b._ground_mean(left)
+
+    def test_an_all_hole_side_is_never_the_lower_one(self, tmp_path):
+        data = np.full((20, 20), 50.0, dtype="float32")
+        data[0:8, 0:8] = -9999.0
+        b = _burner(tmp_path, data)
+        blind = np.zeros(b.shape, dtype=bool)
+        blind[0:8, 0:8] = True
+        seen = np.zeros(b.shape, dtype=bool)
+        seen[10:18, 10:18] = True
+
+        assert b._ground_mean(blind) == np.inf
+        assert not b._ground_mean(blind) < b._ground_mean(seen)
+
+    def test_ponding_stays_bounded_by_real_relief(self, tmp_path, monkeypatch):
+        """The A-C2 path: a hole must not become a kilometre-deep phantom pit.
+
+        Forced through the downsample by dropping the cell cap rather than
+        allocating four million cells. Bilinear interpolation of a raw -9999 used to
+        emit values like -4974.5 that matched no declared nodata, so
+        `fill_depressions` filled to them.
+        """
+        from terrainflow_assessment.modules import earthwork_design as ed
+        monkeypatch.setattr(ed, "_MAX_PONDING_CELLS", 400)
+
+        b = _burner(tmp_path, self._sloping_with_hole(60, 60,
+                                                      (slice(20, 30), slice(20, 30))))
+        ponding = b.get_ponding_layer(b.original)
+
+        assert np.isfinite(ponding).all(), "NaN leaked into the ponding layer"
+        # Total fall across the tile is 60 * 0.1 = 6 m, so nothing can pond deeper.
+        assert ponding.max() < 10.0, f"ponded {ponding.max():.1f} m on a 6 m tile"
+
+    def test_diversion_starting_in_a_hole_is_not_burned_to_the_sentinel(self, tmp_path):
+        """No datum anywhere on the line means no burn, and a warning saying so."""
+        data = np.full((20, 20), -9999.0, dtype="float32")
+        b = _burner(tmp_path, data)
+        ew = _mock_ew("diversion", make_mock_line_geom([(5.0, 10.0), (15.0, 10.0)]),
+                      depth=0.5, width=2.0)
+        ew.gradient_pct = 1.0
+
+        out = b.burn_earthworks([ew])
+
+        assert np.isnan(out).all(), "a channel was graded from a sentinel"
+        assert any("elevation to grade from" in w for w in b.warnings), b.warnings
+
+
+class TestBurnerDefensivePathsExtra:
     def test_steep_warning_survives_an_unmeasurable_cut(self, tmp_path):
         """The advisory still fires when the volumes can't be quantified."""
         from terrainflow_assessment.modules.burn_strategy import steep_ground_warning
