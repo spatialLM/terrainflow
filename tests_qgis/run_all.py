@@ -18,6 +18,8 @@ Exit code is 0 when every check passes, 1 otherwise — so CI can gate on it.
 
 from __future__ import annotations
 
+import collections
+import faulthandler
 import importlib
 import os
 import queue
@@ -77,6 +79,13 @@ def run_worker(module_name, patterns):
             "Run them via run_qgis_tests.ps1 from the repo root instead.\n\n"
         )
         return 2
+
+    # A PyQGIS access violation kills the process with nothing but an exit code,
+    # which names the module and no more. faulthandler installs a Windows
+    # structured-exception handler and prints the Python stack of every thread as
+    # it goes down — the difference between "checks_report crashed" and the line
+    # that was executing when it did.
+    faulthandler.enable()
 
     import _harness
 
@@ -149,6 +158,10 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
     passed = failed = 0
     last_started = None
     body = []
+    # Everything the worker said, most recent last. A crash prints its
+    # faulthandler stack and then dies, so the tail is the whole diagnosis and
+    # it would otherwise scroll past inside a six-minute run.
+    tail = collections.deque(maxlen=40)
 
     deadline = time.monotonic() + timeout_s
     saw_result = False
@@ -177,6 +190,7 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
             break
 
         stripped = line.rstrip("\n")
+        tail.append(stripped)
         if stripped.startswith("RESULT "):
             _, _mod, p, f = stripped.split()
             passed, failed = int(p), int(f)
@@ -206,7 +220,9 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
             f"    The QGIS subprocess exited with code {proc.returncode} before reporting a\n"
             "    result, so none of this module's checks were counted. Re-run it\n"
             "    on its own to see where it goes:\n"
-            f"        .\\run_qgis_tests.ps1 {short}"
+            f"        .\\run_qgis_tests.ps1 {short}\n\n"
+            "    Its last words:\n"
+            + "\n".join(f"      {line}" for line in tail)
         )
         return passed, failed + 1, body
     return passed, failed, body
