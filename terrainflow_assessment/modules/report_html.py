@@ -270,7 +270,17 @@ def _figure(path, caption, extra=""):
 
 
 def _page_break(section, ctx):
-    # Only meaningful in print; on screen the document scrolls continuously.
+    """Only meaningful in print; on screen the document scrolls continuously.
+
+    Suppressed when a level-1 heading follows immediately, because that heading
+    already carries ``.brk`` and the two together threw a blank sheet between
+    every part of the document. The PDF has no equivalent: there a heading is
+    just a heading, and only an explicit break starts a page. Dropping this one
+    is what makes the two paginate the same way.
+    """
+    following = ctx.get("next")
+    if getattr(following, "level", None) == 1 and hasattr(following, "text"):
+        return ""
     return '<div class="brk"></div>'
 
 
@@ -323,7 +333,15 @@ def render_html(report, images=None, maps=None):
     if missing:
         stages += " &nbsp;·&nbsp; Not run: " + ", ".join(missing)
 
-    body = "".join(render_section(s, ctx) for s in report.sections)
+    # One section of lookahead, so a page break can see whether the thing after it
+    # is a heading that already breaks the page.
+    sections = list(report.sections)
+    parts = []
+    for i, section in enumerate(sections):
+        ctx["next"] = sections[i + 1] if i + 1 < len(sections) else None
+        parts.append(render_section(section, ctx))
+    ctx.pop("next", None)
+    body = "".join(parts)
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en"><head><meta charset="utf-8">'

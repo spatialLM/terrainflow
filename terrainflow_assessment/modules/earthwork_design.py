@@ -65,7 +65,10 @@ from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_leng
 
 _log = logging.getLogger(__name__)
 
-_MAX_PONDING_CELLS = 4_000_000  # ~2000 × 2000
+# ~2000 × 2000. A memory guard, deliberately counted in cells rather than derived
+# from a ground distance: what it is protecting is the size of the arrays the flood
+# allocates, and that is a cell count whatever the cell happens to measure.
+_MAX_PONDING_CELLS = 4_000_000
 _DAM_WINDOW_PAD_CELLS = 64      # initial crop padding for the windowed per-feature flood
 # Below a millimetre a "pond" is flood-fill noise, not water. Matches the default in
 # ``reporting.attribute_ponding_volume`` so the two agree about what counts as ponding.

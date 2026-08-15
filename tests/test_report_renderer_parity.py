@@ -492,3 +492,42 @@ class TestMergedPoolEndToEnd:
         assert _escaped("Features holding one pool between them") in html
         assert _escaped("Swale 1 + Dam 4") in html, (
             "the shared pool's members are not named in the document")
+
+
+class TestPagination:
+    """The two renderers must break pages in the same places.
+
+    The HTML gives every level-1 heading ``page-break-before: always`` and also
+    emitted a ``.brk`` div for an explicit ``PageBreak``. Since the model puts a
+    PageBreak immediately before most of its headings, printing the HTML threw a
+    blank sheet between every part of the document — where the PDF, which starts
+    a page only on an explicit break, threw one.
+    """
+
+    def _html(self, sections):
+        report = Report(title="T", subtitle="S", footer="F", sections=sections)
+        return report_html.render_html(report)
+
+    def test_a_break_before_a_top_heading_is_not_doubled(self):
+        html = self._html([report_model.PageBreak(),
+                           report_model.Heading(text="Water", level=1)])
+        # The heading keeps its class; the standalone break div goes.
+        assert '<h2 class="brk">Water</h2>' in html
+        assert '<div class="brk"></div>' not in html, (
+            "a PageBreak and the heading after it both broke the page")
+
+    def test_a_break_before_anything_else_still_breaks(self):
+        html = self._html([report_model.PageBreak(),
+                           report_model.Paragraph(text="Not a heading.")])
+        assert '<div class="brk"></div>' in html
+
+    def test_a_break_before_a_sub_heading_still_breaks(self):
+        """Only level 1 carries the class, so level 2 needs the explicit break."""
+        html = self._html([report_model.PageBreak(),
+                           report_model.Heading(text="Detail", level=2)])
+        assert '<div class="brk"></div>' in html
+
+    def test_a_trailing_break_is_harmless(self):
+        html = self._html([report_model.Paragraph(text="Last word."),
+                           report_model.PageBreak()])
+        assert '<div class="brk"></div>' in html

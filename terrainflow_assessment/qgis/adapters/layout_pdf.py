@@ -53,15 +53,77 @@ def table_content_height(n_rows, font_pt=7.0):
 # Label text wraps inside its frame, but the frame does not grow to match:
 # adjustSizeToText() measures the text on ONE line, so a wrapped paragraph got a
 # single line's height and the next block was drawn over its tail. Estimate the
-# wrapped height instead. Arial's average glyph is about half its point size.
-_LABEL_CHAR_FACTOR = 0.50      # average advance as a fraction of point size
+# wrapped height instead.
+#: What every label asks for. A request, not a promise — see label_char_factor.
+_FONT_FAMILY = "Arial"
+
+_LABEL_CHAR_FACTOR = 0.50      # fallback: Arial's average advance / point size
 _LABEL_LINE_FACTOR = 1.32      # line height as a fraction of point size
 _PT_TO_MM = 25.4 / 72.0
+
+#: Enough of the alphabet, in roughly report proportions, to average over.
+_ADVANCE_SAMPLE = ("The measured storage across every feature is 1,240 m3 "
+                   "against 1,315 m3 at this grid (-5.7%).")
+_advance_factor_cache = {}
+
+
+def label_char_factor(family=_FONT_FAMILY):
+    """Average glyph advance as a fraction of point size, **measured**.
+
+    0.50 was an assumption, and measuring it says 0.641 for Arial over this
+    report's own prose: report text is full of digits, capitals and units, all
+    of which are wider than the lowercase average the round number came from.
+    Too small a factor means the wrap estimate believes more characters fit per
+    line, which under-counts lines, which under-sizes the frame, which draws
+    the next block over the tail of this one. Under-estimating is the failure
+    the estimate exists to prevent, so it is the direction to get right.
+
+    Measured against Qt's own word-wrapped ``boundingRect`` on three report
+    paragraphs at 8.5 and 9 pt, both factors still come out short — the constant
+    by as much as 8.6 mm on a paragraph, the measured one by 4.4 mm. Half the
+    error, in the safe direction, is worth an extra page in a ten-page document.
+
+    ``family`` is a request, not a fact: ``QFont`` substitutes silently when the
+    host has no Arial, and measuring off whatever was actually resolved is what
+    makes this correct on a machine that does not. The substitution is logged,
+    because a report that paginates differently per machine is worth knowing
+    about.
+
+    Falls back to the constant when there is no usable Qt — ``tests/`` imports
+    this module under a mocked ``qgis`` and would otherwise measure a stub.
+    """
+    if family in _advance_factor_cache:
+        return _advance_factor_cache[family]
+
+    factor = _LABEL_CHAR_FACTOR
+    try:
+        from qgis.PyQt.QtGui import QFont, QFontInfo, QFontMetricsF
+
+        probe_pt = 20.0                       # big enough that rounding is noise
+        font = QFont(family)
+        font.setPointSizeF(probe_pt)
+
+        resolved = QFontInfo(font).family()
+        if resolved and resolved.lower() != family.lower():
+            _log.info("report font %r is not installed; laying out with %r",
+                      family, resolved)
+
+        advance = QFontMetricsF(font).horizontalAdvance(_ADVANCE_SAMPLE)
+        measured = float(advance) / len(_ADVANCE_SAMPLE) / probe_pt
+        # A stub, a metric-less platform or a pathological font: keep the
+        # constant rather than laying the document out on nonsense.
+        if 0.2 < measured < 1.5:
+            factor = measured
+    except Exception:                          # pragma: no cover - no Qt here
+        pass
+
+    _advance_factor_cache[family] = factor
+    return factor
 
 
 def estimate_label_height(text, width_mm, size_pt, margin_mm=2.0):
     """Millimetres a wrapped label needs, including its own margins."""
-    char_mm = size_pt * _LABEL_CHAR_FACTOR * _PT_TO_MM
+    char_mm = size_pt * label_char_factor() * _PT_TO_MM
     line_mm = size_pt * _LABEL_LINE_FACTOR * _PT_TO_MM
     usable = max(width_mm - 2 * margin_mm, char_mm)
     per_line = max(1, int(usable / char_mm))
@@ -79,7 +141,7 @@ def estimate_label_width(text, size_pt, margin_mm=2.0):
     good enough for laying legend chips out in a row: the cost of being a
     millimetre generous is a slightly wide gap, not an overlap.
     """
-    return len(str(text)) * size_pt * _LABEL_CHAR_FACTOR * _PT_TO_MM + margin_mm
+    return len(str(text)) * size_pt * label_char_factor() * _PT_TO_MM + margin_mm
 
 
 # Roughly the width of a 7 pt character, plus the cell padding either side.
@@ -144,7 +206,12 @@ def _text_format(size_pt, bold=False, colour="#22302e"):
     from qgis.PyQt.QtGui import QColor, QFont
 
     fmt = QgsTextFormat()
-    font = QFont("Arial", int(size_pt))
+    # setPointSizeF, not the int constructor: `QFont("Arial", int(8.5))` asked for
+    # 8 pt, and while `fmt.setSize` below is what the renderer honours, the font
+    # carried on reporting a size nothing in the document uses — which is what
+    # any measurement taken off it would then believe.
+    font = QFont(_FONT_FAMILY)
+    font.setPointSizeF(float(size_pt))
     font.setBold(bold)
     fmt.setFont(font)
     fmt.setSize(size_pt)
@@ -205,6 +272,7 @@ class ReportLayoutBuilder:
         self._page = 0
         self._y = 0.0
         self._landscape = False
+        self._next_section = None   # one section of lookahead, set while building
 
     # -- page management ---------------------------------------------------
 
@@ -261,7 +329,8 @@ class ReportLayoutBuilder:
     # -- primitives --------------------------------------------------------
 
     def _label(self, text, size_pt=9, bold=False, colour="#22302e",
-               width=None, height=None, background=None, indent=0.0):
+               width=None, height=None, background=None, indent=0.0,
+               gap_after=1.5):
         from qgis.core import QgsLayoutItemLabel
         from qgis.PyQt.QtCore import Qt
         from qgis.PyQt.QtGui import QColor
@@ -284,7 +353,7 @@ class ReportLayoutBuilder:
         item.attemptResize(_size(width, height))
         item.attemptMove(_pt(MARGIN_MM + indent, self._y_on_page()),
                          page=self._page)
-        self._y += height + 1.5
+        self._y += height + gap_after
         return item
 
     def _gap(self, mm=3.0):
@@ -302,8 +371,14 @@ class ReportLayoutBuilder:
         self._new_page(landscape=False)
 
         self._cover()
-        for section in self.report.sections:
+        # One section of lookahead, so a heading can decide whether to turn the
+        # page *with* the block it introduces instead of stranding itself at the
+        # foot of this one.
+        sections = list(self.report.sections)
+        for i, section in enumerate(sections):
+            self._next_section = sections[i + 1] if i + 1 < len(sections) else None
             self._section(section)
+        self._next_section = None
         self._footers()
         return self.layout
 
@@ -332,10 +407,30 @@ class ReportLayoutBuilder:
     def _render_page_break(self, section):
         self._page_break(section.orientation == "landscape")
 
+    #: What a heading reserves for the block after it when that block's height
+    #: cannot be estimated — a table, a map, a chart. Enough to be worth turning
+    #: the page for without dragging every heading onto a page of its own.
+    _HEADING_KEEP_MM = 20.0
+
+    def _following_height(self):
+        """Millimetres the section after this one will want, where that is knowable."""
+        section = getattr(self, "_next_section", None)
+        text = getattr(section, "text", None)
+        if not text:
+            return self._HEADING_KEEP_MM
+        size_pt = 8.5 if type(section).__name__ == "Callout" else 9.0
+        return estimate_label_height(text, self._text_width(), size_pt)
+
     def _render_heading(self, section):
         self._gap(2.0)
-        self._label(section.text, size_pt=15 if section.level == 1 else 11,
-                    bold=True)
+        size_pt = 15 if section.level == 1 else 11
+        # Turn the page now, with the block this heading introduces, rather than
+        # leaving the heading stranded at the foot and its first paragraph
+        # overleaf. `_label` only ever asked for room for itself, so a heading
+        # always fitted and what it announced frequently did not.
+        self._room_for(estimate_label_height(section.text, self._text_width(),
+                                             size_pt) + self._following_height())
+        self._label(section.text, size_pt=size_pt, bold=True)
 
     def _render_paragraph(self, section):
         self._label(section.text, size_pt=9)
@@ -358,26 +453,46 @@ class ReportLayoutBuilder:
 
     def _render_callout(self, callout):
         bg, fg = _TONE.get(callout.tone, _TONE["info"])
-        text = (f"{callout.title}\n{callout.text}" if callout.title
-                else callout.text)
-        self._label(text, size_pt=8.5, colour=fg, background=bg,
+        # The title is set apart, as it is in the HTML — there it is a bold block
+        # above the prose, and here it was one more line of the same run-on text,
+        # so "These measurements are out of date" read as the first sentence of
+        # the paragraph it was heading. Two labels sharing one background colour
+        # with no gap between them is one box on the page.
+        if callout.title:
+            self._label(callout.title, size_pt=8.5, colour=fg, background=bg,
+                        bold=True, gap_after=0.0)
+        self._label(callout.text, size_pt=8.5, colour=fg, background=bg,
                     bold=callout.tone == "bad")
         self._gap(1.5)
 
+    #: Cards per row. Four 8.5 pt cards fit the text column with their labels
+    #: still on one line; a fifth squeezes every one of them.
+    _CARDS_PER_ROW = 4
+
     def _render_stat_grid(self, grid):
-        """Cards across the text column — a table row would read as data."""
+        """Cards across the text column — a table row would read as data.
+
+        Wrapped, not truncated. This drew ``cards[:4]`` and dropped the rest
+        without saying so, while the HTML renderer flex-wraps and shows them all:
+        a five-card grid printed four figures on paper and five on screen, with
+        nothing on the page to suggest one was missing.
+        """
         if not grid.cards:
             return
-        n = min(len(grid.cards), 4)
+        per_row = self._CARDS_PER_ROW
         gap = 3.0
-        width = (self._text_width() - gap * (n - 1)) / n
-        self._room_for(20.0)
-        top = self._y_on_page()
-        for i, card in enumerate(grid.cards[:n]):
-            label, value, sub = (list(card) + ["", "", ""])[:3]
-            x = MARGIN_MM + i * (width + gap)
-            self._card(x, top, width, label, value, sub)
-        self._y += 21.0
+        for start in range(0, len(grid.cards), per_row):
+            chunk = grid.cards[start:start + per_row]
+            # A short last row keeps the full row's card width rather than
+            # stretching two cards across the page.
+            width = (self._text_width() - gap * (per_row - 1)) / per_row
+            self._room_for(20.0)
+            top = self._y_on_page()
+            for i, card in enumerate(chunk):
+                label, value, sub = (list(card) + ["", "", ""])[:3]
+                self._card(MARGIN_MM + i * (width + gap), top,
+                           width, label, value, sub)
+            self._y += 21.0
 
     def _card(self, x, y, width, label, value, sub):
         from qgis.core import QgsLayoutItemLabel
@@ -405,10 +520,15 @@ class ReportLayoutBuilder:
             QgsLayoutTableColumn,
         )
 
-        if title:
-            self._label(title, size_pt=10, bold=True)
+        # No rows, no section — including its title. Printing the heading anyway
+        # left an orphan on the page over nothing, while the HTML renderer
+        # dropped the table whole; the two now say the same thing, which is
+        # nothing. A table that is empty for a *reason* is a Callout in the
+        # model, not a headless table here.
         if not rows:
             return
+        if title:
+            self._label(title, size_pt=10, bold=True)
 
         table = QgsLayoutItemTextTable(self.layout)
         self.layout.addMultiFrame(table)
