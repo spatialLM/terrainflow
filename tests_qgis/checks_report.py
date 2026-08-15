@@ -841,3 +841,57 @@ def check_successful_runs_still_tick(dem_path):
         h.panel.run_earthworks_requested.emit()
         h.assert_no_errors("earthworks re-analysis")
         assert h.panel._stepper.state("verify") == "done"
+
+
+def check_section_after_a_spilled_table_is_not_drawn_on_the_cover(dem_path):
+    """A multi-page table must leave the cursor under its *last* frame.
+
+    `_advance_past` used to read the page index with
+    `pageNumberForPoint(last.pagePos())`. Those are different coordinate spaces —
+    `pagePos()` is relative to the frame's own page, `pageNumberForPoint` wants an
+    absolute layout coordinate — so any spilled table sent the cursor back to page
+    0 and everything after it was drawn on top of the cover.
+
+    Asserted directly on `_advance_past` rather than end-to-end, and that is not
+    laziness. A layout built in one pass rarely reaches the multi-frame branch:
+    QGIS creates continuation frames when it recalculates frame sizes, which for
+    most of these tables happens after the section was placed. And when the branch
+    *is* reached, two things downstream repair the damage by accident — a level-1
+    heading starts its own page, and `_room_for` calls `_new_page` whenever the
+    cursor sits low — so an end-to-end assertion passes with the bug in place. It
+    was written that way first and did exactly that.
+    """
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.modules.report_model import DataTable, Report
+    from terrainflow_assessment.qgis.adapters.layout_pdf import ReportLayoutBuilder
+
+    rows = [[f"Swale {i}", f"{i * 3} m", f"{i * 11} m3", "0.5 m"] for i in range(90)]
+    report = Report(
+        title="Spill test",
+        sections=[DataTable(title="Build schedule",
+                            headers=["Feature", "Length", "Volume", "Depth"],
+                            rows=rows,
+                            note="Every row above is one feature.")],
+    )
+
+    builder = ReportLayoutBuilder(QgsProject.instance(), report, None, None, 200)
+    layout = builder.render()
+
+    spilled = [m for m in layout.multiFrames()
+               if hasattr(m, "frames") and len(m.frames()) > 1]
+    assert spilled, "the table did not spill — raise the row count"
+    table = spilled[0]
+    last = max(table.frames(), key=lambda f: f.page())
+    assert last.page() > 0, "the table never left page 0"
+
+    builder._advance_past(table, 0.0)
+
+    assert builder._page == last.page(), (
+        f"cursor left on page {builder._page}, but the table's last frame is on "
+        f"page {last.page()} — a page-relative point was read as an absolute one")
+    expected_y = last.pagePos().y() + last.rect().height() + 2.0
+    assert abs(builder._y - expected_y) < 0.01, (
+        f"cursor y is {builder._y:.1f}, expected {expected_y:.1f} — measured from "
+        f"the top margin rather than from where the frame actually sits")
+

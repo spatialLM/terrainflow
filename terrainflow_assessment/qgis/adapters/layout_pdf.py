@@ -466,9 +466,17 @@ class ReportLayoutBuilder:
         frames = table.frames()
         if len(frames) > 1:
             last = frames[-1]
-            self._page = self.layout.pageCollection().pageNumberForPoint(
-                last.pagePos())
-            self._y = MARGIN_MM + last.rect().height() + 2.0
+            # `last.page()`, not `pageNumberForPoint(last.pagePos())`. The two speak
+            # different coordinate spaces: `pagePos()` is relative to the top-left of
+            # the frame's own page, while `pageNumberForPoint` expects an absolute
+            # layout coordinate. Handing it a page-relative point put every spilled
+            # table's continuation back on page 0, so the next section — and the
+            # table's own note — were drawn on top of the cover.
+            self._page = last.page()
+            # And measure from where the frame actually sits, rather than assuming it
+            # begins at the top margin. A continuation frame usually does; the first
+            # frame of a table that fitted below other content does not.
+            self._y = last.pagePos().y() + last.rect().height() + 2.0
         else:
             self._y += height + 2.0
 
