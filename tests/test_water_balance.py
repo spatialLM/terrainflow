@@ -317,3 +317,59 @@ class TestAreaSubtotals:
     def test_no_areas_gives_no_rows(self):
         labels, domain = self._grid()
         assert area_subtotals(labels, domain, None, 1.0, 100.0) == []
+
+
+class TestAreaSubtotalsArePartition:
+    """The four volume buckets have to sum to the runoff. They did not: a cell
+    trapped in a routing cycle, or inside the area mask but outside the labelling's
+    domain, fell into no bucket, so a reader totalling the row found an unnamed gap."""
+
+    def _rows(self, labels):
+        import numpy as np
+
+        from terrainflow_assessment.modules.water_balance import area_subtotals
+
+        labels = np.asarray(labels, dtype="int32")
+        domain = np.ones(labels.shape, dtype=bool)
+        mask = np.ones(labels.shape, dtype=bool)
+        return area_subtotals(labels, domain, {"whole": mask},
+                              cell_area_m2=1.0, runoff_mm=1000.0)
+
+    def test_the_buckets_sum_to_the_runoff(self):
+        from terrainflow_assessment.modules.flow_graph import (
+            LABEL_EXIT,
+            LABEL_SINK,
+            LABEL_UNRESOLVED,
+        )
+
+        row = self._rows([[0, 1, LABEL_EXIT],
+                          [LABEL_SINK, LABEL_UNRESOLVED, LABEL_UNRESOLVED],
+                          [0, 0, LABEL_EXIT]])[0]
+        total = (row["intercepted_m3"] + row["exit_m3"]
+                 + row["sink_m3"] + row["unresolved_m3"])
+        assert total == row["runoff_m3"], (
+            f"{total} of {row['runoff_m3']} m3 accounted for")
+
+    def test_a_cycle_is_named_rather_than_lost(self):
+        from terrainflow_assessment.modules.flow_graph import LABEL_UNRESOLVED
+
+        row = self._rows([[LABEL_UNRESOLVED, LABEL_UNRESOLVED],
+                          [0, 0]])[0]
+        assert row["unresolved_m3"] == 2.0
+        assert row["intercepted_m3"] == 2.0
+
+    def test_a_clean_grid_reports_nothing_unresolved(self):
+        from terrainflow_assessment.modules.flow_graph import LABEL_EXIT
+
+        row = self._rows([[0, 1], [LABEL_EXIT, LABEL_EXIT]])[0]
+        assert row["unresolved_m3"] == 0.0
+
+    def test_capture_reads_low_not_high_where_cells_are_unresolved(self):
+        """The audit that found this said the gap overstated capture. It is the
+        reverse — the cells are in the denominator and out of the numerator."""
+        from terrainflow_assessment.modules.flow_graph import LABEL_UNRESOLVED
+
+        clean = self._rows([[0, 0], [0, 0]])[0]
+        cycled = self._rows([[0, 0], [LABEL_UNRESOLVED, LABEL_UNRESOLVED]])[0]
+        assert clean["capture_pct"] == 100.0
+        assert cycled["capture_pct"] == 50.0

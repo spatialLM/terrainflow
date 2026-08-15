@@ -935,7 +935,7 @@ FREEBOARD = 0.8
 
 
 def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
-                       cut_m3=None):
+                       cut_m3=None, cell_area=None):
     """Split a feature's capacity into the numbers the Verify stage compares.
 
     A single "capacity" figure conflated three unrelated gaps, which is why a
@@ -1020,11 +1020,18 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
     # run — a model standing beside a burn is the arrangement that has gone wrong twice
     # (Round 3's phantom batter discount, then the narrow-footprint taper), so wherever a
     # measurement exists it wins.
+    # A length and an area, separately: `cell_size` decides whether a feature is
+    # sub-cell, `cell_area` converts a cell count to square metres. They are the
+    # same number only on a square grid, and defaulting one from the other keeps
+    # every caller that has only ever seen square cells working unchanged.
+    if cell_area is None:
+        cell_area = float(cell_size) ** 2
+
     if terrain_storage_m3 is not None:
         raster = float(terrain_storage_m3)
     elif n_cells:
         raster = rasterisable_capacity(
-            n_cells, cell_size ** 2, ew.depth,
+            n_cells, cell_area, ew.depth,
             ew.width, getattr(ew, "bottom_width_m", ew.width), cell_size,
             batter_run=channel_batter_run(ew),
         )
@@ -1385,6 +1392,14 @@ class DEMBurner:
         # being able to check for rather than discover in a shape mismatch downstream.
         self.dem_path = dem_path
         self.cell_size = abs(self.transform.a)
+        self.cell_h = abs(self.transform.e)
+        # The real area of one cell, not ``cell_size ** 2``. On a non-square grid the
+        # two differ by cell_h/cell_w, and the volumes computed from them were
+        # inconsistent with each other: ``feature_storage`` already measured against
+        # ``abs(a * e)`` while spoil, trench storage and burned-cut used the square.
+        # One design could therefore report a pond that held more than the hole that
+        # made it, with nothing in the numbers to say which was wrong.
+        self.cell_area = abs(self.transform.a * self.transform.e)
         # Non-fatal advisories raised during the last burn / ponding pass (sub-cell
         # features, resolution-cap degrade). The controller surfaces these to the
         # QGIS message bar — Strategy C is honest about what it approximates.
@@ -1625,7 +1640,7 @@ class DEMBurner:
         self.burned_masks[key] = mask
         if dem is not None and spill is not None and mask.any():
             held = np.clip(spill - dem[mask], 0.0, None)
-            self.burned_cut[key] = float(held.sum()) * (self.cell_size ** 2)
+            self.burned_cut[key] = float(held.sum()) * (self.cell_area)
 
     def _record_raised(self, ew, mask):
         """Remember the ground *ew* raised, separately from what it claimed.
@@ -1763,13 +1778,14 @@ class DEMBurner:
         # The same taper the trench is cut with, or the bank is sized from earth the
         # excavation does not produce — a full-depth rectangle yields about half again
         # the spoil of the trapezoid that replaced it.
-        reach = taper_reach(swale_mask, channel_batter_run(ew), self.cell_size)
+        reach = taper_reach(swale_mask, channel_batter_run(ew),
+                            (self.cell_h, self.cell_size))
         floor = spill - ew.depth * (1.0 if reach is None else reach[swale_mask])
         cut_depths = np.clip(self.original[swale_mask] - floor, 0.0, None)
         # nansum: a hole in the footprint yields no spoil, because there is no ground
         # there to dig. A plain sum would return NaN for the whole feature, and NaN
         # passes the `spoil_m3 <= 0` guard in level_crest_from_spoil.
-        spoil_m3 = float(np.nansum(cut_depths)) * (self.cell_size ** 2) * 0.75
+        spoil_m3 = float(np.nansum(cut_depths)) * (self.cell_area) * 0.75
 
         try:
             offset = ew.buffer_radius_m + berm_width / 2
@@ -1805,7 +1821,7 @@ class DEMBurner:
             berm_mask = self._key_berm_into_banks(line, berm_mask, swale_mask, ew,
                                                   berm_width)
 
-        crest = level_crest_from_spoil(self.original[berm_mask], self.cell_size ** 2,
+        crest = level_crest_from_spoil(self.original[berm_mask], self.cell_area,
                                        spoil_m3)
         if crest is None:
             return None, 0.0
@@ -1948,7 +1964,7 @@ class DEMBurner:
         """
         if batter_run and batter_run > 0:
             return tapered_invert(dem, mask, ew.depth, batter_run, spill,
-                                  cell_size=self.cell_size)
+                                  cell_size=(self.cell_h, self.cell_size))
         return level_invert(dem, mask, ew.depth, spill)
 
     def _warn_steep(self, ew, mask, relief, burned_dem):
@@ -1959,8 +1975,8 @@ class DEMBurner:
             # contribute no excavation, rather than making the whole figure NaN.
             cut = float(np.nansum(
                 np.clip(self.original[mask] - burned_dem[mask], 0.0, None)
-            )) * (self.cell_size ** 2)
-            storage = float(mask.sum()) * (self.cell_size ** 2) * depth
+            )) * (self.cell_area)
+            storage = float(mask.sum()) * (self.cell_area) * depth
         except Exception:
             cut = storage = None
         w = steep_ground_warning(ew.name, relief, depth, cut, storage)
@@ -2323,7 +2339,7 @@ class DEMBurner:
         if isolated_mask is None or not isolated_mask.any():
             return FeatureStorage(0.0, None, None, 0.0, 0.0)
 
-        cell_area = abs(self.transform.a * self.transform.e)
+        cell_area = self.cell_area
         rows, cols = self.shape
         r_lo, r_hi, c_lo, c_hi = self._feature_cell_bounds(ew)
         pad = _DAM_WINDOW_PAD_CELLS

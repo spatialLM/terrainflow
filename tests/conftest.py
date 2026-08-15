@@ -81,10 +81,17 @@ if _REPO not in sys.path:
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
-def _write_dem(path, data, cell_size=1.0, crs="EPSG:32632", nodata=-9999.0):
-    """Helper: write a numpy array as a GeoTIFF DEM."""
+def _write_dem(path, data, cell_size=1.0, crs="EPSG:32632", nodata=-9999.0,
+               cell_h=None):
+    """Helper: write a numpy array as a GeoTIFF DEM.
+
+    ``cell_h`` gives the rows a different spacing from the columns. Every other
+    fixture here is square, which is what let ``cell_size ** 2`` stand in for a
+    cell's area throughout the burner without a test ever disagreeing.
+    """
     h, w = data.shape
-    transform = from_bounds(0, 0, w * cell_size, h * cell_size, w, h)
+    cell_h = cell_size if cell_h is None else cell_h
+    transform = from_bounds(0, 0, w * cell_size, h * cell_h, w, h)
     with rasterio.open(
         path, "w",
         driver="GTiff", height=h, width=w,
@@ -105,6 +112,21 @@ def tmp_dem(tmp_path):
         lambda r, c: 100.0 - r * 2.0, (20, 20), dtype=float
     )
     return _write_dem(str(tmp_path / "dem.tif"), data)
+
+
+@pytest.fixture
+def tmp_dem_nonsquare(tmp_path):
+    """20x20 DEM on 2 m x 5 m cells — the case every other fixture hides.
+
+    Deliberately a strong aspect ratio: at 2:5 a cell's real area is 10 m2 against
+    the 4 m2 that ``cell_size ** 2`` gives, so anything still assuming a square
+    grid is out by 2.5x rather than by a rounding.
+    """
+    data = np.fromfunction(
+        lambda r, c: 100.0 - r * 2.0, (20, 20), dtype=float
+    )
+    return _write_dem(str(tmp_path / "dem_nonsquare.tif"), data,
+                      cell_size=2.0, cell_h=5.0)
 
 
 @pytest.fixture

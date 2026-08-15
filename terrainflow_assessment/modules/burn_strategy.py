@@ -171,7 +171,20 @@ def level_invert(dem, mask, depth: float, spill_elev: float):
     return out
 
 
-def taper_reach(mask, batter_run: float, cell_size: float = 1.0):
+def _axis_spacing(cell_size):
+    """``cell_size`` as ``(row spacing, column spacing)`` in metres.
+
+    Accepts a scalar for the square case every caller used to assume, or a pair
+    for a grid whose cells are not square.
+    """
+    try:
+        cell_h, cell_w = cell_size
+    except TypeError:
+        cell_h = cell_w = cell_size
+    return abs(float(cell_h)), abs(float(cell_w))
+
+
+def taper_reach(mask, batter_run: float, cell_size=1.0):
     """Per-cell fraction of full depth for a battered section, over *mask*.
 
     ``0`` at the footprint edge, ``1`` once a cell is ``batter_run`` inside it, linear
@@ -195,10 +208,15 @@ def taper_reach(mask, batter_run: float, cell_size: float = 1.0):
     except ImportError:  # pragma: no cover - scipy is a hard dependency in practice
         return None
 
+    # Sampled per axis. `cell_size` is one number for a square grid and the row and
+    # column spacings for any other, so a 2 m x 5 m cell tapers over five metres
+    # north-south and two east-west, as the ground does.
+    cell_h, cell_w = _axis_spacing(cell_size)
     # The outermost cells sit half a cell in from the true boundary, so the transform
     # reports 1.0 for them; subtracting half a cell puts the taper on the real edge.
-    dist = distance_transform_edt(inside, sampling=(cell_size, cell_size))
-    return np.clip((dist - cell_size / 2.0) / float(batter_run), 0.0, 1.0)
+    dist = distance_transform_edt(inside, sampling=(cell_h, cell_w))
+    inset = min(cell_h, cell_w) / 2.0
+    return np.clip((dist - inset) / float(batter_run), 0.0, 1.0)
 
 
 def tapered_invert(dem, mask, depth: float, batter_run: float, spill_elev: float,

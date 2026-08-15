@@ -484,3 +484,53 @@ class TestImpoundment:
         imp = Impoundment(region, 12.5)
         assert imp.n_cells == 4
         assert imp.pour_level_m == 12.5
+
+
+class TestMergedPoolPourLevel:
+    """Two depressions touching on a diagonal are one 8-connected component here
+    while remaining two ponds on a filled surface, each flat at its own level."""
+
+    def _two_pools_touching_diagonally(self):
+        import numpy as np
+
+        # Ground: a plateau with two hollows meeting at a corner.
+        ground = np.full((7, 7), 20.0)
+        ground[2, 2] = 8.0
+        ground[3, 3] = 5.0
+        # Filled: each hollow flat at its own pour level.
+        filled = ground.copy()
+        filled[2, 2] = 10.0
+        filled[3, 3] = 12.0
+        return ground, filled
+
+    def test_the_pour_level_is_the_lower_of_the_two(self):
+        from terrainflow_assessment.modules.crest_routing import find_impoundments
+
+        ground, filled = self._two_pools_touching_diagonally()
+        ponds, skipped = find_impoundments(filled, ground, min_cells=1)
+        assert ponds, "no impoundment found"
+        pour = ponds[0].pour_level_m
+        assert pour == 10.0, (
+            f"pour level {pour} — the maximum sizes the rim for a level the "
+            "lower sub-pool never reaches")
+
+    def test_the_spread_is_reported_rather_than_hidden(self):
+        from terrainflow_assessment.modules.crest_routing import find_impoundments
+
+        ground, filled = self._two_pools_touching_diagonally()
+        _, skipped = find_impoundments(filled, ground, min_cells=1)
+        assert any("pour level" in note for note in skipped), (
+            f"a two-level pond was merged silently: {skipped}")
+
+    def test_one_level_pond_says_nothing(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.crest_routing import find_impoundments
+
+        ground = np.full((7, 7), 20.0)
+        ground[3, 3] = 5.0
+        filled = ground.copy()
+        filled[3, 3] = 12.0
+        ponds, skipped = find_impoundments(filled, ground, min_cells=1)
+        assert ponds and ponds[0].pour_level_m == 12.0
+        assert not any("pour level" in note for note in skipped)

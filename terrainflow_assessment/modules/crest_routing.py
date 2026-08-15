@@ -318,7 +318,21 @@ def find_impoundments(filled, ground, built=None, min_depth=1e-3, tol=1e-6,
         if pool_sizes[pid] < min_cells:
             continue
         pool = labels == pid
-        pour = float(filled[pool].max())
+        # The *lowest* level the pool stands at, not the highest. Two depressions
+        # that touch on a diagonal are one 8-connected component here while
+        # remaining two ponds on a filled surface — each flat at its own pour
+        # level. Taking the maximum sizes `_level_rim` for a level the lower
+        # sub-pool never reaches, so its crest band is drawn across ground the
+        # water does not get to and the spread is shed over cells that stay dry.
+        # The minimum is the level the merged component is certainly at, which is
+        # the conservative reading and the one the lower pond actually spills at.
+        levels = filled[pool]
+        pour = float(levels.min())
+        spread = float(levels.max()) - pour
+        if spread > tol:
+            skipped.append(
+                f"a {int(pool.sum()):,}-cell pond spans {spread:.2f} m of pour "
+                f"level — treated as one pond at {pour:.2f} m, its lower level")
         region = pool | _level_rim(filled, pool, pour, tol)
         imp = Impoundment(region, pour, pool=pool)
         if built is not None and not (built & region).any():

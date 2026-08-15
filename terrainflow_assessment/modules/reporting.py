@@ -606,7 +606,7 @@ class SpillOver(NamedTuple):
 
 
 def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
-                      min_depth=0.001):
+                      min_depth=0.001, cell_area_m2=None):
     """Which barriers their own pools pour over, and along what length of crest.
 
     A pool fills to the lowest point of its rim and leaves there. Where that low point
@@ -670,7 +670,12 @@ def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
 
     pond = np.asarray(ponding, dtype="float64")
     bed = np.asarray(ground, dtype="float64")
-    cell_area = float(cell_size_m) ** 2
+    # A length and an area are two different questions and one number answers both
+    # only on a square grid: `cell_size_m` measures crest length, `cell_area_m2`
+    # converts a pool's cells to cubic metres. Defaulted from the length so callers
+    # on square grids are unchanged.
+    cell_area = (float(cell_area_m2) if cell_area_m2 is not None
+                 else float(cell_size_m) ** 2)
     out = []
     if pond.shape != bed.shape:
         return out

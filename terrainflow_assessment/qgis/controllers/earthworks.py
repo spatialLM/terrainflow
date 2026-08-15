@@ -3832,7 +3832,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # measured against, so the headline isolates burn error from cell size.
             try:
                 breakdowns[key] = capacity_breakdown(
-                    ew, cell_size=cell_size, n_cells=int(mask.sum()),
+                    ew, cell_size=cell_size, cell_area=cell_area,
+                    n_cells=int(mask.sum()),
                     terrain_storage_m3=getattr(ew, "terrain_capacity_m3", None),
                     cut_m3=burned_cut.get(getattr(ew, "id", None)))
             except Exception:
@@ -4078,9 +4079,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not barriers:
             return
         try:
+            t = ctx["transform"]
             spills = overtopping_spill(ctx["full"], ground,
-                                       abs(ctx["transform"].a), barriers,
-                                       built=raised)
+                                       abs(t.a), barriers, built=raised,
+                                       cell_area_m2=abs(t.a * t.e))
         except Exception as exc:
             print(f"TerrainFlow Assessment — overtopping check failed: {exc}")
             return

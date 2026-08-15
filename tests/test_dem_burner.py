@@ -553,3 +553,111 @@ class TestDiversionBurnEquivalence:
         cut = got < b.original - 1e-9
         assert cut.any(), "a sub-cell drain burned nothing at all"
         assert cut.sum() >= 25, f"only {int(cut.sum())} cells — the path is broken"
+
+
+class TestNonSquareCells:
+    """`cell_size ** 2` is a cell's area only on a square grid.
+
+    Every other fixture is square, so the substitution stood in for the real area
+    throughout the burner and nothing disagreed. On a 2 m x 5 m grid it is out by
+    2.5x — and, worse, it was out *inconsistently*: `feature_storage` already
+    measured against `abs(a * e)` while spoil, trench storage and burned-cut used
+    the square, so one design could report a pond holding more than the hole that
+    made it with nothing in the numbers to say which was wrong.
+    """
+
+    def test_the_burner_knows_its_cell_is_not_square(self, tmp_dem_nonsquare):
+        from terrainflow_assessment.modules.earthwork_design import DEMBurner
+
+        b = DEMBurner(tmp_dem_nonsquare)
+        assert b.cell_size == 2.0
+        assert b.cell_h == 5.0
+        assert b.cell_area == 10.0, (
+            f"cell area is {b.cell_area}, not width x height")
+
+    def test_cell_area_is_not_the_square_of_the_width(self, tmp_dem_nonsquare):
+        from terrainflow_assessment.modules.earthwork_design import DEMBurner
+
+        b = DEMBurner(tmp_dem_nonsquare)
+        assert b.cell_area != b.cell_size ** 2, (
+            "the fixture is not exercising the non-square path")
+
+    def test_a_square_grid_is_unchanged(self, tmp_dem):
+        from terrainflow_assessment.modules.earthwork_design import DEMBurner
+
+        b = DEMBurner(tmp_dem)
+        assert b.cell_area == b.cell_size ** 2 == 1.0
+
+    def _swale(self):
+        from unittest.mock import MagicMock
+
+        from tests.conftest import make_mock_line_geom
+
+        ew = MagicMock()
+        ew.type = "swale"
+        ew.geometry = make_mock_line_geom([(0.0, 0.0), (100.0, 0.0)])
+        ew.depth = 0.5
+        ew.width = 2.0
+        ew.top_width_m = 2.0
+        ew.bottom_width_m = 1.0
+        ew.batter_run_m = 0.0
+        ew.companion_berm = False
+        ew.capacity_m3 = 60.0
+        return ew
+
+    def test_capacity_breakdown_takes_an_area_not_a_side(self):
+        """The sub-cell test wants a length and the volume wants an area; one
+        argument cannot be both once the cells stop being square."""
+        from terrainflow_assessment.modules.earthwork_design import (
+            capacity_breakdown,
+        )
+
+        square = capacity_breakdown(self._swale(), cell_size=2.0, n_cells=100)
+        wide = capacity_breakdown(self._swale(), cell_size=2.0, cell_area=10.0,
+                                  n_cells=100)
+        assert wide["rasterisable"] > square["rasterisable"], (
+            "a 10 m2 cell must hold more than a 4 m2 one")
+
+    def test_the_default_area_still_squares_the_side(self):
+        from terrainflow_assessment.modules.earthwork_design import (
+            capacity_breakdown,
+        )
+
+        implied = capacity_breakdown(self._swale(), cell_size=2.0, n_cells=100)
+        explicit = capacity_breakdown(self._swale(), cell_size=2.0, cell_area=4.0,
+                                      n_cells=100)
+        assert implied == explicit
+
+
+class TestTaperSamplesPerAxis:
+    """A batter runs the same number of metres in both directions, which is a
+    different number of cells on each axis once they stop being square."""
+
+    def test_a_pair_tapers_differently_along_each_axis(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.burn_strategy import taper_reach
+
+        mask = np.zeros((11, 11), dtype=bool)
+        mask[2:9, 2:9] = True
+
+        square = taper_reach(mask, batter_run=6.0, cell_size=2.0)
+        wide = taper_reach(mask, batter_run=6.0, cell_size=(5.0, 2.0))
+        assert square is not None and wide is not None
+        # Rows are five metres apart in `wide`, so the taper reaches full depth in
+        # fewer rows than columns — the square case cannot tell them apart.
+        mid = mask.shape[0] // 2
+        assert np.allclose(square[mid, :], square[:, mid]), (
+            "a square grid should taper identically on both axes")
+        assert not np.allclose(wide[mid, :], wide[:, mid]), (
+            "a 5 m x 2 m cell tapered identically on both axes")
+
+    def test_a_scalar_still_means_a_square_cell(self):
+        import numpy as np
+
+        from terrainflow_assessment.modules.burn_strategy import taper_reach
+
+        mask = np.zeros((11, 11), dtype=bool)
+        mask[2:9, 2:9] = True
+        assert np.allclose(taper_reach(mask, 6.0, 2.0),
+                           taper_reach(mask, 6.0, (2.0, 2.0)))

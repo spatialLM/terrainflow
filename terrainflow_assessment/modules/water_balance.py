@@ -201,7 +201,13 @@ def area_subtotals(labels, domain_mask, area_masks, cell_area_m2, runoff_mm):
 
     Returns a list of dicts ordered as *area_masks* was given, each with ``name``,
     ``cells``, ``area_m2``, ``runoff_m3``, ``intercepted_m3``, ``exit_m3``,
-    ``sink_m3`` and ``capture_pct``.
+    ``sink_m3``, ``unresolved_m3`` and ``capture_pct``.
+
+    The four volume buckets are a **partition**: intercepted + exit + sink +
+    unresolved is the whole of ``runoff_m3``, every time. ``unresolved`` is
+    ``LABEL_UNRESOLVED`` — a cell trapped in a routing cycle, which a conditioned
+    DEM should never produce and which used to fall into no bucket at all, so the
+    rows quietly failed to add up.
     """
     import numpy as np
 
@@ -225,6 +231,15 @@ def area_subtotals(labels, domain_mask, area_masks, cell_area_m2, runoff_mm):
         exit_cells = int((values == LABEL_EXIT).sum())
         sink_cells = int((values == LABEL_SINK).sum())
         intercepted_cells = int((values >= 0).sum())
+        # The fourth bucket, as the remainder rather than as `== LABEL_UNRESOLVED`:
+        # taken that way the four are a partition by construction, and it catches
+        # LABEL_NONE too — a cell inside the area mask but outside the labelling's
+        # domain, which is the other way the rows failed to add up. Without it the
+        # three above sum to less than `cells` and a reader totalling them finds a
+        # gap with no name on it. (Not, as was once claimed, an overstated capture
+        # figure: an unresolved cell is in the denominator and out of the
+        # numerator, so capture reads low, not high.)
+        unresolved_cells = n - exit_cells - sink_cells - intercepted_cells
         rows.append({
             "name": name,
             "cells": n,
@@ -233,6 +248,7 @@ def area_subtotals(labels, domain_mask, area_masks, cell_area_m2, runoff_mm):
             "intercepted_m3": intercepted_cells * cell_area_m2 * depth_m,
             "exit_m3": exit_cells * cell_area_m2 * depth_m,
             "sink_m3": sink_cells * cell_area_m2 * depth_m,
+            "unresolved_m3": unresolved_cells * cell_area_m2 * depth_m,
             "capture_pct": (intercepted_cells / n * 100.0) if n else 0.0,
         })
     return rows
