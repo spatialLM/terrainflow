@@ -1338,16 +1338,27 @@ class AssessmentPanel(QDockWidget):
     def _wire_input_change_signals(self):
         """Emit analysis_inputs_changed on any storm/soil input change (drives the live
         analytical readout — the accumulation raster is storm-independent, so no re-analyse).
-        Also keeps the header's storm chip and site name live."""
+        Also keeps the header's storm chip and site name live.
+
+        Inputs that participate in ``run_tag`` additionally mark the completed stages
+        stale. Only the method combo used to, so changing the rainfall depth or the
+        duration left a green tick and a "Verified" chip standing over rasters routed
+        for a different storm — and the group name in the legend still carried the old
+        one, which is the value the report re-derives.
+        """
         for spin in (self._rainfall_spin, self._duration_spin, self._cn_spin):
-            spin.valueChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+            spin.valueChanged.connect(lambda *_: self._on_storm_input_changed())
             spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
         self._runoff_coeff_spin.valueChanged.connect(lambda *_: self._refresh_storm_chip())
+        self._runoff_coeff_spin.valueChanged.connect(
+            lambda *_: self._on_storm_input_changed())
         self._sizing_basis_combo.currentIndexChanged.connect(
             lambda *_: self._refresh_storm_chip())
+        self._threshold_spin.valueChanged.connect(
+            lambda *_: self._on_storm_input_changed())
         for combo in (self._soil_combo, self._moisture_combo, self._ew_soil_combo,
                       self._ground_condition_combo):
-            combo.currentTextChanged.connect(lambda *_: self.analysis_inputs_changed.emit())
+            combo.currentTextChanged.connect(lambda *_: self._on_storm_input_changed())
         self._site_name_edit.textChanged.connect(
             lambda text: self._head_site_lbl.setText(text.strip() or "Unnamed Site")
         )
@@ -1559,6 +1570,11 @@ class AssessmentPanel(QDockWidget):
         self._run_baseline_btn.set_done()
         self._baseline_results_lbl.setText(summary)
         self.mark_stage("baseline", "done")
+        # Verify measured the previous baseline, so this one retires it. The
+        # controller clears the matching state; without this the tick stays green
+        # over a comparison that no longer has the run it was made against.
+        if self._stepper.state("verify") == "done":
+            self.mark_stage("verify", "stale")
         # Enable results tools after first successful baseline
         self._query_ponding_btn.setEnabled(True)
         self._toggle_slope_class_btn.setEnabled(True)
@@ -2213,6 +2229,19 @@ class AssessmentPanel(QDockWidget):
             for label, widget in rows:
                 label.setVisible(visible)
                 widget.setVisible(visible)
+
+    def _on_storm_input_changed(self):
+        """A storm/soil input moved: re-assess live, and mark what it invalidated.
+
+        Same treatment `_on_basis_changed` already gave the method combo. The live
+        readout is analytical and recomputes immediately; the *baseline rasters* do
+        not, so leaving Baseline ticked green claims a run that described a different
+        storm.
+        """
+        self.analysis_inputs_changed.emit()
+        if self._baseline_has_run:
+            self.mark_stage("baseline", "stale")
+            self.mark_stage("analysis", "stale")
 
     def _on_basis_changed(self, _index=None):
         """The basis drives the baseline rasters too, so a run made under the old

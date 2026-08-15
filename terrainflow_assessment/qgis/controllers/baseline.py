@@ -412,6 +412,18 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         # New terrain conditioning → the cached flow pointers and catchment labels
         # describe the previous run and must not be reused.
         self._state.invalidate_flow_cache()
+        # And nothing measured against the *previous* baseline survives this one. A
+        # verification is the burned ponding minus the baseline ponding, so a new
+        # baseline invalidates it by definition — but it used to be left in place, and
+        # the scorecard went on showing "Verified · Δ −38%" from the old storm's burn
+        # while the run behind it had been replaced. Not the full `invalidate_results`:
+        # the design itself, its spillways and the balance are all still valid, and
+        # re-analysing with earthworks is what re-measures them.
+        self._state.verification = None
+        self._state.verified_delta_pct = None
+        self._state.edits_since_verify = None
+        self._state.earthworks_result = None
+        self._state.pond_context = None
         self._load_result_layers(result, is_earthworks=False)
 
         # Water the routing could not place. Said out loud rather than left to vanish
