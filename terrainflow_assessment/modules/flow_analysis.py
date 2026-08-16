@@ -701,6 +701,19 @@ class FlowAnalysis:
             # rounds up to 152 — the wrong cell — and the bottom row, 299.5, rounds to
             # 300 and off the raster, returning no catchment at all. np.floor, which
             # "center" uses, is the only resolution that means what we asked.
+            # The seed has to be inside the grid before pysheds sees it. Its
+            # catchment kernels are numba `nopython` code with bounds checking
+            # off, so a row or column one past the edge is not an IndexError to
+            # catch below — it is a read outside the array and the process dies
+            # with an access violation. Every one of these points is an *exit*
+            # point, which is to say it sits on the boundary by definition, so
+            # whether `floor` lands on the last row or one past it comes down to
+            # the last bit of a float. That is the intermittency.
+            seed_row, seed_col = xy_to_rc(self.transform, x, y)
+            if not (0 <= seed_row < acc_array.shape[0]
+                    and 0 <= seed_col < acc_array.shape[1]):
+                continue
+
             try:
                 try:
                     catch_mask = self.grid.catchment(
