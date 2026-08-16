@@ -509,6 +509,35 @@ class AssessmentPanel(QDockWidget):
         self._earthworks_area_combo.layerChanged.connect(
             lambda layer: self.earthworks_area_changed.emit(layer))
 
+    def _layer_combos(self):
+        """The four combos that track ``QgsProject`` — see :meth:`teardown`."""
+        return (self._dem_combo, self._boundary_combo,
+                self._analysis_area_combo, self._earthworks_area_combo)
+
+    def teardown(self):
+        """Make the panel inert before it is deleted.
+
+        A ``QgsMapLayerComboBox`` follows the project, so clearing the project
+        makes all four emit ``layerChanged`` — into the lambdas above, which
+        re-emit on this panel, which reaches the controllers. After ``unload()``
+        those controllers are gone, and the process dies inside the emit with an
+        access violation.
+
+        ``deleteLater`` alone does not prevent it: the deletion is queued for
+        the event loop, and until the loop next turns the panel is still alive
+        and still connected. Reloading from the Plugin Manager is exactly that
+        window — unload, then a new plugin, then whatever the operator's project
+        does next. Offscreen there is no loop at all, so a check that reboots
+        the plugin and then clears the project takes the process down every
+        time; that is what `checks_lifecycle` now does.
+        """
+        for combo in self._layer_combos():
+            try:
+                combo.layerChanged.disconnect()
+            except (TypeError, RuntimeError):
+                # Never connected, or the C++ side has already gone.
+                pass
+
     # ---------------------------------------------------------------- Section 2: Baseline
 
     def _build_section_baseline_inputs(self):

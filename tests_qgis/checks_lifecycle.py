@@ -54,3 +54,46 @@ def check_panel_inputs_readable(dem_path):
             assert getattr(h.panel, name) is not None, f"panel.{name} is None"
 
         h.assert_no_errors("panel inputs")
+
+
+def check_a_second_plugin_boots_cleanly_over_the_first(dem_path):
+    """Reload: unload, build another against the same QGIS, and run something.
+
+    This is what the Plugin Manager does, and what `unload()`'s docstring is
+    entirely about — anything left attached to an object QGIS owns rather than
+    the plugin (the canvas, the layer tree, the project singleton) outlives the
+    object it calls back into. Booting once per check, as every other check
+    does, never exercises it: the failure needs a *second* plugin alive against
+    connections the first left behind.
+
+    A stale connection shows up here as the dead controller raising when the
+    signal reaches it, which the harness records as an error rather than a
+    traceback nobody sees.
+    """
+    from terrainflow_assessment.qgis.plugin import TerrainFlowAssessmentPlugin
+
+    with PluginHarness(dem_path) as h:
+        h.plugin.unload()
+
+        second = TerrainFlowAssessmentPlugin(h.iface)
+        second.initGui()
+        # Hand it to the harness now, so its __exit__ tears this one down however
+        # the assertions below go — and tears it down exactly once.
+        h.plugin = second
+        h.panel = second.panel
+        try:
+            assert len(h.iface.dock_widgets) == 1, (
+                f"{len(h.iface.dock_widgets)} panels docked after a reload — "
+                "the first one was not removed")
+            assert len(h.iface.toolbar_actions) == 1, "two toolbar icons after reload"
+            assert len(h.iface.menu_items) == 1, "two menu entries after reload"
+
+            # Reaches the new controllers, and must not reach the old ones.
+            second.panel.dem_changed.emit(h.dem_layer)
+            second.panel.analysis_inputs_changed.emit()
+            h.assert_no_errors("after reload")
+
+            assert second._state.dem_path == dem_path, (
+                "the second plugin did not take the DEM — its wiring is not live")
+        finally:
+            h.state = second._state

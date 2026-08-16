@@ -102,8 +102,18 @@ class TerrainFlowAssessmentPlugin:
         # 4. The panel. `removeDockWidget` only un-docks it — the widget, and every
         #    connection from its signals into the controllers, stays alive and
         #    reachable without the `deleteLater`.
+        #
+        #    And `deleteLater` is not enough on its own, because it is a *request*:
+        #    the panel lives until the event loop next turns, and until then its
+        #    four layer combos are still following QgsProject and still able to
+        #    fire into controllers that no longer exist. `teardown()` cuts those
+        #    connections now rather than whenever Qt gets round to the deletion.
         if self.panel:
             self._iface.removeDockWidget(self.panel)
+            try:
+                self.panel.teardown()
+            except (AttributeError, RuntimeError):
+                pass
             try:
                 self.panel.deleteLater()
             except RuntimeError:
