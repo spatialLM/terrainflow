@@ -4252,7 +4252,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         _row("Volume held:",
              f"{volume_m3:,.1f} m³  ({volume_l:,.0f} L)",
-             "Total water volume in the connected depression area.")
+             H.PONDING_VOLUME_HELD)
 
         area_ha = area_m2 / 10_000
         area_str = f"{area_ha:.2f} ha  ({area_m2:,.0f} m²)" if area_ha >= 0.1 else f"{area_m2:,.0f} m²"

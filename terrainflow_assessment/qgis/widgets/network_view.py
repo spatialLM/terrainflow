@@ -69,16 +69,10 @@ def _capacity_tooltip(node):
     cap = node.get("capacity_m3", 0.0) or 0.0
     drawn = node.get("drawn_capacity_m3", cap) or 0.0
     if not node.get("capacity_is_measured"):
-        return ("Storage capacity from the drawn cross-section. No terrain measurement "
-                "yet — load a DEM to see what the ground actually holds here.")
-    tip = (f"{cap:,.0f} m³ is what this feature impounds on the actual ground, measured "
-           f"by flooding it on the DEM. The fill bar is against that figure.\n\n"
-           f"{drawn:,.0f} m³ is the drawn cross-section less freeboard — the number you "
-           f"can check by hand and the one a contractor builds to.")
+        return H.NETWORK_CAPACITY_UNMEASURED
+    tip = H.NETWORK_CAPACITY_MEASURED.format(cap=cap, drawn=drawn)
     if cap > drawn * 1.2:
-        tip += ("\n\nThe difference is water the bank holds above natural ground, and up "
-                "the slope behind it. No cross-section can predict it; it depends on "
-                "this hillside.")
+        tip += H.NETWORK_CAPACITY_ABOVE_GROUND
     return tip
 
 
@@ -175,21 +169,15 @@ class _NodeCard(QFrame):
             drain = node.get("drain_hours")
             if node["stored_m3"] >= 1.0:
                 if drain is None:
-                    txt, col, tip = ("⏱ never", _BAD,
-                                     "No infiltration — this water has nowhere to go "
-                                     "and will stand until it evaporates.")
+                    txt, col, tip = ("⏱ never", _BAD, H.NETWORK_DRAIN_NEVER)
                 elif drain > 48:
-                    txt, col, tip = (f"⏱ {drain:,.0f} h", _BAD,
-                                     "Over 48 h to drain — too slow. Expect mosquito "
-                                     "breeding, drowned plantings, and no freeboard "
-                                     "left for the next storm.")
+                    txt, col, tip = (f"⏱ {drain:,.0f} h", _BAD, H.NETWORK_DRAIN_SLOW)
                 elif drain > 24:
                     txt, col, tip = (f"⏱ {drain:,.0f} h", _WARN,
-                                     "24-48 h to drain — acceptable, but little margin "
-                                     "before the next storm.")
+                                     H.NETWORK_DRAIN_MARGINAL)
                 else:
                     txt, col, tip = (f"⏱ {drain:,.0f} h", _MUTED,
-                                     "Drains well within the conventional 24 h target.")
+                                     H.NETWORK_DRAIN_GOOD)
                 lbl = QLabel(txt)
                 lbl.setStyleSheet(f"font-size: 11px; color: {col};")
                 lbl.setToolTip(tip)

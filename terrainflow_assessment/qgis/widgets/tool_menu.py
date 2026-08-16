@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from terrainflow_assessment.core.registry.earthwork_types import all_types
+from terrainflow_assessment.qgis import help_text as H
 
 # Small monochrome-on-colour glyphs per type (kept ASCII/BMP so Qt renders them
 # everywhere). The chip carries the type's registry colour.
@@ -35,22 +36,9 @@ _SWALE_MODES = (("contour", "Segment"), ("full_contour", "Contour"), ("freehand"
 # iterates all_types(), so a registry entry here would conjure a map layer, a burn
 # method and a capacity path for something that is not an earthwork at all.
 _CONNECTION_ROWS = (
-    ("outflow", "▽", "#1273b5", "Outflow Spillway",
-     "Click the map to site where the selected feature OVERFLOWS.\n"
-     "Its crest is then read from the ground there rather than typed.\n"
-     "This is the weir sized to pass the peak flow."),
-    ("inflow", "▲", "#2e7d55", "Inflow Spillway",
-     "Click the map to site where water ENTERS the selected feature\n"
-     "from upslope. A separate structure with a separate job: an inlet is\n"
-     "protected against the incoming jet cutting the bank, rather than\n"
-     "sized to pass a peak.\n\n"
-     "Routed overflow is drawn to this point, so placing it makes the\n"
-     "connection follow the ground rather than run centroid to centroid."),
-    ("connect", "⇢", "#5f7176", "Route Overflow",
-     "Click the feature that overflows, then the one it flows into.\n"
-     "The link is drawn from the source's outflow spillway to the target's\n"
-     "inflow spillway where both are placed.\n"
-     "A link that would close a loop is refused."),
+    ("outflow", "▽", "#1273b5", "Outflow Spillway", H.TOOL_OUTFLOW_SPILLWAY),
+    ("inflow", "▲", "#2e7d55", "Inflow Spillway", H.TOOL_INFLOW_SPILLWAY),
+    ("connect", "⇢", "#5f7176", "Route Overflow", H.TOOL_ROUTE_OVERFLOW),
 )
 
 
@@ -125,7 +113,8 @@ class EarthworkToolMenu(QWidget):
 
         name = QLabel(cfg.label)
         name.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #22302e;")
-        name.setToolTip(cfg.tooltip or f"Draw a {cfg.label.lower()}")
+        name.setToolTip(cfg.tooltip
+                        or H.TOOL_DRAW_FALLBACK.format(label=cfg.label.lower()))
         h.addWidget(name)
         h.addStretch(1)
 

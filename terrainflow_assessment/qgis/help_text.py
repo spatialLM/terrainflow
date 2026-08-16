@@ -10,6 +10,18 @@ Usage:
     from terrainflow_assessment.qgis import help_text as H
     widget.setToolTip(H.STREAM_THRESHOLD)
 
+A few constants carry ``{name}`` fields and are applied with ``.format()``. They
+are still copy — the sentence is fixed and only a figure varies — and they are
+marked as templates where they are defined.
+
+**What is deliberately not here.** ``verification_table._row_tooltip``, its
+``_footer_text`` and ``spillway_table._row_tooltip`` build a paragraph per row
+out of twenty-odd branches, choosing what to say from what the numbers did. The
+sentence *is* the logic there, and lifting the wording out would leave the
+widget naming constants nobody can read and this file holding sentences whose
+conditions live elsewhere — less reviewable, not more, which is the opposite of
+why this file exists.
+
 Lives under qgis/ (the Qt/QGIS layer) as it is pure UI copy.
 """
 
@@ -1019,3 +1031,88 @@ NETWORK_SOAKED = (
     "as standing water, so it does not fill the feature."
 )
 NETWORK_SITE_EXIT = "Runoff not held by any feature"
+
+
+# --------------------------------------------------------------------- Tool menu
+# The draw tools' own copy lives on the earthwork registry, beside the type it
+# describes. These are the three that belong to no type.
+TOOL_DRAW_FALLBACK = "Draw a {label}."          # when a registry type carries no copy
+
+TOOL_OUTFLOW_SPILLWAY = (
+    "Click the map to site where the selected feature OVERFLOWS.\n"
+    "Its crest is then read from the ground there rather than typed.\n"
+    "This is the weir sized to pass the peak flow."
+)
+TOOL_INFLOW_SPILLWAY = (
+    "Click the map to site where water ENTERS the selected feature\n"
+    "from upslope. A separate structure with a separate job: an inlet is\n"
+    "protected against the incoming jet cutting the bank, rather than\n"
+    "sized to pass a peak.\n\n"
+    "Routed overflow is drawn to this point, so placing it makes the\n"
+    "connection follow the ground rather than run centroid to centroid."
+)
+TOOL_ROUTE_OVERFLOW = (
+    "Click the feature that overflows, then the one it flows into.\n"
+    "The link is drawn from the source's outflow spillway to the target's\n"
+    "inflow spillway where both are placed.\n"
+    "A link that would close a loop is refused."
+)
+
+# --------------------------------------------------------------------- Flow network
+# Drawdown bands. Lancaster sizes earthworks so they "work, don't flood, and
+# don't puddle"; this is the third constraint, and conventional practice is full
+# drawdown inside 24-48 hours.
+NETWORK_DRAIN_NEVER = (
+    "No infiltration — this water has nowhere to go and will stand until it "
+    "evaporates."
+)
+NETWORK_DRAIN_SLOW = (
+    "Over 48 h to drain — too slow. Expect mosquito breeding, drowned "
+    "plantings, and no freeboard left for the next storm."
+)
+NETWORK_DRAIN_MARGINAL = (
+    "24-48 h to drain — acceptable, but little margin before the next storm."
+)
+NETWORK_DRAIN_GOOD = "Drains well within the conventional 24 h target."
+
+NETWORK_CAPACITY_UNMEASURED = (
+    "Storage capacity from the drawn cross-section. No terrain measurement "
+    "yet — load a DEM to see what the ground actually holds here."
+)
+NETWORK_CAPACITY_MEASURED = (
+    "{cap:,.0f} m³ is what this feature impounds on the actual ground, measured "
+    "by flooding it on the DEM. The fill bar is against that figure.\n\n"
+    "{drawn:,.0f} m³ is the drawn cross-section less freeboard — the number you "
+    "can check by hand and the one a contractor builds to."
+)
+NETWORK_CAPACITY_ABOVE_GROUND = (
+    "\n\nThe difference is water the bank holds above natural ground, and up "
+    "the slope behind it. No cross-section can predict it; it depends on "
+    "this hillside."
+)
+
+# --------------------------------------------------------------------- Verify table
+VERIFY_TABLE_SUBHEAD = (
+    "Design and Geometric are calculated from your dimensions; At grid and "
+    "Measured are flooded on the terrain. At grid is usually the larger — a "
+    "keyed bank holds water above natural ground."
+)
+#: One per column of the verification table, in column order.
+VERIFY_TABLE_HEADER_TIPS = (
+    "The earthwork, as named on the map.",
+    "CALCULATED. The drawn shape less your freeboard allowance — arithmetic from\n"
+    "your dimensions, and reproducible by hand.",
+    "CALCULATED. The drawn shape exactly, without the DEM. With a companion berm\n"
+    "it is the trench plus the berm's own section. This is what a contractor\n"
+    "builds to.",
+    "MEASURED. What this feature impounds on this hillside — its own cut and its\n"
+    "own bank, flooded on the DEM in isolation. Usually larger than Geometric,\n"
+    "because a keyed bank holds water above natural ground and up the slope\n"
+    "behind it. This is what the live score sizes against.",
+    "MEASURED. The pond this feature ends up with once the whole design is built.",
+    "Measured against At-grid. Both are floods, so a gap here means a neighbouring\n"
+    "feature is changing where this one's water goes — nothing else.",
+)
+
+# --------------------------------------------------------------------- Ponding query
+PONDING_VOLUME_HELD = "Total water volume in the connected depression area."

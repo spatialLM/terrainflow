@@ -54,6 +54,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import help_text as H
+
 _INK = "#22302e"
 _MUTED = "#5f7176"
 _FAINT = "#8fa0a4"
@@ -88,25 +90,9 @@ _HEADERS = ("Feature", "Design", "Geometric", "At grid", "Measured", "Δ")
 # Per-column hover copy. The header row has no space for the distinction that matters
 # most — which columns are calculated and which are measured — so it is said here and
 # summarised in one line above the table.
-_HEADER_TIPS = (
-    "The earthwork, as named on the map.",
-    "CALCULATED. The drawn shape less your freeboard allowance — arithmetic from\n"
-    "your dimensions, and reproducible by hand.",
-    "CALCULATED. The drawn shape exactly, without the DEM. With a companion berm\n"
-    "it is the trench plus the berm's own section. This is what a contractor\n"
-    "builds to.",
-    "MEASURED. What this feature impounds on this hillside — its own cut and its\n"
-    "own bank, flooded on the DEM in isolation. Usually larger than Geometric,\n"
-    "because a keyed bank holds water above natural ground and up the slope\n"
-    "behind it. This is what the live score sizes against.",
-    "MEASURED. The pond this feature ends up with once the whole design is built.",
-    "Measured against At-grid. Both are floods, so a gap here means a neighbouring\n"
-    "feature is changing where this one's water goes — nothing else.",
-)
+_HEADER_TIPS = H.VERIFY_TABLE_HEADER_TIPS
 
-_SUBHEAD = ("Design and Geometric are calculated from your dimensions; At grid and "
-            "Measured are flooded on the terrain. At grid is usually the larger — a "
-            "keyed bank holds water above natural ground.")
+_SUBHEAD = H.VERIFY_TABLE_SUBHEAD
 
 _QSS = f"""
 QTableWidget {{
