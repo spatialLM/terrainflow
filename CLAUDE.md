@@ -154,7 +154,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, ~6 min (185 checks). Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, ~8 min (189 checks). Exit code gates.
 .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
 .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
 .\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
@@ -171,6 +171,14 @@ only that folder is deployed or zipped, so none of it can reach a shipped build.
   instead of stalling. Assert on them with `h.dialogs.of("warning")`.
 - Nothing is quarantined at present. `run_all.OPT_IN_MODULES` still exists for it —
   a module named there runs only when asked for by name.
+- **A module whose process dies is a failure, and prints why.** Every worker enables
+  `faulthandler`, so a PyQGIS access violation dumps the Python stack of each thread on
+  the way down, and the orchestrator folds the last 40 lines of the module's output into
+  the summary. This is not decoration: the runner used to score a dead subprocess `(0, 0)`
+  — no pass, no fail, no message — so a run could lose thirty checks and eleven screenshots
+  while announcing "0 failed". Two real crashes were diagnosed off these stacks within a
+  day of adding them (a panel still wired to `QgsProject` after unload, and a boundary
+  seed indexing outside a numba kernel in pysheds).
 - **Workers run inline** (`make_workers_synchronous` aliases `start = run`), which is what
   makes the suite deterministic — and what makes every concurrency fault invisible:
   `isRunning()` is never True, so a double-start or a teardown-during-run cannot be

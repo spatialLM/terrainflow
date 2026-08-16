@@ -562,3 +562,81 @@ def check_reanalysis_exit_markers_rescale_with_the_baseline(dem_path):
         h.assert_no_errors("rescale after a re-analysis")
         assert set(baseline_ctl._exit_layer_ids) == after, (
             "a rescale dropped layers that are still on the map")
+
+
+# ---------------------------------------------------------------- edge cases
+# Item 39. Three paths the controllers take when the design is incomplete. Each
+# has a `return None` or an `or {}` in it, which is how a missing input is meant
+# to be handled — and also how a *broken* one looks, right up until something
+# downstream unpacks the None.
+
+def check_verification_is_none_with_nothing_enabled(dem_path):
+    """No enabled storage feature, no verification — and no exception either.
+
+    An earthwork with zero capacity is skipped by the loop that builds the
+    footprints, so a design of nothing but disabled features reaches the maths
+    with empty inputs. Returning None is right; raising, or returning a result
+    whose totals are all zero, are both wrong — a zero total reads on the panel
+    as "measured, and it holds nothing".
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", line_across_valley())
+        # Two things the control below insisted on, in turn. Verification is
+        # measured off the burned DEM's ponding raster, so it needs a full
+        # re-analysis rather than a design-tier refresh; and it only considers
+        # features that carry a design capacity, which a harness-built earthwork
+        # does not. Without either, this check passed while asserting nothing.
+        ew.capacity_m3 = 40.0
+        h.panel.run_earthworks_requested.emit()
+
+        assert h.plugin._earthworks._compute_verification() is not None, (
+            "the fixture cannot produce a verification even with the feature "
+            "enabled, so the disabled case below proves nothing")
+
+        ew.enabled = False
+        result = h.plugin._earthworks._compute_verification()
+        assert result is None, (
+            f"expected no verification with nothing enabled, got {result!r}")
+        h.assert_no_errors("verification with nothing enabled")
+
+
+def check_the_design_tier_survives_having_no_balance(dem_path):
+    """Everything that reads `state.balance` must cope with it being None.
+
+    It is None before the first design edit and after a baseline re-run clears
+    it, and the report, the scorecard and the network view all read it. This
+    drops it deliberately and drives the readouts that consume it.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", line_across_valley())
+        h.panel.analysis_inputs_changed.emit()
+        assert h.state.balance is not None, "fixture never produced a balance"
+
+        h.state.balance = None
+        h.state.balance_stores = None
+        # The two readouts that consume it, driven directly.
+        h.plugin._earthworks._recompute_live_assessment()
+        h.plugin._reporting._collect(h.plugin._reporting._site_name())
+        h.assert_no_errors("readouts with no balance")
+
+
+def check_spillway_context_without_an_idf_table(dem_path):
+    """`has_idf` is False rather than absent when no HIRDS table is loaded.
+
+    The report's spillway footer reads this key to decide whether to say the
+    intensity was looked up at Tc or assumed. A missing key and a False one read
+    the same way in Python and differently to anyone maintaining it, and the
+    default-intensity flag beside it has to stay independent of the table.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.state.idf_table = None
+
+        context = h.plugin._earthworks._spillway_context()
+        assert context["has_idf"] is False, (
+            f"has_idf should be False with no table, got {context['has_idf']!r}")
+        assert "intensity_mm_hr" in context, "the footer still needs an intensity"
+        assert isinstance(context["intensity_is_default"], bool)
+        h.assert_no_errors("spillway context with no IDF table")
