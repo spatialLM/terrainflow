@@ -27,7 +27,10 @@ from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QMessageBox
 
-from terrainflow_assessment.modules.contour_analysis import INFLOW_RAMP_HEX
+from terrainflow_assessment.modules.contour_analysis import (
+    INFLOW_RAMP_HEX,
+    SEGMENT_INFLOW_RAMP_HEX,
+)
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers._layers import (
     crs_object,
@@ -46,8 +49,13 @@ from terrainflow_assessment.qgis.workers.task_worker import TaskWorker
 # spread is deliberate; a subtle one is no better than colour alone.
 _INFLOW_BAND_WIDTHS = (0.7, 1.4, 2.5, 4.0)
 
-# Narrower ramp for the overlay drawn *inside* the swale segments, so the green
-# verdict outline still shows as a rim around the widest band.
+# Narrower ramp for the overlay drawn over the swale segments. It used to be sized so
+# the green verdict outline showed as a rim around the widest band — that stopped being
+# expressible when the segment core moved to metres-in-map-units: a rim in millimetres
+# around a core in metres holds at exactly one scale. The bands stay in millimetres on
+# purpose. They rank where inflow concentrates along an alignment, and `_symbols`' rule
+# is that magnitude and identity are drawn in millimetres while structure is drawn in
+# metres. Narrower than `_INFLOW_BAND_WIDTHS` so the two overlays remain distinguishable.
 _SEGMENT_BAND_WIDTHS = (0.5, 1.0, 1.7, 2.5)
 
 # White halo under every banded line. Does the work colour cannot: it separates
@@ -56,9 +64,9 @@ _SEGMENT_BAND_WIDTHS = (0.5, 1.0, 1.7, 2.5)
 _INFLOW_CASING = QColor(255, 255, 255, 200)
 
 
-def _ramp_colour(i):
-    """Band *i* of the shared inflow ramp as a QColor (clamped to the ramp length)."""
-    return QColor(INFLOW_RAMP_HEX[max(0, min(i, len(INFLOW_RAMP_HEX) - 1))])
+def _ramp_colour(i, ramp=INFLOW_RAMP_HEX):
+    """Band *i* of an inflow ramp as a QColor (clamped to the ramp length)."""
+    return QColor(ramp[max(0, min(i, len(ramp) - 1))])
 
 
 class ContourController(G.LayerTreeMixin, MapToolMixin):
@@ -278,14 +286,14 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         self._apply_banded_renderer(layer, "inflow_m3", breaks, unit=unit)
 
     @staticmethod
-    def _band_symbol(i, widths, casing):
+    def _band_symbol(i, widths, casing, ramp=INFLOW_RAMP_HEX):
         """One band's line symbol: a coloured core over an optional white halo."""
         from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
         from qgis.PyQt.QtCore import Qt as _Qt
 
         width = widths[min(i, len(widths) - 1)]
         symbol = QgsLineSymbol.createSimple({"capstyle": "round", "joinstyle": "round"})
-        symbol.setColor(_ramp_colour(i))
+        symbol.setColor(_ramp_colour(i, ramp))
         symbol.setWidth(width)
         if casing:
             halo = QgsSimpleLineSymbolLayer(_INFLOW_CASING)
@@ -297,8 +305,9 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
     @classmethod
     def _apply_banded_renderer(cls, layer, attr, breaks, unit="m³",
-                               widths=_INFLOW_BAND_WIDTHS, casing=1.1):
-        """Band *layer* on *attr* using the shared ramp: colour **and** width.
+                               widths=_INFLOW_BAND_WIDTHS, casing=1.1,
+                               ramp=INFLOW_RAMP_HEX):
+        """Band *layer* on *attr* using an inflow ramp: colour **and** width.
 
         Ranges are built explicitly rather than through ``createRenderer``, which
         would re-derive its own classes from the layer — the point of passing
@@ -309,6 +318,11 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         photo is not readable: adjacent classes differ by a few percent of
         lightness and the background varies far more than that between one metre
         and the next. Four bands, each a distinct width, can be read at a glance.
+
+        ``ramp`` is a parameter because the segment overlay is drawn inside the
+        swale's own green core rather than on ground, and takes the contrasting
+        ``SEGMENT_INFLOW_RAMP_HEX`` for it. Breaks, widths and band count stay
+        shared — only the hues differ, so the two views are one scheme.
         """
         from qgis.core import QgsGraduatedSymbolRenderer, QgsRendererRange
 
@@ -316,7 +330,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         # one colour is what the data actually says.
         if len(breaks) < 3:
             layer.setRenderer(QgsSingleSymbolRenderer(
-                cls._band_symbol(len(INFLOW_RAMP_HEX) - 1, widths, casing)))
+                cls._band_symbol(len(ramp) - 1, widths, casing, ramp)))
             return
 
         ranges = []
@@ -325,7 +339,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             # a shared boundary value (QGIS tests lower <= v <= upper per range).
             lower = breaks[i] if i == 0 else breaks[i] + 1e-9
             ranges.append(QgsRendererRange(
-                lower, breaks[i + 1], cls._band_symbol(i, widths, casing),
+                lower, breaks[i + 1], cls._band_symbol(i, widths, casing, ramp),
                 f"{breaks[i]:,.0f} – {breaks[i + 1]:,.0f} {unit}",
             ))
         layer.setRenderer(QgsGraduatedSymbolRenderer(attr, ranges))
@@ -704,6 +718,12 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             min_acc_ha=self._panel.min_catchment_ha,
             swale_depth_m=self._panel.swale_depth_m,
             swale_width_m=self._panel.swale_width_m,
+            # Derived on the panel from the three entered dimensions, not typed in.
+            # `find_swale_segments` has accepted this since the trapezoid went in and
+            # nothing ever passed it, so its own 1.0 default was the site's batter
+            # whatever the design said. The sizing was trapezoidal all along; the third
+            # dimension of the trapezoid was simply unreachable from the criteria box.
+            side_slope=self._panel.swale_side_slope,
             infiltration_mm_hr=get_infiltration_rate(self._panel.earthwork_soil_name),
             duration_hr=self._panel.duration_hr,
             rank_mode=self._panel.segment_rank_mode,
@@ -756,8 +776,17 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             QgsField("required_length_m", QMetaType.Double),
             QgsField("rank",              QMetaType.Int),
             QgsField("capped",            QMetaType.Int),
+            # The top width these lengths were sized against, carried on the feature so
+            # the symbol can draw the segment at the width it means. `_symbols.BAND_EXPR`
+            # reads this field by name, which is what lets the recommendation be measured
+            # off the map instead of being a constant-thickness ribbon.
+            QgsField("width_m",           QMetaType.Double),
         ])
         layer.updateFields()
+
+        # Read once, on the GUI thread, from the same criteria box that sized the
+        # segments — so the line cannot drift from the number that produced it.
+        top_width_m = float(self._panel.swale_width_m or 0.0)
 
         feats = []
         for seg in segments:
@@ -766,12 +795,12 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             f.setAttributes([
                 seg.label, seg.elevation, seg.contributing_ha,
                 seg.inflow_m3, seg.required_length_m, seg.segment_rank,
-                1 if seg.capped else 0,
+                1 if seg.capped else 0, top_width_m,
             ])
             feats.append(f)
         pr.addFeatures(feats)
 
-        self._style_swale_segments(layer, self._panel.segment_gradient_active)
+        self._style_swale_segments(layer)
 
         text_fmt = QgsTextFormat()
         font = QFont()
@@ -802,33 +831,72 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             )
         self._iface.messageBar().pushSuccess("TerrainFlow Assessment", msg)
 
-    def _style_swale_segments(self, layer, gradient_on=False):
+    def _style_swale_segments(self, layer):
         """Distinct "swale" style: a white casing under a bold core coloured by
         whether the swale holds its inflow (green) or needs an overflow (amber),
         so it reads clearly as the recommended swale — separate from the thin
         ranked candidate contours and the slope-coloured flow lines.
 
-        With the peak-inflow overlay on, the core widens to 4.0 mm so the widest
-        gradient band (2.5 mm) still leaves ~0.75 mm of green showing either side.
-        The green/amber verdict is the point of this layer — where the water
-        concentrates is extra information about the same swale, so it is drawn
-        within the outline rather than in place of it. The green also acts as the
-        overlay's backdrop, which is why the gradient carries no white halo here.
+        **Drawn at the top width it was sized for.** This was the last layer in the
+        plugin still styled in millimetres, so a recommendation zoomed in looked like a
+        farm track and the same recommendation zoomed out looked like the same farm
+        track — the one thing a proposed swale drawn over a hillside has to say is how
+        much of that hillside it takes, and the line said nothing about it. It now
+        follows ``_symbols``' rule and its constants: structure in metres, data-defined
+        off ``width_m``, floored by ``minSizeMM`` so it survives a zoom-out rather than
+        vanishing (at 0.6 m it goes sub-pixel somewhere above 1:3000).
+
+        The ``gradient_on`` parameter is gone with it. It widened the core to 4.0 mm so
+        the widest 2.5 mm inflow band left ~0.75 mm of green showing either side; against
+        a core that is now a real width, that relationship holds at one scale and at no
+        other — at 1:100 the core swallows the band, at 1:2000 the band swallows the
+        core. The overlay stays in millimetres deliberately: it ranks where water
+        arrives, and a ranking is identity, not structure.
         """
-        from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+        from qgis.core import (
+            QgsLineSymbol,
+            QgsSimpleLineSymbolLayer,
+            QgsUnitTypes,
+        )
         from qgis.PyQt.QtCore import Qt as _Qt
+
+        from ._symbols import (
+            BAND_EXPR,
+            BAND_MIN_MM,
+            CASING_EXPR,
+            CASING_MIN_MM,
+            _clamped,
+        )
         color_expr = (
             "CASE WHEN \"capped\" = 1 THEN color_rgb(230,126, 34)"
             " ELSE color_rgb( 39,174, 96) END"
         )
-        core_w, casing_w = (4.0, 5.6) if gradient_on else (1.8, 3.6)
-        symbol = QgsLineSymbol.createSimple({"width": str(core_w), "capstyle": "round"})
-        symbol.symbolLayer(0).setDataDefinedProperty(
-            QgsSymbolLayer.PropertyStrokeColor, QgsProperty.fromExpression(color_expr))
+        # Static fallbacks in metres, used only if `width_m` is missing — which it is
+        # not, `_display_swale_segments` writes it — so `coalesce(...,0)` can never
+        # collapse the whole layer onto `minSizeMM` and quietly restore the old look.
+        fallback_m = self._panel.swale_width_m or 1.0
+
         casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 190))
-        casing.setWidth(casing_w)
+        casing.setWidth(fallback_m + 0.6)
+        casing.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+        casing.setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeWidth, QgsProperty.fromExpression(CASING_EXPR))
         casing.setPenCapStyle(_Qt.RoundCap)
-        symbol.insertSymbolLayer(0, casing)  # draw casing beneath the core
+        _clamped(casing, CASING_MIN_MM)
+
+        core = QgsSimpleLineSymbolLayer(QColor(39, 174, 96))
+        core.setWidth(fallback_m)
+        core.setWidthUnit(QgsUnitTypes.RenderMetersInMapUnits)
+        core.setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeWidth, QgsProperty.fromExpression(BAND_EXPR))
+        core.setDataDefinedProperty(
+            QgsSymbolLayer.PropertyStrokeColor, QgsProperty.fromExpression(color_expr))
+        core.setPenCapStyle(_Qt.RoundCap)
+        _clamped(core, BAND_MIN_MM)
+
+        symbol = QgsLineSymbol()
+        symbol.changeSymbolLayer(0, casing)   # casing beneath
+        symbol.appendSymbolLayer(core)
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
         layer.triggerRepaint()
 
@@ -843,9 +911,8 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         remove_layer(self._project, self._state.segment_gradient_layer_id)
         self._state.segment_gradient_layer_id = None
 
-        seg_layer = resolve_layer(self._project, self._state.segment_layer_id)
-        if seg_layer is not None:
-            self._style_swale_segments(seg_layer, checked)
+        # The segment core no longer changes with the overlay — it is the swale's real
+        # top width either way — so there is nothing to restyle here.
 
         if not checked:
             self._canvas.refresh()
@@ -912,17 +979,23 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             feats.append(f)
         pr.addFeatures(feats)
 
-        # Same bands, same colours and the same width ordering as the contour
-        # gradient — the overlay is that scheme read at segment scale, not a second
-        # one. Narrower widths and no halo: it has to fit inside the green core,
-        # which is already doing the halo's job of separating it from the ground.
-        # Boundaries follow the same scale control as the contour gradient, so both
-        # views answer "how much" the same way.
+        # Same bands and the same width ordering as the contour gradient — the
+        # overlay is that scheme read at segment scale, not a second one. Narrower
+        # widths and no halo: it has to fit inside the green core, which is already
+        # doing the halo's job of separating it from the ground. Boundaries follow
+        # the same scale control as the contour gradient, so both views answer "how
+        # much" the same way.
+        #
+        # The hues are the one thing that does differ, and for the same reason the
+        # halo is dropped: this ramp is read against the core rather than against
+        # the ground, and cyan→navy inside a green band is a hue step small enough
+        # that the thin low bands disappeared into it.
         self._apply_banded_renderer(
             layer, "inflow_m3",
             class_breaks(values, mode=self._panel.inflow_scale_mode,
-                         n_classes=len(INFLOW_RAMP_HEX)),
-            widths=_SEGMENT_BAND_WIDTHS, casing=None)
+                         n_classes=len(SEGMENT_INFLOW_RAMP_HEX)),
+            widths=_SEGMENT_BAND_WIDTHS, casing=None,
+            ramp=SEGMENT_INFLOW_RAMP_HEX)
 
         # Above the segments in the group, or the green core it belongs inside
         # would be painted over it.

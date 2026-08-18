@@ -45,6 +45,29 @@ _log = logging.getLogger(__name__)
 # renderers cannot drift apart — both import it.
 INFLOW_RAMP_HEX = ("#6fd8ef", "#1f9ed4", "#1b58b8", "#101a63")
 
+# The same quantity, read against a different background — and that is the whole
+# reason it is a second ramp rather than a shared one.
+#
+# The two ramps above are drawn on *ground*: candidate contours and the along-contour
+# gradient lie on aerial imagery, where cyan→navy is right precisely because it is not
+# one of the imagery's colours. The segment overlay is drawn **inside the recommended
+# swale's own green core**, which is a colour, and blue against green is a hue step of
+# well under a quadrant: on a field run-through the bands were hard to pick out of the
+# band they sit in, and the palest one — the thinnest, so already the quietest —
+# effectively was not there.
+#
+# Violet-magenta, at a hue a full quadrant clear of *both* colours the core can be:
+# green where the segment holds its inflow, amber where it cannot. The overlay
+# therefore separates from the core by hue rather than by asking lightness to do the
+# work a second time, and it does not stop working on the segments that are flagged —
+# which a warm ramp would have, on exactly the segments worth looking at. It stays
+# outside the aerial palette too, so the rule the ramp above is built on is not broken
+# on the way past.
+#
+# Same shape as INFLOW_RAMP_HEX — four classes, light to dark with volume — so it is
+# the same grammar read on a different ground, not a second scheme to learn.
+SEGMENT_INFLOW_RAMP_HEX = ("#f5c2ff", "#d458ed", "#a01ab8", "#5e076b")
+
 
 class ContourFeature:
     """A single contour line with its analysis results."""
@@ -729,7 +752,10 @@ class SwaleSegment:
 def find_swale_segments(contours, acc_path,
                         cell_area_m2, runoff_mm=None,
                         min_acc_ha=0.5, drop_fraction=0.25,
-                        swale_depth_m=0.3, swale_width_m=0.6,
+                        # The registry's swale, and the panel's criteria boxes — a
+                        # floored trench. These were 0.3/0.6, where 1:1 batters meet at
+                        # the drawn depth and the section is a V of 0.09 m².
+                        swale_depth_m=0.5, swale_width_m=2.0,
                         max_segments_per_contour=3,
                         side_slope=1.0, infiltration_mm_hr=0.0, duration_hr=0.0,
                         rank_mode="catchment", slope_path=None,
@@ -763,9 +789,12 @@ def find_swale_segments(contours, acc_path,
     min_acc_ha       : float — minimum contributing area (ha) for a crossing to
                        qualify.  Default 0.5 ha.
     drop_fraction    : float — fallback landscape walk: ends where acc < fraction × peak
-    swale_depth_m    : float — swale design depth (m), default 0.3 m
-    swale_width_m    : float — swale top width (m), default 0.6 m
-    side_slope       : float — wall batter H:V run-per-rise (default 1.0)
+    swale_depth_m    : float — swale design depth (m), default 0.5 m
+    swale_width_m    : float — swale top width (m), default 2.0 m
+    side_slope       : float — wall batter H:V run-per-rise (default 1.0). Together
+                       the three give a 1.0 m bottom width: a swale is dug with a
+                       floor, and a combination that leaves none describes a V-drain
+                       holding a fraction of the intended section.
     infiltration_mm_hr : float — soil infiltration rate (mm/hr); 0 → storage only
     duration_hr      : float — storm duration (hr); infiltration counts over the event
     max_segments_per_contour : int — max crossings extracted per contour

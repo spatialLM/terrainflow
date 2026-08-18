@@ -72,13 +72,32 @@ hand-off, a chain of them, or a pond that receives its own emission back all nee
 case. Stated compactly: the parked version was the Neumann series truncated after one term,
 computed on the wrong operator.
 
+Retention: a pond fills before it spills
+----------------------------------------
+Everything above describes where a pond's water *goes*. It said nothing about how much
+of it goes anywhere, because the loop re-emitted every drop it received — so the field
+downstream of a hollow was the water that would pass it if the hollow held nothing. On a
+design that is the whole point of, a swale reading 46% full still drew a full channel
+leaving its pour point, and the map contradicted the panel beside it.
+
+Given ``capacities``, each pond now keeps ``min(arriving, headroom)`` and sheds only the
+excess. The capacity is measured off the surface as Σ(filled − ground) over the pool — no
+knowledge of *what made the hollow* is needed or wanted, which is what lets one code path
+serve the bare DEM and the burned one, and a natural hollow and a swale, identically.
+
+Headroom is drawn down pass by pass rather than resolved up front: on a chain a pond's
+inflow arrives over several passes, and one that filled on pass 2 must pass on everything
+reaching it on pass 3.
+
 Conservation, and why truncating is safe
 ----------------------------------------
-A pond emits exactly what it has received, so at every point in the loop
+A pond emits exactly what it has received less what it kept, so at every point in the loop
 
-    (flux reaching a real terminal) + residual + stranded == total weight
+    (flux reaching a real terminal) + retained + residual + stranded == total weight
 
-*exactly* — not only at convergence. Every quantity in the loop is non-negative (``held`` is a
+*exactly* — not only at convergence. ``retained`` is a terminal like any other; ``residual``
+is the different thing it must not be confused with, being water the loop ran out of passes
+to place rather than water a pond is holding on purpose. Every quantity in the loop is non-negative (``held`` is a
 bincount of an accumulation of non-negative weights), so the iteration is **monotone from
 below**: it can only ever under-emit, never over-emit, never drive a cell negative. Stopping
 early is therefore one-signed and bounded by a number this module returns, and the map can
@@ -133,13 +152,18 @@ class Impoundment:
     changes are pool, not rim.
     """
 
-    __slots__ = ("region", "pour_level_m", "n_cells", "pool")
+    __slots__ = ("region", "pour_level_m", "n_cells", "pool", "storage_m3")
 
-    def __init__(self, region, pour_level_m, pool=None):
+    def __init__(self, region, pour_level_m, pool=None, storage_m3=0.0):
         self.region = region                      # bool (rows, cols) — pool + level rim
         self.pool = region if pool is None else pool   # bool — the standing water only
         self.pour_level_m = float(pour_level_m)
         self.n_cells = int(region.sum())
+        # What this hollow holds before it spills: Σ(filled − ground) over the pool. The
+        # same quantity ``reporting.raster_ponding_volume`` measures and the same one the
+        # panel shows as At grid, so a swale's 210 m³ here is the 210 m³ there — measured
+        # off the surface, with no knowledge that a swale is what made the hollow.
+        self.storage_m3 = float(storage_m3)
 
 
 class CrestPlan:
@@ -151,9 +175,10 @@ class CrestPlan:
     """
 
     __slots__ = ("absorb", "pools", "rid", "exits", "targets", "shape", "cascade_depth",
-                 "skipped")
+                 "skipped", "capacities")
 
-    def __init__(self, absorb, pools, rid, exits, targets, shape, cascade_depth, skipped):
+    def __init__(self, absorb, pools, rid, exits, targets, shape, cascade_depth, skipped,
+                 capacities=None):
         self.absorb = absorb              # bool (rows, cols) — cells to make self-draining
         self.pools = pools                # bool (rows, cols) — the standing water only
         self.rid = rid                    # int32 flat — pond index per cell, 0 = none
@@ -162,6 +187,10 @@ class CrestPlan:
         self.shape = shape
         self.cascade_depth = int(cascade_depth)
         self.skipped = skipped            # list[str]
+        # Each surviving pond's storage volume, aligned with ``exits``. Only meaningful to
+        # a caller spreading a field whose units are m³; see ``spread_crests(capacities=)``.
+        self.capacities = (np.zeros(len(exits), dtype="float64") if capacities is None
+                           else np.asarray(capacities, dtype="float64"))
 
     @property
     def ponds(self) -> int:
@@ -197,10 +226,10 @@ class CrestSpread:
     """What :func:`spread_crests` worked out, and what it could not place."""
 
     __slots__ = ("accumulation", "outlets", "pond_flow", "ponds", "outlet_cells", "passes",
-                 "residual", "skipped")
+                 "residual", "skipped", "retained", "retained_by_pond")
 
     def __init__(self, accumulation, outlets, pond_flow, ponds, outlet_cells, passes,
-                 residual, skipped):
+                 residual, skipped, retained_by_pond=None):
         self.accumulation = accumulation    # float64 (rows, cols) — the spread field
         self.outlets = outlets              # float64 (rows, cols) — each crest cell's share
         self.pond_flow = pond_flow          # float64 (rows, cols) — see below
@@ -209,6 +238,12 @@ class CrestSpread:
         self.passes = passes                # int — accumulations run, including the absorb
         self.residual = residual            # float — still held when the loop stopped
         self.skipped = skipped              # list[str]
+        # What the ponds kept rather than passed on. Zero unless the caller supplied
+        # capacities, and a *terminal* — unlike ``residual``, which is water the loop ran
+        # out of passes to place.
+        self.retained_by_pond = (np.zeros(0, dtype="float64") if retained_by_pond is None
+                                 else np.asarray(retained_by_pond, dtype="float64"))
+        self.retained = float(self.retained_by_pond.sum())
 
     @property
     def changed(self) -> bool:
@@ -272,7 +307,8 @@ def _level_rim(filled, pool, pour, tol):
 
 
 def find_impoundments(filled, ground, built=None, min_depth=1e-3, tol=1e-6,
-                      min_cells=MIN_POND_CELLS, max_cells=MAX_REGION_CELLS):
+                      min_cells=MIN_POND_CELLS, max_cells=MAX_REGION_CELLS,
+                      cell_area_m2=1.0):
     """Every pond on the surface, with the level rim it spills over.
 
     Parameters
@@ -290,6 +326,10 @@ def find_impoundments(filled, ground, built=None, min_depth=1e-3, tol=1e-6,
     min_cells : pools smaller than this keep the default routing — see
         :data:`MIN_POND_CELLS`. Measured on the **pool**, not on pool-plus-rim, because it is
         the standing water that decides whether this is a reservoir or a rounding error.
+    cell_area_m2 : cell footprint, used only to put ``Impoundment.storage_m3`` in cubic
+        metres. Left at 1.0 the storage comes back in depth·cells, which is what a caller
+        spreading an unweighted (cell-count) field would need — and nothing here reads it,
+        so a caller that does not care can ignore it.
 
     Returns ``(impoundments, skipped)``.
     """
@@ -334,7 +374,13 @@ def find_impoundments(filled, ground, built=None, min_depth=1e-3, tol=1e-6,
                 f"a {int(pool.sum()):,}-cell pond spans {spread:.2f} m of pour "
                 f"level — treated as one pond at {pour:.2f} m, its lower level")
         region = pool | _level_rim(filled, pool, pour, tol)
-        imp = Impoundment(region, pour, pool=pool)
+        # Measured against the pour level the rim is drawn at, not against each cell's own
+        # filled value: where a merged component spans two levels the upper sub-pool stands
+        # above the level this pond is treated as spilling at, and counting the water above
+        # that line would credit the hollow with storage it releases before it gets there.
+        depth = np.clip(np.minimum(filled[pool], pour) - ground[pool], 0.0, None)
+        imp = Impoundment(region, pour, pool=pool,
+                          storage_m3=float(depth.sum()) * float(cell_area_m2))
         if built is not None and not (built & region).any():
             continue
         if imp.n_cells > max_cells:
@@ -397,16 +443,18 @@ def plan_crest_absorption(impoundments, next_flat, is_sink, shape, skipped=None)
     # ``np.bincount`` indexes by them.
     rid[:] = 0
     absorb[:] = False
-    exits, targets = [], []
+    exits, targets, capacities = [], [], []
     for i, (imp, cells) in enumerate(found, start=1):
         rid[imp.region.ravel()] = i
         absorb |= imp.region
         pools |= imp.pool
         exits.append(cells)
         targets.append(tgt[cells])
+        capacities.append(imp.storage_m3)
 
     depth = _cascade_depth(rid, tgt, exits, targets)
-    return CrestPlan(absorb, pools, rid, exits, targets, shape, depth, skipped)
+    return CrestPlan(absorb, pools, rid, exits, targets, shape, depth, skipped,
+                     capacities=capacities)
 
 
 def _cascade_depth(rid, tgt, exits, targets):
@@ -455,8 +503,9 @@ def _cascade_depth(rid, tgt, exits, targets):
     return max((longest(i) for i in range(1, n_ponds + 1)), default=0)
 
 
-def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-12):
-    """Contract each pond to a mixing node and shed its whole inflow evenly along its crest.
+def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-12,
+                  capacities=None):
+    """Contract each pond to a mixing node and shed its inflow evenly along its crest.
 
     Parameters
     ----------
@@ -467,11 +516,29 @@ def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-1
         own default (one unit per valid cell). Taking it as a callback is what keeps this
         module free of pysheds and testable against a fifteen-line accumulator.
     base_weights : the weights for the first pass, or ``None`` for the engine default.
+    capacities : per-pond storage, aligned with ``plan.exits`` — usually ``plan.capacities``.
+        Given it, **a pond fills before it spills**: it keeps what it can hold and sheds only
+        the excess, so the field downstream is the water that actually gets there rather than
+        the water that would if nothing were retained. Omitted (the default) every pond passes
+        its whole inflow on, which is what this module did before and what a caller spreading
+        an unweighted field must keep — see the unit warning below.
+
+        **Units are the caller's responsibility.** The retention is a subtraction against the
+        accumulated field, so the capacities must be in the field's own units. That is m³ for
+        a runoff-weighted accumulation and depth·cells for the engine's default cell count,
+        and mixing the two silently caps a cell count by a volume. A caller with only a cell
+        count should pass nothing.
 
     Returns a :class:`CrestSpread`. ``accumulation`` is the field; ``outlets`` carries each
     crest cell's own share so the caller can show the crest passing what it actually passes;
-    ``pond_flow`` paints each pool with its pond's whole throughput, in the same cell-units
-    as the accumulation, so a reader that needs a *through-flow* figure inside a pond has one.
+    ``retained``/``retained_by_pond`` is what the ponds kept, zero unless ``capacities`` was
+    given; ``pond_flow`` paints each pool with its pond's whole throughput, in the same
+    cell-units as the accumulation, so a reader that needs a *through-flow* figure inside a
+    pond has one.
+
+    ``pond_flow`` stays the **arriving** figure under retention, not the surplus. It is read
+    as a catchment-size proxy, and a pond that captures everything would otherwise look like
+    ground nothing drains to.
 
     That last raster exists because contraction makes the accumulation inside a pool stop
     meaning contributing area — measured on Quail Island, the median pool cell falls from
@@ -493,12 +560,37 @@ def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-1
     held = np.bincount(plan.rid, weights=acc.ravel(), minlength=n_ponds + 1)[1:]
     stop_at = float(tol) * max(float(held.sum()), 1.0)
 
+    # Headroom, drawn down as the cascade delivers. Tracked per pass rather than resolved
+    # up front because a pond's inflow arrives over several passes on a chain, and a pond
+    # that filled on pass 2 must pass on everything that reaches it on pass 3.
+    remaining = None
+    if capacities is not None:
+        remaining = np.asarray(capacities, dtype="float64")
+        if remaining.size != n_ponds:
+            raise ValueError(
+                f"capacities has {remaining.size} entries for {n_ponds} ponds")
+        # ``clip`` returns a fresh array, so drawing the headroom down below cannot reach
+        # back into the caller's plan — this loop runs twice over the same ``CrestPlan``.
+        remaining = np.clip(remaining, 0.0, None)
+
     budget = int(max_passes) if max_passes else plan.default_passes()
     passes = 1
-    emitted = np.zeros(n_ponds, dtype="float64")
+    received = np.zeros(n_ponds, dtype="float64")
+    retained = np.zeros(n_ponds, dtype="float64")
     while passes < budget:
         if held.sum() <= stop_at:
             break
+        # Everything that arrived, before any of it is kept: this is the pond's throughput
+        # and what ``pond_flow`` reports, which must stay the arriving figure — a reader
+        # sizing a catchment off it wants the water that got there, not the surplus.
+        received += held
+        if remaining is not None:
+            keep = np.minimum(held, remaining)
+            remaining -= keep
+            retained += keep
+            held = held - keep
+            if held.sum() <= stop_at:
+                break
         inj = np.zeros(n, dtype="float64")
         for i in range(n_ponds):
             if held[i] <= 0:
@@ -510,7 +602,6 @@ def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-1
             # cell that also receives flow from outside the pond would otherwise pass that on
             # top of its share, which is the double count the first attempt died of.
             np.add.at(inj, plan.targets[i], share)
-        emitted += held
         step = np.asarray(accumulate(inj.reshape(shape)), dtype="float64")
         acc += step
         passes += 1
@@ -527,7 +618,8 @@ def spread_crests(plan, accumulate, base_weights=None, max_passes=None, tol=1e-1
     # body, and its accumulation was already the low figure a local high should have.
     ids = plan.rid.reshape(shape)
     with_water = plan.pools & (ids > 0)
-    pond_flow[with_water] = emitted[ids[with_water] - 1]
+    pond_flow[with_water] = received[ids[with_water] - 1]
 
-    return CrestSpread(acc, outlets.reshape(shape), pond_flow, int((emitted > 0).sum()),
-                       int(live.sum()), passes, residual, list(plan.skipped))
+    return CrestSpread(acc, outlets.reshape(shape), pond_flow, int((received > 0).sum()),
+                       int(live.sum()), passes, residual, list(plan.skipped),
+                       retained_by_pond=retained)

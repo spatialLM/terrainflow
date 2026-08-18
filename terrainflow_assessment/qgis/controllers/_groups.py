@@ -207,6 +207,37 @@ def add_layer(project, layer, path=SITE, site_name="", tag="",
     return node
 
 
+def register_render_only(project, layer):
+    """Register a layer the report draws but the user never sees. Returns it.
+
+    The PDF renderer's ``QgsLayoutItemMap`` holds its layers as
+    ``QgsMapLayerRef`` — an id resolved against the project at render time — so
+    a layer built in the exporter and handed straight to the layout comes out
+    blank. It has to be in the project. It must equally *not* be in the layer
+    tree: these are figures assembled for one document — a clipped copy of the
+    runoff raster, a traced catchment boundary — and filing them under a stage
+    group would leave the panel's legend growing a pair of layers every time
+    anyone pressed Export.
+
+    So this is the one thing ``add_layer`` does without the thing it exists for,
+    and it lives here because ``_groups.py`` is the only file allowed to say
+    ``addMapLayer`` (``tests/test_architecture.py``). Pair every call with
+    :func:`discard`, in a ``finally``.
+    """
+    project.instance().addMapLayer(layer, False)
+    return layer
+
+
+def discard(project, layer):
+    """Remove a :func:`register_render_only` layer, ignoring a dead reference."""
+    if layer is None:
+        return
+    try:
+        project.instance().removeMapLayer(layer.id())
+    except Exception:
+        pass
+
+
 def clear_group(project, path=SITE, site_name="", tag=""):
     """Drop every layer inside the group at *path*, keeping the group itself.
 

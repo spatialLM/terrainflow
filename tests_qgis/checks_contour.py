@@ -271,11 +271,28 @@ def check_inflow_bands_are_legible_over_imagery(dem_path):
         assert seg_widths == sorted(seg_widths), (
             f"segment band widths are not ascending: {seg_widths}"
         )
-        # ...and they have to fit inside the green verdict outline.
+        # The two are measured in different units and must stay that way, so there is no
+        # width comparison to make between them any more. This used to assert the widest
+        # overlay band fitted inside the green core — true only while both were in
+        # millimetres, and silently meaningless the moment the core became a real width.
+        from qgis.core import QgsSymbolLayer, QgsUnitTypes
+
+        for rng in seg_grad.renderer().ranges():
+            assert _core(rng.symbol()).widthUnit() == QgsUnitTypes.RenderMillimeters, (
+                "the inflow overlay ranks where water arrives — a ranking is drawn in "
+                "millimetres, not as a ground width"
+            )
+
         segs = QgsProject.instance().mapLayer(h.state.segment_layer_id)
-        green = _core(segs.renderer().symbol()).width()
-        assert max(seg_widths) < green, (
-            f"widest overlay band {max(seg_widths)} covers the {green} green outline"
+        core = _core(segs.renderer().symbol())
+        assert core.widthUnit() == QgsUnitTypes.RenderMetersInMapUnits, (
+            "the recommended segment is drawn in millimetres again, so its apparent "
+            "width changes with zoom and says nothing about the swale's footprint"
+        )
+        prop = core.dataDefinedProperties().property(
+            QgsSymbolLayer.PropertyStrokeWidth)
+        assert prop.isActive() and "width_m" in prop.expressionString(), (
+            f"the segment core is not driven by width_m: {prop.expressionString()!r}"
         )
 
 

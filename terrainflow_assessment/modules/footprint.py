@@ -73,8 +73,15 @@ def rasterize_footprint(shapely_geom, shape, transform,
     ).astype(bool)
 
 
+# Which branch of :func:`domain_mask` produced the mask. Not decoration: only the first
+# means the user said where the site is, and the other two are the plugin guessing.
+DOMAIN_FROM_POLYGON = "polygon"
+DOMAIN_FROM_VALID_DEM = "valid_dem"
+DOMAIN_FROM_WHOLE_GRID = "whole_grid"
+
+
 def domain_mask(shape, transform, polygons=None, valid=None,
-                all_touched: bool = DEFAULT_ALL_TOUCHED):
+                all_touched: bool = DEFAULT_ALL_TOUCHED, with_source: bool = False):
     """Boolean mask of "the site" — the denominator of the water balance.
 
     *polygons* is an ordered list of shapely-polygon lists, most-specific first (e.g.
@@ -87,7 +94,15 @@ def domain_mask(shape, transform, polygons=None, valid=None,
     cell, which is one outlet's catchment, not the site. On a multi-outlet DEM that is
     a small fraction of the real area, which is half of why "100% of the storm held on
     site" was being reported.
+
+    ``with_source=True`` also returns which branch answered, as one of the
+    ``DOMAIN_FROM_*`` constants. The fallbacks are not equivalent to a drawn boundary
+    and the difference is not visible in the mask: on the Quail Island tile the DEM
+    declares a nodata sentinel and contains **no** nodata cells, so "every usable DEM
+    cell" was all 2.85 km² — 70% of it harbour, and rain on the harbour went into every
+    "% of the site" the report prints. A caller that can say so should.
     """
+    source = DOMAIN_FROM_POLYGON
     for group in (polygons or []):
         if not group:
             continue
@@ -105,13 +120,95 @@ def domain_mask(shape, transform, polygons=None, valid=None,
         if valid is not None:
             mask &= np.asarray(valid, dtype=bool)
         if mask.any():
-            return mask
+            return (mask, source) if with_source else mask
 
     if valid is not None:
         valid = np.asarray(valid, dtype=bool)
         if valid.any():
-            return valid.copy()
-    return np.ones(shape, dtype=bool)
+            mask = valid.copy()
+            return (mask, DOMAIN_FROM_VALID_DEM) if with_source else mask
+    mask = np.ones(shape, dtype=bool)
+    return (mask, DOMAIN_FROM_WHOLE_GRID) if with_source else mask
+
+
+def clip_raster_to_polygons(src_path, geoms, out_path,
+                            all_touched: bool = DEFAULT_ALL_TOUCHED):
+    """Write a copy of *src_path* with everything outside *geoms* set to nodata.
+
+    For the report's flow map. The Surface Runoff raster covers the whole DEM
+    tile, and on a coastal tile most of that tile is not the block — so the
+    figure captioned "where the water goes" came out with the site sitting in a
+    fan of blue streaks running off every edge, none of which is anywhere the
+    owner can do anything about. Masking to the drawn boundary leaves the same
+    ramp saying the same thing about the same ground.
+
+    A copy, not a change to the source. The raster on the canvas is the analysis
+    output and the numbers behind it are measured over the whole grid; clipping
+    the original would quietly move what the layer means everywhere else it is
+    read.
+
+    Returns *out_path*, or ``None`` when there is nothing to clip to — an empty
+    geometry list, or a mask that misses the raster entirely. Both mean "print
+    the unclipped layer", which is what the caller does with ``None``.
+    """
+    import rasterio
+
+    geoms = [g for g in (geoms or [])
+             if g is not None and not getattr(g, "is_empty", False)]
+    if not geoms:
+        return None
+
+    with rasterio.open(src_path) as src:
+        profile = src.profile.copy()
+        mask = rasterize(
+            [(g, 1) for g in geoms],
+            out_shape=(src.height, src.width),
+            transform=src.transform,
+            fill=0,
+            dtype="uint8",
+            all_touched=all_touched,
+        ).astype(bool)
+        if not mask.any():
+            return None
+        data = src.read(1)
+        nodata = src.nodata
+
+    if nodata is None:
+        # No sentinel declared, so one has to be chosen. NaN for a float band
+        # reads as "no data" to every renderer without colliding with a real
+        # value; an integer band has no such value, so it keeps its zeros and
+        # is masked to the band minimum instead.
+        if np.issubdtype(data.dtype, np.floating):
+            nodata = float("nan")
+        else:
+            nodata = int(np.min(data))
+        profile.update(nodata=nodata)
+
+    out = np.where(mask, data, np.asarray(nodata).astype(data.dtype))
+    profile.update(count=1, compress="lzw")
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(out.astype(data.dtype), 1)
+    return out_path
+
+
+def domain_fallback_warning(source, domain_cells, cell_area_m2):
+    """Advisory when "the site" was guessed rather than drawn. ``None`` when it was drawn.
+
+    Deliberately not a percentage of anything: the point is that the denominator every
+    other percentage is built on has not been set, so quoting one here would be circular.
+    Says the area instead, which the reader can recognise as their farm or not.
+    """
+    if source == DOMAIN_FROM_POLYGON:
+        return None
+    area_ha = (domain_cells * float(cell_area_m2)) / 10_000.0
+    where = ("the whole DEM" if source == DOMAIN_FROM_WHOLE_GRID
+             else "every cell the DEM has an elevation for")
+    return (
+        f"No site boundary or analysis area is set, so the site is {where} — "
+        f"{area_ha:,.0f} ha. Runoff totals, capture % and every other share of the site "
+        f"are measured over that, including any water body or neighbouring land the DEM "
+        f"happens to cover. Draw a Site Boundary to measure them over your ground."
+    )
 
 
 def _dilate8(mask):

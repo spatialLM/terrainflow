@@ -34,7 +34,7 @@ from terrainflow_assessment.modules.reporting import BaselineReport
 from terrainflow_assessment.qgis.controllers import _groups as G
 from terrainflow_assessment.qgis.controllers import _layers as L
 from terrainflow_assessment.qgis.controllers._layers import dem_crs
-from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
+from terrainflow_assessment.qgis.controllers._symbols import apply_shared_ramp
 from terrainflow_assessment.qgis.controllers._tools import MapToolMixin
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.analysis_worker import AnalysisWorker
@@ -234,6 +234,11 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
             pass
 
     def on_boundary_changed(self, layer):
+        # The id as well as the path. The report frames every map on the
+        # boundary and now clips the runoff wash to it, and it can only do
+        # either if it can find the layer: the path is a *converted* copy for a
+        # memory layer, so it does not match anything in the project.
+        self._state.boundary_layer_id = layer.id() if layer is not None else None
         if layer is None:
             self._state.boundary_path = None
             return
@@ -243,6 +248,8 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
             self._state.boundary_path = None
 
     def on_analysis_area_changed(self, layer):
+        self._state.analysis_area_layer_id = (
+            layer.id() if layer is not None else None)
         self._state.analysis_area_path = self._layer_to_path(layer) if layer else None
         # Auto-apply the Analysis Area as the contour/keypoint clip so analysis
         # stays inside the boundary (matches the field's tooltip).
@@ -250,6 +257,8 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
             self._panel.set_usable_area_source("analysis")
 
     def on_earthworks_area_changed(self, layer):
+        self._state.earthworks_area_layer_id = (
+            layer.id() if layer is not None else None)
         self._state.earthworks_area_path = self._layer_to_path(layer) if layer else None
 
     def on_site_name_changed(self, name):
@@ -443,11 +452,25 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         self._state.pond_context = None
         self._load_result_layers(result, is_earthworks=False)
 
+        # What "the site" turned out to mean, when nobody drew it. Baseline only: it is
+        # a fact about the setup, not about this run, and repeating it on every design
+        # edit would train the reader to dismiss the message bar.
+        domain_msg = result.get("domain_warning")
+        if domain_msg:
+            self._iface.messageBar().pushInfo("TerrainFlow Assessment", domain_msg)
+
         # Water the routing could not place. Said out loud rather than left to vanish
         # quietly out of the streams, the exit volumes and everything derived from them.
         unrouted = result.get("unrouted_warning")
         if unrouted:
             self._iface.messageBar().pushWarning("TerrainFlow Assessment", unrouted)
+        # The banner says how much; the file says why. Printed rather than shown,
+        # because it is a page of counts for whoever is diagnosing and noise for
+        # everyone else — and written whenever there are stuck cells at all, not only
+        # when the share clears the warning threshold.
+        diag_path = result.get("unrouted_diag_path")
+        if diag_path:
+            print(f"TerrainFlow Assessment — unrouted diagnostics: {diag_path}")
 
         crest = result.get("crest_warning")
         if crest:
@@ -490,7 +513,10 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         )
         self._panel.set_baseline_complete(summary)
         self._panel.set_area_outflow(result.get("area_outflow", {}),
-                                     result.get("ponded_volume_m3"))
+                                     result.get("ponded_volume_m3"),
+                                     result.get("pond_retained_m3"))
+        self._panel.set_exit_points(result.get("exit_points"),
+                                    self._panel.exit_flow_ls)
         # A baseline alone is a reportable site assessment, so the export unlocks here
         # rather than waiting on a design or a simulation. Deliberately not in
         # set_baseline_complete(): _on_analysis_error calls that too, and a failed run
@@ -501,6 +527,9 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
     def _on_analysis_error(self, tb):
         self._panel.set_baseline_failed(
             "Analysis failed — see Python console for details.")
+        # The crossings on screen belong to the run that just failed to replace them.
+        # Left up, they read as this run's answer.
+        self._panel.set_exit_points(None)
         print("TerrainFlow Assessment — Analysis error:\n" + tb)
         self._iface.messageBar().pushCritical("TerrainFlow Assessment",
                                                "Analysis failed. See Python console.")
@@ -536,20 +565,27 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
                 self.apply_stream_ramp(layer, result.get("stream_acc_max", 1))
                 _add(layer)
 
-        # The reservoirs the flow model routes as ponds, drawn as water bodies. Added
-        # *under* nothing and beside Streams on purpose: a channel entering a pond now
-        # genuinely stops there — a pond holds its inflow and sheds it along its whole
-        # crest rather than threading a line through itself — so without this the map has a
-        # gap where the water is. Drawn from the pond mask rather than by lowering the
-        # stream threshold, because folding the pools into Streams took that layer from
-        # 3,286 cells to 10,955, nearly three times its own baseline: that is a flood of
-        # ink, not a reservoir.
-        pond_path = result.get("pond_flow")
-        if pond_path and os.path.exists(pond_path):
-            layer = QgsRasterLayer(pond_path, f"{label} — Ponds (routed)")
-            if layer.isValid():
-                self.apply_ponding_ramp(layer)
-                _add(layer)
+        # "Ponds (routed)" used to be drawn here, to fill the gap Streams has where a
+        # channel enters a pond: a pond holds its inflow and sheds it along its whole
+        # crest rather than threading a line through itself.
+        #
+        # It is gone because it could not be read. ``pond_flow`` is a **cell count** —
+        # every cell of a pool carries that pond's total arriving throughput, a
+        # contributing-area proxy and explicitly not a depth (``crest_routing`` says so:
+        # "a lookup, not a distributable quantity"). It was painted with
+        # ``apply_ponding_ramp``, whose stops are labelled *dry / shallow / holding /
+        # deep / deepest* — a depth vocabulary over a field that has no depth in it — and
+        # it sat one row from "Pond Capacity (full)", which genuinely is metres of water.
+        # Two layers, near-identical footprints, the same colours, the same words, and
+        # only one of them meaning what the legend said.
+        #
+        # The gap it was added for stays filled: Pond Capacity draws every wet cell, a
+        # strict superset of the pools that survive ``MIN_POND_CELLS`` and reach an exit.
+        #
+        # The raster is still written. Keypoint analysis reads the *path* (see
+        # ``ContourController``), and without it a reservoir floor comes back as a
+        # ridgeline — so ``result["pond_flow"]`` must keep existing, and only the layer
+        # is gone.
 
         # Total event water passing through each cell — the whole surface, not just
         # the cells that pass the stream threshold, so water is visible gathering
@@ -559,7 +595,8 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
             layer = QgsRasterLayer(throughflow_path,
                                    f"{label} — Surface Runoff (m³)")
             if layer.isValid():
-                self.apply_throughflow_ramp(layer, self._panel.throughflow_scale_mode)
+                self.apply_throughflow_ramp(layer,
+                                            self._panel.throughflow_scale_mode)
                 _add(layer, visible=self._panel.throughflow_visible)
                 if not is_earthworks:
                     self._state.throughflow_layer_id = layer.id()
@@ -811,27 +848,43 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
     # ---------------------------------------------------------------- Shared raster styling
 
     def apply_stream_ramp(self, layer, max_acc=None):
-        """The thresholded channel network. Stops live in ``map_palette``."""
+        """The thresholded channel network. Stops live in ``map_palette``.
+
+        Scaled with the Earthworks network rather than against itself — see
+        ``_symbols.apply_shared_ramp``.
+        """
         from terrainflow_assessment.core.registry.map_palette import STREAMS
 
-        apply_raster_ramp(layer, STREAMS, max_acc)
+        apply_shared_ramp(self._state, self._project, "streams",
+                          layer, STREAMS, max_acc)
 
     def apply_throughflow_ramp(self, layer, scale="log"):
         """Blue gradient over the whole site: total event water through each cell.
 
-        Off-white where flow is diffuse through to dark blue where it concentrates —
+        Light cyan where flow is diffuse through to dark blue where it concentrates —
         a different colour family from the green→red slope ramp, keeping the shared
         rule that blue means actual water.
 
         The stops live in ``core.registry.map_palette`` so the panel's inline key
         and the report's map legend describe the ramp the map is actually drawn
         with. They used to be declared here and hand-copied into ``panel.py``.
+
+        The colour ramp starts at ``SURFACE_RUNOFF_FADE_TOP_M3`` rather than at the
+        raster's zero, and the layer fades in beneath it. Per-stop alpha across the
+        whole ramp was tried and made a value read differently over pasture than over
+        bush shadow; layer opacity replaced it and was honest but still put a 55%
+        wash over everything. The fade is neither: it is one colour at varying alpha
+        over the first couple of cubic metres, which is where the map is mostly
+        reporting that it rained.
         """
         from terrainflow_assessment.core.registry.map_palette import (
+            SURFACE_RUNOFF_FADE_TOP_M3,
             surface_runoff_ramp,
         )
 
-        apply_raster_ramp(layer, surface_runoff_ramp(scale))
+        apply_shared_ramp(self._state, self._project, "surface_runoff",
+                          layer, surface_runoff_ramp(scale),
+                          min_value=SURFACE_RUNOFF_FADE_TOP_M3)
 
     def set_throughflow_visible(self, visible):
         """Show/hide the throughflow raster without re-running the analysis."""
@@ -854,10 +907,17 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         layer.triggerRepaint()
         self._canvas.refresh()
 
-    def apply_ponding_ramp(self, layer):
-        """Standing water, by depth. Full opacity — see ``map_palette``."""
+    def apply_ponding_ramp(self, layer, max_depth=None):
+        """Standing water, by depth. Full opacity — see ``map_palette``.
+
+        On the ``ponding`` shared scale, so a depth reads as one colour on the
+        Baseline layer, on the Earthworks layer and on the event pond drawn over
+        it. Left to itself each stretched the same stops over its own deepest
+        cell, which is the one thing a before/after pair must not do.
+        """
         from terrainflow_assessment.core.registry.map_palette import (
             WATER_CAPTURED,
         )
 
-        apply_raster_ramp(layer, WATER_CAPTURED)
+        apply_shared_ramp(self._state, self._project, "ponding",
+                          layer, WATER_CAPTURED, max_depth)

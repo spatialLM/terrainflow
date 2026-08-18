@@ -101,7 +101,7 @@ def _full_data():
             routing_warnings=["A routing warning."],
             per_feature=[_feature()]),
         earthworks=[_Earthwork()],
-        # The Cut/Fill columns of "Every feature, as drawn" come from here and
+        # The Cut/Fill columns of "Every feature — drawn against measured" come from here and
         # nowhere else, so without a store the sweep reads a table whose last two
         # columns are always blank and calls the renderers agreed.
         balance_stores=[_Store()],
@@ -126,6 +126,11 @@ def _full_data():
                           "geometric_m3": 1250.0, "rasterisable_m3": 1100.0,
                           "terrain_m3": 950.0, "delta_pct": -13.6,
                           "section_overstated": True, "section_gap_pct": -12.0,
+                          # The build schedule's measured cut. Present so the sweep
+                          # actually reaches that column: an em dash buys no coverage,
+                          # and this one carried no value for the whole time it was
+                          # printing the wrong figure.
+                          "cut_m3": 1150.0, "excavation_m3": 1400.0,
                           "existing_m3": 42.0, "total_m3": 992.0}]),
         comparison=ComparisonResult(
             captured_pct=78.0, exit_reduction_pct=40.0, peak_reduction_pct=35.0,
@@ -244,7 +249,7 @@ class TestContentAgreement:
                         f"{text!r} from {section.title!r} is missing from the HTML")
 
     @pytest.mark.parametrize("title", [
-        "Every feature, as drawn",                    # balance_stores -> Cut/Fill
+        "Every feature — drawn against measured",                    # balance_stores -> Cut/Fill
         "Earthmoving — drawn against measured",       # burn_quantities
         "Features holding one pool between them",     # merged_groups
         "These measurements are out of date",         # edits_since_verify

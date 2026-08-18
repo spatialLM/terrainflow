@@ -505,6 +505,82 @@ class TestOvertoppingSpill:
         assert overtopping_spill(pond, ground, 1.0, [("Swale A", empty, 10.0)]) == []
 
 
+class TestWhichStormTheSpillIsAbout:
+    """The band is measured on the **full** pond, and that was never said.
+
+    Filled to its spill point, the pool leaves over its own crest — a freeboard fact
+    about the structure, true whatever the event does. Drawn unqualified beside an
+    event water line sitting a metre below the crest, it read as a claim that the
+    modelled storm was going over the top. ``event_depth`` is what lets the two be
+    told apart.
+    """
+
+    def _valley(self):
+        """Same 12.0 m wall as above, with the pool filled to it at capacity."""
+        ground = np.full((5, 7), 20.0)
+        ground[2, :] = 10.0
+        ground[2, 3] = 12.0
+        pond = np.zeros((5, 7))
+        pond[2, 0:3] = 2.0
+        crest = np.zeros((5, 7), dtype=bool)
+        crest[2, 3] = True
+        return ground, pond, crest
+
+    def test_without_an_event_pond_the_answer_is_not_asked_rather_than_no(self):
+        """None, not False. A barrier nobody measured is not a barrier cleared."""
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])
+        assert got[0].event_level_m is None
+        assert got[0].overtops_this_event is None
+
+    def test_a_part_full_pond_does_not_overtop_this_event(self):
+        """The case from the field: the water line is drawn below the crest and the
+        band was still solid red."""
+        ground, pond, crest = self._valley()
+        event = np.zeros((5, 7))
+        event[2, 0:3] = 0.5                     # standing at 10.5, not 12.0
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                event_depth=event)
+        assert got[0].pour_level_m == pytest.approx(12.0)
+        assert got[0].event_level_m == pytest.approx(10.5)
+        assert got[0].overtops_this_event is False
+
+    def test_a_pond_the_event_fills_does_overtop(self):
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                event_depth=pond)   # the event fills it to capacity
+        assert got[0].event_level_m == pytest.approx(12.0)
+        assert got[0].overtops_this_event is True
+
+    def test_a_pool_the_event_leaves_dry_reads_off_the_floor(self):
+        """Not an error and not a None: the pool is empty, so the surface is the bed,
+        which is below the pour level by construction."""
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                event_depth=np.zeros((5, 7)))
+        assert got[0].event_level_m == pytest.approx(10.0)
+        assert got[0].overtops_this_event is False
+
+    def test_a_misshapen_event_raster_is_ignored_not_believed(self):
+        """A grid mismatch is the failure that would otherwise silently clear every
+        barrier on the site."""
+        ground, pond, crest = self._valley()
+        got = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                event_depth=np.zeros((3, 3)))
+        assert got[0].overtops_this_event is None
+
+    def test_the_measurement_itself_does_not_move(self):
+        """Everything but the event level is a property of the ground and the
+        structure, so supplying an event pond must not change one of them."""
+        ground, pond, crest = self._valley()
+        event = np.zeros((5, 7))
+        event[2, 0:3] = 0.5
+        bare = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)])[0]
+        asked = overtopping_spill(pond, ground, 1.0, [("Dam A", crest, 10.0)],
+                                  event_depth=event)[0]
+        assert bare[:5] == asked[:5]
+
+
 class TestOvertoppingWarning:
     def test_names_the_length_and_asks_for_a_spillway(self):
         msg = overtopping_warning("Dam 15", 34.0, 56.12, alt_saddle_m=57.9)
@@ -528,6 +604,28 @@ class TestOvertoppingWarning:
 
     def test_no_length_no_warning(self):
         assert overtopping_warning("Dam 15", 0.0, 56.12) is None
+
+    def test_it_says_which_storm_when_it_has_been_told(self):
+        """Unqualified, the advisory reads as a claim about the event just routed.
+
+        It is not — the pour level comes off the full pond — so where the event
+        falls short the message has to say so, and where it does not it may as well
+        confirm it.
+        """
+        short = overtopping_warning("Dam 5", 30.0, 56.12, reaches_crest=False,
+                                    event_level_m=55.40)
+        assert "no freeboard" in short
+        assert "does not fill it that far" in short
+        assert "55.40" in short
+
+        reached = overtopping_warning("Dam 5", 30.0, 56.12, reaches_crest=True)
+        assert "goes over in this run" in reached
+
+    def test_an_unasked_event_leaves_the_wording_alone(self):
+        """None is not False. Nothing was measured, so nothing is claimed."""
+        msg = overtopping_warning("Dam 5", 30.0, 56.12)
+        assert "modelled event" not in msg
+        assert "fills to 56.12 m and leaves over its own crest" in msg
 
     def test_an_alternative_at_the_same_level_reports_no_freeboard(self):
         """"Raising the crest 0.00 m" is worse than saying nothing.
@@ -901,7 +999,9 @@ class TestHtmlVerificationSurvivesConvergence:
             ])
         html = self._html(v)
         assert "Checked against the ground" in html
-        assert "Design storage" in html and "At this grid" in html
+        assert "Geometric (drawn)" in html and "At this grid" in html
+        # The freeboard-derived fourth storage figure is not in either renderer.
+        assert "Design storage" not in html
         assert "Δ vs grid" in html
         assert "n/a — sub-cell" in html          # sub-cell feature flagged
         assert "A caveat about attribution." in html
@@ -1067,8 +1167,10 @@ class TestVerificationSeparatesTheThreeGaps:
         assert row["geometric_m3"] == pytest.approx(140.0)
         assert row["rasterisable_m3"] == pytest.approx(187.0)
         assert row["terrain_m3"] == pytest.approx(183.0)
-        assert row["freeboard_m3"] == pytest.approx(28.0)
         assert row["resolution_penalty_m3"] == pytest.approx(47.0)
+        # No freeboard term: the blanket 20% allowance is gone, so there is no
+        # gap between "the shape you drew" and "what you would plan on filling".
+        assert "freeboard_m3" not in row
 
     def test_a_large_resolution_penalty_is_named_in_the_caveats(self):
         v = self._build(183.0, self.BREAKDOWN)
@@ -1221,12 +1323,11 @@ class TestBarrierImpoundedVerification:
         b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
         assert b["barrier_impounded"] is True
 
-    def test_its_three_design_columns_collapse_to_one_number(self):
-        """There is no drawn section to rasterise, so claiming a resolution penalty
-        or a freeboard split would invent a comparison that was never made."""
+    def test_its_calculated_columns_collapse_to_one_number(self):
+        """There is no drawn section to rasterise, so claiming a resolution
+        penalty would invent a comparison that was never made."""
         b = capacity_breakdown(self._Dam(), cell_size=1.0, n_cells=900)
-        assert b["geometric"] == b["rasterisable"] == b["design"] == 2148.0
-        assert b["freeboard_m3"] == 0.0
+        assert b["geometric"] == b["rasterisable"] == b["section_m3"] == 2148.0
         assert b["resolution_penalty_m3"] == 0.0
 
     def test_a_dam_that_burns_to_its_design_reads_zero_delta(self):
@@ -1245,8 +1346,8 @@ class TestBarrierImpoundedVerification:
         assert v.per_feature[0]["delta_pct"] == pytest.approx(-50.0, abs=0.5)
 
     def test_a_swale_is_unaffected(self):
-        """The flag keys off "no analytic section", so a type that has one must keep
-        its freeboard and resolution split intact."""
+        """The flag keys off "no analytic section", so a type that has one must
+        keep its resolution split intact."""
         class _Line:
             length = 100.0
 
@@ -1258,8 +1359,10 @@ class TestBarrierImpoundedVerification:
 
         b = capacity_breakdown(_Swale(), cell_size=1.0, n_cells=200)
         assert b["barrier_impounded"] is False
-        assert b["geometric"] > 0
-        assert b["freeboard_m3"] != 0.0
+        # The drawn section, brim-full: 0.75 m² x 100 m, and no allowance off it
+        # even though `capacity_m3` was seeded at a lower 100.0.
+        assert b["geometric"] == pytest.approx(75.0)
+        assert "freeboard_m3" not in b
 
 
 class TestLiveAssessmentAgainstRealBalanceOutput:

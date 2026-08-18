@@ -81,6 +81,14 @@ QGroupBox {{
     margin-top: 12px;
     padding: 10px;
 }}
+/* A collapsed group has no body left to pad around, and the 10px would otherwise
+   leave an empty card hanging under the title — which reads as a section that failed
+   to draw rather than one that is closed. Only checkable groups can be collapsed, so
+   :!checked cannot catch anything else. */
+QGroupBox:!checked {{
+    padding-top: 0px;
+    padding-bottom: 0px;
+}}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
@@ -478,6 +486,14 @@ class EarthworkPropertiesDialog(QDialog):
             # Stored water volume → the water-quantity blue (the only on-grammar use).
             for _lbl in (self.lbl_capacity_m3, self.lbl_capacity_l):
                 _lbl.setStyleSheet("font-weight: 600; color: #1273b5;")
+            # "Volume", not "Usable". This read "Usable" for as long as
+            # `calculate_capacity` took a blanket 20% off the drawn section: the label
+            # existed to stop the most prominent volume in the plugin being the one
+            # figure that never said what it had already subtracted. Nothing is
+            # subtracted now — it is the drawn section, brim-full — so the qualifier
+            # would be describing a deduction that no longer happens.
+            for _lbl in (self.lbl_capacity_m3, self.lbl_capacity_l):
+                _lbl.setToolTip(H.DRAWN_VOLUME)
             cap_layout.addRow("Volume (m³):", self.lbl_capacity_m3)
             cap_layout.addRow("Volume (L):",  self.lbl_capacity_l)
             if self.ew_type == "swale":
@@ -601,7 +617,25 @@ class EarthworkPropertiesDialog(QDialog):
             existing = getattr(ew, "spillway", None) if ew else None
             self.grp_spillway.setChecked(existing is not None)
             self.grp_spillway.setToolTip(H.SPILLWAY_GROUP)
-            spill_layout = QFormLayout(self.grp_spillway)
+
+            # Fifteen rows, and on a freshly drawn feature every one of them is greyed
+            # out — Qt disables a checkable group's children when it is unticked, but it
+            # does not hide them, so the dialog opened at full height showing a block of
+            # dead controls. They collapse to the title row instead.
+            #
+            # The tick is NOT a disclosure arrow and must not become one. It is the
+            # feature's data: `get_spillway()` returns None when unchecked, which is what
+            # records "no spillway designed yet" on the earthwork, and `H.SPILLWAY_GROUP`
+            # tells the user so. The body's visibility rides along with it; it does not
+            # replace it. That is why this is a second slot on the existing `toggled`
+            # rather than a rebuild around the panel's `_section()` helper, whose checked
+            # state is a view state and would have quietly become the data one.
+            self._spillway_body = QWidget()
+            spill_layout = QFormLayout(self._spillway_body)
+            spill_layout.setContentsMargins(0, 0, 0, 0)
+            grp_outer = QVBoxLayout(self.grp_spillway)
+            grp_outer.setContentsMargins(8, 4, 8, 4)
+            grp_outer.addWidget(self._spillway_body)
 
             # Datum. Every other number here is relative to it, so it is stated
             # rather than assumed.
@@ -760,11 +794,16 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_freeboard.valueChanged.connect(
                 self._on_spillway_head_changed)
             self.grp_spillway.toggled.connect(self._update_spillway_sizing)
+            self.grp_spillway.toggled.connect(self._set_spillway_expanded)
             self._update_spillway_sizing()
+            # Once, for the initial state: a feature that already carries a spillway
+            # opens on it, a freshly drawn one opens collapsed.
+            self._set_spillway_expanded(self.grp_spillway.isChecked())
 
             layout.addWidget(self.grp_spillway)
         else:
             self.grp_spillway = None
+            self._spillway_body = None
             self.spin_spillway_crest = None
             self.spin_spillway_drop = None
             self.spin_spillway_head = None
@@ -916,9 +955,9 @@ class EarthworkPropertiesDialog(QDialog):
     def _update_swale_verdict(self, depth, width, side_slope):
         """Deficit-at-the-drawn-length readout for a swale.
 
-        Uses the real trapezoidal section, the 0.8 freeboard allowance and event
-        infiltration — i.e. the same model as the capacity the swale actually
-        delivers. The old readout divided the inflow by a rectangular ``depth ×
+        Uses the real trapezoidal section and event infiltration — i.e. the same
+        model as the capacity the swale actually delivers. The old readout divided
+        the inflow by a rectangular ``depth ×
         width``, which overstated capacity by ~⅓ for a 1:1 batter, and the result was
         labelled "recommended length" even though that figure scales with the drawn
         length and so could never be satisfied by extending the swale.
@@ -944,7 +983,6 @@ class EarthworkPropertiesDialog(QDialog):
         check = required_storage_at_length(
             self._peak_inflow_m3, length, depth, width,
             side_slope=side_slope if side_slope is not None else 1.0,
-            freeboard=0.8,
             infiltration_mm_hr=infil,
             duration_hr=self._duration_hours or 0.0,
         )
@@ -1171,6 +1209,23 @@ class EarthworkPropertiesDialog(QDialog):
             return shapely_shape(json.loads(self.geometry.asJson())).length or None
         except Exception:
             return None
+
+    def _set_spillway_expanded(self, expanded):
+        """Show or hide the spillway rows, following the group's tick.
+
+        Purely presentational — every widget keeps existing and keeps its value, so a
+        crest typed in, then unticked, then reticked comes back unchanged. `get_spillway`
+        reads the *tick*, never this; hiding a row must never be what decides whether the
+        feature has a spillway.
+
+        `adjustSize` shrinks the dialog back down again. Without it Qt keeps the height
+        it laid out for the expanded form, which leaves the collapse doing nothing
+        visible on the one dialog that most needed it.
+        """
+        if getattr(self, "_spillway_body", None) is None:
+            return
+        self._spillway_body.setVisible(bool(expanded))
+        self.adjustSize()
 
     def _update_spillway_sizing(self):
         """Refresh the required width, the auto-tracked built width, and the notes.

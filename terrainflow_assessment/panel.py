@@ -72,6 +72,19 @@ _BAND_GLYPHS = ("▂", "▄", "▆", "█")
 _REPORT_SUMMARY_IDLE = "Run Baseline to enable the report."
 
 
+def _blend_to_white(hex_colour, alpha):
+    """*hex_colour* at *alpha* over white, as an opaque hex.
+
+    The panel is white, so this is what the swatch would look like translucent —
+    computed rather than set as an alpha colour because a translucent stylesheet
+    background shows the widget behind it, and in a row of chips that is whatever
+    happens to be there rather than the panel.
+    """
+    r, g, b = (int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+    mix = [int(round(255 + (channel - 255) * alpha)) for channel in (r, g, b)]
+    return "#{:02X}{:02X}{:02X}".format(*mix)
+
+
 def _ramp_swatches(labels=None):
     """The inflow ramp as coloured, thickening glyphs, optionally labelled."""
     out = []
@@ -767,6 +780,14 @@ class AssessmentPanel(QDockWidget):
         )
         lay.addWidget(self._area_outflow_lbl)
 
+        # The crossings behind that total, one per row. Directly beneath it on purpose:
+        # the two disagree by construction — this table reports each crossing at its
+        # busiest cell and drops everything under the threshold — and the only safe
+        # place to show a subtotal is next to the total it is a subtotal of.
+        from terrainflow_assessment.qgis.widgets.exit_table import ExitPointsTable
+        self._exit_table = ExitPointsTable()
+        lay.addWidget(self._exit_table)
+
         self._run_baseline_btn.clicked.connect(self.run_baseline_requested)
 
     def _build_section_baseline_results(self):
@@ -866,20 +887,35 @@ class AssessmentPanel(QDockWidget):
         # Read from the ramp the layer is actually painted with, rather than
         # hand-copied from it — these four hexes used to live here as literals
         # under a comment asking whoever changed the renderer to remember to
-        # change them here too. The renderer fades the low end out with alpha so
-        # the map stays readable underneath; a key shows the hue, not the blend,
-        # so the swatches carry a border to keep the near-white one visible. The
-        # transparent "none" stop drops out of visible_stops by construction.
+        # change them here too. The border on each swatch is what keeps the pale
+        # "diffuse" one from dissolving into the panel.
+        #
+        # The fade below the bottom stop gets its own swatch first, drawn at the
+        # alpha the map uses halfway up it. Leaving it out would have the key open
+        # at "diffuse" while the map has a whole band of cells beneath that — which
+        # is the exact divergence between key and map this row was rebuilt to end.
         from terrainflow_assessment.core.registry.map_palette import (
+            SURFACE_RUNOFF_FADE_TOP_M3 as _FADE_TOP,
+        )
+        from terrainflow_assessment.core.registry.map_palette import (
+            surface_runoff_alpha,
             surface_runoff_ramp,
             visible_stops,
         )
 
-        for hex_colour, lbl_text in visible_stops(surface_runoff_ramp()):
+        stops = visible_stops(surface_runoff_ramp())
+        faded = surface_runoff_alpha(_FADE_TOP / 2.0) / 255.0
+        swatches = [(stops[0][0], f"<{_FADE_TOP:g} m³", faded)]
+        swatches += [(hexc, lbl, 1.0) for hexc, lbl in stops]
+        for hex_colour, lbl_text, alpha in swatches:
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
+            # Composited over the panel rather than set as an alpha colour: a
+            # translucent Qt stylesheet background lets the widget behind show
+            # through, which for a chip in a row is whatever happens to be there.
+            faded_hex = _blend_to_white(hex_colour, alpha)
             swatch.setStyleSheet(
-                f"background-color: {hex_colour}; border: 1px solid #888;"
+                f"background-color: {faded_hex}; border: 1px solid #888;"
             )
             lbl = QLabel(lbl_text)
             lbl.setStyleSheet("font-size: 10px; color: #5f7176;")
@@ -901,8 +937,10 @@ class AssessmentPanel(QDockWidget):
 
     # ---------------------------------------------------------------- Section 3: Contour & Keypoint
 
+    _CONTOUR_SECTION = "Contour & Keypoint Analysis"
+
     def _build_section_contour_keypoint(self):
-        lay = self._section("Contour & Keypoint Analysis", collapsed=True)
+        lay = self._section(self._CONTOUR_SECTION, collapsed=True)
 
         tabs = QTabWidget()
 
@@ -1046,26 +1084,75 @@ class AssessmentPanel(QDockWidget):
         seg_slope_row.addWidget(self._seg_max_slope_spin)
         mid_lay.addLayout(seg_slope_row)
 
+        # The swale cross-section these segments are sized against. Three inputs, not
+        # two: the sizing has always integrated a trapezoid, but the batter was a
+        # hard-coded 1:1 inside the analysis module that nothing on screen mentioned, so
+        # the panel showed a depth and a top width and quietly meant a third dimension
+        # as well. The bottom width follows from the three and is shown rather than
+        # entered, because it is the one a reader wants to sanity-check and the one that
+        # goes to zero first. Same derivation as the properties dialog's, so the site
+        # default and a per-feature override describe the same shape.
+        #
+        # **A swale is built with a floor.** These read 0.60 m over 0.30 m at 1:1, where
+        # the batters meet exactly at the drawn depth: bottom width 0.00, a V-drain, and
+        # 0.09 m² of section. That is not how a swale is dug, and it made the tool
+        # unusable rather than merely wrong — at 0.072 m³ per metre, a 7.4 ha catchment
+        # in a 65 mm storm asked for **33.6 km** of swale, so every recommendation came
+        # back capped as "contour too short" and the ranking meant nothing.
+        #
+        # They now match ``core/registry``'s swale, which was already a floored trench:
+        # 1.00 m bottom, 0.75 m² of section, 4.0 km for that same catchment. The criteria
+        # box and a swale you draw finally describe the same swale, which is the confusion
+        # that made wiring one to the other look sensible in the first place.
         swale_dim_grid = QGridLayout()
-        swale_dim_grid.addWidget(self._label("Swale depth (m)"), 0, 0)
-        self._swale_depth_spin = QDoubleSpinBox()
-        self._swale_depth_spin.setRange(0.1, 2.0)
-        self._swale_depth_spin.setValue(0.3)
-        self._swale_depth_spin.setSuffix(" m")
-        self._swale_depth_spin.setSingleStep(0.05)
-        self._swale_depth_spin.setDecimals(2)
-        self._swale_depth_spin.setToolTip(H.SWALE_DEPTH)
-        swale_dim_grid.addWidget(self._swale_depth_spin, 0, 1)
-
-        swale_dim_grid.addWidget(self._label("Swale width (m)"), 1, 0)
+        swale_dim_grid.addWidget(self._label("Swale top width (m)"), 0, 0)
         self._swale_width_spin = QDoubleSpinBox()
         self._swale_width_spin.setRange(0.1, 10.0)
-        self._swale_width_spin.setValue(0.6)
+        self._swale_width_spin.setValue(2.0)
         self._swale_width_spin.setSuffix(" m")
         self._swale_width_spin.setSingleStep(0.1)
         self._swale_width_spin.setDecimals(2)
         self._swale_width_spin.setToolTip(H.SWALE_WIDTH)
-        swale_dim_grid.addWidget(self._swale_width_spin, 1, 1)
+        swale_dim_grid.addWidget(self._swale_width_spin, 0, 1)
+
+        swale_dim_grid.addWidget(self._label("Swale depth (m)"), 1, 0)
+        self._swale_depth_spin = QDoubleSpinBox()
+        self._swale_depth_spin.setRange(0.1, 2.0)
+        self._swale_depth_spin.setValue(0.5)
+        self._swale_depth_spin.setSuffix(" m")
+        self._swale_depth_spin.setSingleStep(0.05)
+        self._swale_depth_spin.setDecimals(2)
+        self._swale_depth_spin.setToolTip(H.SWALE_DEPTH)
+        swale_dim_grid.addWidget(self._swale_depth_spin, 1, 1)
+
+        swale_dim_grid.addWidget(self._label("Swale bottom width (m)"), 2, 0)
+        self._swale_bottom_width_spin = QDoubleSpinBox()
+        self._swale_bottom_width_spin.setRange(0.05, 10.0)
+        self._swale_bottom_width_spin.setValue(1.0)
+        self._swale_bottom_width_spin.setSuffix(" m")
+        self._swale_bottom_width_spin.setSingleStep(0.1)
+        self._swale_bottom_width_spin.setDecimals(2)
+        self._swale_bottom_width_spin.setToolTip(H.SWALE_BOTTOM_WIDTH)
+        swale_dim_grid.addWidget(self._swale_bottom_width_spin, 2, 1)
+
+        # Derived, and shown read-only — the same way round as the properties dialog,
+        # which has always taken the three dimensions and reported the batter. Three
+        # measurements you can take with a tape at the machine, one consequence you
+        # cannot. Entering the batter instead put the floor at the mercy of the other
+        # three, which is how the shipped default came to describe a V-drain.
+        swale_dim_grid.addWidget(self._label("Side slope"), 3, 0)
+        self._swale_side_slope_lbl = self._label("—")
+        self._swale_side_slope_lbl.setToolTip(H.SWALE_SIDE_SLOPE)
+        swale_dim_grid.addWidget(self._swale_side_slope_lbl, 3, 1)
+
+        self._swale_section_lbl = self._label("", small=True)
+        self._swale_section_lbl.setWordWrap(True)
+        self._swale_section_lbl.setToolTip(H.SWALE_SECTION_NOTE)
+        swale_dim_grid.addWidget(self._swale_section_lbl, 4, 0, 1, 2)
+        for _spin in (self._swale_width_spin, self._swale_depth_spin,
+                      self._swale_bottom_width_spin):
+            _spin.valueChanged.connect(self._update_swale_section_note)
+        self._update_swale_section_note()
         mid_lay.addLayout(swale_dim_grid)
 
         self._find_segments_btn = RunButton(
@@ -1404,7 +1491,31 @@ class AssessmentPanel(QDockWidget):
         )
         self._site_name_edit.editingFinished.connect(
             lambda: self.site_name_changed.emit(self.site_name))
+
+        # The swale cross-section is deliberately NOT on the storm path. It changes what
+        # length of swale a recommendation needs and nothing else — not the conditioning,
+        # not the accumulation, not the run tag — so putting it through
+        # `_on_storm_input_changed` would grey out a valid baseline over a design edit.
+        # It does stale the segments, which were sized against the old section.
+        for spin in (self._swale_width_spin, self._swale_depth_spin,
+                     self._swale_bottom_width_spin):
+            spin.valueChanged.connect(lambda *_: self._on_swale_section_changed())
+
         self._refresh_storm_chip()
+
+    def _on_swale_section_changed(self):
+        """Mark drawn segment recommendations as sized against a section that has moved.
+
+        The layer is left on the map rather than removed: it is still a reasonable set
+        of alignments, and deleting a user's results because a spin box moved is a worse
+        surprise than a note saying they are out of date.
+        """
+        if not self._segment_gradient_check.isEnabled():
+            return      # nothing has been found yet, so nothing is out of date
+        self._find_segments_btn.set_idle()
+        self.set_section_note(
+            self._CONTOUR_SECTION,
+            "segments sized against an older cross-section — re-run to update")
 
     @property
     def runoff_basis_tag(self):
@@ -1429,18 +1540,27 @@ class AssessmentPanel(QDockWidget):
     # ---------------------------------------------------------------- Section 6: Simulation
 
     def _build_section_verification(self):
-        """Design vs measured, per feature.
+        """Drawn against measured, per feature.
 
-        The scorecard chip carries one site-wide Δ, which on its own conflates the
-        freeboard allowance, what the terrain model made of the drawn section, and any
-        actual burn error. This section separates them so a number that looks alarming
-        can be read — and marks the rows where the last two columns are not a capacity.
+        The scorecard chip carries one site-wide Δ, which on its own conflates what the
+        terrain model made of the drawn section with any actual burn error. This section
+        separates them so a number that looks alarming can be read — and marks the rows
+        where the last two columns are not a capacity.
+
+        A freeboard allowance used to be a third strand here, under a leading "Design"
+        column: the drawn section less a blanket 20%. Leading with it invited a
+        comparison against the two measured columns that a rule of thumb could not
+        support, so the column went — and the deduction itself has now gone with it.
+        Every storage figure here is the shape as drawn, brim-full.
         """
         from terrainflow_assessment.qgis.widgets.verification_table import (
             VerificationTable,
         )
 
-        lay = self._section("Design vs Measured", collapsed=False)
+        # "Design vs Measured" while the Design column existed. With it gone the heading
+        # named a column that is not there, and pointed at the wrong comparison: what the
+        # section tests is the drawn shape against the burn.
+        lay = self._section("Drawn vs Measured", collapsed=False)
         self._verification_empty = self._label(
             "Re-analyse with earthworks to compare the design against what the "
             "burned terrain actually holds.", small=True)
@@ -1643,7 +1763,8 @@ class AssessmentPanel(QDockWidget):
         if self._usable_area_combo.currentText() != text:
             self._usable_area_combo.setCurrentText(text)
 
-    def set_area_outflow(self, area_outflow, ponded_volume_m3=None):
+    def set_area_outflow(self, area_outflow, ponded_volume_m3=None,
+                         pond_retained_m3=None):
         """Show how much water leaves each defined area after baseline.
 
         Each area reports two figures because they answer different questions: the
@@ -1651,6 +1772,13 @@ class AssessmentPanel(QDockWidget):
         of it running through the exits currently drawn, which moves with the "Show
         exits above (L/s)" threshold. Only ever showing the second made a filtered
         subtotal look like a site total.
+
+        ``pond_retained_m3`` is the water every hollow on the way held back, and it is
+        the reason Surface Runoff can be near-blank downstream of a feature that takes
+        its whole catchment. The analysis has computed it since the retention change and
+        nothing read it, so the map looked broken where it was in fact correct and
+        merely silent. A stated figure is a finding; a blank map on its own is a bug
+        report.
         """
         if not area_outflow:
             self._area_outflow_lbl.setVisible(False)
@@ -1684,9 +1812,27 @@ class AssessmentPanel(QDockWidget):
                 f"<br><b>Water captured:</b> {ponded_volume_m3:,.0f} m³ "
                 f"ponding naturally on site"
             )
+        if pond_retained_m3:
+            text += (
+                f"<br><b>Held on the way:</b> {pond_retained_m3:,.0f} m³ "
+                f"kept by hollows and never reaches the boundary"
+                f"<br><span style='color:#5b6b78;'>&nbsp;&nbsp;Surface Runoff is what "
+                f"gets past them, so it thins below anything that fills.</span>"
+            )
         self._area_outflow_lbl.setText(text)
         self._area_outflow_lbl.setToolTip(H.AREA_OUTFLOW)
         self._area_outflow_lbl.setVisible(True)
+
+    def set_exit_points(self, points, threshold_ls=None):
+        """List the boundary crossings under the baseline tool (None/empty clears).
+
+        Baseline-only, deliberately. The earthworks re-run produces its own exit points
+        and its own totals, and a table on the Baseline stage that silently switched to
+        describing the burned terrain would be worse than one that never moved: the
+        before/after comparison is the whole point of the second run, and it needs two
+        readings that stay put.
+        """
+        self._exit_table.set_rows(points, threshold_ls)
 
     def set_contour_progress(self, pct, msg):
         self._run_contour_btn.set_progress(pct, f"{msg} ({pct}%)")
@@ -2227,6 +2373,66 @@ class AssessmentPanel(QDockWidget):
         return self._swale_width_spin.value()
 
     @property
+    def swale_bottom_width_m(self):
+        """Floor width as entered, never wider than the top.
+
+        The clamp mirrors the properties dialog's ``_current_bottom_width``: a bottom
+        wider than the top is not a section, and letting one through would hand the
+        sizing a negative batter.
+        """
+        return min(self._swale_bottom_width_spin.value(), self.swale_width_m)
+
+    @property
+    def swale_side_slope(self):
+        """Wall batter (z:1), **derived** from the three entered dimensions.
+
+        ``(top − bottom) / 2·depth``, the same derivation the properties dialog uses, so
+        the site criteria and a per-feature override cannot describe the batter
+        differently. 0 is a vertical-sided trench.
+        """
+        depth = self.swale_depth_m
+        if depth <= 0:
+            return 0.0
+        return max(0.0, (self.swale_width_m - self.swale_bottom_width_m)
+                   / (2.0 * depth))
+
+    def _update_swale_section_note(self):
+        """Report the derived batter, the section area, and anything unbuildable.
+
+        A swale is dug to three measurements — top, bottom, depth — and the batter is
+        what those come out as, not a fourth thing to set. Reporting it in degrees as
+        well as z:1 is what makes it checkable against the machine and against the soil
+        advisory in the earthwork dialog.
+        """
+        import math as _math
+
+        from terrainflow_assessment.core.sizing import trapezoid_section
+
+        top, bottom = self.swale_width_m, self.swale_bottom_width_m
+        depth, z = self.swale_depth_m, self.swale_side_slope
+
+        angle = _math.degrees(_math.atan2(1.0, z)) if z > 0 else 90.0
+        self._swale_side_slope_lbl.setText(f"{angle:.1f}°  ({z:.2g} : 1)")
+
+        area = trapezoid_section(top, bottom, depth).area
+        if self._swale_bottom_width_spin.value() > top + 1e-9:
+            # Clamped rather than refused, so a user widening the floor before the top
+            # is not blocked mid-edit — but said out loud, because the sizing is now
+            # running on a number the box is not showing.
+            self._swale_section_lbl.setText(
+                f"⚠ bottom is wider than the top — using {top:.2f} m. "
+                f"Widen the top width to match.")
+            self._swale_section_lbl.setStyleSheet("color: #b9770e;")
+            return
+        # The section itself, not a fraction of it. This read `area * 0.8` while
+        # `calculate_capacity` took the same blanket 20% off, so it agreed with the
+        # sizing; with that allowance gone it was the last place a discounted storage
+        # figure was still shown, and it disagreed with every other number on the panel.
+        self._swale_section_lbl.setText(
+            f"→ {area:.2f} m² of section, {area:.2f} m³ per metre of swale")
+        self._swale_section_lbl.setStyleSheet("color: #5f7176;")
+
+    @property
     def top_n(self):
         return self._top_n_spin.value()
 
@@ -2400,6 +2606,9 @@ class AssessmentPanel(QDockWidget):
         "min_catchment_ha": ("_min_catchment_ha_spin", "value"),
         "swale_depth_m": ("_swale_depth_spin", "value"),
         "swale_width_m": ("_swale_width_spin", "value"),
+        # The batter is derived from these three and so is not saved: storing a
+        # consequence beside its causes is how the two drift apart on reload.
+        "swale_bottom_width_m": ("_swale_bottom_width_spin", "value"),
     }
 
     def collect_inputs(self):

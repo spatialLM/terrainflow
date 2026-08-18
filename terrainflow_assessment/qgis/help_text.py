@@ -242,6 +242,9 @@ CONTOUR_LEGEND = (
     "sunlit grass, a dark one in tree shadow — whereas a thick line is obviously\n"
     "thicker than a thin one whatever is beneath it. Quiet stretches recede by\n"
     "being thin rather than by being faint.\n\n"
+    "The overlay inside the swale segments carries the same bands in violet →\n"
+    "deep purple: it sits on the segment's green core rather than on ground,\n"
+    "and cyan → navy inside green is too small a step to read.\n\n"
     "Band edges come from the value, not from rank position. This replaced\n"
     "'top 5 / top 10 / rest', which only said where a contour sat in the queue:\n"
     "it drew a fixed five contours the same colour whether the fifth carried\n"
@@ -280,8 +283,11 @@ SEGMENT_GRADIENT = (
     "The outline says a swale belongs on this stretch of contour; the bands say\n"
     "where along it the water actually concentrates — which is where the\n"
     "crossing, the deepest section and any overflow want to go.\n\n"
-    "Same four bands, same colours and same m³ as the contour inflow gradient,\n"
-    "drawn narrower so the green still shows. Follows the same scale setting.\n\n"
+    "Same four bands and same m³ as the contour inflow gradient, drawn narrower\n"
+    "so the green still shows. Follows the same scale setting.\n\n"
+    "Coloured violet → deep purple rather than the gradient's cyan → navy: these\n"
+    "bands are read against the segment's own green core instead of against the\n"
+    "ground, and blue inside green is too small a step to pick out.\n\n"
     "Requires: Find Best Swale Segments run first."
 )
 INFLOW_SCALE = (
@@ -341,8 +347,38 @@ SWALE_DEPTH = (
 )
 SWALE_WIDTH = (
     "Design top width of the swale cross-section (m).\n"
-    "With the depth and soil batter this sets the trapezoidal capacity per\n"
+    "With the depth and side slope this sets the trapezoidal capacity per\n"
     "metre used to size the required swale length."
+)
+SWALE_BOTTOM_WIDTH = (
+    "Width of the swale FLOOR — the flat bottom the machine cuts (m).\n\n"
+    "A swale is dug with a floor, not to a point. Together with the top width\n"
+    "and the depth this fixes the trapezoid the segment sizing integrates, and\n"
+    "the side slope below is what those three come out as.\n\n"
+    "Wider floor, same top and depth: more section per metre, so a swale holds\n"
+    "more and the recommended segments get shorter. It also flattens the\n"
+    "batter, which is what you want in softer ground.\n\n"
+    "It cannot exceed the top width. A drawn swale can override all three in\n"
+    "its own properties dialog."
+)
+SWALE_SIDE_SLOPE = (
+    "Wall batter, CALCULATED from the three dimensions above — you do not set\n"
+    "it here.\n\n"
+    "    side slope = (top width - bottom width) / (2 x depth)\n\n"
+    "Shown as the angle from horizontal and as run:rise. 1:1 is a 45 degree\n"
+    "wall; 1.5:1 or flatter is the usual recommendation in loam and softer,\n"
+    "where a steeper face can slump. A vertical-sided trench reads 90 degrees.\n\n"
+    "To flatten the batter, widen the top or the floor, or make it shallower.\n"
+    "The earthwork properties dialog carries the soil-specific advisory for a\n"
+    "swale you have actually drawn."
+)
+SWALE_SECTION_NOTE = (
+    "The cross-sectional area these three dimensions give, and the volume it\n"
+    "holds per metre of swale, brim-full.\n\n"
+    "This is the number the segment sizing divides the inflow by, so it is the\n"
+    "quickest check on a recommendation that looks too long: a swale that is\n"
+    "sized as a V-drain rather than a floored trench holds a fraction as much\n"
+    "and asks for kilometres."
 )
 FIND_SEGMENTS = (
     "Find swale placement zones on each candidate contour and size each\n"
@@ -418,8 +454,8 @@ DIRECT_CATCHMENT = (
 )
 SWALE_HOLDS = (
     "What this swale can take over the event, at the length you drew:\n"
-    "live storage in the trench (trapezoidal cross-section × length × 0.8\n"
-    "freeboard) plus what soaks into its bed over the storm duration."
+    "live storage in the trench (trapezoidal cross-section × length, brim-full)\n"
+    "plus what soaks into its bed over the storm duration."
 )
 SWALE_DEFICIT = (
     "Whether the swale as drawn holds its event, and what would fix it.\n\n"
@@ -474,10 +510,24 @@ STRESS_POINTS = (
     "shows the distance along the feature and the surplus in m³."
 )
 THROUGHFLOW = (
-    "Total surface water that passes over each cell during the event, as a\n"
-    "blue gradient — pale where flow is diffuse, dark where it concentrates.\n\n"
+    "Surface water that actually passes over each cell during the event, as a\n"
+    "blue gradient — light cyan where flow is diffuse, dark blue where it\n"
+    "concentrates.\n\n"
     "Finer-grained than the stream layer: it shows the whole surface, so you\n"
-    "can see water gathering before it becomes a defined channel."
+    "can see water gathering before it becomes a defined channel.\n\n"
+    "The colour scale starts at 2 m³. Below that the layer fades out instead:\n"
+    "2 m³ is solid, 1 m³ is half, 0 m³ is nothing. Every cell on the site\n"
+    "carries at least the rain that fell on it, and drawing all of those solid\n"
+    "painted the whole map with 'it rained here' — the fade keeps them on the\n"
+    "map without letting them dominate it.\n\n"
+    "Every hollow on the way has already taken what it can hold — a swale, a\n"
+    "dam's pool or a natural depression — so a feature that captures its whole\n"
+    "catchment shows nothing leaving it. Where a line does continue past one,\n"
+    "that is the surplus after it filled, and it is the same water the panel\n"
+    "counts as leaving.\n\n"
+    "It is a volume for the whole event, not a rate: it says how much passes,\n"
+    "never when. Storage is the measured pond on this terrain, so a hollow the\n"
+    "DEM cannot resolve holds nothing here."
 )
 THROUGHFLOW_SCALE = (
     "How the colour range is stretched.\n"
@@ -589,18 +639,49 @@ INFLOW_PROFILE = (
     "That is exact for a contour swale, where runoff runs perpendicular to the line,\n"
     "and looser the further the alignment departs from the contour."
 )
+EXIT_TABLE = (
+    "Every place water crosses your boundary, largest first — the same crossings the\n"
+    "red dots mark on the map, in one list you can read without clicking each one.\n\n"
+    "AVERAGE RATE      the event volume spread over the storm duration, in L/s\n"
+    "VOLUME OVER EVENT the water that leaves through this crossing, in m3\n\n"
+    "The two are one measurement: the rate IS the volume divided by the duration. Both\n"
+    "are shown because a culvert is sized by a rate and a dam is sized by a volume.\n\n"
+    "This is NOT the peak flow a structure is sized against. That is a larger number,\n"
+    "calculated at the time of concentration, and it is on the Spillways table.\n\n"
+    "The rows will not add up to the 'Water leaving' total above them. Each crossing\n"
+    "is reported at its busiest cell, and anything under your L/s threshold is left\n"
+    "out entirely. The total above is measured cell by cell around the whole boundary\n"
+    "and is the figure to quote."
+)
+DRAWN_VOLUME = (
+    "The drawn cross-section over the drawn length, brim-full — the size of the hole,\n"
+    "with nothing taken off it.\n\n"
+    "It used to be this figure LESS a blanket 20% freeboard allowance. That allowance\n"
+    "is gone: freeboard on a real feature is the height its spillway leaves between\n"
+    "the design nappe and the crest, which is set per feature on the Spillways table\n"
+    "from a peak flow a site-wide fraction knew nothing about.\n\n"
+    "This same number is the GEOMETRIC figure in the Verify stage's table, and what\n"
+    "the feature actually ponds once the design is burned into the terrain is MEASURED\n"
+    "there beside it. On a keyed swale the measured pond is often much the larger:\n"
+    "a companion berm holds water above natural ground, and no cross-section predicts\n"
+    "that because it depends on the hillside."
+)
 VERIFICATION_TABLE = (
     "What each feature was drawn to hold, against what it holds on the actual\n"
-    "ground. Four numbers because a single figure hid three unrelated gaps.\n\n"
-    "DESIGN      the drawn shape less the 0.8 freeboard allowance — pure arithmetic\n"
-    "            from your dimensions, and reproducible by hand\n"
+    "ground. Three numbers because a single figure hid two unrelated gaps.\n\n"
     "GEOMETRIC   the drawn shape exactly. For a swale with a companion berm this is\n"
     "            the trench PLUS the berm's own section\n"
     "AT GRID     what this feature impounds on this hillside — its own cut and its own\n"
     "            bank, flooded on the DEM in isolation from every other feature\n"
     "MEASURED    the pond it ends up with once the whole design is built\n\n"
-    "The first two are CALCULATED, the last two are MEASURED. That is the important\n"
+    "The first is CALCULATED, the last two are MEASURED. That is the important\n"
     "division, and it is why AT GRID is usually the larger.\n\n"
+    "There was a fourth column, DESIGN — the drawn shape less a blanket 20% freeboard.\n"
+    "Both it and the allowance behind it are gone. Freeboard on a real feature is set\n"
+    "by its spillway, sized on the Spillways table from a peak flow that fraction knew\n"
+    "nothing about, so a rule of thumb sat first in a row of figures meant to be\n"
+    "compared and invited a comparison it could not support. GEOMETRIC is now the\n"
+    "whole drawn section, brim-full.\n\n"
     "AT GRID is bigger than GEOMETRIC on most swales, and this is real, not an error.\n"
     "A companion berm keyed into its banks holds water ABOVE natural ground, standing\n"
     "deeper than the trench and reaching further up the slope than the trench does.\n"
@@ -1082,7 +1163,7 @@ NETWORK_CAPACITY_UNMEASURED = (
 NETWORK_CAPACITY_MEASURED = (
     "{cap:,.0f} m³ is what this feature impounds on the actual ground, measured "
     "by flooding it on the DEM. The fill bar is against that figure.\n\n"
-    "{drawn:,.0f} m³ is the drawn cross-section less freeboard — the number you "
+    "{drawn:,.0f} m³ is the drawn cross-section, brim-full — the number you "
     "can check by hand and the one a contractor builds to."
 )
 NETWORK_CAPACITY_ABOVE_GROUND = (
@@ -1093,15 +1174,13 @@ NETWORK_CAPACITY_ABOVE_GROUND = (
 
 # --------------------------------------------------------------------- Verify table
 VERIFY_TABLE_SUBHEAD = (
-    "Design and Geometric are calculated from your dimensions; At grid and "
-    "Measured are flooded on the terrain. At grid is usually the larger — a "
-    "keyed bank holds water above natural ground."
+    "Geometric is calculated from your dimensions; At grid and Measured are "
+    "flooded on the terrain. At grid is usually the larger — a keyed bank holds "
+    "water above natural ground."
 )
 #: One per column of the verification table, in column order.
 VERIFY_TABLE_HEADER_TIPS = (
     "The earthwork, as named on the map.",
-    "CALCULATED. The drawn shape less your freeboard allowance — arithmetic from\n"
-    "your dimensions, and reproducible by hand.",
     "CALCULATED. The drawn shape exactly, without the DEM. With a companion berm\n"
     "it is the trench plus the berm's own section. This is what a contractor\n"
     "builds to.",

@@ -18,6 +18,7 @@ heading and states its reason and which button produces it, because silent
 omission is how a reader fails to notice that verification never ran.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -223,6 +224,10 @@ class ReportData:
     inputs: dict = field(default_factory=dict)   # panel settings, for the appendix
     dem: dict = field(default_factory=dict)      # provenance
     maps: dict = field(default_factory=dict)     # key -> reason-if-unavailable
+    # Whether the summary map got a catchment outline. Set by the exporter, which
+    # is the only thing that knows whether the labelling traced to anything — a
+    # key naming a line the map does not draw is worse than no key.
+    catchment_outline: bool = False
 
     # ---- derived predicates, so the rules below read as prose ----
     @property
@@ -298,15 +303,47 @@ def _display_names(data):
     return disambiguate(pairs)
 
 
+def _by_raw_name(data):
+    """``{raw name: display name}`` for names that identify exactly one feature.
+
+    The verification rows are keyed by name and carry no id, so they could not reach
+    the document's ``{id: name}`` map and printed the raw name instead — while every
+    other page printed the disambiguated one. A reader then met "Swale 3" in the
+    caveats and "Swale 3 (b)" in the table above it.
+
+    Ambiguous raw names are deliberately absent: where two features share one, there
+    is no mapping that is true of either, and guessing would attribute a caveat to
+    the wrong earthwork. Those keep the raw name, which is the honest answer.
+    """
+    cached = getattr(data, "_raw_name_map", None)
+    if cached is not None:
+        return cached
+    names = getattr(data, "display_names", None) or {}
+    pairs = []
+    for e in (data.earthworks or []):
+        if getattr(e, "enabled", True):
+            pairs.append((getattr(e, "id", None), getattr(e, "name", "")))
+    for f in (getattr(data.balance, "per_feature", None) or []):
+        pairs.append((f.get("id"), f.get("name")))
+    counts = {}
+    for _, raw in pairs:
+        counts[raw] = counts.get(raw, 0) + 1
+    mapping = {raw: names[fid] for fid, raw in pairs
+               if counts.get(raw) == 1 and fid in names}
+    data._raw_name_map = mapping
+    return mapping
+
+
 def _shown(data, row, fallback_key="name"):
     """A row's display name: the document's, or its own where it has no id."""
     fid = row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
     names = getattr(data, "display_names", None) or {}
     if fid in names:
         return names[fid]
-    if isinstance(row, dict):
-        return row.get(fallback_key) or "Unnamed"
-    return getattr(row, fallback_key, "") or "Unnamed"
+    raw = (row.get(fallback_key) if isinstance(row, dict)
+           else getattr(row, fallback_key, "")) or "Unnamed"
+    # No id — a verification row. Reach the document's map through the name.
+    return _by_raw_name(data).get(raw, raw)
 
 
 def build_report(data):
@@ -353,6 +390,15 @@ def _footer(data):
 
 def _page_summary(data):
     out = [Heading(text="Your scheme in one page", level=1, anchor="summary")]
+
+    # The site before any number about it. A reader who has never seen the block
+    # cannot place a single figure on this page until they know what shape the
+    # property is and where the features sit in it — and the reader this document
+    # is handed to is often exactly that person. Framed wider than the design map
+    # on page 3 so the block sits in its surroundings rather than filling the
+    # frame; that map is the one to work from, this one is to get oriented by.
+    out.append(_map_ref(data, "overview",
+                        "The block, its water and what the scheme catches."))
 
     if data.stale_storm:
         out.append(Callout(
@@ -430,7 +476,7 @@ def _page_summary(data):
 # every table that carries numbers. Kept as constants rather than typed out per table so
 # the words cannot drift between sections, and short enough to sit in front of a note
 # without pushing it onto another line.
-CALCULATED = "Calculated"
+CALCULATED = "Geometric calculated"
 MEASURED = "Measured"
 
 
@@ -464,10 +510,11 @@ def _page_how_to_read(data):
         tone="info", title=CALCULATED,
         text=("Worked out from the dimensions you drew — lengths, widths, depths, "
               "batters — using geometry and standard hydraulic formulae. It never "
-              "looks at the ground. You can check any of it with a tape measure and a "
+              "looks at the ground: it assumes a completely flat gradient under the "
+              "feature. You can check any of it with a tape measure and a "
               "calculator, and it would be the same on any site with the same "
               "dimensions. Capacity, cut and fill quantities, spillway sizes and berm "
-              "heights are all calculated.")))
+              "heights are all geometric calculated figures.")))
     out.append(Callout(
         tone="info", title=MEASURED,
         text=("Read off the elevation model — either the ground as it is, or the "
@@ -497,21 +544,11 @@ def _page_how_to_read(data):
               "swale like that reports full while most of its pond is still empty, and "
               "the design gets enlarged when it did not need to be.")))
 
-    out.append(Callout(
-        tone="info", title="Which to quote",
-        text=("Quote the calculated figures when you are setting out or pricing the "
-              "job: they are the dimensions a contractor builds to and the earth that "
-              "has to be shifted, and they do not move when the terrain model is "
-              "re-run. Quote the measured storage when you are asking whether the "
-              "scheme holds enough water — but read it as conditional on the banks "
-              "being built as modelled, because most of the difference between the two "
-              "is what those banks retain.")))
-
     out.append(Paragraph(text=(
-        "The headline percentage of the storm held on site is measured on both halves: "
-        "how much your features hold and how much water reaches each of them are both "
-        "read off the terrain. Where this report gives a calculated figure beside a "
-        "measured one, it says so.")))
+        "The headline percentage of the storm held on site is measured using "
+        "topographical data on both halves: how much your features hold and how much "
+        "water reaches each of them are both read off the terrain. Where this report "
+        "gives a geometric calculated figure beside a measured one, it says so.")))
 
     cell = getattr(data.baseline, "cell_size_m", None) if data.baseline else None
     grid = (f" — {cell:.2f} m across per cell on this site" if cell else "")
@@ -603,6 +640,37 @@ def _water_fate_table(bal, data=None):
     headers = ["", "Volume", "Share of runoff"]
 
     notes = []
+    # The same three volumes against the ground the design actually intercepts.
+    # Against the whole catchment, a feature that works its own slope perfectly is
+    # scored down by every hectare that drains past it — two different faults with
+    # opposite remedies, reported as one number. Omitted where the design works
+    # essentially all of the catchment, since the column would then restate the one
+    # beside it.
+    managed = _managed_catchment(data) if data is not None else None
+    if managed is not None and managed["runoff_m3"] > 0 \
+            and managed["managed_pct"] < 99.0:
+        headers.append("Share of worked catchment")
+        # The exit row gets an em dash rather than a percentage, and that is the
+        # whole design of this column. Its denominator is the runoff on ground a
+        # feature intercepts, so the matching numerator would be the overflow that
+        # ran past the last feature — not ``site_exit_m3``, which also carries
+        # runoff from ground no feature touches. Printing that share beside the
+        # site exit volume in the same row puts two different "water leaving"
+        # figures on one line, which is the misreading Rule 2 exists to stop. The
+        # complement is visible anyway: what is not held or soaked, left.
+        for row, value in zip(rows, (stored, bal.total_infiltration_m3, None)):
+            row.append("—" if value is None
+                       else share(value, managed["runoff_m3"]))
+        notes.append(
+            f"The last column divides only the runoff falling on the "
+            f"{fmt_area_ha(managed['managed_m2'])} that drains into a feature "
+            f"({fmt_pct(managed['managed_pct'])} of the catchment) — so it answers "
+            "how well the features work the ground they actually command, which "
+            "the headline percentage cannot separate from how much ground they "
+            "command in the first place. The exit row is left blank there on "
+            "purpose: water leaving from ground no feature intercepts was never "
+            "in that denominator, and the two kinds of exit are never mixed in "
+            "one figure.")
     sim = _simulated_fate(data) if data is not None else None
     if sim is not None:
         headers += ["Volume (simulated)", "Share (simulated)"]
@@ -630,8 +698,47 @@ def _water_fate_table(bal, data=None):
             "relying on it.")
     return DataTable(
         title="Where the storm's water goes", headers=headers, rows=rows,
-        note=_tag("Calculated storage against measured inflow",
+        note=_tag("Geometric calculated storage against measured inflow",
                   " ".join(notes)))
+
+
+def _managed_catchment(data):
+    """How much of the catchment the design actually works, and how well.
+
+    The headline capture percentage answers one question — what share of the whole
+    storm stays on the block — and it conflates two quite different ways of scoring
+    badly. A design can capture little because its features are too small, or
+    because most of the block drains past them entirely. Those call for opposite
+    responses, and the single figure cannot tell them apart.
+
+    So: ``managed_pct`` is the share of the contributing catchment that drains into
+    some feature, and ``capture_pct`` is how much of the runoff *falling on that
+    ground* the design holds. Both come off ``per_feature``, whose direct catchments
+    are mutually exclusive by construction (``flow_graph`` labels each cell with the
+    feature that intercepts it **first**), so summing them never double-counts a
+    hillside and the runoff total is the water genuinely entering the network.
+
+    Neither figure is clamped, for the same reason ``capture_pct`` is not: a value
+    over 100% is a labelling bug and has to be visible rather than rounded away.
+    """
+    bal, b = data.balance, data.baseline
+    if bal is None or b is None or not bal.per_feature:
+        return None
+    catchment_m2 = float(getattr(b, "catchment_area_ha", 0.0) or 0.0) * 10000.0
+    managed_m2 = sum(float(f.get("direct_catchment_m2") or 0.0)
+                     for f in bal.per_feature)
+    runoff_m3 = sum(float(f.get("direct_inflow_m3") or 0.0)
+                    for f in bal.per_feature)
+    if catchment_m2 <= 0 or managed_m2 <= 0:
+        return None
+    return {
+        "managed_m2": managed_m2,
+        "catchment_m2": catchment_m2,
+        "managed_pct": 100.0 * managed_m2 / catchment_m2,
+        "runoff_m3": runoff_m3,
+        "capture_pct": (100.0 * bal.total_captured_m3 / runoff_m3
+                        if runoff_m3 > 0 else None),
+    }
 
 
 def _summary_cards(data):
@@ -642,6 +749,16 @@ def _summary_cards(data):
                       "the ground draining through this block"))
         cards.append(("The storm", f"{b.rainfall_mm:.0f} mm / {b.duration_hr:.0f} hr",
                       f"{b.runoff_mm:.0f} mm of runoff"))
+    managed = _managed_catchment(data)
+    if managed is not None:
+        cards.append((
+            "Catchment worked", fmt_pct(managed["managed_pct"]),
+            f"{fmt_area_ha(managed['managed_m2'])} of "
+            f"{fmt_area_ha(managed['catchment_m2'])} drains into a feature"))
+        if managed["capture_pct"] is not None:
+            cards.append((
+                "Capture within it", fmt_pct(managed["capture_pct"]),
+                "of the runoff falling on that ground is held"))
     if bal is not None:
         n = len(bal.per_feature)
         cards.append(("Storage built", fmt_volume(bal.total_capacity_m3),
@@ -770,19 +887,25 @@ def _exit_points(data):
                  key=lambda p: p.get("volume_m3", 0), reverse=True)
     if not pts:
         return []
-    top = pts[:5]
+    # Every crossing, not the top five. The map above draws all of them, so a
+    # five-row table under it left the reader counting markers they could not
+    # look up — and the "and N smaller crossings" line it printed instead named
+    # none of them. The list and the figure now hold the same set.
     rows = [[p.get("label", "").split(":")[0] or f"Exit {i + 1}",
              f"{p.get('flow_ls', 0):.1f} L/s",
              fmt_volume(p.get("volume_m3", 0))]
-            for i, p in enumerate(top)]
-    notes = []
-    if len(pts) > 5:
-        rest = sum(p.get("volume_m3", 0) for p in pts[5:])
-        notes.append(f"and {len(pts) - 5} smaller crossings, together about "
-                     f"{fmt_volume(rest)}.")
-    notes.append(_exit_threshold_note(data))
+            for i, p in enumerate(pts)]
+    notes = [_exit_threshold_note(data)]
+    # "Peak flow" until the panel grew the same table and had to name the column
+    # honestly. ``flow_ls`` is the crossing's event volume over the event duration —
+    # an **average rate**, spatially maxed across the cells of the crossing. The peak a
+    # structure is sized against is Q at the time of concentration, comes from
+    # ``peak_flow.py``, is larger, and is on the spillway page. Two documents printing
+    # one number under two names, one of which is the name of a different quantity the
+    # same document also reports, is the divergence this table exists to avoid.
     out = [DataTable(title="Where water leaves the boundary",
-                     headers=["Crossing", "Peak flow", "Volume over the event"],
+                     headers=["Crossing", "Average rate over the event",
+                              "Volume over the event"],
                      rows=rows,
                      note=_tag(MEASURED, " ".join(n for n in notes if n)))]
 
@@ -794,7 +917,7 @@ def _exit_points(data):
                 # No emphasis markup here: the PDF draws this straight into a
                 # layout label and the HTML escapes it, so asterisks would print
                 # as asterisks in both. The wording has to carry it.
-                "This page counts water crossing your boundary. It answers "
+                "This page counts water crossing the user's boundary. It answers "
                 "where the water goes — and it only counts the crossings big "
                 f"enough to draw ({_exit_threshold_phrase(data)}). The capture "
                 "figure on page one is a different measurement "
@@ -804,8 +927,8 @@ def _exit_points(data):
                 "below that threshold.\n\n"
                 "That is why more water leaves the block than the crossings "
                 "above add up to. They are not two estimates of one number and "
-                "the difference between them is not an error. Quote them "
-                "separately, say which one you mean, and never subtract one "
+                "the difference between them is not an error. Read them "
+                "separately, say which one is meant, and never subtract one "
                 "from the other."),
         ))
     return out
@@ -865,8 +988,15 @@ def _page_design(data):
         f"{len(bal.per_feature)} features: {parts}. Together they hold "
         f"{fmt_volume(bal.total_capacity_m3)} and pass the rest on deliberately "
         "rather than by accident.")))
+    # Spillway markers and overflow links used to be drawn on this map and named
+    # in its key. They came off with everything else that was not the design
+    # itself: this is the sheet somebody stands in a paddock holding, and at the
+    # scale it is now framed at, a second set of markers over every feature was
+    # competing with the names. Both are still in the document — the spillways
+    # have a page and a table of their own, and the links are on the flow
+    # diagram, which is where a routing question is actually answered.
     out.append(_map_ref(data, "design",
-                        "Every feature as drawn, with spillways and overflow links."))
+                        "Every feature as drawn, over the ground it is dug in."))
     # The map is labelled with names alone — a volume against every line was
     # unreadable wherever features cluster. Every capacity is in one place, on
     # the "How the water is shared out" page, rather than in a second feature
@@ -914,10 +1044,12 @@ def _page_network(data):
 
     out.append(ImageRef(
         key="network", caption=(
-            "Solid arrows are links you drew; dashed arrows are followed "
-            "automatically downhill. Blue arrows are the ones water actually "
-            "goes down at this storm, thicker where more of it does. Each box "
-            "shows what the feature holds when dug and how full it gets."),
+            "Features are placed down the page by height, so the cascade runs "
+            "downhill as it runs across. Solid arrows are links you drew; dashed "
+            "arrows are followed automatically downhill. Blue arrows are the ones "
+            "water actually goes down at this storm, thicker where more of it "
+            "does. Each box shows what the feature holds when dug and how full it "
+            "gets."),
         fallback=DataTable(title="Overflow chains", headers=["Chain"],
                            rows=[[c] for c in graph["chains"]])))
     return out
@@ -959,6 +1091,10 @@ def build_flow_graph(balance, display_names=None):
             "is_terminal": bool(f.get("is_terminal")),
             "target_id": f.get("target_id"),
             "is_user_link": bool(f.get("is_user_link")),
+            # For the cascade diagram, which places a feature down the page by
+            # height. Absent on an older balance, so both are read defensively.
+            "elevation": f.get("elevation"),
+            "elevation_known": bool(f.get("elevation_known")),
         }
         nodes.append(node)
         by_id[node["id"]] = node
@@ -1057,7 +1193,7 @@ def _page_water_shared(data):
                  "Held", soak_header, "How full", "Spills to", "Spills",
                  "Empties in"],
         rows=rows, wide=True,
-        note=_tag("Calculated storage against measured inflow",
+        note=_tag("Geometric calculated storage against measured inflow",
                   "Capacity comes from the dimensions you drew; catchment and the "
                   "water arriving are read off the terrain.")))
     return out
@@ -1106,7 +1242,7 @@ def _page_spillways(data):
         headers=["Feature", "Fast flow to pass", "Width needed", "Width designed",
                  "Water depth over weir", "Margin above", "Status"],
         rows=rows, wide=True,
-        note=_tag("Calculated storage against measured inflow",
+        note=_tag("Geometric calculated storage against measured inflow",
                   "Widths and water depths come from the weir equation; the flow "
                   "each has to pass is the peak off a catchment read from the "
                   "terrain.")))
@@ -1139,19 +1275,23 @@ def _page_build_schedule(data):
         return out
 
     out.append(Paragraph(text=(
-        "Take this page to your contractor. Capacity is the working volume with "
-        "the standard freeboard already taken off — what the feature holds in "
-        "service, not the size of the hole.")))
+        "Every feature, with the geometric calculated figures from the dimensions "
+        "you drew — brim-full, with no allowance taken off — set beside what the "
+        "terrain model measures for the same feature. "
+        "The measured columns are blank until an earthworks re-analysis has been "
+        "run, and they are the ones to price the job from.")))
 
     cut_by_id, fill_by_id = {}, {}
     for st in (data.balance_stores or []):
         cut_by_id[getattr(st, "id", None)] = getattr(st, "cut_vol_m3", 0.0)
         fill_by_id[getattr(st, "id", None)] = getattr(st, "fill_vol_m3", 0.0)
+    measured = _measured_by_name(data)
 
     enabled = [e for e in data.earthworks if getattr(e, "enabled", True)]
     names = [_shown(data, e) for e in enabled]
     rows = []
     for i, e in enumerate(enabled):
+        m = measured.get(getattr(e, "name", None)) or {}
         rows.append([
             names[i],
             f"{getattr(e, 'length_m', 0) or 0:.0f} m",
@@ -1162,22 +1302,59 @@ def _page_build_schedule(data):
             _type_extra(e),
             getattr(e, "soil_name", "") or "site default",
             fmt_volume(getattr(e, "capacity_m3", 0)),
+            fmt_volume(m.get("terrain_m3")),
             fmt_volume(cut_by_id.get(getattr(e, "id", None))),
+            # `excavation_m3`, not `cut_m3`. This column used to print the latter — the
+            # trench filled to its own pour point — which on falling ground is the earth
+            # that fits in the hole rather than the earth taken out of it, understating a
+            # swale on 10% cross-slope by 23% in the one column the paragraph above tells
+            # the reader to price from, and disagreeing with the site total in the very
+            # next table. `cut_m3` keeps its job as the grid-fidelity yardstick, where
+            # being measured to the pour point is the point.
+            fmt_volume(m.get("excavation_m3")),
             fmt_volume(fill_by_id.get(getattr(e, "id", None))),
         ])
     # "Dam 1" already says it is a dam, so a Type column beside the name spent
     # a column of a twelve-column table restating it. "Type detail" stays —
     # that carries the one dimension that matters for the type and no other.
+    #
+    # There is no measured fill column, and that is deliberate rather than an
+    # omission: the burn builds banks that lie outside their own footprints and
+    # cuts that overlap, so per-feature fill could only be produced by an
+    # attribution rule, and the figure would report the rule. It is a site total
+    # in the table below.
     out.append(DataTable(
-        title="Every feature, as drawn",
+        title="Every feature — drawn against measured",
         headers=["Feature", "Length", "Top width", "Bottom width",
-                 "Depth", "Batter", "Type detail", "Soil", "Capacity",
-                 "Cut", "Fill"],
+                 "Depth", "Batter", "Type detail", "Soil",
+                 "Capacity (geometric)", "Capacity (measured)",
+                 "Cut (geometric)", "Cut (measured)", "Fill (geometric)"],
         rows=rows, wide=True,
-        note=_tag(CALCULATED, cut_fill_sentence(data.balance.total_cut_m3,
-                                                data.balance.total_fill_m3))))
+        note=_tag(f"{CALCULATED} and {MEASURED}",
+                  cut_fill_sentence(data.balance.total_cut_m3,
+                                    data.balance.total_fill_m3)
+                  + " Measured fill is a site total only — banks sit outside their "
+                    "own footprints and cuts overlap, so splitting it between "
+                    "features would report the splitting rule rather than the job.")))
     out.extend(_earthmoving(data))
     return out
+
+
+def _measured_by_name(data):
+    """``{raw name: verification row}`` for the features measured on the terrain.
+
+    Keyed by name because that is the only key the verification carries — it is
+    built from the burn's footprint masks, which are named, not from the balance
+    rows. A name shared by two features is dropped rather than guessed at: the two
+    would otherwise take each other's measured cut, and a wrong figure in a column
+    headed "measured" is worse than a blank one.
+    """
+    v = data.verification
+    rows = list(getattr(v, "per_feature", None) or []) if v is not None else []
+    counts = {}
+    for f in rows:
+        counts[f.get("name")] = counts.get(f.get("name"), 0) + 1
+    return {f.get("name"): f for f in rows if counts.get(f.get("name")) == 1}
 
 
 def _earthmoving(data):
@@ -1195,12 +1372,15 @@ def _earthmoving(data):
     and the calculated one is already in the table above.
     """
     q = data.burn_quantities or {}
-    cut, fill = q.get("cut_m3"), q.get("fill_m3")
+    # NaN is what a burn over a DEM with nodata holes used to produce, and it is
+    # truthy — so it passed the guard below and printed as "nan" in the measured
+    # column. An unmeasurable figure is an absent one.
+    cut, fill = _measured(q.get("cut_m3")), _measured(q.get("fill_m3"))
     if not cut and not fill:
         return []
 
-    drawn_cut = getattr(data.balance, "total_cut_m3", 0.0) or 0.0
-    drawn_fill = getattr(data.balance, "total_fill_m3", 0.0) or 0.0
+    drawn_cut = _measured(getattr(data.balance, "total_cut_m3", 0.0)) or 0.0
+    drawn_fill = _measured(getattr(data.balance, "total_fill_m3", 0.0)) or 0.0
     rows = [
         ["Cut — soil out", fmt_volume(drawn_cut), fmt_volume(cut),
          _ratio(drawn_cut, cut)],
@@ -1209,7 +1389,7 @@ def _earthmoving(data):
     ]
     return [DataTable(
         title="Earthmoving — drawn against measured",
-        headers=["", "Calculated (flat ground)", "Measured (this terrain)",
+        headers=["", "Geometric calculated (flat ground)", "Measured (this terrain)",
                  "Difference"],
         rows=rows,
         note=("Calculated against measured · Price the job on the measured column. "
@@ -1219,6 +1399,16 @@ def _earthmoving(data):
               "Site totals only: earthworks overlap and a berm sits outside its own "
               "footprint, so splitting the measured figure between features would "
               "report the splitting rule rather than the job."))]
+
+
+def _measured(v):
+    """A figure, or ``None`` where there is not a number to print."""
+    if v is None:
+        return None
+    try:
+        return v if math.isfinite(float(v)) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _ratio(drawn, measured):
@@ -1277,7 +1467,8 @@ def _page_verification(data):
 
     if v.caveats:
         out.append(Callout(tone="info", title="Attribution caveats",
-                           text="\n".join(str(c) for c in v.caveats)))
+                           text="\n".join(_renamed_caveat(str(c), data)
+                                          for c in v.caveats)))
     if v.baseline_uncorrected:
         out.append(Callout(tone="warn",
                            title="Water that was already there could not be subtracted",
@@ -1287,19 +1478,49 @@ def _page_verification(data):
     return out
 
 
+#: The one group caveat that leads with feature names rather than a single name.
+_POOL_CAVEAT = " impound one continuous pool"
+
+
+def _renamed_caveat(text, data):
+    """A caveat naming the features the way the tables above it do.
+
+    ``build_verification`` writes these sentences from the raw names it was given —
+    it has no access to the document's name map, and giving it one would make a pure
+    verification function depend on how a report letters its rows. So the rename
+    happens here, and only on the leading name: these two forms put the feature
+    first ("Swale 3: a 1.00 m cell…", "Swale 3 + Dam 4 impound one continuous
+    pool…"). Substituting anywhere in the prose would rewrite words that happen to
+    match a feature name.
+    """
+    mapping = _by_raw_name(data)
+    if not mapping:
+        return text
+    head, sep, rest = text.partition(": ")
+    if sep and head in mapping:
+        return f"{mapping[head]}{sep}{rest}"
+    head, sep, rest = text.partition(_POOL_CAVEAT)
+    if sep:
+        renamed = " + ".join(mapping.get(n, n) for n in head.split(" + "))
+        return f"{renamed}{sep}{rest}"
+    return text
+
+
 #: Marks a Δ whose at-grid reference is not the feature's capacity. In DejaVu Sans,
 #: so it prints rather than boxing.
 _OVERSTATED_MARK = "†"
 
 
-def _overstated_note(v):
+def _overstated_note(v, data=None):
     """The sentence the dagger stands for, naming the features it marks.
 
     Print has no hover, so the explanation cannot live in a tooltip the way the panel's
     does; it goes under the table instead, where it can wrap. Naming the features keeps
-    the marker from being a symbol the reader has to hunt for.
+    the marker from being a symbol the reader has to hunt for — which means naming them
+    the way the table above does, hence ``_shown`` rather than the raw name.
     """
-    flagged = [f.get("name", "") for f in v.per_feature if f.get("section_overstated")]
+    flagged = [_shown(data, f) if data is not None else f.get("name", "")
+               for f in v.per_feature if f.get("section_overstated")]
     if not flagged:
         return ""
     named = ", ".join(flagged[:4])
@@ -1330,70 +1551,77 @@ def _impoundment_note(v):
 
 
 def _volume_ladder(v, data=None):
-    """Rule 1: four figures, in derivation order, never merged.
+    """Rule 1: three figures, in derivation order, never merged.
 
     ``data`` carries the document's ``display_names``. This table lettered nothing
     at all while two other pages lettered from two different inputs, so it could
     print two rows reading "Swale 3" with no way to tell which was which.
 
-    They are four different questions about one earthwork, not four estimates of one
-    number. The first two are **calculated** from the drawn dimensions; the last two are
-    **measured** by flooding the terrain. That division is the one the reader most needs,
-    and it is why the third column is usually the largest: a companion berm keyed into
-    its banks holds water above natural ground, which no cross-section can predict.
+    They are three different questions about one earthwork, not three estimates of one
+    number. The first is **geometric calculated** from the drawn dimensions; the last
+    two are **measured** by flooding the terrain. That division is the one the reader
+    most needs, and it is why the middle column is usually the largest: a companion
+    berm keyed into its banks holds water above natural ground, which no cross-section
+    can predict.
+
+    **Design storage is gone, and so is the allowance it was made of.** It was
+    ``geometric`` less a blanket 20% freeboard, and a single site-wide fraction is not
+    what determines freeboard on a real feature — the spillway does, and the spillway is
+    sized separately on page 6 from a peak flow this column knows nothing about. Dropping
+    the column left the deduction itself inside ``calculate_capacity``, where it still
+    reached the build schedule under a heading that said *geometric*; every storage
+    figure in the document is now the whole drawn shape, brim-full, and no rung of the
+    ladder is a rule of thumb.
 
     Δ appears once in the whole document and compares two floods — what a feature holds
     on its own against what the finished site ponds there — so it isolates interaction
     between features and nothing else.
     """
     out = [Callout(tone="info", title="Reading this table", text=(
-        "The first two figures are calculated from the dimensions you drew, and you can "
-        "check them by hand. Geometric is the cross-section volume — for a swale with a "
-        "companion berm, the trench plus the berm's own section — and Design storage is "
-        "that less your freeboard allowance. The last two are measured by flooding the "
-        "terrain: At this grid is what the feature impounds on this hillside on its own, "
-        "and Measured is the pond it ends up with once everything is built. At this grid "
-        "is usually the larger of all four, and that is not an error — a bank keyed into "
-        "its ends holds water above natural ground and up the slope behind it, which is "
-        "real storage no drawn section accounts for. Only Measured minus At-this-grid is "
-        "an error term, and it means a neighbouring feature is changing where the water "
-        "goes."))]
+        "The first figure is geometric calculated from the dimensions you drew, and "
+        "you can check it by hand: it is the cross-section volume brim-full — for a "
+        "swale with a companion berm, the trench plus the berm's own section. The "
+        "last two are "
+        "measured by flooding the terrain: At this grid is what the feature impounds "
+        "on this hillside on its own, and Measured is the pond it ends up with once "
+        "everything is built. At this grid is usually the largest of the three, and "
+        "that is not an error — a bank keyed into its ends holds water above natural "
+        "ground and up the slope behind it, which is real storage no drawn section "
+        "accounts for. Only Measured minus At-this-grid is an error term, and it means "
+        "a neighbouring feature is changing where the water goes."))]
 
     rows = []
     for f in v.per_feature:
         if f.get("routing_only"):
-            rows.append([_shown(data, f), fmt_volume(f.get("analytic_m3")),
-                         fmt_volume(f.get("geometric_m3")),
+            rows.append([_shown(data, f), fmt_volume(f.get("geometric_m3")),
                          "n/a — sub-cell", "n/a — sub-cell", "n/a — sub-cell"])
             continue
         if f.get("merged_with"):
             # One pool, two owners. Printing a share of it under either name would
             # report the sharing rule; the pool gets its own table below.
-            rows.append([_shown(data, f), fmt_volume(f.get("analytic_m3")),
-                         fmt_volume(f.get("geometric_m3")),
+            rows.append([_shown(data, f), fmt_volume(f.get("geometric_m3")),
                          fmt_volume(f.get("rasterisable_m3")),
                          "shared pool", "see below"])
             continue
         if f.get("barrier_impounded"):
             # A dam holds against the hillside, not against a drawn section:
-            # design, geometric and grid are one computation. Printing three
-            # identical numbers would imply three independent derivations.
-            rows.append([f.get("name", ""),
+            # geometric and grid are one computation. Printing two identical
+            # numbers would imply two independent derivations.
+            rows.append([_shown(data, f),
                          f"{fmt_volume(f.get('analytic_m3'))} (barrier-impounded)",
-                         "", "", fmt_volume(f.get("terrain_m3")),
+                         "", fmt_volume(f.get("terrain_m3")),
                          fmt_pct(f.get("delta_pct"))])
             continue
         delta = (fmt_pct(f.get("delta_pct"))
                  if f.get("delta_pct") is not None else "—")
         # The marker rather than the sentence: this column shares a fixed page width
-        # with five others in proportion to its longest cell, so spelling it out per
+        # with four others in proportion to its longest cell, so spelling it out per
         # row would squeeze the volumes it is meant to qualify. The note below the
         # table names every marked feature, so the dagger is never left orphaned.
         if f.get("section_overstated"):
             delta = f"{delta} {_OVERSTATED_MARK}"
         rows.append([
-            f.get("name", ""),
-            fmt_volume(f.get("analytic_m3")),
+            _shown(data, f),
             fmt_volume(f.get("geometric_m3")),
             fmt_volume(f.get("rasterisable_m3")),
             fmt_volume(f.get("terrain_m3")),
@@ -1401,13 +1629,14 @@ def _volume_ladder(v, data=None):
         ])
     out.append(DataTable(
         title="Drawn storage against measured storage",
-        headers=["Feature", "Design storage", "Geometric (drawn)",
-                 "At this grid (held)", "Measured", "Δ vs grid"],
+        headers=["Feature", "Geometric (drawn)", "At this grid (held)",
+                 "Measured", "Δ vs grid"],
         rows=rows, wide=True,
-        note=("The first two columns are calculated, the last two measured. Δ compares "
-              "what each feature holds alone against what the finished site ponds "
-              "there, so it is diagnostic of interaction between features and not a "
-              "pass or a fail." + _impoundment_note(v) + _overstated_note(v))))
+        note=("The first column is geometric calculated, the last two measured. Δ "
+              "compares what each feature holds alone against what the finished site "
+              "ponds there, so it is diagnostic of interaction between features and "
+              "not a pass or a fail." + _impoundment_note(v)
+              + _overstated_note(v, data))))
 
     # Where two features hold one sheet of water, this is the row that tests the burn.
     # It has to appear, and appear with a Δ, or the "shared pool" cells above look like
@@ -1428,17 +1657,11 @@ def _volume_ladder(v, data=None):
                   "there is no share that is true of either. This Δ tests the burn "
                   "for all of them together.")))
 
-    # Context, physically separated: total_m3 is the largest number here and
-    # would otherwise be read as the capacity.
-    ctx_rows = [[f.get("name", ""), fmt_volume(f.get("existing_m3")),
-                 fmt_volume(f.get("total_m3"))]
-                for f in v.per_feature
-                if f.get("existing_m3") or f.get("total_m3")]
-    if ctx_rows:
-        out.append(DataTable(
-            title="Standing water — context only, not a design claim",
-            headers=["Feature", "Already ponding before", "Pool you would see"],
-            rows=ctx_rows))
+    # The "Standing water — context only" table lived here. It carried existing_m3
+    # and total_m3 per feature, and total_m3 is the largest number in the section —
+    # so a table explicitly labelled "not a design claim" was the one a reader was
+    # most likely to quote. Both figures remain on the rows for anything that wants
+    # them; the document no longer prints a table whose whole caption is a warning.
     return out
 
 
@@ -1500,10 +1723,14 @@ def _page_appendix(data):
 
     inputs = data.inputs or {}
     if inputs:
-        out.append(KeyValueTable(
-            title="Settings used",
-            rows=[(k.replace("_", " ").capitalize(), str(v))
-                  for k, v in sorted(inputs.items())]))
+        rows = [("Runoff method", _basis_label(inputs))]
+        rows += [(k.replace("_", " ").capitalize(), str(v))
+                 for k, v in sorted(inputs.items())
+                 if k not in _UNUSED_BY_BASIS.get(
+                     inputs.get("sizing_basis"), ())]
+        out.append(KeyValueTable(title="Settings used", rows=rows))
+
+    out.extend(_methodology())
 
     dem = data.dem or {}
     if dem:
@@ -1518,6 +1745,74 @@ def _page_appendix(data):
     out.append(Heading(text="What this document is not", level=2))
     out.append(Paragraph(text=_NOT_A_SURVEY))
     return out
+
+
+#: How the runoff depth was arrived at, in the words the dialog offers it under.
+#: Keyed off the constants themselves so a renamed basis cannot silently fall
+#: through to "not recorded" here while the panel still shows a label for it.
+_BASIS_LABELS = {
+    "coefficient": "Runoff coefficient (Lancaster)",
+    "rainfall": "Total rainfall — all rain runs off",
+    "runoff": "Surface runoff (SCS curve number)",
+}
+
+#: Inputs a given basis never reads. The settings table used to print every field
+#: it was handed, alphabetically, so a site sized on a Lancaster runoff coefficient
+#: still listed "Cn 61" — a curve number nothing in that run consulted. A reader
+#: cannot tell a live input from a dormant default, and the appendix exists
+#: precisely to say which input to change.
+_UNUSED_BY_BASIS = {
+    "coefficient": ("cn", "ground_condition", "moisture"),
+    "rainfall": ("cn", "ground_condition", "moisture", "runoff_coefficient"),
+    "runoff": ("runoff_coefficient",),
+}
+
+
+def _basis_label(inputs):
+    basis = (inputs or {}).get("sizing_basis")
+    return _BASIS_LABELS.get(basis, str(basis or "not recorded"))
+
+
+def _methodology():
+    """How the two kinds of figure are actually produced.
+
+    The reading guide on page 2 says *which* figures are which. This says how each
+    one is arrived at, because a reader who has to defend a number needs the method
+    and not just the label. It sits in the appendix rather than up front: it is
+    reference material, and page 2 has to stay short enough to be read.
+    """
+    return [
+        Heading(text="How this model works", level=2),
+        Paragraph(text=(
+            "Two independent methods run over the same design, and the report keeps "
+            "them apart everywhere.")),
+        Callout(tone="info", title="The geometric calculated method", text=(
+            "Each feature's drawn dimensions — length, top and bottom width, depth "
+            "and batter — are turned into a cross-section, and the section is "
+            "multiplied along the feature's length. Capacity, cut and fill all come "
+            "from that one calculation, and spillway widths come from the weir "
+            "equation on top of it. It assumes the ground under the feature is a "
+            "flat plane. Nothing about this site enters the arithmetic, which is "
+            "what makes it checkable by hand and what makes it wrong in a knowable "
+            "direction: a level structure on sloping ground always costs more earth "
+            "than its drawn section implies.")),
+        Callout(tone="info", title="The measured method", text=(
+            "The design is cut into the elevation model — inverts levelled, crests "
+            "raised — and the resulting surface is flooded by filling every "
+            "depression to its pour point. What each feature holds is the water "
+            "standing in it, counted cell by cell. The catchment feeding it is "
+            "traced by following flow directions over the same grid, so each cell "
+            "is credited to the first feature that intercepts it and no hillside is "
+            "counted twice. This accounts for slope, for banks that hold water above "
+            "natural ground, and for features that interfere with one another — none "
+            "of which any cross-section can predict.")),
+        Paragraph(text=(
+            "Where the two disagree, the disagreement is the finding. A measured "
+            "storage above the geometric figure is usually a bank impounding water "
+            "up the slope behind it. A measured storage below it usually means the "
+            "grid cannot hold the section that was drawn — the report marks those "
+            "features rather than leaving the gap to be read as an error.")),
+    ]
 
 
 def _map_ref(data, key, caption):
@@ -1560,6 +1855,21 @@ def _ramp_entry(label, ramp):
                        colours=tuple(c for c, _l in stops))
 
 
+def _types_present(data):
+    """Earthwork types on this block, in the order the balance lists them.
+
+    A key listing five types on a scheme with two swales is its own kind of
+    wrong, so every map key is built from what the design actually contains.
+    """
+    seen = []
+    for f in ((data.balance.per_feature if data.balance is not None
+               else None) or []):
+        t = f.get("ew_type")
+        if t and t not in seen:
+            seen.append(t)
+    return seen
+
+
 def _map_legend(data, key):
     """What the reader needs to be told the colours mean.
 
@@ -1573,22 +1883,32 @@ def _map_legend(data, key):
     )
 
     if key == "design":
-        out = []
-        seen = []
-        for f in ((data.balance.per_feature if data.balance is not None
-                   else None) or []):
-            t = f.get("ew_type")
-            if t and t not in seen:
-                seen.append(t)
-        for t in seen:
-            kind = "fill" if t == "basin" else "line"
-            out.append(LegendEntry(label=type_label(t), colour=_type_colour(t),
-                                   kind=kind))
-        if data.spillway_rows:
-            out.append(LegendEntry(label="Spillway",
-                                   colour=_SPILLWAY_COLOUR, kind="point"))
-        out.append(LegendEntry(label="Overflow link",
-                               colour=_CONNECTION_COLOUR, kind="line"))
+        # Every earthwork type on the block, and nothing else. The spillway and
+        # overflow-link entries came off with the layers they named — see
+        # ``_page_design``.
+        out = [LegendEntry(label=type_label(t), colour=_type_colour(t),
+                           kind="fill" if t == "basin" else "line")
+               for t in _types_present(data)]
+        out.append(LegendEntry(label="Site boundary",
+                               colour=_BOUNDARY_COLOUR, kind="line"))
+        return out
+
+    if key == "overview":
+        # The summary map carries no earthworks, so it names none of them. What
+        # it does carry is water — held, moving, and the ground that feeds it —
+        # and none of that is self-explanatory over an aerial photograph.
+        out = [
+            _ramp_entry("Water held — shallow to deepest", WATER_CAPTURED),
+            LegendEntry(label="Watercourse",
+                        colour=stop_colour(STREAMS, "channel"), kind="line"),
+        ]
+        if data.catchment_outline:
+            # One line per type, in the colour of the feature that catches it,
+            # because that is how the map draws them.
+            for t in _types_present(data):
+                out.append(LegendEntry(
+                    label=f"Catchment — {type_label(t).lower()}",
+                    colour=_type_colour(t), kind="line"))
         out.append(LegendEntry(label="Site boundary",
                                colour=_BOUNDARY_COLOUR, kind="line"))
         return out
@@ -1602,6 +1922,7 @@ def _map_legend(data, key):
                         surface_runoff_ramp()),
             LegendEntry(label="Watercourse",
                         colour=stop_colour(STREAMS, "channel"), kind="line"),
+            _ramp_entry("Water held — shallow to deepest", WATER_CAPTURED),
             LegendEntry(label="Boundary crossing", colour=_EXIT_COLOUR,
                         kind="point"),
             LegendEntry(label="Site boundary", colour=_BOUNDARY_COLOUR,

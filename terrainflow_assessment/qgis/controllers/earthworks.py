@@ -617,6 +617,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         n = len(self._state.earthwork_manager) + 1
         ew_name = f"{ew_type.capitalize()} {n}"
+        # Seeded from `core/registry`, deliberately, and NOT from the panel's swale
+        # cross-section boxes. Those live in the Find Best Swale Segments criteria and
+        # answer a different question — "what size of swale should these contour
+        # segments be sized for" — and at their defaults they describe a 0.6 m drainage
+        # swale, which is sub-cell on a 1 m DEM and cannot be burned or verified. The
+        # registry's 2.0 m is the width a drawn feature should start at. Wiring the two
+        # together was tried and reverted: it silently replaced a representable default
+        # with one the terrain model cannot hold.
         ew = Earthwork(ew_type, geometry, ew_name)
         ew.source_contour_coords = source_contour  # reshape stays contour-locked
 
@@ -1074,9 +1082,15 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """
         if ew.type == "dam":
             ew.terrain_capacity_m3 = float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None
+            # A wall, and its recorded band is the drawn line rather than the wall's own
+            # footprint, so there is no excavation this measurement could honestly claim.
+            ew.excavation_m3 = None
             return
         if not self._state.dem_path:
             ew.terrain_capacity_m3 = None
+            # Cleared with the capacity it was measured beside: a figure off a DEM that
+            # is no longer loaded outlives the terrain that produced it.
+            ew.excavation_m3 = None
             return
         # The burn holds `state.burner` for several seconds on a worker thread, and
         # this floods the same object. Two floods at once would interleave their
@@ -1095,11 +1109,17 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
             ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
             ew.retained_depth_m = round(storage.retained_depth_m, 2)
+            # The earth this takes out, measured on the same isolated burn that measured
+            # the pond — free here, and the only per-feature excavation that is
+            # order-independent. `or None` would erase a genuine zero, which a feature
+            # drawn entirely on flat ground at sub-cell width really can be.
+            ew.excavation_m3 = round(storage.excavation_m3, 2)
             if not quiet:
                 self._warn_impoundment(ew)
         except Exception as exc:
             print(f"TerrainFlow Assessment — terrain capacity error: {exc}")
             ew.terrain_capacity_m3 = None
+            ew.excavation_m3 = None
 
     def _refresh_all_terrain_capacities(self):
         """Measure every feature's pond in one pass — on design open, or a DEM change.
@@ -1175,13 +1195,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if storage is None:                     # a dam: capacity_m3 IS this figure
                 ew.terrain_capacity_m3 = (
                     float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None)
+                ew.excavation_m3 = None             # a wall: see _refresh_terrain_capacity
                 continue
             if storage is False:                    # measurement failed; say nothing new
                 ew.terrain_capacity_m3 = None
+                ew.excavation_m3 = None
                 continue
             ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
             ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
             ew.retained_depth_m = round(storage.retained_depth_m, 2)
+            ew.excavation_m3 = round(storage.excavation_m3, 2)
         for ew, _ in measured:
             self._warn_impoundment(ew)
         self._panel.set_earthworks_idle()
@@ -2395,9 +2418,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         capacity = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
         if length <= 0 or capacity <= 0:
             return None, 0.0
-        # capacity_m3 already carries the freeboard allowance, so pass 1.0 rather than
-        # discounting it twice.
-        return overtopping_station(profile, capacity / length, freeboard=1.0)
+        return overtopping_station(profile, capacity / length)
 
     def refresh_stress_points_layer(self):
         """Mark where features overtop, on the map beside the problem.
@@ -3576,6 +3597,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # whole assessment, which has to include this run.
             sizing_basis=self._panel.sizing_basis,
             runoff_coefficient=self._panel.runoff_coefficient,
+            # Same argument, three more arguments. `exit_flow_ls` defaults to 0.5, so a
+            # session that raised the panel's "Show exits above" threshold got earthworks
+            # exit markers drawn through a *different* filter from the baseline's — and the
+            # before/after exit comparison, which is the point of running this tier at all,
+            # was then partly a comparison of thresholds. The two area paths default to
+            # None, which collapses `area_outflow` to the whole site and loses the
+            # per-area split the baseline reports.
+            exit_flow_ls=self._panel.exit_flow_ls,
+            analysis_area_path=self._state.analysis_area_path,
+            earthworks_area_path=self._state.earthworks_area_path,
         )
         self._state.analysis_worker.progress.connect(self._panel.set_earthworks_progress)
         self._state.analysis_worker.completed.connect(self._on_earthworks_complete)
@@ -3601,6 +3632,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         unrouted = result.get("unrouted_warning")
         if unrouted:
             self._iface.messageBar().pushWarning("TerrainFlow Assessment", unrouted)
+        diag_path = result.get("unrouted_diag_path")
+        if diag_path:
+            print(f"TerrainFlow Assessment — unrouted diagnostics: {diag_path}")
 
         crest = result.get("crest_warning")
         if crest:
@@ -3628,7 +3662,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             )
 
         # Per-feature breakdown in the Verify stage. The chip carries one site-wide
-        # delta, which cannot distinguish a burn error from the freeboard allowance.
+        # delta, which cannot distinguish a burn error from a terrain effect.
         cell = self._state.dem_info.cell_size_m if self._state.dem_info else 1.0
         self._panel.set_verification(v, cell_size_m=cell)
 
@@ -3643,8 +3677,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         "Verified · Δ −38%" said nothing about what was being compared or what the user
         should do. The delta now compares two floods — what each feature impounds alone
         against what the finished site ponds there — so it isolates interaction between
-        features, with impoundment, freeboard and the grid's fidelity all reported as
-        separate terms rather than folded into the same number.
+        features, with impoundment and the grid's fidelity reported as separate terms
+        rather than folded into the same number.
         """
         from terrainflow_assessment.modules.reporting import (
             fmt_volume,
@@ -3653,7 +3687,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         if v is None:
             return ""
-        freeboard = sum(f.get("freeboard_m3", 0.0) for f in v.per_feature)
         penalty = sum(f.get("resolution_penalty_m3", 0.0) for f in v.per_feature)
         impounded = sum(f.get("impoundment_m3", 0.0) for f in v.per_feature)
         reference = sum(f.get("rasterisable_m3", 0.0) for f in v.per_feature)
@@ -3669,9 +3702,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if impounded > 1:
             parts.append(f"Of that, {fmt_volume(impounded)} is water the banks hold "
                          f"above natural ground — beyond any drawn cross-section.")
-        if abs(freeboard) > 1:
-            parts.append(f"Freeboard accounts for a further {fmt_volume(freeboard)} "
-                         f"deliberately kept empty.")
         if abs(penalty) > 1:
             parts.append(f"The grid cut the drawn trench {round_volume(penalty):+,} m³ "
                          f"differently; where that is large, Geometric is the capacity "
@@ -3839,7 +3869,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                     ew, cell_size=cell_size, cell_area=cell_area,
                     n_cells=int(mask.sum()),
                     terrain_storage_m3=getattr(ew, "terrain_capacity_m3", None),
-                    cut_m3=burned_cut.get(getattr(ew, "id", None)))
+                    cut_m3=burned_cut.get(getattr(ew, "id", None)),
+                    excavation_m3=getattr(ew, "excavation_m3", None))
             except Exception:
                 pass
 
@@ -3952,6 +3983,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             print(f"TerrainFlow Assessment — event pond error: {exc}")
             return
 
+        # Handed to the overtopping check, which runs next and otherwise has only the
+        # full-capacity pond to answer from — the whole of the reason its band read as
+        # a claim about this storm when it was a claim about the structure.
+        ctx["event"] = depth
+
         wet = depth > 0.001
         if not wet.any():
             return
@@ -3973,7 +4009,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # itself, a shallower event pond would stretch the same ramp over a
             # smaller range and the two layers would say "deepest" in the same navy
             # at different depths — which is exactly the comparison being made here.
-            S.apply_raster_ramp(layer, WATER_CAPTURED,
+            #
+            # Through the shared ``ponding`` scale, so the same holds against the
+            # Baseline capacity layer as well as against the Earthworks one: a
+            # before/after pair drawn on two different stretches of one ramp shows a
+            # difference that is the ramp's, not the design's.
+            S.apply_shared_ramp(self._state, self._project, "ponding", layer,
+                                WATER_CAPTURED,
                                 float(np.asarray(ctx["full"]).max()))
             self.place(layer, G.RERUN, at_top=True)
             self._state.earthworks_layer_ids.append(layer.id())
@@ -4024,12 +4066,21 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         pool's surface stays flat as it rises, so it goes over every metre standing at
         the pour level simultaneously. The band drawn here is that length, and it is what
         discharge per metre has to be figured against.
+
+        *And which storm it is about.* The measurement is made on the **full** pond, so
+        it answers "filled, does this pool leave over its own wall" — a freeboard fact
+        about the structure, true whatever the event does, and the right question for a
+        layer that exists to catch a dam with no spillway. Drawn without qualification it
+        was read as the other question: a solid red band beside an event water line
+        sitting a metre below the crest says the modelled storm is going over the top,
+        and it is not. So the event level is measured too, and the answer is split into
+        the same **(full)** / **(event)** pair the pond layers already use — see
+        :meth:`_place_overtopping_layer`.
         """
         import rasterio
-        from rasterio.features import shapes as _shapes
 
         from terrainflow_assessment.core.registry.map_palette import (
-            OVERTOPPING_EDGE,
+            OVERTOPPING_CAPACITY_FILL,
             OVERTOPPING_FILL,
         )
         from terrainflow_assessment.modules.burn_strategy import overtopping_warning
@@ -4086,7 +4137,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             t = ctx["transform"]
             spills = overtopping_spill(ctx["full"], ground,
                                        abs(t.a), barriers, built=raised,
-                                       cell_area_m2=abs(t.a * t.e))
+                                       cell_area_m2=abs(t.a * t.e),
+                                       event_depth=ctx.get("event"))
         except Exception as exc:
             print(f"TerrainFlow Assessment — overtopping check failed: {exc}")
             return
@@ -4099,13 +4151,63 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 spill.name, spill.length_m, spill.pour_level_m,
                 alt_saddle_m=spill.alt_saddle_m,
                 has_spillway=getattr(ew, "spillway", None) is not None,
+                reaches_crest=spill.overtops_this_event,
+                event_level_m=spill.event_level_m,
             )
-            if msg:
+            if not msg:
+                continue
+            # A crest this event does not reach is a design note, not an alarm. Pushed
+            # as a warning it competed with the ones that are about the storm just
+            # routed, and a bar full of undifferentiated red is a bar nobody reads.
+            if spill.overtops_this_event is False:
+                self._iface.messageBar().pushInfo("TerrainFlow Assessment", msg)
+            else:
                 self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
 
+        # Two layers, named to match the pond pair sitting beside them: **(full)** is
+        # every barrier that pours over itself once its pool is brim-full, and
+        # **(event)** is the subset this storm actually reaches — nested inside the
+        # first exactly as "Pond Capacity (event)" nests inside "(full)".
+        #
+        # A tick per question, rather than one layer styled two ways, because the two
+        # are asked at different moments. Judging a design against the storm just
+        # routed, the capacity bands are noise and go off; asking whether a wall has
+        # freeboard, they are the whole answer. One layer cannot be half-turned-off
+        # however it is symbolised, and the styling that stood in for it had to be read
+        # off a hatch pattern rather than off a name.
+        #
+        # (full) goes down first so (event) lands above it: where both apply, the
+        # statement about this storm is the one that should be on top.
+        self._place_overtopping_layer(
+            "Earthworks — Overtopping (full)", spills, by_name, ctx,
+            fill=OVERTOPPING_CAPACITY_FILL, hatched=True,
+            suffix=" when full", priority=3)
+        self._place_overtopping_layer(
+            "Earthworks — Overtopping (event)",
+            [s for s in spills if s.overtops_this_event], by_name, ctx,
+            fill=OVERTOPPING_FILL, hatched=False,
+            suffix=" this event", priority=8)
+
+    def _place_overtopping_layer(self, name, spills, by_name, ctx,
+                                 fill, hatched, suffix, priority):
+        """One of the two overtopping band layers. No layer at all when empty.
+
+        An empty "(event)" layer would be a row in the legend asserting a question was
+        asked and answered no — which is right when the event was measured and wrong
+        when there was no event pond to measure against. Absent, it says neither, and
+        the advisory in the message bar is where "nothing goes over in this run" is
+        stated in words.
+        """
+        from qgis.PyQt.QtCore import Qt as _Qt
+        from rasterio.features import shapes as _shapes
+
+        from terrainflow_assessment.core.registry.map_palette import OVERTOPPING_EDGE
+
+        if not spills:
+            return
+
         crs_str = dem_crs(self._state)
-        layer = QgsVectorLayer(f"Polygon?crs={crs_str}",
-                               "Earthworks — Overtopping", "memory")
+        layer = QgsVectorLayer(f"Polygon?crs={crs_str}", name, "memory")
         if not layer.isValid():
             return
         pr = layer.dataProvider()
@@ -4114,6 +4216,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             QgsField("length_m", QMetaType.Double),
             QgsField("level_m", QMetaType.Double),
             QgsField("spillway", QMetaType.QString),
+            # Which storm the band is about. Redundant with the layer name for
+            # "event", and not redundant in "(full)": a spill sits there both when
+            # the event was measured and fell short ("capacity") and when there was
+            # no event pond to ask ("unknown"), and those are different states that
+            # one layer name cannot separate.
+            QgsField("state", QMetaType.QString),
+            QgsField("event_m", QMetaType.Double),
         ])
         layer.updateFields()
 
@@ -4121,6 +4230,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         for spill in spills:
             ew = by_name.get(spill.name)
             sited = "designed" if getattr(ew, "spillway", None) is not None else "none"
+            reaches = spill.overtops_this_event
+            state = ("unknown" if reaches is None
+                     else "event" if reaches else "capacity")
             parts = []
             for geom, _v in _shapes(spill.mask.astype("uint8"), mask=spill.mask,
                                     transform=ctx["transform"]):
@@ -4140,25 +4252,45 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             f = QgsFeature(layer.fields())
             f.setGeometry(merged)
             f.setAttributes([spill.name, round(spill.length_m, 1),
-                             round(spill.pour_level_m, 2), sited])
+                             round(spill.pour_level_m, 2), sited, state,
+                             None if spill.event_level_m is None
+                             else round(spill.event_level_m, 2)])
             feats.append(f)
         if not feats:
             return
         pr.addFeatures(feats)
         layer.updateExtents()
 
+        # Same red and the same edge in both layers: it is one fault on one crest, and
+        # a second hue would read as a second kind of thing. The capacity bands are
+        # hatched so the two stay distinguishable where they overlap — (event) is drawn
+        # over (full) by construction — and carry more alpha, because a diagonal hatch
+        # at the solid fill's alpha is barely on the map.
         sym = QgsFillSymbol.createSimple({
-            "color": ",".join(str(c) for c in OVERTOPPING_FILL),
+            "color": ",".join(str(c) for c in fill),
             "outline_color": ",".join(str(c) for c in OVERTOPPING_EDGE),
             "outline_width": "0.6",
         })
+        if hatched:
+            try:
+                sym.symbolLayer(0).setBrushStyle(_Qt.BrushStyle.BDiagPattern)
+            except Exception:
+                pass
         layer.setRenderer(QgsSingleSymbolRenderer(sym))
 
-        # Labelled with the length, because that is the whole point of the band.
+        # Labelled with the length, because that is the whole point of the band — and
+        # with the reference state, because "spills over 30 m" beside an event water
+        # line a metre below the crest is the sentence that has to be qualified.
+        #
+        # ``priority`` is what settles the two labels a barrier in both layers would
+        # draw on one crest: PAL competes across layers, so the low number is dropped
+        # first, and where both apply the event statement is the one to keep.
         settings = QgsPalLayerSettings()
-        settings.fieldName = "concat(\"feature\", ' spills over ', " \
-                             "format_number(\"length_m\", 0), ' m')"
+        settings.fieldName = (
+            f"concat(\"feature\", ' spills over ', "
+            f"format_number(\"length_m\", 0), ' m{suffix}')")
         settings.isExpression = True
+        settings.priority = priority
         text = QgsTextFormat()
         text.setSize(9)
         text.setColor(QColor(120, 20, 12))

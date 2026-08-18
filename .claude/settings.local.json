@@ -21,6 +21,8 @@
       "Bash(git remote *)",
       "Bash(git fetch *)",
       "PowerShell(& \"C:\\\\Users\\\\liamm\\\\Documents\\\\TerrainFlow\\\\deploy.ps1\")",
+      "PowerShell(.\\\\run_qgis_tests.ps1:*)",
+      "PowerShell(& \"C:\\\\Users\\\\liamm\\\\Documents\\\\TerrainFlow\\\\run_qgis_tests.ps1\"*)",
       "Read(//c/Users/liamm/.claude/**)"
     ]
   }

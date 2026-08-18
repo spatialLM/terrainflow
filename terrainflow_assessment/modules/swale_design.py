@@ -64,7 +64,7 @@ def _channel_section(top_width, depth, side_slope):
 
 
 def recommend_swale_length(peak_inflow_m3, depth, width, *,
-                           side_slope=1.0, freeboard=0.8,
+                           side_slope=1.0,
                            infiltration_mm_hr=0.0, duration_hr=0.0):
     """
     Estimate the swale length needed to manage a design-storm inflow volume.
@@ -78,7 +78,7 @@ def recommend_swale_length(peak_inflow_m3, depth, width, *,
     -----
     Over a storm of ``duration_hr`` hours, per metre of swale::
 
-        capacity_per_m = A_x · freeboard          (trench storage, m³/m)
+        capacity_per_m = A_x                      (trench storage, m³/m)
                        + (f / 1000) · duration · T (infiltration, m³/m)
 
     where ``A_x`` is the trapezoidal cross-section area for ``depth`` / top width
@@ -98,7 +98,6 @@ def recommend_swale_length(peak_inflow_m3, depth, width, *,
     depth : float — swale depth (m)
     width : float — swale **top** width (m)
     side_slope : float — wall batter, H:V run-per-rise (default 1.0 = 1:1)
-    freeboard : float — usable fraction of the trench cross-section (default 0.8)
     infiltration_mm_hr : float — soil steady-state infiltration rate (mm/hr)
     duration_hr : float — storm duration (hr); infiltration only counts over the event
 
@@ -112,7 +111,7 @@ def recommend_swale_length(peak_inflow_m3, depth, width, *,
     # Trapezoidal cross-section (bottom width narrows with battered walls).
     section = _channel_section(width, depth, side_slope)
 
-    storage_per_m = section.area * freeboard
+    storage_per_m = section.area
     infil_per_m = (max(0.0, infiltration_mm_hr) / 1000.0) * max(0.0, duration_hr) * width
     capacity_per_m = storage_per_m + infil_per_m
     if capacity_per_m <= 0:
@@ -137,7 +136,7 @@ class StorageCheck:
 
 
 def required_storage_at_length(inflow_m3, length_m, depth, width, *,
-                               side_slope=1.0, freeboard=0.8,
+                               side_slope=1.0,
                                infiltration_mm_hr=0.0, duration_hr=0.0):
     """Does this swale, **as drawn**, hold its event — and if not, by how much?
 
@@ -147,8 +146,8 @@ def required_storage_at_length(inflow_m3, length_m, depth, width, *,
     hillside, so the ratio ``required_length / drawn_length`` is very nearly constant
     and the user can never clear a red flag by extending. (The previous implementation
     made that worse by dividing by a rectangular ``depth × width``, ignoring the
-    battered walls, the freeboard allowance and infiltration entirely — so it also
-    disagreed with :func:`recommend_swale_length`, which the dialog never called.)
+    battered walls and infiltration entirely — so it also disagreed with
+    :func:`recommend_swale_length`, which the dialog never called.)
 
     Deficit at the drawn length is always actionable: deepen, widen, or route the
     surplus to a downstream feature, and each responds immediately.
@@ -173,7 +172,7 @@ def required_storage_at_length(inflow_m3, length_m, depth, width, *,
 
     section = _channel_section(width, depth, side_slope)
 
-    result.storage_m3 = section.area * freeboard * length_m
+    result.storage_m3 = section.area * length_m
     result.infiltration_m3 = (
         (max(0.0, infiltration_mm_hr) / 1000.0) * max(0.0, duration_hr)
         * width * length_m
@@ -183,14 +182,14 @@ def required_storage_at_length(inflow_m3, length_m, depth, width, *,
     result.holds = result.deficit_m3 <= 0
 
     result.recommended_length_m = recommend_swale_length(
-        result.inflow_m3, depth, width, side_slope=side_slope, freeboard=freeboard,
+        result.inflow_m3, depth, width, side_slope=side_slope,
         infiltration_mm_hr=infiltration_mm_hr, duration_hr=duration_hr,
     )
 
     # The cross-section that would close the gap, and the depth that delivers it.
     infil_per_m = (max(0.0, infiltration_mm_hr) / 1000.0) * max(0.0, duration_hr) * width
     needed_per_m = max(0.0, result.inflow_m3 / length_m - infil_per_m)
-    result.required_section_m2 = needed_per_m / freeboard if freeboard > 0 else 0.0
+    result.required_section_m2 = needed_per_m
 
     target = result.required_section_m2
     if target <= 0:
@@ -272,7 +271,7 @@ def inflow_profile(distances_m, volumes_m3, length_m, n_stations=24):
     }
 
 
-def overtopping_station(profile, capacity_per_m, freeboard=1.0):
+def overtopping_station(profile, capacity_per_m):
     """First point along the alignment where arriving water outruns storage upstream.
 
     Walks the profile from the start comparing cumulative inflow against the storage
@@ -292,10 +291,9 @@ def overtopping_station(profile, capacity_per_m, freeboard=1.0):
     if not stations or step <= 0:
         return None, 0.0
 
-    usable_per_m = capacity_per_m * freeboard
     for i, station in enumerate(stations):
         reach_m = (i + 1) * step
-        available = usable_per_m * reach_m
+        available = capacity_per_m * reach_m
         if cumulative[i] > available:
             return station, round(cumulative[i] - available, 1)
     return None, 0.0

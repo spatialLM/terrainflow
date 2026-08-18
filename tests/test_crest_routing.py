@@ -156,10 +156,11 @@ def _plan_for(z, **kw):
     return plan, next_flat, is_sink, filled, ground
 
 
-def _spread(z, max_passes=None, weights=None, **kw):
+def _spread(z, max_passes=None, weights=None, capacities=None, **kw):
     plan, next_flat, is_sink, filled, _ = _plan_for(z, **kw)
     accumulate = _accumulator(next_flat, is_sink, plan.absorb, filled.shape)
-    out = spread_crests(plan, accumulate, base_weights=weights, max_passes=max_passes)
+    out = spread_crests(plan, accumulate, base_weights=weights, max_passes=max_passes,
+                        capacities=capacities)
     return plan, out, accumulate, (next_flat, is_sink)
 
 
@@ -477,6 +478,189 @@ class TestSpreadCrests:
         assert len(out.skipped) == 2
 
 
+class TestPondStorage:
+    """What a hollow holds before it spills — measured off the surface, not off a design.
+
+    This is the whole reason retention needs no idea what an earthwork is: the volume comes
+    from Σ(filled − ground) over the pool, exactly as ``reporting.raster_ponding_volume``
+    measures it and exactly as the panel's At-grid column reports it. A swale, a dam's pool
+    and a natural hollow are the same object here.
+    """
+
+    def test_a_pool_holds_its_own_depth_times_its_own_area(self):
+        z = _staircase()
+        imps, _ = find_impoundments(_condition(z), z)
+        # Pond A: three rows of three cells standing at 15 over ground at 12.
+        assert imps[0].storage_m3 == pytest.approx(3 * 3 * 3.0)
+        # Pond B: three rows of three at 10 over ground at 8.
+        assert imps[1].storage_m3 == pytest.approx(3 * 3 * 2.0)
+
+    def test_storage_scales_with_the_cell(self):
+        z = _staircase()
+        imps, _ = find_impoundments(_condition(z), z, cell_area_m2=4.0)
+        assert imps[0].storage_m3 == pytest.approx(27.0 * 4.0)
+
+    def test_the_rim_is_not_storage(self):
+        """The level band through the wall routes water; it does not hold any. Counting it
+        would credit the pond with the volume of its own bank."""
+        z = _walled(20, 12, 12, 12, 15, 15, 5)
+        imps, _ = find_impoundments(_condition(z), z)
+        assert imps[0].n_cells == 15                     # pool plus two rows of wall
+        assert imps[0].storage_m3 == pytest.approx(3 * 3 * 3.0)   # pool only
+
+    def test_water_above_the_pour_level_is_not_counted(self):
+        """Two hollows touching on a diagonal are one component but two pour levels, and the
+        pond is treated as spilling at the lower. Storage measured against each cell's own
+        filled value would credit it with water it has already released."""
+        ground = np.full((9, 9), 20.0)
+        ground[2:5, 2:5] = 10.0
+        ground[5:8, 5:8] = 10.0
+        filled = ground.copy()
+        filled[2:5, 2:5] = 16.0        # upper sub-pool
+        filled[5:8, 5:8] = 14.0        # lower sub-pool, and the level this pond spills at
+        imps, skipped = find_impoundments(filled, ground, min_cells=1)
+        assert len(imps) == 1
+        assert imps[0].pour_level_m == pytest.approx(14.0)
+        assert any("pour level" in s for s in skipped)
+        # 18 cells of 4 m each, not 9 of 6 plus 9 of 4.
+        assert imps[0].storage_m3 == pytest.approx(18 * 4.0)
+
+    def test_the_plan_carries_them_aligned_with_the_exits(self):
+        plan, *_ = _plan_for(_staircase())
+        assert len(plan.capacities) == plan.ponds
+        assert list(plan.capacities) == pytest.approx([27.0, 18.0])
+
+    def test_a_pond_that_drops_out_takes_its_capacity_with_it(self):
+        """Ids are rebuilt contiguously when a pond keeps the default routing, so the
+        capacities must be rebuilt with them or every pond after it is capped by its
+        neighbour's volume."""
+        z = _walled(20, 12, 12, 12, 15, 14, 8, 8, 8, 10, 5)
+        plan, *_ = _plan_for(z, min_cells=1)
+        assert len(plan.capacities) == plan.ponds
+        assert all(c > 0 for c in plan.capacities)
+
+
+class TestRetention:
+    """A pond fills before it spills, so the field downstream is the water that gets there.
+
+    Without this the raster showed what would pass each cell if every hollow held nothing —
+    a swale reading 46% full still drew a full channel leaving its pour point, which is the
+    map contradicting the panel beside it.
+    """
+
+    def _ledger(self, z, **kw):
+        plan, out, _, (next_flat, is_sink) = _spread(z, **kw)
+        total = _terminal_total(next_flat, is_sink, plan.absorb, out.accumulation)
+        return plan, out, total
+
+    def test_retention_is_off_unless_asked_for(self):
+        """The engine's default field is a cell count, and capping a count with a volume is
+        a category error — so a caller that passes nothing gets exactly the old behaviour."""
+        _, was, *_ = _spread(_staircase())
+        _, now, *_ = _spread(_staircase(), capacities=None)
+        assert np.array_equal(was.accumulation, now.accumulation)
+        assert now.retained == 0.0
+
+    def test_a_pond_that_can_hold_its_inflow_passes_nothing_on(self):
+        z = _staircase()
+        plan, out, total = self._ledger(z, capacities=[1e9, 1e9])
+        assert not out.outlets.any()                  # nothing crossed either crest
+        assert out.retained > 0
+        # Only the ground below pond B reaches a terminal — everything above is held.
+        assert total < float(z.size)
+        assert total + out.retained + out.residual == pytest.approx(float(z.size))
+
+    def test_a_full_pond_passes_the_excess_and_only_the_excess(self):
+        z = _staircase()
+        _, unheld, *_ = _spread(z)
+        _, out, *_ = _spread(z, capacities=[5.0, 0.0])
+        # Pond A kept 5 units; its crest sheds 5 fewer, and pond B is uncapped so all of
+        # that shortfall carries straight through to the bottom.
+        assert out.outlets.sum() == pytest.approx(unheld.outlets.sum() - 5.0 * 2)
+        assert out.retained == pytest.approx(5.0)
+
+    def test_the_ledger_closes_with_retention_in_it(self):
+        """Retained water is a terminal like any other. It is *not* residual — that is water
+        the loop ran out of passes to place, and conflating them would hide a truncation."""
+        z = _staircase()
+        for caps in ([0.0, 0.0], [5.0, 3.0], [1e9, 0.0], [0.0, 1e9], [1e9, 1e9]):
+            plan, out, total = self._ledger(z, capacities=caps)
+            assert total + out.retained + out.residual == pytest.approx(float(z.size)), caps
+            assert out.accumulation.min() >= 0.0, caps
+
+    def test_the_ledger_closes_at_every_truncation_point_too(self):
+        z = _staircase()
+        for cap in (2, 3, 4, 8):
+            plan, out, total = self._ledger(z, capacities=[5.0, 3.0], max_passes=cap)
+            assert total + out.retained + out.residual == pytest.approx(float(z.size)), cap
+
+    def test_a_pond_holds_only_up_to_its_capacity_across_the_whole_cascade(self):
+        """Headroom is drawn down pass by pass, so a pond filled by an early arrival must
+        pass on what reaches it later. Resolving it up front would let a pond on a chain
+        keep its capacity once per pass."""
+        z = _staircase()
+        _, out, *_ = _spread(z, capacities=[3.0, 4.0])
+        assert out.retained == pytest.approx(7.0)
+        assert out.retained_by_pond == pytest.approx([3.0, 4.0])
+
+    def test_an_upstream_pond_filling_starves_the_one_below_it(self):
+        z = _staircase()
+        _, unheld, *_ = _spread(z)
+        _, held, *_ = _spread(z, capacities=[1e9, 0.0])
+        # Pond B is uncapped in both runs, so all of the difference is water pond A kept.
+        assert held.pond_flow[7, 1] < unheld.pond_flow[7, 1]
+
+    def test_the_pool_still_reports_what_arrived_not_what_left(self):
+        """``pond_flow`` is read as a catchment-size proxy (``keypoint_analysis``), so it has
+        to stay the arriving figure. Switching it to the surplus would make a pond that
+        captures everything look like it drains nothing."""
+        z = _staircase()
+        _, unheld, *_ = _spread(z)
+        _, held, *_ = _spread(z, capacities=[1e9, 1e9])
+        assert held.pond_flow[2, 1] == pytest.approx(unheld.pond_flow[2, 1])
+
+    def test_doubling_the_rain_does_not_double_what_a_pond_can_hold(self):
+        """The retention is a volume, not a fraction — which is the whole point of it. A
+        storm twice the size overflows a pond by more than twice as much."""
+        z = _staircase()
+        _, single, *_ = _spread(z, weights=np.ones(z.shape), capacities=[5.0, 1e9])
+        _, double, *_ = _spread(z, weights=np.full(z.shape, 2.0), capacities=[5.0, 1e9])
+        assert double.outlets.sum() > 2.0 * single.outlets.sum()
+        # Pond A's own 5 m³, not the total: pond B is uncapped here and swallows whatever
+        # reaches it, so its share of the retention does scale with the storm.
+        assert single.retained_by_pond[0] == pytest.approx(double.retained_by_pond[0])
+        assert single.retained_by_pond[0] == pytest.approx(5.0)
+
+    def test_spreading_the_same_plan_twice_does_not_drain_its_headroom(self):
+        """``FlowAnalysis.run`` spreads one plan twice — once plain, once weighted — so a
+        ``remaining`` that aliased ``plan.capacities`` would leave the second pass with
+        ponds already full, and the field would silently stop retaining."""
+        plan, next_flat, is_sink, filled, _ = _plan_for(_staircase())
+        accumulate = _accumulator(next_flat, is_sink, plan.absorb, filled.shape)
+        first = spread_crests(plan, accumulate, capacities=plan.capacities)
+        second = spread_crests(plan, accumulate, capacities=plan.capacities)
+        assert first.retained == pytest.approx(second.retained)
+        assert first.retained > 0
+        assert list(plan.capacities) == pytest.approx([27.0, 18.0])
+
+    def test_a_capacity_per_pond_is_required(self):
+        z = _staircase()
+        with pytest.raises(ValueError, match="capacities"):
+            _spread(z, capacities=[1.0])
+
+    def test_a_negative_capacity_is_read_as_no_storage(self):
+        z = _staircase()
+        _, out, *_ = _spread(z, capacities=[-5.0, -5.0])
+        _, plain, *_ = _spread(z)
+        assert out.retained == 0.0
+        assert np.allclose(out.accumulation, plain.accumulation)
+
+    def test_no_ponds_means_nothing_to_retain(self):
+        _, out, *_ = _spread(_walled(5, 4, 3, 2, 1), capacities=[])
+        assert out.retained == 0.0
+        assert not out.changed
+
+
 class TestImpoundment:
     def test_it_counts_its_own_cells(self):
         region = np.zeros((4, 4), dtype=bool)
@@ -484,6 +668,7 @@ class TestImpoundment:
         imp = Impoundment(region, 12.5)
         assert imp.n_cells == 4
         assert imp.pour_level_m == 12.5
+        assert imp.storage_m3 == 0.0
 
 
 class TestMergedPoolPourLevel:

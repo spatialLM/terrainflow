@@ -1193,6 +1193,422 @@ over a row slice it is **0.001 s**, ~47x, with `TestValleyCrossWidthEquivalence`
 132 cases against the loop it replaced — edges, nodata stripe and flat row included, since
 NaN compares False either way.
 
+## Round 16 — 2026-08-17 (the swale that read 46% full and drew a full stream leaving it)
+
+| Finding | Outcome |
+|---|---|
+| Swale 17 read **97 m³ · 46% full** in the panel while Surface Runoff drew a channel leaving its west end | **Fixed.** The raster had no storage term at all. It now nets what every hollow holds. |
+
+Reported as "it shows it is overtopping". It was not: the panel and the raster agreed on
+volume and disagreed on **retention**. Identify at the pour point read **100.8 m³** against
+the feature's **96.9 m³** event inflow from 0.2 ha — so the raster was shedding essentially
+the swale's own catchment and keeping none of it, against a measured pond of 210 m³.
+
+**Why the picture was structurally incapable of being right.** Three things compound, and
+none of them is a bug in isolation:
+
+1. Flow directions come off the depression-**filled** surface (`fill_pits` →
+   `fill_depressions` → `resolve_flats`), so the trench the burn cut is level-full before
+   any routing happens. Every drop that arrives leaves.
+2. `crest_routing` then contracts the pond and re-emits `held[i]` — *everything* it
+   received — at whatever cells discharge from it. A cut swale's lip is level at one place,
+   so the exits are a handful of cells and the departure is a single concentrated thread.
+3. `grep -nE "capacity|stored_m3|infiltrat" flow_analysis.py crest_routing.py` returned
+   **nothing**. The two files that build that raster had no notion of storage whatsoever, so
+   the picture was identical at 5% full and at 500%.
+
+**The user's own challenge was the key to the fix.** Asked how the re-analysis could
+possibly know a swale from a wheel rut — it cannot. `find_impoundments` is called with
+`built=None` and finds hollows as `(filled − ground) > 1e-3`, with no footprint, type or id
+anywhere near it. Earthwork identity lives in a different pipeline entirely
+(`label_direct_catchments`, fed an `interceptor_labels` raster the controller paints), and
+the two never speak.
+
+It turns out **no identity is needed**. A hollow's capacity is Σ(filled − ground) over its
+pool — the same measurement `burner.feature_storage` makes for `terrain_capacity_m3` and the
+same number the panel prints as *At grid*. Swale 17's 210 m³ is that figure. So one code
+path serves the bare DEM and the burned one, a natural hollow and a designed swale, with no
+special cases: **a pond fills before it spills**, keeping `min(arriving, headroom)` and
+shedding only the excess.
+
+Headroom is drawn down pass by pass rather than resolved up front, because a pond on a chain
+receives over several passes and one that filled on pass 2 must pass on what reaches it on
+pass 3.
+
+**Kept out of it, deliberately.** Retention applies **only** to the runoff-weighted field.
+`plan.capacities` is in m³ and the engine's default accumulation is a cell count, so capping
+one with the other is a category error — `spread_crests(capacities=)` defaults to off and
+`_spread_crests(retain=)` is set on exactly one call. Streams in cell-count mode, keypoint
+catchment sizing and the time-of-concentration path all read the unweighted field and are
+untouched, which is right: contributing area does not shrink because something upslope holds
+water. `pond_flow` likewise still reports what *arrived*, not the surplus, because
+`keypoint_analysis` reads it as a catchment-size proxy.
+
+The conservation identity gained a fourth bucket and did not lose one:
+`terminal flux + retained + residual + stranded == total`, asserted at every truncation
+point. `retained` is a terminal; `residual` is still only water the loop ran out of passes
+to place.
+
+**What moved as a consequence, on purpose.** Boundary exit volumes and exit L/s read the
+same net field, so they now agree with the panel's *leaves site* instead of being computed
+on the opposite assumption. Volume-mode stream delineation thins below a feature that
+captures its catchment. A uniform-depth site now goes through the weighted accumulation
+rather than reconstructing `acc × runoff_m × cell_area` afterwards — arithmetically the same
+field, but the only one a pond can be held against, and no-CN-zones is the common case.
+The baseline DEM gets all of this too; correcting only the design tier would have left
+before/after partly measuring the change in method.
+
+Measured on the staircase fixture (pools of 27 m³ and 18 m³ on a 1 m grid): at 1 m³/cell the
+site generates less than its storage and **nothing** from above the lower pond reaches the
+outlet; at 10 and at 20 and at 100 m³/cell the ponds keep 45.0 m³ and not a litre more; and
+what the outlet loses is exactly what the ponds kept, against the same run with the split
+off. Twice the rain overflows by more than twice as much — the field is deliberately no
+longer linear in its weights, and `test_the_weighted_field_is_spread_the_same_way` was
+rewritten because it asserted the very linearity this removes.
+
+**Still true, and still worth reading.** 46% is a *lumped* total-vs-total verdict. Where a
+drainage line crosses an alignment at one point a swale with adequate total capacity can
+still go over the side there — that is `inflow_profile` / `overtopping_station` and the
+Stress points layer, and it is a different question from the one fixed here. The burn also
+remains spillway-blind: the pour point this exposed is where a designed notch belongs.
+
+## Round 17 — 2026-08-17 (nine findings from a run-through, and four of them were not what they said)
+
+| Finding | Outcome |
+|---|---|
+| 1. "516 cells … hold ~105.0% of runoff" | **Ratio fixed; the cells are still open.** The percentage was three measurement defects; the 516 are real and now instrumented. |
+| 2. No per-crossing exit summary | **Shipped.** `qgis/widgets/exit_table.py`, under the baseline tool. Nothing computed — the data was already there. |
+| 3. "Ponds (routed)" unreadable / redundant | **Layer removed, raster kept.** |
+| 4. Swale settings are only depth and width | **Already trapezoidal.** The batter was the missing control, not the maths. |
+| 5. Segment overlay is zoom-variant | **Now metres-in-map-units**, data-defined off `width_m`. |
+| 6. Surface Runoff fades out at the low end | **Opaque stops + layer opacity.** The palette module already forbade what it was doing. |
+| 7. Spillway group opens expanded | **Collapses with its tick.** |
+| 8. Runoff "stops at the Pond Capacity extent" | **No clip exists.** Mostly item 6; the rest is stated, not drawn. |
+| 9. Freeboard-inclusive "Design" column | **Dropped**, applying the decision the report already made. |
+
+**The pattern worth keeping.** Four of the nine described a cause rather than a symptom,
+and the cause was wrong in each. The symptoms were all real. Diagnosing before agreeing
+is what made items 4 and 8 an afternoon instead of a fortnight.
+
+**Item 1 — most of 105% was the instrument.** Three compounding defects, all in the
+ratio and none in the terrain:
+
+1. `unrouted_flow()` masked by `~_at_data_edge()` and **never by the domain**, while the
+   caller divided by the *site's* cell count. On a 2.8 M-cell tile against a smaller
+   drawn site, a pit in the buffer contributed its whole upstream to a ratio it was not
+   part of.
+2. `acc` under crest contraction is a **sum over passes** and a pond re-emits at its
+   exits, so the same water can be counted at a second stuck cell.
+3. The numerator was a **cell count** and the sentence called it runoff.
+
+Fixed: `unrouted_flow(domain=, field=)`, and the worker re-measures after the mask exists
+and against `runoff_accumulation`, so it is m³ over m³ over the same ground. An impossible
+share is **printed and flagged, never clamped** — `min(share, 1.0)` would have turned an
+obviously broken instrument into a plausible reading, which is the worst available
+outcome. `unrouted_diagnostics()` writes `unrouted_{label}.txt` beside the rasters:
+flats vs pits, in/out of domain, distance to nodata, connected components, and the
+steepest available drop on each conditioning surface. **The 516 are not yet explained —
+read that file after a field run before designing a fix.**
+
+Also found: the conservation ledger CLAUDE.md quotes names `stranded`, and grep finds the
+word only in a `crest_routing` docstring. Nothing computes it.
+
+**Item 8 — there is no clip, and coupling to the event balance would have been a
+regression wearing a fix.** Surface Runoff and Pond Capacity come from one worker run over
+one grid; their extents are identical by construction. The cut-off is a data effect —
+retention caps every pond at full geometric capacity, so a pond under its capacity emits
+zero — compounded by a ramp anchored on the band max whose `log` stops open at 1e-4 and
+whose second stop was drawn at **alpha 40**. Below a pond that takes its catchment, the
+runoff was drawn all along and could not be seen. Feeding *event* capacities into
+`spread_crests` would make the map draw water the design does not release; the honest
+lever is the pour level, which is the spillway notch (STRETCH_GOALS §5a). What shipped is
+the ramp fix plus `pond_retained_m3` surfaced in the panel — computed since Round 16 and
+read by nothing.
+
+**The real-QGIS suite rejected a change, correctly.** Drawn swales were wired to seed from
+the panel's cross-section boxes; `check_companion_berm_readout_renders` failed on a
+predicted 0.13 m berm against a built 0.28 m. Those boxes are the *Find Best Swale
+Segments criteria*, and at their defaults they describe a 0.6 m drainage swale — sub-cell
+on a 1 m DEM, so unburnable and unverifiable. It replaced the registry's representable
+2.0 m with a width the terrain model cannot hold. Reverted; the reason lives at the
+construction site so it is not tried again.
+
+**Two divergences closed rather than created.** Dropping the panel's Design column left
+the same freeboarded figure as the *headline* of the properties dialog, unlabelled — so
+that is now "Usable volume (m³)" with the allowance stated. And naming the panel's new
+exit column honestly ("Average rate over the event") would have left the report calling
+the same number "Peak flow", which is the name of a different quantity the same document
+reports on the spillway page; the report was renamed to match.
+
+**Item 4, on the user's correction: the derivation was the wrong way round.** The criteria
+box first grew a *side slope* input with the floor derived from it, and the shipped
+defaults then read 0.6 m top over 0.3 m deep at 1:1 — batters meeting exactly at the
+drawn depth, floor **0.00 m**, a V-drain of 0.09 m². The user's answer was one sentence:
+*"I do want a floored trench, that is how swales are actually built."*
+
+Two things were wrong and only one of them was the numbers:
+
+- **A swale is set out with three tape measurements — top, bottom, depth — and the
+  batter is what they come out as.** That is how the properties dialog has always taken
+  it (`Depth` / `Width` / `Bottom width`, with `Side slope: 45.0° (1:1)` read-only
+  beside them), and it is what the run-through log asked for in as many words. Entering
+  the batter instead makes the floor a *consequence* of three other numbers, so it can
+  reach zero without anyone choosing that — which is exactly what the shipped default
+  did. Inverted: `swale_bottom_width_m` is now an input, `swale_side_slope` is a derived
+  property and a read-only label, and it is **not persisted** — storing a derived value
+  beside its causes is how a reloaded file describes a section that never existed.
+- **The defaults now sit on `core/registry`'s swale**: 2.0 m top, 1.0 m floor, 0.5 m
+  deep, 1:1, 0.75 m² of section. The criteria box and a drawn swale finally describe the
+  same swale — which is also the divergence that made wiring one to seed the other look
+  sensible.
+
+**This was not cosmetic.** At 0.072 m³ per metre the sizing asked for **33.6 km** of
+swale on a 7.4 ha catchment in a 65 mm storm, so *every* recommendation returned capped
+as "contour too short" and the ranking carried no information at all. At 0.60 m³/m the
+same catchment asks for 4.0 km. The screenshots in the run-through show the capped list;
+nobody had read it as a defect because a swale recommendation being too long for its
+contour is a plausible thing for a tool to say once.
+
+Pinned by `test_the_default_swale_has_a_floor`,
+`test_the_batter_is_derived_and_therefore_not_stored` and
+`test_the_default_section_is_the_registrys_swale`, which ties the criteria defaults to
+the registry so the two cannot drift apart again.
+
+**Left standing, deliberately.** The `taper_reach` **+33% over-cut** on a default swale
+(`burn_strategy.py:204-207`) — documented, one-signed, and it moves every capacity figure
+on the site, so it gets its own commit. Note it is now reached with a *different* batter
+than before, so measure it against the defaults that ship.
+
+---
+
+## Round 18 — 2026-08-18 (four map-reading findings, and the one that was a real question)
+
+From a run-through of the polished demo. Three were legibility; the fourth asked which
+reference state a layer is computed from, and the answer was worth the asking.
+
+| Finding | Outcome |
+|---|---|
+| 1. Swale segment overlay is hard to see against the green core | **New ramp.** Violet→purple, a quadrant clear of *both* core colours. |
+| 2. Overtopping flagged while the pond is below the crest | **Not a bug — the wrong question was being answered without saying so.** Split into `(full)` and `(event)` layers. |
+| 3. Surface Runoff is a translucent wash and colours every cell | **Light cyan→dark blue from 2 m³ up, fading to nothing below it.** |
+| 4. Baseline and Earthworks pond layers use different gradients | **They used the same stops on different scales.** Matching pairs now share one ramp top. |
+
+**Item 1 — the ramp was right for the ground it was designed for, and this is not that
+ground.** `INFLOW_RAMP_HEX` is cyan→navy under an explicit rule (*no green, no brown —
+those are the imagery's own colours*), and it is read over aerial imagery in two of its
+three uses. The third, the peak-inflow overlay, is drawn **inside the recommended swale's
+own green core** — and cyan sits ~46° from that green on the wheel, so the thin low bands
+were competing with the band they are drawn inside rather than with the photo.
+
+`SEGMENT_INFLOW_RAMP_HEX` is a second constant rather than a change to the first, because
+the two are read against different backgrounds. Hue ~290: ≥ 90° from the green core **and**
+from the amber one a capped segment turns — the second constraint is what ruled out plain
+magenta (69° from amber), which would have failed on exactly the segments worth looking
+at. Same four classes, same breaks, same widths, same scale control, so it is one scheme
+read on two grounds. Pinned by `TestSegmentInflowRamp`, which asserts the hue gap as a
+number against both core colours.
+
+**Item 2 — the layer was answering "filled, does this pool leave over its own wall".**
+`_build_overtopping_layer` passes `ctx["full"]` — the depression-fill, every hollow at its
+spill point — so `overtopping_spill` measures a **capacity** state. That is the right
+reference for the fault it exists to catch: a wall with no freeboard is a fault whether or
+not this particular storm finds it, and it is what sizes a spillway. But it was drawn one
+row from "Event Water Line", which is the *event* state, and a solid red band beside a
+water line a metre below the crest reads as a claim about the storm just routed.
+
+So: not a wrong reference state, and not merely a label. Both states are now measured.
+`event_pond_depth` already runs immediately before, so its raster is handed forward on
+`pond_context["event"]`; `overtopping_spill(event_depth=)` returns `event_level_m` and
+`SpillOver.overtops_this_event`. **None, not False, when no event pond was available** —
+a barrier nobody measured is not a barrier cleared, and that distinction is what stops a
+grid mismatch from silently clearing every dam on the site.
+
+Carried through to every place the fact appears: the label says "spills over 30 m **when
+full**" or "**this event**", and the advisory drops to `pushInfo` when the event falls
+short, so it stops competing with warnings that *are* about the storm just routed.
+
+**And then split into two layers**, on the user's call, after seeing the styled version:
+`Earthworks — Overtopping (full)` and `Earthworks — Overtopping (event)`, named to match
+the pond pair beside them and nested the same way — (event) is a subset of (full), drawn
+over it. One layer styled two ways was the wrong shape for the question: the two are asked
+at different moments, and a layer cannot be half-ticked-off however it is symbolised.
+Judging a design against the storm, the capacity bands are noise and go off; asking about
+freeboard, they are the whole answer. Same red and edge in both — one fault on one crest —
+with the capacity bands hatched and at higher alpha so they stay legible underneath.
+
+The `(event)` layer is **absent rather than empty** when nothing overtops this event: an
+empty layer asserts a question was asked and answered no, which is right when the event
+was measured and wrong when there was no event pond to measure against. The `state`
+attribute survives on both, because "(full)" holds two different things — `capacity` (the
+event was measured and fell short) and `unknown` (nothing was measured) — that one layer
+name cannot separate.
+
+**Item 3 — the wash was never an alpha problem.** Round 17 replaced per-stop alpha with
+layer opacity and was right that alpha re-orders where opacity dilutes. It still left a
+55% wash, because the actual cause is that **every cell on the site has runoff**: the rain
+that landed on it has to go somewhere, so the layer legitimately covers the whole map with
+cells whose only message is "it rained here".
+
+The first fix was a hard floor at that self-contribution (`runoff depth × cell area`, the
+same `vol_per_cell` the volume-mode stream threshold uses). It worked, and the user
+replaced it the same day with something better: **fade in over the first 2 m³** — nothing
+at 0, half at 1, solid at 2 — with the colour ramp starting at 2 m³ and light cyan as its
+bottom.
+
+The floor was right about the cause and wrong about the instrument, for a reason this
+layer has now produced twice: **a threshold drawn as an edge reads as water stopping
+there.** Round 16 and round 17 item 8 are both that complaint. The fade reaches the same
+end — a 2 m grid cell in a 65 mm storm carries 0.26 m³ and draws at 13% — without an edge
+to misread, and it means the quiet cells are still *there* to be identified rather than
+absent.
+
+`SURFACE_RUNOFF_FADE_TOP_M3 = 2.0` is the one absolute number in a ramp that is otherwise
+all fractions of the band maximum, and deliberately so: this is the bottom sliver of a
+heavily skewed field, where a fraction of the maximum means nothing to a reader and one
+cubic metre of water means something to everybody. `apply_raster_ramp(min_value=)` lays
+the stops over `[2.0, top]` and prepends a transparent stop at 0 in the same colour; the
+interpolated shader produces the half at 1 m³, which is asserted against the real shader
+rather than against the palette.
+
+**This is the one place alpha carries a quantity**, and the bound is what makes it safe:
+the fade is *one colour*, so there is nothing below the bottom stop for it to re-order
+against — which is the actual defect the "alpha is for absence" rule exists to prevent.
+Every stop above the fade top stays opaque, and `test_only_absence_is_transparent` now
+names the exception rather than silently excluding it.
+
+The low end is light cyan, and the same cyan `WATER_CAPTURED` opens on, so the shallowest
+water on one map and the faintest flow on the next are one colour. It was briefly white,
+which reads its distance from the background fast but has nowhere to go underneath it — a
+fade needs a colour to fade, and white fading out over an aerial is white fading out over
+paper.
+
+**Item 4 — same stops, different scales, and that is a difference the design did not
+make.** Every raster overlay called `apply_raster_ramp` with its own `band_max`. A
+Baseline layer and its Earthworks counterpart therefore stretched identical stops over
+different ranges, so the same two metres of water was mid-blue before the design and navy
+after it because the deepest pond on the site had moved. The pair exists to be compared,
+and the visible difference was partly the ramp rescaling itself.
+
+`_symbols.apply_shared_ramp` gives each comparable family (`ponding`, `surface_runoff`,
+`streams`) one top: the largest maximum any **live** member has claimed, with earlier
+members repainted when a new one raises it — a shared scale only the last layer drawn is
+on is not shared. Members are held by id and pruned when they stop resolving, so a cleared
+stage group releases its claim instead of propping the scale up with rasters nobody can
+see. The event pond joins the same family, which generalises the argument its own comment
+already made for it.
+
+Verified in real QGIS by `check_matching_before_and_after_layers_share_one_ramp` (reads
+the renderers, not the state dict — a shared top is worth nothing if it did not reach the
+pixels) and `check_surface_runoff_fades_in_over_the_first_cubic_metres`.
+
+**Two of these four went round twice, and both times the second pass came from the user
+looking at the first.** Item 2 shipped as one layer styled two ways and came back as two
+layers; item 3 shipped as a hard floor and came back as a fade. Neither first attempt was
+wrong about the cause — they were wrong about the shape of the answer, which is the part
+that only becomes obvious once it is on the screen. Worth remembering before the next
+"the diagnosis is settled, so the fix is settled".
+
+## Round 19 — 2026-08-18 (the 516 cells, explained: the conditioning made them)
+
+The open item from Round 17. It was carried on the promise that
+`unrouted_diagnostics()` would say which of several mechanisms it was rather than let
+someone pick the most plausible; the field run wrote the file, and it did.
+
+| Finding | Outcome |
+|---|---|
+| 1. "516 cells … hold about 13.4% of its runoff" | **`resolve_flats` creates them.** Fixed by deriving the inflation step from the surface instead of taking pysheds' fixed default. 516 → **0**. |
+| 2. The diagnostic's own m³ ratio read 0.000596 against a warning saying 13.4% | **Wrong denominator.** It divided by the sum of the throughflow field. |
+| 3. "The site" was the whole 2.85 km² tile, 70% of it harbour | **Advisory added.** No boundary was drawn and nothing said so. |
+
+**Item 1 — it was never terrain, and it was never the ratio either.** The diagnostic
+narrows it to one line:
+
+```
+neighbour_drop:
+  conditioned:  has_lower: 0     exactly_level: 516
+  filled:       has_lower: 516   exactly_level: 0
+nodata_distance: no nodata in the DEM
+location: at_data_edge: 0   outside_domain: 0   interior_in_domain: 516
+```
+
+Every one of the 516 had a strictly lower neighbour on the depression-filled surface and
+none after flat resolution. `resolve_flats` returns `filled + eps × drainage_gradient`
+(pysheds `sgrid.py`, and nothing else happens to `eps`), the gradient is an **integer BFS
+distance to the flat's outlet**, and `eps` is a **fixed 1e-5 m**. So the inflation is not
+a constant: it grows with the size of the flat. On this tile **70.4% of the grid
+(2,002,831 cells) is one connected plane at ≈ −0.10 m** — Lyttelton Harbour, encoded as
+valid ground — the gradient reaches **1842**, and the plane is lifted by up to **1.84 cm**.
+Every low bump standing inside it, all of them under a centimetre proud, was lifted under
+its own neighbours and became a pit: a cell with a real way downhill that the conditioning
+took away, absorbing its whole upstream into a self-loop.
+
+Three independent confirmations, none of them argued:
+
+1. On the saved conditioned raster, the amount by which each stuck cell's lowest
+   neighbour now *exceeds* it is an exact integer multiple of 1e-5 — 97% within 1e-3 of
+   an integer multiple, spanning 2 to 1528 units. That is `eps`'s signature and nothing
+   else's.
+2. Re-running the pipeline reproduces `(516, 60 flat, 456 pit)` exactly, and
+   `ponded + 1e-5 × gradient == inflated` bit for bit.
+3. `d8_from_dem` over the same surface finds the identical 516 interior sinks and
+   **356,171 cells draining into them — exactly the `sink=356171` in `basin_diag.txt`.**
+   One cause, three symptoms, two tiers.
+
+**The fix is a bound, not a smaller magic number.** For neighbours A and B with
+`z[A] > z[B]`, the inflated surface keeps that order only while
+`eps × (g[B] − g[A]) < z[A] − z[B]`. `safe_flat_epsilon` minimises that over the eight
+offsets, halves it, and clamps: never above pysheds' own default, so it can only ever be
+gentler than what it replaced, and never below ~1024 float64 spacings at the surface's own
+elevation, so the synthetic gradient still routes. `resolve_flats_safely` gets the integer
+gradient for free by calling `resolve_flats(filled, eps=1.0)` and rebuilds the surface
+itself — **one flood, not two.** On this DEM the bound lands at **3.554e-07**: the default
+was **14× too large**, and the tightest drop it had to respect was 7.108e-07 m per
+gradient unit.
+
+| | pysheds stuck cells | `d8_from_dem` interior sinks | cells captured | peak acc |
+|---|---|---|---|---|
+| `eps = 1e-5` | 516 (60 flat, 456 pit) | 516 | 356,171 | 105,981 |
+| derived `eps` | **0** | **0** | **0** | 138,906 |
+
+Afterwards the only sinks left are the 6,948 grid-border cells — `2×(1319+2157) − 4`, the
+edge of the tile, which is an exit by definition. Peak accumulation rises 31%, which is
+the Surface Runoff ramp top, so the map moves visibly and correctly.
+
+The same one-line call was in `catchment.py` and `keypoint_analysis.py`. Both now use the
+helper: a keypoint is *derived from* a flat-resolved surface, so a drowned drop moves one.
+
+**The bound moves the step everywhere and the answers nowhere.** On the 400 m test fixture
+it lands at 5.99e-06 rather than the 1e-5 ceiling — so the conditioned surface there *did*
+change — and `check_real_terrain_numbers_have_not_moved` reports **0.00% on all nine
+figures**. That is the result to want: the numbers were never sensitive to the size of a
+synthetic gradient, only to whether it buried a real one. A DEM with no flat big enough to
+reach the bound keeps the ceiling and is untouched.
+
+**Item 2 — the file written to check the warning understated it 225-fold.**
+`unrouted_diagnostics` divided the held volume by `nansum(field[domain])` — the sum of
+throughflow over every cell, which is each cubic metre counted once per cell it passes and
+is not a volume of water at all. It printed `0.000596` beside a warning correctly saying
+13.4%. Anyone reading the two together would have concluded the warning was broken and
+gone looking in the wrong place — the exact failure Round 17 built this file to prevent.
+It now takes `runoff_volume_m3` (the worker already had it) and the field's own sum is
+still reported, under `field_ink.total_throughflow_m3`, a name that says what it is.
+
+**Item 3 — nobody had said where the site was, and nothing said so.** This DEM declares
+`nodata = -9999` and contains **zero** nodata cells, so `_at_data_edge()` matched **0
+cells** and the mechanism that keeps a coastal DEM quiet was inert. With no boundary and
+no analysis area, `footprint.domain_mask` fell through to "every usable DEM cell" — all
+2,845,083 of them, 285 ha, 200 ha of it harbour. That mask is also `runoff_volume_m3`, the
+capture %, and every "% of the site" in the report. `domain_mask(with_source=True)` now
+says which of its three branches answered and the baseline run pushes one advisory naming
+the area in hectares. **No sea detection** — the remedy is the user drawing a boundary,
+and the plugin's job is to say the boundary is missing, not to guess where it is.
+
+**What Round 17 got right.** It refused to fix the 516 on the most plausible story and
+instrumented them instead. Every candidate cause it listed — a nodata hole, an unreached
+plateau, a pit that survived the fill — was wrong, and the file said so in one line each
+(`no nodata in the DEM`, 479 singletons, `filled.has_lower: 516`). A day's instrumentation
+bought a diagnosis that no amount of staring at the terrain would have produced.
+
 ## Never run
 
 **Manual QGIS smoke tests.** Everything above is verified by `pytest`, `ruff`, the CI

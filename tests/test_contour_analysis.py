@@ -623,6 +623,35 @@ class TestFindSwaleSegments:
         assert result[0].segment_rank == 1
         assert result[0].inflow_m3 > 0
 
+    def test_a_flatter_batter_lengthens_the_required_segment(self, tmp_path):
+        """The third dimension of the trapezoid has to reach the sizing.
+
+        ``find_swale_segments`` has taken ``side_slope`` since the trapezoid went in,
+        and the controller never passed it — so every recommendation on every site was
+        sized at the module's own 1:1 whatever the design said, and the panel showed a
+        depth and a top width while quietly meaning a batter too. Nothing failed,
+        because the default is a reasonable value; it was simply not the user's.
+
+        **The direction is the opposite of the intuitive one, which is why it is pinned
+        here.** The batter is measured in from a *fixed top width*, so flattening it
+        eats the floor rather than widening the top: at 2.0 m over 0.5 m, 0:1 is a
+        2.0 m rectangle and 1.5:1 leaves a 0.5 m bottom. Less area per metre, so more
+        metres are needed. Anyone reasoning "flatter walls hold more" — which is true
+        when the *bottom* is what is held fixed — will write this assertion backwards.
+        """
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        kwargs = dict(cell_area_m2=1.0, runoff_mm=25.0, min_acc_ha=0.1,
+                      swale_depth_m=0.5, swale_width_m=2.0)
+
+        steep = find_swale_segments([feat], acc_path, side_slope=0.0, **kwargs)
+        flat = find_swale_segments([feat], acc_path, side_slope=1.5, **kwargs)
+        assert steep and flat
+        assert flat[0].required_length_m > steep[0].required_length_m, (
+            f"side_slope is not reaching the sizing: {flat[0].required_length_m} "
+            f"vs {steep[0].required_length_m}"
+        )
+
     def test_no_runoff_uses_landscape_walk(self, tmp_path):
         """Without runoff_mm, fallback branch is used (drop_fraction walk)."""
         from terrainflow_assessment.modules.contour_analysis import find_swale_segments
@@ -1089,3 +1118,68 @@ class TestNoFalseEdgeGradient:
             "by a spurious edge gradient"
         )
         assert result[0].mean_slope_deg < 5.0
+
+
+class TestSegmentInflowRamp:
+    """The overlay drawn *inside* the recommended swale's green core.
+
+    Same quantity as the contour gradient and deliberately the same shape of
+    ramp — but a different background, which is the whole reason it is a second
+    constant. Cyan → navy is right over aerial imagery and wrong inside a green
+    band: on a field run-through the thin low bands could not be picked out of
+    the core they sit in.
+    """
+
+    def _rgb(self, hexcode):
+        h = hexcode.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _hue(self, hexcode):
+        import colorsys
+        r, g, b = (c / 255.0 for c in self._rgb(hexcode))
+        return colorsys.rgb_to_hsv(r, g, b)[0] * 360.0
+
+    def test_it_is_the_same_shape_as_the_ground_ramp(self):
+        """Four classes, so the shared breaks, widths and panel legend all still
+        describe it. A ramp of a different length would silently re-band it."""
+        from terrainflow_assessment.modules.contour_analysis import (
+            INFLOW_RAMP_HEX,
+            SEGMENT_INFLOW_RAMP_HEX,
+        )
+
+        assert len(SEGMENT_INFLOW_RAMP_HEX) == len(INFLOW_RAMP_HEX)
+        assert all(c.startswith("#") and len(c) == 7
+                   for c in SEGMENT_INFLOW_RAMP_HEX)
+
+    def test_it_darkens_with_volume(self):
+        """The one rule every ramp in the plugin keeps, so a learnt map reads the
+        next: light where least, dark where most."""
+        from terrainflow_assessment.modules.contour_analysis import (
+            SEGMENT_INFLOW_RAMP_HEX,
+        )
+
+        lumas = [0.299 * r + 0.587 * g + 0.114 * b
+                 for r, g, b in map(self._rgb, SEGMENT_INFLOW_RAMP_HEX)]
+        assert lumas == sorted(lumas, reverse=True), lumas
+
+    @pytest.mark.parametrize("background, name", [
+        ("#27ae60", "the swale core"),          # contour.py `_style_swale_segments`
+        ("#e67e22", "the capped-segment core"),  # ...and its amber verdict colour
+    ])
+    def test_every_band_contrasts_in_hue_with_the_core_it_sits_in(
+            self, background, name):
+        """The complaint this ramp exists to answer, stated as a number.
+
+        Blue against green is a hue step of well under a quadrant, which is why
+        the old bands disappeared into the band they were drawn inside. A quarter
+        turn is the floor; magenta against green is closer to a half.
+        """
+        from terrainflow_assessment.modules.contour_analysis import (
+            SEGMENT_INFLOW_RAMP_HEX,
+        )
+
+        base = self._hue(background)
+        for band in SEGMENT_INFLOW_RAMP_HEX:
+            gap = abs(self._hue(band) - base) % 360.0
+            gap = min(gap, 360.0 - gap)
+            assert gap >= 90.0, f"{band} is only {gap:.0f}° from {name}"

@@ -130,13 +130,29 @@ class AnalysisWorker(AbortMixin, QThread):
             eff_cn = scs.adjust_cn(self.cn, self.moisture)
             runoff_mm = scs.runoff_depth(self.rainfall_mm, eff_cn)
 
+        # A uniform depth goes through the weighted accumulation too, rather than being
+        # reconstructed afterwards as `acc x runoff_m x cell_area`. The two are the same
+        # arithmetic — the fallback below is what this replaces — but only the weighted pass
+        # can hold a pond to its storage, and a site with no CN zones is the common case, not
+        # a special one. Masked to valid DEM cells so it matches the unweighted field's
+        # "one unit per valid cell" rather than paying the nodata border a depth of rain.
+        if runoff_weights is None:
+            dem_arr = np.asarray(fa.dem, dtype="float64")
+            valid = np.isfinite(dem_arr)
+            if fa.nodata is not None:
+                valid &= dem_arr != fa.nodata
+            runoff_weights = np.where(valid, (runoff_mm / 1000.0) * cell_area_m2, 0.0)
+
         self._stage(20, "Running flow analysis...")
         result = fa.run(routing=self.routing, runoff_weights=runoff_weights)
 
         acc_array = np.array(fa.acc)
         fdir_array = np.array(fa.fdir)
 
-        # Stream threshold
+        # Stream threshold. In volume mode this now reads the field net of pond storage, so
+        # a watercourse below a swale that takes its whole catchment stops being drawn —
+        # which is the point, since it does not run. Cell-count mode is contributing area
+        # and is deliberately unaffected: the ground still drains there either way.
         if self.threshold_mode == "volume":
             if runoff_weights is not None and "runoff_accumulation" in result:
                 stream_mask = np.array(result["runoff_accumulation"]) > self.volume_threshold
@@ -203,26 +219,37 @@ class AnalysisWorker(AbortMixin, QThread):
 
         # The site itself — the capture-% denominator. Most specific area wins.
         # No nodata: this is a mask, and its 0 means "outside the site", not "unknown".
-        domain = self._build_domain_mask(fa, shape, transform)
+        domain, domain_source = self._build_domain_mask(fa, shape, transform)
         fa.save_result(domain.astype("float32"), domain_path, "analysis domain (1 = site)")
         domain_cells = int(domain.sum())
         domain_area_m2 = domain_cells * cell_area_m2
+        # Whether the site was drawn or guessed. Every share this run reports is over
+        # this mask, so a run that guessed it should say so once rather than have the
+        # reader infer it from an area that looks too big.
+        from terrainflow_assessment.modules.footprint import domain_fallback_warning
+        domain_warning = domain_fallback_warning(
+            domain_source, domain_cells, cell_area_m2)
 
-        # "Total water through this cell" for the throughflow gradient. The weighted
-        # accumulation is truthful under spatially varying CN; the uniform volume
-        # raster is exact when there are no CN zones and identical in that case.
+        # "Water that actually passes this cell over the event" — the runoff gradient. Every
+        # hollow on the way has already kept what it can hold (``spread_crests(capacities=)``),
+        # so a swale that takes its whole catchment shows nothing leaving it, and the map
+        # agrees with the panel's fill % instead of contradicting it. ``runoff_volume`` beside
+        # it is the same field *without* that subtraction, and is the fallback only if the
+        # weighted pass could not be built at all.
         if runoff_weights is not None and "runoff_accumulation" in result:
             throughflow_path = os.path.join(
                 self.output_dir, f"throughflow_{self.label}.tif")
             fa.save_result(np.array(result["runoff_accumulation"]), throughflow_path,
-                           "event throughflow (m³ per cell, CN-weighted)",
+                           "event surface runoff (m³ per cell, net of pond storage)",
                            nodata=np.nan)
         else:
             throughflow_path = runoff_path
 
         self._stage(65, "Detecting exit points...")
-        # Prefer the runoff-weighted accumulation (m³ per cell) for a truthful
-        # per-cell flow, falling back to the uniform-storm volume raster.
+        # The same net field the map shows, so a boundary crossing reports the water that
+        # reaches it rather than the water that would if every hollow upslope were full.
+        # That is what puts the exit volumes on the same footing as the panel's "leaves
+        # site"; before, the two were computed on different assumptions and disagreed.
         if runoff_weights is not None and "runoff_accumulation" in result:
             exit_vol = np.array(result["runoff_accumulation"])
         else:
@@ -315,12 +342,48 @@ class AnalysisWorker(AbortMixin, QThread):
         # than the whole tile, because a nodata margin outside the site is not a loss.
         from terrainflow_assessment.modules.flow_analysis import (
             crest_spread_warning,
+            format_unrouted_diagnostics,
             unrouted_flow_warning,
         )
-        unrouted_cells = int(result.get("unrouted_cells", 0))
-        unrouted_flow = float(result.get("unrouted_flow", 0.0))
-        unrouted_warning = unrouted_flow_warning(
-            unrouted_cells, unrouted_flow, domain_cells)
+        # Re-measured here rather than taken from `result`. `FlowAnalysis.run` computes
+        # it before this domain mask exists — the mask needs file I/O over the boundary
+        # and area layers, which the analysis deliberately does not do — so the figure
+        # it produced counts pits anywhere on the tile against a denominator that is the
+        # site alone. On a DEM much larger than the drawn site that alone can push the
+        # share past 100%, which is what a field run reported.
+        #
+        # And it is re-measured in m³ against m³. `result["unrouted_flow"]` is summed
+        # off `acc`, a cell count, while the sentence calls it a share of runoff.
+        net_field = (np.array(result["runoff_accumulation"])
+                     if "runoff_accumulation" in result else None)
+        runoff_volume_m3 = (runoff_mm / 1000.0) * domain_area_m2
+        if net_field is not None:
+            unrouted_cells, unrouted_held_m3 = fa.unrouted_flow(
+                domain=domain, field=net_field)
+            unrouted_warning = unrouted_flow_warning(
+                unrouted_cells, unrouted_held_m3, runoff_volume_m3)
+        else:
+            # No weighted pass to measure against: fall back to the cell-count ratio,
+            # which is at least now masked to the domain.
+            unrouted_cells, unrouted_count = fa.unrouted_flow(domain=domain)
+            unrouted_held_m3 = unrouted_count * cell_area_m2 * runoff_mm / 1000.0
+            unrouted_warning = unrouted_flow_warning(
+                unrouted_cells, unrouted_count, domain_cells)
+
+        # Written whenever there is anything to explain. The counts alone cannot say
+        # *why* a cell is stuck, and the candidate causes want different fixes.
+        unrouted_diag_path = None
+        if unrouted_cells:
+            try:
+                diag = fa.unrouted_diagnostics(
+                    domain=domain, field=net_field,
+                    runoff_volume_m3=runoff_volume_m3)
+                unrouted_diag_path = os.path.join(
+                    self.output_dir, f"unrouted_{self.label}.txt")
+                with open(unrouted_diag_path, "w", encoding="utf-8") as fh:
+                    fh.write(format_unrouted_diagnostics(diag))
+            except Exception:
+                unrouted_diag_path = None
 
         # A pond spills along its whole level crest at once, so each pond is contracted to a
         # mixing node and sheds its inflow evenly over the cells that discharge from it.
@@ -349,17 +412,30 @@ class AnalysisWorker(AbortMixin, QThread):
             "cell_area_m2": cell_area_m2,
             "domain_cells": domain_cells,
             "domain_area_m2": domain_area_m2,
+            "domain_source": domain_source,
+            "domain_warning": domain_warning,
             "catchment_area_m2": domain_area_m2,
             "max_upstream_area_m2": max_upstream_area_m2,
             "unrouted_cells": unrouted_cells,
-            "unrouted_flow_m3": unrouted_flow * cell_area_m2 * runoff_mm / 1000.0,
+            # Already m³ where the weighted pass exists — measured off the same field
+            # the map and the exit volumes read, so it is not scaled a second time.
+            "unrouted_flow_m3": unrouted_held_m3,
             "unrouted_warning": unrouted_warning,
+            "unrouted_diag_path": unrouted_diag_path,
             "crest_ponds": int(result.get("crest_ponds", 0)),
             "crest_cells": int(result.get("crest_cells", 0)),
             "crest_passes": int(result.get("crest_passes", 0)),
             "pond_flow": pond_path,
-            "crest_unplaced_m3": crest_unplaced * cell_area_m2 * runoff_mm / 1000.0,
+            # Prefer the weighted pass's own residual, which is already a volume. The
+            # fallback scales the cell-count one, which is what this always did and is
+            # right only while runoff is spatially uniform.
+            "crest_unplaced_m3": float(result.get(
+                "crest_residual_m3",
+                crest_unplaced * cell_area_m2 * runoff_mm / 1000.0)),
             "crest_warning": crest_warning,
+            # Already in m³ — this one comes off the runoff-weighted pass, unlike the
+            # cell-unit counters above, so it must not be scaled a second time.
+            "pond_retained_m3": float(result.get("crest_retained_m3", 0.0)),
             "runoff_volume_m3": (runoff_mm / 1000.0) * domain_area_m2,
             "exit_points": exit_points,
             "area_outflow": area_outflow,
@@ -368,10 +444,12 @@ class AnalysisWorker(AbortMixin, QThread):
         })
 
     def _build_domain_mask(self, fa, shape, transform):
-        """Boolean mask of the site, most-specific area first.
+        """``(mask, source)`` for the site, most-specific area first.
 
         Analysis area → site boundary → every usable DEM cell. Read here (file I/O)
-        and decided in ``modules.footprint.domain_mask`` (pure, tested).
+        and decided in ``modules.footprint.domain_mask`` (pure, tested). The source
+        says which of those three answered, because only the first is the user telling
+        us where the site is.
         """
         from terrainflow_assessment.modules.footprint import domain_mask
 
@@ -394,5 +472,6 @@ class AnalysisWorker(AbortMixin, QThread):
         except Exception:
             valid = None
 
-        return domain_mask(shape, transform, polygons=groups, valid=valid)
+        return domain_mask(shape, transform, polygons=groups, valid=valid,
+                           with_source=True)
 

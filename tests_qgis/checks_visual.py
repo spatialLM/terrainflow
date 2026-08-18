@@ -94,7 +94,7 @@ def check_spillway_review_renders(dem_path):
 
 
 def check_verification_table_renders(dem_path):
-    """Design vs Measured, with every row state in one image.
+    """Drawn vs measured, with every row state in one image.
 
     Driven from a synthetic result rather than a real burn: the point is the styling
     of the five states side by side — flagged, clean, dam, sub-cell, shared-pool — and
@@ -103,8 +103,9 @@ def check_verification_table_renders(dem_path):
     What to look at: the flagged row's Δ must be blue with a dagger and NOT green
     (that green on the wrong comparison is the bug this table had), the clean row's Δ
     must still be green, the shared-pool row must read "shared" and "—" rather than a
-    share of someone else's water, the subhead must wrap inside the dock width without
-    pushing the table off, and the Δ column must be wide enough for "+0% †".
+    share of someone else's water, the dam row must carry its impounded volume under
+    Geometric, the subhead must wrap inside the dock width without pushing the table
+    off, and the Δ column must be wide enough for "+0% †".
     """
     from terrainflow_assessment.modules.reporting import VerificationResult
 
@@ -114,17 +115,17 @@ def check_verification_table_renders(dem_path):
             # Too narrow for the grid to hold its section: At grid sits 24% over the
             # drawn trench, so Δ +0% is agreement with the grid and not with the design.
             # Geometric also carries a companion berm, which the trench columns do not.
-            {"name": "Swale 33", "analytic_m3": 291.0, "geometric_m3": 364.0,
+            {"name": "Swale 33", "analytic_m3": 364.0, "geometric_m3": 364.0,
              "section_m3": 208.0, "berm_credit_m3": 156.0,
              "rasterisable_m3": 259.0, "terrain_m3": 259.0, "delta_pct": 0.0,
-             "freeboard_m3": 73.0, "resolution_penalty_m3": 51.0,
+             "resolution_penalty_m3": 51.0,
              "section_overstated": True, "section_gap_pct": 24.5,
              "existing_m3": 0.0, "total_m3": 259.0},
             # The grid holds the section: green means something here.
-            {"name": "Basin 39", "analytic_m3": 612.0, "geometric_m3": 765.0,
+            {"name": "Basin 39", "analytic_m3": 765.0, "geometric_m3": 765.0,
              "section_m3": 765.0, "berm_credit_m3": 0.0,
              "rasterisable_m3": 772.0, "terrain_m3": 759.0, "delta_pct": -1.7,
-             "freeboard_m3": 153.0, "resolution_penalty_m3": 7.0,
+             "resolution_penalty_m3": 7.0,
              "section_overstated": False, "section_gap_pct": 0.9,
              "existing_m3": 0.0, "total_m3": 759.0},
             # A dam: one figure, no cross-section to overstate.
@@ -156,23 +157,50 @@ def check_verification_table_renders(dem_path):
         assert h.panel._verification_empty.isHidden(), (
             "the 'run an analysis' placeholder is still showing above four real rows")
 
-        deltas = [table.table.item(r, 5).text() for r in range(table.table.rowCount())]
+        # Columns are read by name, not by a number that silently means the wrong one
+        # after a column is added or dropped — which is what happened when "Design" went
+        # and every index in this check was off by one.
+        headers = [table.table.horizontalHeaderItem(c).text()
+                   for c in range(table.table.columnCount())]
+        assert "Design" not in headers, (
+            f"the freeboard-derived Design column is back: {headers}")
+        col = {name: i for i, name in enumerate(headers)}
+        d, meas, geom = col["Δ"], col["Measured"], col["Geometric"]
+
+        deltas = [table.table.item(r, d).text() for r in range(table.table.rowCount())]
         assert deltas[0] == "+0% †", f"flagged row lost its marker: {deltas[0]}"
         assert "†" not in deltas[1], f"clean row was marked: {deltas[1]}"
 
-        flagged = table.table.item(0, 5).foreground().color().name()
-        clean = table.table.item(1, 5).foreground().color().name()
+        flagged = table.table.item(0, d).foreground().color().name()
+        clean = table.table.item(1, d).foreground().color().name()
         assert flagged == "#1273b5", f"flagged delta should be informational: {flagged}"
         assert clean == "#1e8449", f"clean delta should stay green: {clean}"
 
+        # The dam has no drawn cross-section, so Geometric carries its impounded volume
+        # rather than the bare word "impounded". Before Design was dropped that figure
+        # lived in Design and the row would now have no volume on it at all.
+        dam_row = next(r for r in range(table.table.rowCount())
+                       if table.table.item(r, 0).text() == "Dam 40")
+        dam_geom = table.table.item(dam_row, geom).text()
+        assert "1,838" in dam_geom and "impounded" in dam_geom, (
+            f"the dam row lost its only volume figure: {dam_geom!r}")
+
         merged_row = table.table.rowCount() - 1
-        assert table.table.item(merged_row, 4).text() == "shared", (
+        assert table.table.item(merged_row, meas).text() == "shared", (
             "a feature sharing a pool still claims a measured volume of its own")
-        assert table.table.item(merged_row, 5).text() == "—", (
+        assert table.table.item(merged_row, d).text() == "—", (
             "a feature sharing a pool still carries a Δ it cannot have earned")
 
         footer = table.footer.text()
         assert "cannot hold its section" in footer, footer
+        # Freeboard is not a column and no longer a figure at all: the blanket 20%
+        # is gone from `calculate_capacity`, so there is no allowance left to state.
+        # The footer stating one again would mean the deduction had come back.
+        assert "freeboard" not in footer.lower(), (
+            f"the blanket freeboard allowance is being reported again: {footer}")
+        assert "between Design and" not in footer, (
+            "the footer still tells the reader to subtract two columns, one of which "
+            "is gone")
         assert "flat-floored trench" not in footer, (
             "the footer still describes the pre-taper burn, which squared every drawn "
             "channel off to a rectangle regardless of its cross-section")
@@ -374,6 +402,12 @@ def check_pond_layer_renders(dem_path):
     genuinely stops the channel, since a pond holds its inflow and sheds it along its whole
     crest instead of threading a line through itself, so if this layer draws nothing the map
     has a hole where the water is.
+
+    The layer read is **Pond Capacity (full)**, not the "Ponds (routed)" layer this check
+    was written against. That one is gone — it painted a cell count through a depth ramp —
+    and Pond Capacity covers a strict superset of the same pools, so it is what now fills
+    the gap in Streams. ``pond_flow`` is still asserted on disk, because keypoint analysis
+    reads that file and the layer going away must not take the raster with it.
     """
     import os
     from pathlib import Path
@@ -399,12 +433,15 @@ def check_pond_layer_renders(dem_path):
         names = [project.mapLayer(lid).name()
                  for lid in h.state.baseline_layer_ids
                  if project.mapLayer(lid) is not None]
-        pond_layers = [n for n in names if "Ponds (routed)" in n]
-        assert pond_layers, f"no Ponds layer in the baseline group: {names}"
+        assert not [n for n in names if "Ponds (routed)" in n], (
+            f"the Ponds (routed) layer is back in the baseline group: {names}"
+        )
+        pond_layers = [n for n in names if "Pond Capacity (full)" in n]
+        assert pond_layers, f"no Pond Capacity layer in the baseline group: {names}"
 
         layer = next(project.mapLayer(lid) for lid in h.state.baseline_layer_ids
                      if project.mapLayer(lid) is not None
-                     and "Ponds (routed)" in project.mapLayer(lid).name())
+                     and "Pond Capacity (full)" in project.mapLayer(lid).name())
         # On its own, not synced to the project: the question is whether *this* layer
         # paints, and a shot with the DEM under it cannot answer that. Framed on the water
         # rather than on the raster, which spans the whole DEM and is zero nearly
@@ -412,7 +449,7 @@ def check_pond_layer_renders(dem_path):
         import rasterio
         from qgis.core import QgsRectangle
 
-        with rasterio.open(pond_path) as src:
+        with rasterio.open(result.get("ponding") or pond_path) as src:
             band = src.read(1)
             rows, cols = (band > 0).nonzero()
             left, top = src.xy(rows.min(), cols.min(), offset="ul")
@@ -422,11 +459,11 @@ def check_pond_layer_renders(dem_path):
         extent = QgsRectangle(left, bottom, right, top)
         extent.scale(1.4)
         h.canvas.setExtent(extent)
-        path = save_canvas(h.canvas, "layer_baseline___ponds_routed")
+        path = save_canvas(h.canvas, "layer_baseline___pond_capacity")
         describe(path)
-        # A mask is two colours by design — flat water on nothing. What matters is that it
-        # is not *one*, which is what "the layer exists but paints nothing" looks like.
-        assert_rendered(path, "Ponds (routed) layer", min_colours=2)
+        # Depth on nothing. Two colours is the floor — one means "the layer exists but
+        # paints nothing", which is the failure this shot is here to catch.
+        assert_rendered(path, "Pond Capacity (full) layer", min_colours=2)
 
 
 def check_earthworks_hillshade_renders(dem_path):

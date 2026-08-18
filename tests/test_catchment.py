@@ -17,6 +17,7 @@ from terrainflow_assessment.modules.catchment import (
     SCSRunoff,
     clip_dem_to_polygon,
     fast_contributing_area,
+    label_outlines,
 )
 
 # ---------------------------------------------------------------------------
@@ -749,3 +750,81 @@ class TestPreviewDownsampleHygiene:
 
         with pytest.raises(ValueError, match="rotated"):
             fast_contributing_area(path, "unused.gpkg")
+
+
+# ---------------------------------------------------------------------------
+# label_outlines — the catchment boundary the summary map draws
+# ---------------------------------------------------------------------------
+
+class TestLabelOutlines:
+    """The filled catchment raster covers the aerial photo it sits on. The
+    summary map needs to show which ground feeds the scheme *and* what that
+    ground looks like, so the same labelling is traced as a line."""
+
+    def _grid(self):
+        # Two catchments side by side, a strip of "nothing" down the middle.
+        labels = np.full((6, 6), -1, dtype="int16")
+        labels[1:5, 0:2] = 0
+        labels[1:5, 4:6] = 1
+        return labels, from_bounds(0, 0, 6, 6, 6, 6)
+
+    def test_one_ring_per_earthwork(self):
+        labels, transform = self._grid()
+        rings = label_outlines(labels, transform, ["swale-a", "swale-b"])
+        assert sorted(rings) == ["swale-a", "swale-b"]
+        assert all(len(v) == 1 for v in rings.values())
+
+    def test_the_ring_closes_on_itself(self):
+        labels, transform = self._grid()
+        ring = label_outlines(labels, transform, ["a", "b"])["a"][0]
+        assert ring[0] == ring[-1]
+        assert len(ring) >= 4
+
+    def test_a_ring_traces_the_cells_it_came_from(self):
+        labels, transform = self._grid()
+        ring = label_outlines(labels, transform, ["a", "b"])["a"][0]
+        xs = [x for x, _ in ring]
+        ys = [y for _, y in ring]
+        assert (min(xs), max(xs)) == (0.0, 2.0)
+        assert (min(ys), max(ys)) == (1.0, 5.0)
+
+    def test_the_sentinels_are_not_earthworks(self):
+        """LABEL_NONE, LABEL_EXIT and the rest are negative, and none of them
+        is a feature — tracing them would draw the sea as a catchment."""
+        labels = np.full((4, 4), -1, dtype="int16")
+        labels[0, 0] = -2                    # LABEL_EXIT
+        labels[1:3, 1:3] = 0
+        rings = label_outlines(labels, from_bounds(0, 0, 4, 4, 4, 4), ["only"])
+        assert list(rings) == ["only"]
+
+    def test_a_catchment_in_two_pieces_gets_two_rings(self):
+        """Ground on both sides of a spur drains to the same swale, so a
+        feature gets a list of rings rather than one polygon."""
+        labels = np.full((6, 6), -1, dtype="int16")
+        labels[0:2, 0:2] = 0
+        labels[4:6, 4:6] = 0
+        rings = label_outlines(labels, from_bounds(0, 0, 6, 6, 6, 6), ["split"])
+        assert len(rings["split"]) == 2
+
+    def test_a_hole_comes_through_as_its_own_ring(self):
+        labels = np.full((7, 7), -1, dtype="int16")
+        labels[1:6, 1:6] = 0
+        labels[3, 3] = -1
+        rings = label_outlines(labels, from_bounds(0, 0, 7, 7, 7, 7), ["ring"])
+        assert len(rings["ring"]) == 2
+
+    def test_a_label_with_no_earthwork_is_skipped(self):
+        """The labelling can outlive the list that names it — a feature deleted
+        between the reanalysis and the export leaves its index behind."""
+        labels = np.full((4, 4), -1, dtype="int16")
+        labels[1:3, 1:3] = 3
+        assert label_outlines(labels, from_bounds(0, 0, 4, 4, 4, 4), ["a"]) == {}
+
+    def test_nothing_labelled_is_no_outlines(self):
+        labels = np.full((4, 4), -1, dtype="int16")
+        assert label_outlines(labels, from_bounds(0, 0, 4, 4, 4, 4), []) == {}
+
+    def test_without_names_it_keys_by_index(self):
+        labels = np.full((4, 4), -1, dtype="int16")
+        labels[1:3, 1:3] = 2
+        assert list(label_outlines(labels, from_bounds(0, 0, 4, 4, 4, 4))) == [2]

@@ -13,12 +13,15 @@ adding a function; there is deliberately no shared abstraction to learn.
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "terrainflow_assessment"
+TESTS_QGIS = REPO / "tests_qgis"
+CLAUDE_MD = REPO / "CLAUDE.md"
 MODULES = PKG / "modules"
 CONTROLLERS = PKG / "qgis" / "controllers"
 STATE_PY = CONTROLLERS / "_state.py"
@@ -287,3 +290,44 @@ def test_the_package_is_not_nested_inside_itself():
     """
     nested = PKG / PKG.name
     assert not nested.exists(), f"nested package copy at {nested.relative_to(REPO)}"
+
+
+# ------------------------------------------------- 6. the QGIS scoping table stays true
+
+def _checks_modules_on_disk():
+    return {p.stem for p in TESTS_QGIS.glob("checks_*.py")}
+
+
+def _checks_modules_named_in_claude_md():
+    # `checks_*.py` in prose is a glob, not a module, and does not match: the character
+    # class stops at the `*`. Matching the bare stem anywhere in the file rather than
+    # parsing the markdown table means reformatting the table cannot break this test.
+    return set(re.findall(r"checks_[a-z_]+", CLAUDE_MD.read_text(encoding="utf-8")))
+
+
+def test_claude_md_scoping_table_names_every_checks_module():
+    """CLAUDE.md's "Touching -> Run" table is how a scoped QGIS run gets chosen.
+
+    A module missing from it is invisible: the table is the only thing saying which
+    ~30 s run covers a given source file, so an unlisted module is one nobody ever
+    runs on purpose, and its checks are paid for only in the 8-minute full run.
+    """
+    missing = sorted(_checks_modules_on_disk() - _checks_modules_named_in_claude_md())
+    assert not missing, (
+        "these tests_qgis/checks_*.py modules have no row in CLAUDE.md's scoping "
+        "table:\n  " + "\n  ".join(missing)
+    )
+
+
+def test_claude_md_scoping_table_names_no_module_that_is_gone():
+    """The other direction: a rename leaves the old name behind, pointing nowhere.
+
+    A row naming a module that no longer exists is worse than a missing row — it reads
+    as a working command and selects nothing, and "No checks matched." is easy to skim
+    past as a pass.
+    """
+    phantom = sorted(_checks_modules_named_in_claude_md() - _checks_modules_on_disk())
+    assert not phantom, (
+        "CLAUDE.md names these checks modules, but they are not on disk:\n  "
+        + "\n  ".join(phantom)
+    )

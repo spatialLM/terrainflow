@@ -29,10 +29,20 @@ The two suites are complementary, not competing:
 ## Running
 
 ```powershell
-.\run_qgis_tests.ps1                 # everything
-.\run_qgis_tests.ps1 baseline        # only checks matching "baseline"
-.\run_qgis_tests.ps1 --timeout=600   # raise the per-module limit (default 300 s)
+.\run_qgis_tests.ps1                    # everything, ~8 min
+.\run_qgis_tests.ps1 checks_baseline    # one module, ~30-40 s
+.\run_qgis_tests.ps1 --skip=checks_report   # everything else
+.\run_qgis_tests.ps1 --timeout=600      # raise the per-module limit (default 300 s)
 ```
+
+**Which module covers what you changed** is the `Touching -> Run` table in the repo root
+`CLAUDE.md`, under "Real-QGIS testing". It lives there rather than here because that is
+the file read at the start of every session, and a second copy would be one more thing to
+drift; `tests/test_architecture.py` asserts the table names every `checks_*.py` on disk.
+
+Prefer the full `checks_*` module name over a bare word: patterns match check *names* too,
+so `report` also selects `checks_crs`, `checks_simulation` and `checks_threading` and pays
+a ~10 s QGIS boot for each. Every run prints what it selected and why.
 
 It finds the newest QGIS install automatically; override with
 `$env:TERRAINFLOW_QGIS_PYTHON` pointing at `bin\python-qgis-ltr.bat`.

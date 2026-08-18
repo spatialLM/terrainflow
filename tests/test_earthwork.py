@@ -180,11 +180,11 @@ class TestCalculateCapacity:
         # depth=0.5, width=2.0, length=100
         # bottom_width = max(0.1, 2.0 - 2*0.5) = 1.0
         # cross_section = (1.0+2.0)/2 * 0.5 = 0.75
-        # volume = 0.75 * 100 * 0.8 = 60.0 m³
+        # volume = 0.75 * 100 = 75.0 m³ (brim-full: no freeboard allowance)
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
         vol, _ = calculate_capacity("swale", geom, depth=0.5, width=2.0)
-        assert vol == pytest.approx(60.0, rel=1e-3)
+        assert vol == pytest.approx(75.0, rel=1e-3)
 
     def test_swale_with_companion_berm_larger(self):
         geom = make_mock_line_geom()
@@ -194,11 +194,11 @@ class TestCalculateCapacity:
         assert vol_with_berm > vol_no_berm
 
     def test_basin_known_value(self):
-        # area=100 m², depth=1.0 → vol = 100*1.0*0.8 = 80.0 m³
+        # area=100 m², depth=1.0 → vol = 100*1.0 = 100.0 m³
         geom = make_mock_polygon_geom()
         geom.area.return_value = 100.0
         vol, _ = calculate_capacity("basin", geom, depth=1.0, width=0)
-        assert vol == pytest.approx(80.0, rel=1e-3)
+        assert vol == pytest.approx(100.0, rel=1e-3)
 
     def test_berm_returns_zero(self):
         geom = make_mock_line_geom()

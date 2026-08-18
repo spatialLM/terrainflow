@@ -137,6 +137,111 @@ def check_event_pond_nests_inside_the_capacity_pond(dem_path):
             < rank("Pond Capacity (full)"), f"pond layers stacked wrong: {order}"
 
 
+def check_matching_before_and_after_layers_share_one_ramp(dem_path):
+    """A Baseline layer and its Earthworks counterpart are drawn on one scale.
+
+    The only reason to draw both is to read one against the other, and that works
+    only while a colour means one quantity on both. Each layer used to stretch its
+    stops over its own band maximum, so the same depth was mid-blue before the
+    design and navy after it because the deepest pond on the site had moved — a
+    difference that belonged to the ramp and not to the earthworks.
+
+    Checked on the renderers rather than on the state dict: the shared top is only
+    worth anything if it reached the pixels.
+    """
+    from qgis.core import QgsProject
+
+    def ramp_items(layer):
+        shader = layer.renderer().shader().rasterShaderFunction()
+        return [(item.value, item.label) for item in shader.colorRampItemList()]
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+        h.add_earthwork("swale")
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis")
+
+        layers = list(QgsProject.instance().mapLayers().values())
+
+        def named(prefix, fragment):
+            hit = [lyr for lyr in layers
+                   if lyr.name().startswith(prefix) and fragment in lyr.name()]
+            assert hit, (f"no {prefix} {fragment!r} layer: "
+                         f"{sorted(lyr.name() for lyr in layers)}")
+            return hit[0]
+
+        for fragment in ("Pond Capacity (full)", "Surface Runoff", "Streams"):
+            before = ramp_items(named("Baseline", fragment))
+            after = ramp_items(named("Earthworks", fragment))
+            assert before == after, (
+                f"{fragment!r} is drawn on two different ramps — before {before}, "
+                f"after {after}. A colour has to mean one quantity on both or the "
+                f"pair cannot be compared.")
+
+        # The event pond rides the same scale, which is the case the argument was
+        # first made for: a part-full pond scaled to itself would say "deepest" in
+        # the same navy as a brim-full one.
+        event = [lyr for lyr in layers if "Pond Capacity (event)" in lyr.name()]
+        if event:
+            assert ramp_items(event[0]) == ramp_items(
+                named("Baseline", "Pond Capacity (full)")), (
+                "the event pond is on its own scale again")
+
+
+def check_surface_runoff_fades_in_over_the_first_cubic_metres(dem_path):
+    """Nothing at 0 m³, half at 1 m³, solid from 2 m³ up — and solid above that.
+
+    Every cell on the site has runoff, so drawing them all solid painted the map
+    with "it rained here"; that wash is what two rounds of transparency were
+    trying to fix. A hard floor answers it but draws an edge, and an edge on this
+    layer reads as water *stopping* there. The renderer is checked rather than the
+    palette because the interpolated shader is what actually produces the half.
+    """
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.core.registry.map_palette import (
+        SURFACE_RUNOFF_FADE_TOP_M3,
+    )
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        layers = [lyr for lyr in QgsProject.instance().mapLayers().values()
+                  if lyr.name().startswith("Baseline") and "Surface Runoff" in lyr.name()]
+        assert layers, "no Baseline Surface Runoff layer"
+        layer = layers[0]
+
+        assert layer.opacity() == 1.0, (
+            f"the runoff layer is washed out at {layer.opacity()} — the fade at the "
+            f"bottom is what thins this layer now, not whole-layer opacity")
+
+        shader = layer.renderer().shader().rasterShaderFunction()
+        items = shader.colorRampItemList()
+        assert items[0].value == 0.0, (
+            f"the fade does not start at nothing: {items[0].value}")
+        assert items[0].color.alpha() == 0, "0 m³ is drawn"
+        assert items[1].value == SURFACE_RUNOFF_FADE_TOP_M3, (
+            f"the colour ramp starts at {items[1].value}, not at "
+            f"{SURFACE_RUNOFF_FADE_TOP_M3} m³")
+        assert items[0].color.rgb() == items[1].color.rgb(), (
+            "the fade changes hue on the way up, so it is encoding magnitude in "
+            "alpha rather than fading one colour in")
+        assert all(item.color.alpha() == 255 for item in items[1:]), (
+            "a stop above the fade top is translucent again")
+
+        # The half at the midpoint is the shader's, not the palette's — this is the
+        # line that would fail if the ramp type stopped being interpolated.
+        ok, r, g, b, a = shader.shade(SURFACE_RUNOFF_FADE_TOP_M3 / 2.0)
+        assert ok, "the shader refused the midpoint of its own fade"
+        assert abs(a - 128) <= 2, f"1 m³ renders at alpha {a}, not half"
+        diffuse = items[1].color
+        assert (r, g, b) == (diffuse.red(), diffuse.green(), diffuse.blue()), (
+            f"the fade renders {(r, g, b)} where the ramp opens on "
+            f"{(diffuse.red(), diffuse.green(), diffuse.blue())}")
+
+
 def check_a_dam_that_pours_over_its_own_crest_is_flagged(dem_path):
     """A dam across the valley with no spillway must warn, and draw the run of crest.
 
@@ -166,7 +271,11 @@ def check_a_dam_that_pours_over_its_own_crest_is_flagged(dem_path):
             f"no overtopping advisory was raised: {h.bar.warnings}")
 
         all_layers = list(QgsProject.instance().mapLayers().values())
-        layers = [lyr for lyr in all_layers if "Overtopping" in lyr.name()]
+        # The capacity answer, always drawn where a barrier pours over itself. The
+        # "(event)" layer beside it is the subset this storm reaches, and is absent
+        # when that subset is empty — so this is the one that must exist.
+        layers = [lyr for lyr in all_layers
+                  if "Overtopping (full)" in lyr.name()]
         assert layers, ("no overtopping layer: "
                         f"{sorted(lyr.name() for lyr in all_layers)}")
         layer = layers[0]
@@ -184,6 +293,36 @@ def check_a_dam_that_pours_over_its_own_crest_is_flagged(dem_path):
         assert length <= geom.length() + 1e-6, (
             f"spill length {length} m exceeds the {geom.length():.1f} m wall")
         assert feat["spillway"] == "none", feat["spillway"]
+
+        # Which storm the band is about. It is measured on the full pond, so
+        # unqualified it read as a claim about the event just routed — beside an
+        # event water line drawn a metre below the crest. The event pond is built
+        # immediately before this layer, so "unknown" here means the two stopped
+        # being handed to each other.
+        assert feat["state"] in ("event", "capacity"), (
+            f"the band does not say which storm it is about: {feat['state']!r}")
+        assert feat["event_m"] is not None, "no event level was measured"
+        reaches = feat["event_m"] >= feat["level_m"] - 1e-3
+        assert (feat["state"] == "event") == reaches, (
+            f"state {feat['state']!r} disagrees with the levels it was derived "
+            f"from: event {feat['event_m']} vs pour {feat['level_m']}")
+
+        # And the split into two layers, which is what makes the distinction usable:
+        # the event bands can be judged against the storm with the capacity ones
+        # ticked off, and back on to ask about freeboard.
+        event_layers = [lyr for lyr in all_layers
+                        if "Overtopping (event)" in lyr.name()]
+        if reaches:
+            assert event_layers, (
+                "this event reaches the crest and no '(event)' layer was drawn: "
+                f"{sorted(lyr.name() for lyr in all_layers)}")
+            assert all(f["state"] == "event"
+                       for f in event_layers[0].getFeatures()), (
+                "a band that does not overtop this event is in the event layer")
+        else:
+            assert not event_layers, (
+                "nothing overtops this event, so an '(event)' layer asserts a no "
+                "the map did not measure")
 
 
 def check_multiple_earthwork_types_burn(dem_path):

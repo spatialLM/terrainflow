@@ -65,6 +65,7 @@ def _filled_inputs():
         "min_catchment_ha": 1.25,
         "swale_depth_m": 0.9,
         "swale_width_m": 3.0,
+        "swale_bottom_width_m": 0.7,
     }
 
 
@@ -111,6 +112,78 @@ class TestInputCoercion:
         """Guards the round-trip test above from passing on defaults alone."""
         defaults = default_inputs()
         assert all(_filled_inputs()[n] != defaults[n] for n in INPUT_FIELDS)
+
+    def test_the_swale_section_defaults_match_the_panel_spin_boxes(self):
+        """A default here is not a suggestion — it is what an older file gets loaded as.
+
+        ``normalise_inputs`` fills every absent key, so a schema default that disagrees
+        with the widget it restores silently rewrites the user's criteria on open. This
+        pair disagreed: 0.6/2.0 here against 0.3/0.6 in the criteria box, so a file
+        saved before the keys existed came back with a different cross-section from the
+        one the session was using, and the next run answered a different question.
+
+        The panel cannot be imported here — ``tests/`` stubs QGIS out — so the values
+        are restated rather than read. That is the point: if either side moves, this
+        fails and someone has to look at both.
+        """
+        assert INPUT_FIELDS["swale_width_m"][1] == 2.0
+        assert INPUT_FIELDS["swale_depth_m"][1] == 0.5
+        assert INPUT_FIELDS["swale_bottom_width_m"][1] == 1.0
+
+    def test_the_batter_is_derived_and_therefore_not_stored(self):
+        """Three dimensions are entered; the side slope is what they come out as.
+
+        Saving a derived value beside the three it derives from is how a reloaded file
+        comes back describing a section that never existed — the batter says one thing,
+        the widths say another, and whichever the sizing reads wins silently.
+        """
+        assert "swale_side_slope" not in INPUT_FIELDS
+
+    def test_the_default_swale_has_a_floor(self):
+        """A swale is dug with a flat bottom. The defaults have to describe one.
+
+        They did not: 0.6 m top over 0.3 m deep at a 1:1 batter puts the walls together
+        exactly at the drawn depth, so the floor was 0.00 m and the section a V-drain of
+        0.09 m². Not merely inelegant — at 0.072 m³ per metre the segment sizing asked
+        for 33.6 km of swale on a 7.4 ha catchment, so every recommendation came back
+        capped as "contour too short" and the ranking carried no information at all.
+
+        Asserted on the schema rather than on the widgets because this is the copy that
+        survives a save/reload, and a floor that only exists until the file is reopened
+        is not a floor.
+        """
+        top = INPUT_FIELDS["swale_width_m"][1]
+        depth = INPUT_FIELDS["swale_depth_m"][1]
+        bottom = INPUT_FIELDS["swale_bottom_width_m"][1]
+
+        assert 0 < bottom <= top, (
+            f"a {bottom} m floor under a {top} m top is not a section")
+        # Wide enough to be worth calling a floor, and to survive a DEM cell. A 5 cm
+        # bottom is a V with a rounding error on it.
+        assert bottom >= 0.3, f"a {bottom:.2f} m floor is not a buildable trench"
+
+        z = (top - bottom) / (2.0 * depth)
+        assert z > 0, "vertical walls are not a swale batter"
+
+    def test_the_default_section_is_the_registrys_swale(self):
+        """The criteria box and a swale you draw must describe the same swale.
+
+        They did not, and the gap was three-quarters of a square metre of section. That
+        divergence is also what made wiring the panel to seed drawn features look
+        sensible — it is the right instinct against the wrong pair of numbers.
+        """
+        from terrainflow_assessment.core.registry.earthwork_types import get_type
+        from terrainflow_assessment.core.sizing import trapezoid_section
+
+        cfg = get_type("swale")
+        assert INPUT_FIELDS["swale_width_m"][1] == cfg.default_top_width
+        assert INPUT_FIELDS["swale_depth_m"][1] == cfg.default_depth
+
+        sec = trapezoid_section(INPUT_FIELDS["swale_width_m"][1],
+                                INPUT_FIELDS["swale_bottom_width_m"][1],
+                                INPUT_FIELDS["swale_depth_m"][1])
+        assert sec.area == pytest.approx(0.75)
+        assert sec.side_slope == pytest.approx(cfg.default_side_slope)
 
     def test_missing_keys_fall_back_to_defaults(self):
         result = normalise_inputs({"site_name": "Partial"})

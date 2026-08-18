@@ -151,8 +151,8 @@ def build_synthetic_dem(path, pond=False):
 
     ``pond=True`` cuts a basin into the channel so one forms anyway. Everything above is
     written to be depression-free, which means the default surface exercises **nothing** of
-    the crest split — no pond, no contraction, no ``Ponds (routed)`` layer — and a green run
-    over it says nothing about them. The basin is 30 rows x 13 columns at 4 m deep, well
+    the crest split — no pond, no contraction, nothing for Pond Capacity to draw — and a
+    green run over it says nothing about them. The basin is 30 rows x 13 columns at 4 m deep, well
     over ``crest_routing.MIN_POND_CELLS``, and it fills and spills over its downstream lip.
     """
     import numpy as np

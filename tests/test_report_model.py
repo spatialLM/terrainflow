@@ -21,6 +21,7 @@ from terrainflow_assessment.modules.report_model import (
     MapRef,
     Paragraph,
     ReportData,
+    StatGrid,
     build_flow_graph,
     build_report,
 )
@@ -299,9 +300,23 @@ class TestPresentationRules:
                           "terrain_m3": 950.0, "delta_pct": -13.6}])))
         ladder = [t for t in _sections(r, DataTable)
                   if "Δ vs grid" in t.headers][0]
-        assert ladder.headers == ["Feature", "Design storage",
-                                  "Geometric (drawn)", "At this grid (held)",
-                                  "Measured", "Δ vs grid"]
+        assert ladder.headers == ["Feature", "Geometric (drawn)",
+                                  "At this grid (held)", "Measured", "Δ vs grid"]
+
+    def test_the_ladder_does_not_print_a_freeboard_derived_storage(self):
+        """Design storage was geometric less a blanket freeboard fraction. Freeboard
+        on a real feature is set by its spillway, sized on page 6 from a peak flow
+        this column knows nothing about — so it was a fourth storage figure from a
+        rule of thumb, sitting in a run of columns meant to be compared."""
+        r = build_report(_data(verification=VerificationResult(
+            per_feature=[{"name": "Swale 1", "analytic_m3": 1000.0,
+                          "geometric_m3": 1250.0, "rasterisable_m3": 1100.0,
+                          "terrain_m3": 950.0, "delta_pct": -13.6}])))
+        assert "Design storage" not in [h for t in _sections(r, DataTable)
+                                        for h in t.headers]
+        ladder = [t for t in _sections(r, DataTable)
+                  if "Δ vs grid" in t.headers][0]
+        assert all(len(row) == len(ladder.headers) for row in ladder.rows)
 
     def test_the_blurb_splits_calculated_columns_from_measured_ones(self):
         """The division a reader needs, and the reason column three is the largest.
@@ -356,10 +371,12 @@ class TestPresentationRules:
                           "geometric_m3": 100.0, "routing_only": True}])))
         ladder = [t for t in _sections(r, DataTable)
                   if "Δ vs grid" in t.headers][0]
-        assert ladder.rows[0][3:] == ["n/a — sub-cell"] * 3
-        assert "0" not in ladder.rows[0][4]
+        assert ladder.rows[0][2:] == ["n/a — sub-cell"] * 3
+        assert "0" not in ladder.rows[0][3]
 
-    def test_dam_collapses_the_three_design_figures(self):
+    def test_dam_collapses_its_design_figures(self):
+        """A dam impounds against the hillside, so geometric and at-grid are one
+        computation — printing them twice would imply two derivations."""
         r = build_report(_data(verification=VerificationResult(
             per_feature=[{"name": "Dam 4", "analytic_m3": 1838.0,
                           "terrain_m3": 1838.0, "delta_pct": 0.0,
@@ -367,16 +384,17 @@ class TestPresentationRules:
         ladder = [t for t in _sections(r, DataTable)
                   if "Δ vs grid" in t.headers][0]
         assert "barrier-impounded" in ladder.rows[0][1]
-        assert ladder.rows[0][2] == "" and ladder.rows[0][3] == ""
+        assert ladder.rows[0][2] == ""
 
-    def test_standing_water_is_a_separate_table(self):
+    def test_standing_water_is_not_printed_at_all(self):
+        """It was a table whose caption was a warning about itself, carrying the
+        largest number in the section — so it was the one most likely to be quoted."""
         r = build_report(_data(verification=VerificationResult(
             per_feature=[{"name": "Swale 1", "analytic_m3": 1000.0,
                           "terrain_m3": 950.0, "existing_m3": 420.0,
                           "total_m3": 1370.0}])))
-        ctx = [t for t in _sections(r, DataTable)
-               if "context only" in t.title]
-        assert ctx, "existing/total must not sit in the ladder's column run"
+        assert not [t for t in _sections(r, DataTable) if "context only" in t.title]
+        # And it has not simply moved into the ladder's column run.
         ladder = [t for t in _sections(r, DataTable)
                   if "Δ vs grid" in t.headers][0]
         assert "1,370" not in str(ladder.rows)
@@ -463,7 +481,8 @@ class TestTwoCaptureFigures:
 
     def test_no_simulated_columns_without_a_simulation(self):
         table = _table(build_report(_data()), "Where the storm's water goes")
-        assert table.headers == ["", "Volume", "Share of runoff"]
+        assert not [h for h in table.headers if "simulated" in h.lower()]
+        assert table.headers[:3] == ["", "Volume", "Share of runoff"]
 
     def test_simulated_held_never_goes_negative(self):
         """A routed exit volume can exceed the depth-derived runoff total on a
@@ -602,6 +621,14 @@ class TestWording:
         assert fmt_volume(None) == "—"
         assert fmt_volume(21715.0) == "21,700 m³"
 
+    def test_a_figure_that_is_not_a_number_prints_as_no_figure(self):
+        """Every volume in the document comes through here, and ``int(round(nan))``
+        raises — so one unmeasurable number aborted the whole export instead of
+        leaving one cell blank."""
+        assert round_volume(float("nan")) is None
+        assert round_volume(float("inf")) is None
+        assert fmt_volume(float("nan")) == "—"
+
     @pytest.mark.parametrize("hours,fragment", [
         (None, "does not empty"), (0.5, "within the hour"), (18.0, "18 hours"),
         (72.0, "3 days"), (400.0, "more than a week"),
@@ -627,6 +654,10 @@ class TestWording:
         """The words bucket 62%, 80% and 94% together; the reader acts on the
         number, so it belongs in the same cell rather than being inferred."""
         assert fill_wording(pct, over) == expected
+
+    def test_cut_fill_sentence_survives_an_unmeasurable_quantity(self):
+        s = cut_fill_sentence(float("nan"), float("nan"))
+        assert "could not be measured" in s
 
     def test_cut_fill_sentence_avoids_signed_numbers(self):
         s = cut_fill_sentence(7944.0, 3533.0)
@@ -687,14 +718,14 @@ class TestFeatureTables:
         """"Dam 1" already says it is a dam. The column spent width on a
         twelve-column table restating the first word of the name."""
         r = build_report(_data(earthworks=[_FakeEarthwork()]))
-        for title in ("Water arriving at each feature", "Every feature, as drawn"):
+        for title in ("Water arriving at each feature", "Every feature — drawn against measured"):
             assert "Type" not in _table(r, title).headers
 
     def test_the_build_schedule_keeps_type_detail(self):
         """That column carries the one dimension that matters *for* the type —
         a dam's crest, a diversion's grade — which the name does not."""
         r = build_report(_data(earthworks=[_FakeEarthwork()]))
-        assert "Type detail" in _table(r, "Every feature, as drawn").headers
+        assert "Type detail" in _table(r, "Every feature — drawn against measured").headers
 
 
 class TestPageOneDetail:
@@ -766,6 +797,18 @@ class TestPageOneDetail:
         r = build_report(_data(baseline=_baseline(exit_points=[])))
         assert not [t for t in _sections(r, DataTable)
                     if "leaves the boundary" in t.title]
+
+    def test_every_crossing_the_map_draws_is_listed(self):
+        """The table was capped at five under a map that draws all of them, so the
+        reader was left counting markers with no row to look them up in."""
+        r = build_report(_data())          # the fixture carries eight crossings
+        table = _table(r, "Where water leaves the boundary")
+        assert len(table.rows) == 8
+        # The rolled-up "and N smaller crossings, together about X" line is gone.
+        # The threshold note stays: crossings below the display threshold are a
+        # different set, and they are still not drawn and still not listed.
+        assert "together about" not in (table.note or "")
+        assert "display threshold" in (table.note or "")
 
     def test_user_drawn_links_are_marked(self):
         r = build_report(_data(balance=_balance(per_feature=[
@@ -881,21 +924,109 @@ class TestBuildSchedule:
             earthworks=[_FakeEarthwork(id="a")],
             balance_stores=[_FakeStore("a", 201.7, 0.0)]))
         table = [t for t in _sections(r, DataTable)
-                 if t.title == "Every feature, as drawn"][0]
-        assert table.rows[0][-2:] == ["200 m³", "0 m³"]
+                 if t.title == "Every feature — drawn against measured"][0]
+        cut = table.headers.index("Cut (geometric)")
+        fill = table.headers.index("Fill (geometric)")
+        assert [table.rows[0][cut], table.rows[0][fill]] == ["200 m³", "0 m³"]
+
+    def test_measured_columns_sit_beside_the_drawn_ones(self):
+        """The gap between the two is the point, and it only reads as a gap when
+        they are adjacent — the measured figure is the one to price from."""
+        r = build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 1")],
+            balance_stores=[_FakeStore("a", 201.7, 0.0)],
+            verification=VerificationResult(per_feature=[
+                {"name": "Swale 1", "terrain_m3": 1930.0, "cut_m3": 340.0,
+                 "excavation_m3": 410.0}])))
+        table = _table(r, "Every feature — drawn against measured")
+        h = table.headers
+        assert h.index("Capacity (measured)") == h.index("Capacity (geometric)") + 1
+        assert h.index("Cut (measured)") == h.index("Cut (geometric)") + 1
+        assert table.rows[0][h.index("Capacity (measured)")] == "1,930 m³"
+        assert table.rows[0][h.index("Cut (measured)")] == "410 m³"
+
+    def test_cut_measured_is_the_earth_moved_not_the_trench_void(self):
+        """What the column *means*, which nothing pinned until it meant the wrong thing.
+
+        ``cut_m3`` is the trench filled to its own bare pour point — what fits in the
+        hole. ``excavation_m3`` is ``original − burned`` — what comes out of the
+        hillside. On falling ground the second is larger, and it is the second the
+        paragraph above this table tells the reader to price the job from.
+
+        This column printed ``cut_m3`` for several releases. Every test around it
+        supplied one number and asserted that number came back, so the plumbing was
+        covered end to end and the meaning was covered nowhere: the column disagreed
+        with the site total one table below it and the suite stayed green.
+        """
+        r = build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 1")],
+            balance_stores=[_FakeStore("a", 201.7, 0.0)],
+            verification=VerificationResult(per_feature=[
+                {"name": "Swale 1", "terrain_m3": 1930.0,
+                 "cut_m3": 340.0, "excavation_m3": 410.0}])))
+        table = _table(r, "Every feature — drawn against measured")
+        cell = table.rows[0][table.headers.index("Cut (measured)")]
+        assert cell == "410 m³", (
+            f"the column shows {cell}; 340 m³ is the trench void, which is a different "
+            f"question and belongs to the resolution penalty"
+        )
+
+    def test_an_unmeasured_cut_is_suppressed_rather_than_zeroed(self):
+        """No burn, no claim about earthmoving — an em dash, not a nought.
+
+        A zero in a run of volume columns reads as "this feature moves no earth", which
+        is never true of something that has been dug.
+        """
+        r = build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 1")],
+            balance_stores=[_FakeStore("a", 201.7, 0.0)],
+            verification=VerificationResult(per_feature=[
+                {"name": "Swale 1", "terrain_m3": 1930.0, "cut_m3": 340.0}])))
+        table = _table(r, "Every feature — drawn against measured")
+        assert table.rows[0][table.headers.index("Cut (measured)")] == "—"
+
+    def test_no_measured_fill_column_is_invented(self):
+        """Banks sit outside their own footprints and cuts overlap, so a per-feature
+        split would report the splitting rule. It stays a site total."""
+        table = _table(build_report(_data(earthworks=[_FakeEarthwork(id="a")])),
+                       "Every feature — drawn against measured")
+        assert "Fill (measured)" not in table.headers
+        assert "Measured fill is a site total only" in table.note
+
+    def test_an_unmeasured_feature_leaves_the_column_blank(self):
+        table = _table(build_report(_data(earthworks=[_FakeEarthwork(id="a")])),
+                       "Every feature — drawn against measured")
+        assert table.rows[0][table.headers.index("Capacity (measured)")] == "—"
+
+    def test_a_duplicate_name_is_not_given_another_features_measurement(self):
+        """Verification is name-keyed; two features sharing a name would take each
+        other's measured cut, and a wrong number under "measured" is worse than none."""
+        r = build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 1"),
+                        _FakeEarthwork(id="b", name="Swale 1")],
+            verification=VerificationResult(per_feature=[
+                {"name": "Swale 1", "terrain_m3": 1930.0, "cut_m3": 340.0},
+                {"name": "Swale 1", "terrain_m3": 45.0, "cut_m3": 12.0}])))
+        table = _table(r, "Every feature — drawn against measured")
+        col = table.headers.index("Capacity (measured)")
+        assert [row[col] for row in table.rows] == ["—", "—"]
+
+    def test_the_contractor_instruction_is_gone(self):
+        assert "Take this page to your contractor" not in _text_of(
+            build_report(_data(earthworks=[_FakeEarthwork(id="a")])))
 
     def test_disabled_features_are_left_off_the_quote(self):
         r = build_report(_data(earthworks=[
             _FakeEarthwork(id="a", name="Swale 1"),
             _FakeEarthwork(id="b", name="Swale 2", enabled=False)]))
         table = [t for t in _sections(r, DataTable)
-                 if t.title == "Every feature, as drawn"][0]
+                 if t.title == "Every feature — drawn against measured"][0]
         assert [row[0] for row in table.rows] == ["Swale 1"]
 
     def test_cut_fill_balance_is_in_words(self):
         r = build_report(_data(earthworks=[_FakeEarthwork()]))
         table = [t for t in _sections(r, DataTable)
-                 if t.title == "Every feature, as drawn"][0]
+                 if t.title == "Every feature — drawn against measured"][0]
         assert "more soil comes out" in table.note
         assert "+" not in table.note
 
@@ -910,7 +1041,7 @@ class TestBuildSchedule:
     ])
     def test_type_detail_names_the_dimension_that_matters(self, kw, expected):
         r = build_report(_data(earthworks=[_FakeEarthwork(**kw)]))
-        table = _table(r, "Every feature, as drawn")
+        table = _table(r, "Every feature — drawn against measured")
         assert _cell(table, 0, "Type detail") == expected
 
     @pytest.mark.parametrize("slope,expected", [
@@ -918,12 +1049,12 @@ class TestBuildSchedule:
     ])
     def test_batter_is_stated_the_way_a_contractor_reads_it(self, slope, expected):
         r = build_report(_data(earthworks=[_FakeEarthwork(side_slope=slope)]))
-        table = _table(r, "Every feature, as drawn")
+        table = _table(r, "Every feature — drawn against measured")
         assert _cell(table, 0, "Batter") == expected
 
     def test_missing_soil_says_site_default(self):
         r = build_report(_data(earthworks=[_FakeEarthwork(soil_name="")]))
-        table = _table(r, "Every feature, as drawn")
+        table = _table(r, "Every feature — drawn against measured")
         assert _cell(table, 0, "Soil") == "site default"
 
     def test_schedule_needs_earthworks_not_just_a_balance(self):
@@ -982,7 +1113,7 @@ class TestTheTwoKindsOfNumber:
         text = _text_of(build_report(_data()))
         assert "How to read the numbers in this report" in text
         head = text[:text.index("Site today")] if "Site today" in text else text
-        assert "Calculated" in head and "Measured" in head
+        assert "Geometric calculated" in head and "Measured" in head
 
     def test_it_comes_before_the_detail_pages(self):
         from terrainflow_assessment.modules.report_model import Heading
@@ -1023,10 +1154,220 @@ class TestTheTwoKindsOfNumber:
             t.title for t in _sections(r, DataTable)
             if t.title in ("Where the storm's water goes",
                            "Water arriving at each feature", "Spillways",
-                           "Every feature, as drawn", "Where water leaves the boundary")
-            and "Calculated" not in (t.note or "") and "Measured" not in (t.note or "")
+                           "Every feature — drawn against measured", "Where water leaves the boundary")
+            and "calculated" not in (t.note or "").lower()
+            and "Measured" not in (t.note or "")
         ]
         assert not untagged, f"tables carrying figures with no kind stated: {untagged}"
+
+
+class TestOverviewMap:
+    """A reader who has never seen the block cannot place a figure on page one
+    until they know what shape the property is and where the features sit."""
+
+    def _overview(self, report):
+        found = [m for m in _sections(report, MapRef) if m.key == "overview"]
+        return found[0] if found else None
+
+    def test_it_is_on_page_one(self):
+        r = build_report(_data())
+        keys = [m.key for m in _sections(r, MapRef)]
+        assert keys[0] == "overview", keys
+
+    def test_a_missing_overview_states_its_reason(self):
+        r = build_report(_data(maps={"overview": "No DEM is loaded."}))
+        assert self._overview(r).reason == "No DEM is loaded."
+
+    def _design(self, report):
+        return [m for m in _sections(report, MapRef) if m.key == "design"][0]
+
+    def test_its_key_does_not_name_things_it_does_not_draw(self):
+        """Neither map carries spillway markers or overflow links any more, so
+        a key listing them would describe a map the reader is not looking at.
+        Both are still in the document — the spillways have a page of their own,
+        the links are on the flow diagram."""
+        r = build_report(_data(spillway_rows=[_spill()]))
+        for legend in (self._overview(r).legend, self._design(r).legend):
+            labels = [e.label for e in (legend or [])]
+            assert "Site boundary" in labels
+            assert "Spillway" not in labels
+            assert "Overflow link" not in labels
+
+    def test_it_names_the_water_it_draws_and_not_the_earthworks(self):
+        """The summary map is a photograph of the block with its water on it.
+        The earthwork types are the design map's key, one page on."""
+        r = build_report(_data())
+        labels = [e.label for e in (self._overview(r).legend or [])]
+        assert any(label.startswith("Water held") for label in labels), labels
+        assert "Watercourse" in labels
+        assert not any(label.startswith("Swale") for label in labels), labels
+        assert "Swale" in [e.label for e in (self._design(r).legend or [])]
+
+    def test_the_catchment_outline_is_named_only_when_it_is_drawn(self):
+        """The labelling can trace to nothing — no design, or a design whose
+        catchments have not been computed — and the exporter is the only thing
+        that knows which."""
+        without = [e.label for e in (self._overview(
+            build_report(_data())).legend or [])]
+        assert not any(label.startswith("Catchment") for label in without)
+
+        r = build_report(_data(catchment_outline=True))
+        labels = [e.label for e in (self._overview(r).legend or [])]
+        assert "Catchment — swale" in labels, labels
+
+    def test_the_catchment_outline_is_keyed_in_the_feature_colour(self):
+        """The map draws a catchment in the colour of the thing that catches
+        it, so the key has to say so type by type."""
+        r = build_report(_data(catchment_outline=True))
+        entries = {e.label: e for e in (self._overview(r).legend or [])}
+        swale = [e for e in (self._design(r).legend or [])
+                 if e.label == "Swale"][0]
+        assert entries["Catchment — swale"].colour == swale.colour
+        assert entries["Catchment — swale"].kind == "line"
+
+
+class TestWorkedCatchment:
+    """Capture % conflates two faults with opposite remedies: features too small,
+    and a block that mostly drains past them. These separate the two."""
+
+    def _report(self, **kw):
+        per = kw.pop("per_feature", [
+            _feature(fid="a", name="Swale 1", direct_catchment_m2=150000.0,
+                     direct_inflow_m3=7500.0),
+            _feature(fid="b", name="Basin 2", direct_catchment_m2=50000.0,
+                     direct_inflow_m3=2500.0),
+        ])
+        bal = _balance(per_feature=per, total_captured_m3=8000.0,
+                       routed_exit_m3=2000.0, uncaptured_m3=1200.0, **kw)
+        return build_report(_data(balance=bal))
+
+    def _cards(self, report):
+        grids = _sections(report, StatGrid)
+        return {c[0]: c[1] for g in grids for c in g.cards}
+
+    def test_the_worked_share_of_the_catchment_is_reported(self):
+        # 20 ha of direct catchment against the fixture's 36.2 ha contributing area.
+        cards = self._cards(self._report())
+        assert cards["Catchment worked"] == "55%"
+
+    def test_capture_within_the_worked_ground_is_reported(self):
+        # 8,000 m3 captured of the 10,000 m3 falling on ground that drains in.
+        cards = self._cards(self._report())
+        assert cards["Capture within it"] == "80%"
+
+    def test_the_exit_row_carries_no_worked_share(self):
+        """Its denominator is runoff on worked ground, so the matching numerator
+        is the routed overflow — not the site exit sitting in the same row. A
+        share of one beside the volume of the other is two different 'water
+        leaving' figures on one line, which is what Rule 2 forbids."""
+        table = _table(self._report(), "Where the storm's water goes")
+        col = table.headers.index("Share of worked catchment")
+        assert table.rows[2][0] == "Leaves the block"
+        assert table.rows[2][col] == "—"
+
+    def test_the_shares_it_does_print_are_of_the_worked_runoff(self):
+        table = _table(self._report(), "Where the storm's water goes")
+        col = table.headers.index("Share of worked catchment")
+        # 7,880 m3 held and 120 m3 soaked, of the 10,000 m3 falling on worked ground.
+        assert [table.rows[0][col], table.rows[1][col]] == ["79%", "1%"]
+
+    def test_the_note_says_why_the_exit_row_is_blank(self):
+        table = _table(self._report(), "Where the storm's water goes")
+        assert "never mixed in one figure" in table.note
+
+    def test_a_design_working_the_whole_catchment_gets_no_second_column(self):
+        """The column would restate the one beside it."""
+        table = _table(self._report(per_feature=[
+            _feature(fid="a", direct_catchment_m2=362000.0,
+                     direct_inflow_m3=10000.0)]), "Where the storm's water goes")
+        assert "Share of worked catchment" not in table.headers
+
+    def test_no_catchment_data_means_no_claim(self):
+        r = build_report(_data(baseline=_baseline(catchment_area_ha=0.0)))
+        assert "Catchment worked" not in self._cards(r)
+
+
+class TestAppendixNamesTheMethodItRan:
+    """The settings table printed every field it was handed, alphabetically — so a
+    site sized on a Lancaster runoff coefficient still listed 'Cn 61', a curve number
+    nothing in that run consulted. The appendix exists to say which input to change."""
+
+    def _settings(self, **inputs):
+        base = {"sizing_basis": "coefficient", "runoff_coefficient": 0.5,
+                "cn": 61, "ground_condition": "good", "rainfall_mm": 120.0}
+        base.update(inputs)
+        r = build_report(_data(inputs=base))
+        found = [t for t in _sections(r, KeyValueTable)
+                 if t.title == "Settings used"]
+        return dict(found[0].rows) if found else {}
+
+    def test_the_runoff_method_is_named(self):
+        assert self._settings()["Runoff method"] == "Runoff coefficient (Lancaster)"
+        assert self._settings(sizing_basis="runoff")["Runoff method"] == (
+            "Surface runoff (SCS curve number)")
+
+    def test_the_coefficient_basis_does_not_list_a_curve_number(self):
+        rows = self._settings()
+        assert "Cn" not in rows and "Ground condition" not in rows
+        assert "Runoff coefficient" in rows
+
+    def test_the_scs_basis_does_not_list_a_coefficient(self):
+        rows = self._settings(sizing_basis="runoff")
+        assert "Runoff coefficient" not in rows
+        assert "Cn" in rows
+
+    def test_an_unrecognised_basis_is_reported_rather_than_guessed(self):
+        assert self._settings(sizing_basis="whatever")["Runoff method"] == "whatever"
+
+
+class TestMethodologyIsExplained:
+    def test_both_methods_get_their_own_explanation(self):
+        text = _text_of(build_report(_data()))
+        assert "How this model works" in text
+        assert "The geometric calculated method" in text
+        assert "The measured method" in text
+
+    def test_it_says_what_a_disagreement_between_them_means(self):
+        text = _text_of(build_report(_data()))
+        assert "the disagreement is the finding" in text
+
+
+class TestCaveatsNameFeaturesTheWayTheTablesDo:
+    """A reader met 'Swale 3' in the caveats and 'Swale 3 (b)' in the table above."""
+
+    def _report(self, caveat):
+        return build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 3")],
+            balance=_balance(per_feature=[_feature(fid="a", name="Swale 3"),
+                                          _feature(fid="b", name="Basin 9")]),
+            verification=VerificationResult(
+                caveats=[caveat],
+                per_feature=[{"name": "Swale 3", "analytic_m3": 1000.0,
+                              "terrain_m3": 950.0}])))
+
+    def _caveat_text(self, report):
+        return [c for c in _sections(report, Callout)
+                if c.title == "Attribution caveats"][0].text
+
+    def test_a_leading_feature_name_is_renamed(self):
+        r = self._report("Swale 3: a 1.00 m cell cannot hold its drawn section.")
+        # One feature named "Swale 3" among the earthworks, so it is unambiguous
+        # and the caveat gets whatever heading the tables use for it.
+        assert self._caveat_text(r).startswith("Swale 3:")
+
+    def test_prose_that_merely_contains_a_name_is_left_alone(self):
+        text = "Terrain volume is attributed by connected depression."
+        assert self._caveat_text(self._report(text)) == text
+
+    def test_an_ambiguous_name_keeps_its_raw_form(self):
+        """Two features share the name, so no mapping is true of either."""
+        r = build_report(_data(
+            earthworks=[_FakeEarthwork(id="a", name="Swale 3"),
+                        _FakeEarthwork(id="b", name="Swale 3")],
+            verification=VerificationResult(
+                caveats=["Swale 3: a 1.00 m cell cannot hold its drawn section."],
+                per_feature=[{"name": "Swale 3", "analytic_m3": 1000.0}])))
+        assert self._caveat_text(r).startswith("Swale 3:")
 
 
 class TestEarthmoving:
@@ -1069,6 +1410,14 @@ class TestEarthmoving:
 
     def test_nothing_is_printed_before_a_burn(self):
         assert self._table(self._report(burn_quantities=None)) is None
+
+    def test_an_unmeasurable_quantity_is_absent_rather_than_nan(self):
+        """NaN is truthy, so it passed the "has a burn run" guard and reached the
+        rounding, which raised — the export died rather than the cell going blank."""
+        nan = float("nan")
+        r = self._report(burn_quantities={"cut_m3": nan, "fill_m3": nan})
+        assert self._table(r) is None
+        assert "nan" not in _text_of(r).lower()
 
     def test_it_does_not_invent_a_per_feature_split(self):
         """Banks lie outside their own footprints and cuts overlap, so a split would

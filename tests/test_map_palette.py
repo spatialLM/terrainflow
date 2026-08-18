@@ -13,9 +13,11 @@ from terrainflow_assessment.core.registry.map_palette import (
     DEFAULT_SURFACE_RUNOFF_SCALE,
     STREAMS,
     SURFACE_RUNOFF_COLOURS,
+    SURFACE_RUNOFF_FADE_TOP_M3,
     SURFACE_RUNOFF_SCALES,
     WATER_CAPTURED,
     hex_of,
+    surface_runoff_alpha,
     surface_runoff_ramp,
     visible_stops,
 )
@@ -61,11 +63,18 @@ class TestTheTwoRules:
         lumas = [_luma(rgba) for rgba in visible]
         assert lumas == sorted(lumas, reverse=True), lumas
 
-    def test_only_absence_is_transparent(self):
-        """Water captured used to climb 0 -> 160 -> 220 in alpha, so a shallow
-        pond washed out into the basemap and the layer read as a stain."""
-        for fraction, rgba, _l in WATER_CAPTURED:
-            assert (rgba[3] == 0) == (fraction == 0.0), (fraction, rgba)
+    @pytest.mark.parametrize("name", ["streams", "water captured"])
+    def test_only_absence_is_transparent(self, name):
+        """Water captured used to climb 0 -> 160 -> 220 in alpha, so a shallow pond
+        washed out into the basemap and the layer read as a stain.
+
+        Surface runoff is out of this list, and only it: its stops are all opaque and
+        the fade below them is one colour at varying alpha, so it cannot re-order two
+        stops against each other — which is the defect the rule exists to prevent. See
+        ``TestTheFadeIn``, which pins the exception rather than leaving it unstated.
+        """
+        for fraction, rgba, _l in RAMPS[name]:
+            assert (rgba[3] == 0) == (fraction == 0.0), (name, fraction, rgba)
 
     def test_streams_jump_straight_to_a_solid_colour(self):
         """Every non-zero cell already passed the threshold, so there is no
@@ -97,18 +106,125 @@ class TestSurfaceRunoff:
     def test_the_default_mode_exists(self):
         assert DEFAULT_SURFACE_RUNOFF_SCALE in SURFACE_RUNOFF_SCALES
 
-    def test_the_low_end_stays_faint(self):
-        """Diffuse sheet flow covers nearly the whole site; at any real weight
-        it hides the map it is supposed to be describing."""
-        _f, rgba, label = surface_runoff_ramp()[1]
+    def test_the_low_end_is_light_cyan_and_opaque(self):
+        """Diffuse sheet flow recedes by being light, not by being see-through.
+
+        It used to be drawn at alpha 40. The ramp is anchored on the band maximum and
+        ``log`` opens at 1e-3 of it, so on a real site that stop lands a good way in —
+        and everything below it was rendered under a fifth opacity. Runoff then
+        appeared to *stop* below a pond that retains its catchment, when it was drawn
+        all along and simply could not be seen. Weight lives in the value now, and the
+        bottom of the ramp is a colour rather than white — the fade beneath it needs
+        something to fade, and white fading out over an aerial is white fading out
+        over paper.
+        """
+        _f, rgba, label = surface_runoff_ramp()[0]
         assert label == "diffuse"
-        assert 0 < rgba[3] < 80
+        assert rgba[3] == 255, "the bottom of the colour ramp is translucent"
+        assert rgba == WATER_CAPTURED[1][1], (
+            "the faintest flow and the shallowest water are drawn in different "
+            f"cyans: {rgba} vs {WATER_CAPTURED[1][1]}")
+
+    def test_the_layer_is_not_washed_out_wholesale(self):
+        """Layer opacity is gone with per-stop alpha, and for the same reason.
+
+        It was the better instrument — one number over the whole raster dilutes evenly
+        instead of re-ordering the stops — but a 55% wash still hands the basemap's own
+        lightness range to a ramp whose low end is light. What thins this layer now is
+        the bottom couple of cubic metres fading, and nothing above them.
+        """
+        import terrainflow_assessment.core.registry.map_palette as palette
+
+        assert not hasattr(palette, "SURFACE_RUNOFF_OPACITY")
+
+
+class TestTheFadeIn:
+    """The one place alpha carries a quantity, and the bound that makes it safe.
+
+    Every cell on the site has runoff — the rain that landed on it has to go
+    somewhere — so drawing them all solid painted the map with "it rained here".
+    A hard floor answers that but draws an edge, and an edge on this layer reads
+    as water *stopping* there, which is a complaint it has already collected
+    twice. So the bottom couple of cubic metres fade instead.
+
+    The rule the fade must not break: it is **one colour** at varying alpha, so
+    no two stops can swap places against a light or dark background. Above the
+    fade top every stop is opaque.
+    """
+
+    def test_the_stated_anchors(self):
+        assert surface_runoff_alpha(0.0) == 0
+        assert surface_runoff_alpha(SURFACE_RUNOFF_FADE_TOP_M3 / 2.0) == 128
+        assert surface_runoff_alpha(SURFACE_RUNOFF_FADE_TOP_M3) == 255
+
+    def test_it_is_a_straight_line_between_them(self):
+        quarter = surface_runoff_alpha(SURFACE_RUNOFF_FADE_TOP_M3 / 4.0)
+        assert quarter == pytest.approx(255 / 4.0, abs=1)
+
+    def test_it_clamps_rather_than_running_past_either_end(self):
+        """A negative cell is a nodata artefact, not a hole in the map, and a
+        channel carrying a thousand cubic metres is not 128,000 opaque."""
+        assert surface_runoff_alpha(-5.0) == 0
+        assert surface_runoff_alpha(1000.0) == 255
+
+    def test_a_cell_carrying_only_its_own_rain_is_barely_drawn(self):
+        """The case the fade exists for: a 2 m grid cell in a 65 mm storm with
+        nothing draining into it — 0.26 m³, and it must not read as flow."""
+        own_rain_m3 = (65.0 / 1000.0) * 4.0
+        assert surface_runoff_alpha(own_rain_m3) < 40
+
+    def test_every_colour_stop_stays_opaque(self):
+        """The fade is beneath the ramp, not inside it. A translucent stop above
+        the fade top would be the magnitude-as-alpha defect coming back."""
+        assert all(rgba[3] == 255 for _f, rgba, _l in surface_runoff_ramp())
+
+    def test_the_fade_covers_one_colour_only(self):
+        """What makes the exception safe: there is nothing below the bottom stop
+        for the alpha to re-order it against."""
+        assert surface_runoff_ramp()[0][0] == 0.0
+
+
+class TestOvertoppingFills:
+    """One fault, one colour, two reference states.
+
+    The band is measured on the full pond, so it says "filled, this leaves over its
+    own crest" whatever the storm does. Where the modelled event also reaches that
+    level it says both — and the difference has to be visible without reading as a
+    different kind of problem, which a second hue would.
+    """
+
+    def test_the_two_states_differ_only_in_alpha(self):
+        from terrainflow_assessment.core.registry.map_palette import (
+            OVERTOPPING_CAPACITY_FILL,
+            OVERTOPPING_FILL,
+        )
+
+        assert OVERTOPPING_FILL[:3] == OVERTOPPING_CAPACITY_FILL[:3]
+        assert OVERTOPPING_FILL[3] != OVERTOPPING_CAPACITY_FILL[3]
+
+    def test_the_hatched_state_carries_more_alpha(self):
+        """It is drawn as a diagonal hatch rather than a solid fill, and a hatch at
+        the solid fill's alpha is barely on the map. The two have to land at
+        comparable weight or the qualified one reads as the lesser problem."""
+        from terrainflow_assessment.core.registry.map_palette import (
+            OVERTOPPING_CAPACITY_FILL,
+            OVERTOPPING_FILL,
+        )
+
+        assert OVERTOPPING_CAPACITY_FILL[3] > OVERTOPPING_FILL[3]
 
 
 class TestKeyHelpers:
     def test_hex_drops_alpha(self):
         """A key shows the hue a stop stands for, not the blend it lands as —
-        a swatch drawn at 16% alpha over a white panel is white."""
+        a swatch drawn at 16% alpha over a white panel is white.
+
+        This used to paper over a real divergence: the surface-runoff stops climbed in
+        alpha, so the key drew "diffuse" solid while the map drew it at 16% and the two
+        disagreed about the same layer. Every ramp is opaque above zero now, so the
+        behaviour is a safeguard rather than a compensation — the inputs below are kept
+        translucent on purpose, to keep testing it.
+        """
         assert hex_of((226, 240, 250, 40)) == "#E2F0FA"
         assert hex_of((8, 36, 110, 245)) == "#08246E"
 

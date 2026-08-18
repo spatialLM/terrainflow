@@ -83,10 +83,12 @@ class FeatureStorage(NamedTuple):
     ``region``           bool mask of the pond, in the flood window's frame
     ``above_ground_m3``  the part standing proud of natural ground (the bank's work)
     ``retained_depth_m`` how deep the water stands against the bank that holds it
+    ``excavation_m3``    the earth it takes out of this hillside — see :meth:`feature_storage`
 
-    The last two are what separate a swale from a small dam, and neither is visible in a
-    volume alone: a 1,095 m³ pond is unremarkable if it sits in a hollow and is a
-    retaining structure if 1.0 m of it stands against a spoil bank.
+    ``above_ground_m3`` and ``retained_depth_m`` are what separate a swale from a small
+    dam, and neither is visible in a volume alone: a 1,095 m³ pond is unremarkable if it
+    sits in a hollow and is a retaining structure if 1.0 m of it stands against a spoil
+    bank.
     """
 
     volume_m3: float
@@ -94,6 +96,7 @@ class FeatureStorage(NamedTuple):
     region: object
     above_ground_m3: float
     retained_depth_m: float
+    excavation_m3: float = 0.0
 
 
 def extend_to_abutments(coords, elevation_at, crest_elev, max_extend_m=250.0,
@@ -602,6 +605,13 @@ class Earthwork:
         # natural ground, and how deep it stands against the bank holding it back.
         self.impounded_above_ground_m3 = None
         self.retained_depth_m = None
+        # The earth this takes out of the hillside, off the same isolated burn. Not the
+        # same question as `capacity_m3` and not derivable from it: a level floor under
+        # ground that rises away from the pour point digs well past the drawn section,
+        # and that over-dig is most of what a contractor prices. None, never 0.0, until
+        # a DEM has been burned — "moves no earth" is a claim, and an unmeasured feature
+        # is not making it. Not serialised, for `terrain_capacity_m3`'s reason above.
+        self.excavation_m3 = None
 
     # ------------------------------------------------------------------
     # Derived geometry fields
@@ -869,12 +879,23 @@ def channel_batter_run(ew):
 def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
                        bottom_width=None, batter_run=None):
     """
-    Calculate storage capacity of an earthwork.
+    Calculate storage capacity of an earthwork — **the whole drawn shape, brim-full.**
 
-    Swale — trapezoidal cross-section × length × 0.8 freeboard.
-    Basin — battered-wall inset-prism volume × 0.8 freeboard (vertical when
-    ``batter_run`` is None/0 — identical to the historical prism).
+    Swale — trapezoidal cross-section × length.
+    Basin — battered-wall inset-prism volume (vertical when ``batter_run`` is
+    None/0 — identical to the historical prism).
     Berm / Dam / Diversion — no storage, returns (0.0, 0.0).
+
+    There is no freeboard allowance in this figure, and that is deliberate. It used to
+    return the section less a blanket 20%, so the one number the plugin called capacity
+    was a design *policy* wearing the name of a geometry — and it was the figure printed
+    under "Capacity (geometric)" beside a measured pond, where the discount was large
+    enough to flip the sign of the comparison: a swale holding 11% less than it was drawn
+    to hold read as holding 11% more. Freeboard on a real feature is the height its
+    spillway leaves between the design nappe and the crest, which is per-feature, in
+    metres, and lives in ``spillway_policy`` / ``effective_freeboard_m``. A single
+    site-wide fraction was never that, and subtracting one here only made the honest
+    figure unavailable to everything downstream.
 
     ``bottom_width`` is the trapezoid's bottom width (m). When ``None`` it is derived
     from the declared top width assuming 1:1 side slopes (``top_width − 2×depth``) —
@@ -913,47 +934,53 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
             # design figure stays hand-checkable from the drawn dimensions.
             cross_section += berm_spoil_per_metre(depth, top_width, bottom_width)
 
-        volume_m3 = cross_section * length * 0.8
+        volume_m3 = cross_section * length
 
     elif ew_type == "basin":
-        # Battered walls via the shared inset-prism primitive (0.8 freeboard stays
-        # here — policy lives in modules, geometry in core/sizing). NOTE: the burn
-        # tier (_burn_basin) still carves a vertical drop this phase; the analytic/
-        # burned divergence for battered basins is surfaced by the verification tier.
+        # Battered walls via the shared inset-prism primitive. NOTE: the burn tier
+        # (_burn_basin) still carves a vertical drop this phase; the analytic/burned
+        # divergence for battered basins is surfaced by the verification tier.
         area_m2 = shapely_area(geometry)
         perimeter_m = shapely_length(geometry)
         z = (batter_run / depth) if batter_run and depth > 0 else 0.0
-        volume_m3 = basin_volume_battered(area_m2, perimeter_m, depth, z).volume * 0.8
+        volume_m3 = basin_volume_battered(area_m2, perimeter_m, depth, z).volume
     else:
         return 0.0, 0.0
 
     return round(volume_m3, 2), round(volume_m3 * 1000, 1)
 
 
-# Fraction of the cross-section kept free of water as freeboard. A design allowance,
-# not a physical limit — which is exactly why it must be reported separately from the
-# geometry rather than baked into a single "capacity" the Verify stage then measures
-# against and finds wanting.
-FREEBOARD = 0.8
-
-
 def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
-                       cut_m3=None, cell_area=None):
+                       cut_m3=None, cell_area=None, excavation_m3=None):
     """Split a feature's capacity into the numbers the Verify stage compares.
 
-    A single "capacity" figure conflated three unrelated gaps, which is why a
-    verification delta of −38% was uninterpretable — it mixed a burn error, a terrain
-    effect and a design allowance into one percentage.
+    A single "capacity" figure conflated unrelated gaps, which is why a verification
+    delta of −38% was uninterpretable — it mixed a burn error, a terrain effect and a
+    blanket design allowance into one percentage. The allowance is gone entirely now;
+    the rest are separated here.
 
-    ``design``      geometric × freeboard — the drawn shape you can check by hand
     ``geometric``   the exact drawn shape: "if I dug precisely this, how big is it?"
     ``rasterisable`` **what this feature impounds on this terrain**, measured by flooding
                     its own burn in isolation (``DEMBurner.feature_storage``)
-    ``freeboard_m3``          design ← geometric (an allowance you chose)
     ``cut_m3``                the trench as the burn cut it, brim-full, no berm
+    ``excavation_m3``         the earth that comes out of this hillside
     ``resolution_penalty_m3`` cut ← section (did the grid hold the section you drew?)
     ``impoundment_m3``        rasterisable ← section (what berm and hillside add)
     ``section_m3`` / ``berm_credit_m3``   what ``geometric`` is made of
+
+    **``cut_m3`` and ``excavation_m3`` are not the same question and the report needs both.**
+    ``cut_m3`` is ``Σ (spill − floor)`` — the trench filled to its own bare pour point, which
+    is exactly the right yardstick for ``resolution_penalty_m3`` because it asks only whether
+    the grid could hold the drawn section. ``excavation_m3`` is ``Σ (original − burned)``:
+    the earth actually moved, which on falling ground is larger, because the burn cuts to a
+    level invert and the ground rises away from the pour point. The two differ by that
+    over-dig and by nothing else on flat ground, where they are equal.
+
+    They were the same number until ``cut_m3`` was printed under a column headed *Cut
+    (measured)* on the page that says to price the job from it — a trench void quoted as an
+    excavation, understating a 10% cross-slope swale by 23%, and contradicting the site
+    total in the table directly beneath it. The direction is not fixed: a basin dug into a
+    natural hollow sits below its own rim, so there ``cut_m3`` reads the *higher* of the two.
 
     Verification compares measured ponding against ``rasterisable``. Both are now floods,
     so a non-zero delta means the *finished site* ponds differently from the feature
@@ -975,7 +1002,8 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
 
     ``terrain_storage_m3`` is the measured pond; ``n_cells`` (the burned footprint's cell
     count) drives the pre-burn model fallback. Without either, nothing is claimed beyond
-    the geometry.
+    the geometry. ``excavation_m3`` likewise: absent, the key is ``None`` and the column
+    degrades to an em dash rather than to a zero that would read as "moves no earth".
     """
     geometric, _ = calculate_capacity(
         ew.type, ew.geometry, ew.depth, ew.width,
@@ -983,8 +1011,10 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
         bottom_width=getattr(ew, "bottom_width_m", None),
         batter_run=getattr(ew, "batter_run_m", None),
     )
-    geometric = geometric / FREEBOARD if FREEBOARD > 0 else geometric
-    design = getattr(ew, "capacity_m3", 0.0) or 0.0
+    # What the feature carries. For a channel or a basin this is the same figure
+    # ``calculate_capacity`` just returned; for a dam it is the flood
+    # ``_compute_dam_capacity`` cached, which is the only capacity a wall has.
+    cached = getattr(ew, "capacity_m3", 0.0) or 0.0
 
     # The same figure with the berm credit withheld — the trench alone, which is what
     # the grid columns describe.
@@ -993,7 +1023,6 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
         bottom_width=getattr(ew, "bottom_width_m", None),
         batter_run=getattr(ew, "batter_run_m", None),
     )
-    section = section / FREEBOARD if FREEBOARD > 0 else section
 
     # Barrier-impounded storage — a dam. There is no drawn cross-section to rasterise:
     # the shape of the water is the shape of the valley, and the analytic capacity is
@@ -1001,20 +1030,22 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
     # a dam through the trapezoid path yielded a geometric of 0 and a rasterisable of
     # whatever a channel of that width would hold, so a dam that verified perfectly
     # (2,148 m³ measured against 2,148 m³ designed) reported Δ +1712%.
-    barrier = geometric <= 0 and design > 0
+    barrier = geometric <= 0 and cached > 0
     if barrier:
         # A dam has no drawn cross-section, but it does have a pond, and since that pond
         # is now measured the same way every other feature's is, it can be reported.
-        raster = float(terrain_storage_m3) if terrain_storage_m3 is not None else design
+        raster = float(terrain_storage_m3) if terrain_storage_m3 is not None else cached
         return {
-            "design": round(design, 2),
-            "geometric": round(design, 2),
+            "geometric": round(cached, 2),
             "rasterisable": round(raster, 2),
-            "freeboard_m3": 0.0,
+            # Both cut figures stay absent for a wall. A dam's contact band is the drawn
+            # line, not the footprint of the wall standing on it, so any excavation
+            # integrated over it would be a number about the wrong shape.
             "cut_m3": None,
+            "excavation_m3": None,
             "resolution_penalty_m3": 0.0,
             "impoundment_m3": 0.0,
-            "section_m3": round(design, 2),
+            "section_m3": round(cached, 2),
             "berm_credit_m3": 0.0,
             "barrier_impounded": True,
         }
@@ -1047,11 +1078,11 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
     penalty = round(cut_m3 - section, 2) if cut_m3 is not None else 0.0
 
     return {
-        "design": round(design, 2),
         "geometric": round(geometric, 2),
         "rasterisable": round(raster, 2),
-        "freeboard_m3": round(geometric - design, 2),
         "cut_m3": round(float(cut_m3), 2) if cut_m3 is not None else None,
+        "excavation_m3": (round(float(excavation_m3), 2)
+                          if excavation_m3 is not None else None),
         "resolution_penalty_m3": penalty,
         # What the bank and the hillside add beyond the drawn trench. On falling ground a
         # keyed berm holds water above natural ground and further up the slope than the
@@ -1163,13 +1194,21 @@ def burn_quantities(original, burned, cell_area_m2):
     **Site totals only.** Per feature would need earthmoving attributed between
     overlapping cuts and banks that lie outside their own footprints, and a figure
     invented by an attribution rule is worse than one honestly aggregated.
+
+    Summed with ``nansum``, as every other quantity taken off these surfaces is.
+    Holes are NaN in ``self.original`` and in everything derived from it, so a plain
+    ``.sum()`` returns NaN for the **whole site** the moment the DEM has one nodata
+    cell — which a DEM clipped to a boundary always does. That NaN then reached the
+    report's volume rounding, and ``int(round(nan))`` is what put "Export failed:
+    cannot convert float NaN to integer" on the screen in place of a document. A
+    cell with no elevation moved no earth.
     """
     orig = np.asarray(original, dtype="float64")
     burn = np.asarray(burned, dtype="float64")
     diff = burn - orig
     return {
-        "cut_m3": float(np.clip(-diff, 0.0, None).sum()) * cell_area_m2,
-        "fill_m3": float(np.clip(diff, 0.0, None).sum()) * cell_area_m2,
+        "cut_m3": float(np.nansum(np.clip(-diff, 0.0, None))) * cell_area_m2,
+        "fill_m3": float(np.nansum(np.clip(diff, 0.0, None))) * cell_area_m2,
     }
 
 
@@ -2087,7 +2126,18 @@ class DEMBurner:
 
         if band.any():
             rows, cols, chainage = self._band_chainage(band, coords)
-            burn = start_elev - chainage * gradient_frac - ew.depth
+            # The batter, from the two widths, exactly as a swale's — the registry gives
+            # a diversion `default_side_slope` and derives its bottom width, so it is
+            # specified as a trapezoid and `calculate_cut_volume` prices it as one. This
+            # burn cut it as a full-depth rectangle across the whole band: the same
+            # mismatch `_storage_invert` was rewritten to fix for swales, left standing
+            # here because a graded invert could not use `tapered_invert`, whose floor is
+            # one elevation. It does not need to — the taper is a per-cell fraction of
+            # depth and the grade is a per-cell datum, so they simply multiply.
+            reach = taper_reach(band, channel_batter_run(ew),
+                                (self.cell_h, self.cell_size))
+            depth = ew.depth if reach is None else ew.depth * reach[rows, cols]
+            burn = start_elev - chainage * gradient_frac - depth
             # np.minimum, so a cell already lower keeps its level and a hole stays a
             # hole — NaN propagates rather than the drain inventing ground to cut.
             dem[rows, cols] = np.minimum(dem[rows, cols], burn)
@@ -2328,6 +2378,26 @@ class DEMBurner:
         ``baseline_ponding`` is the pre-earthwork ponding on the same grid — pass the cached
         baseline layer to save a flood pass. ``isolated_dem`` overrides the burn (the dam
         path passes its idealised keyed variant); ``isolated_mask`` goes with it.
+
+        **``excavation_m3`` — the earth this feature takes out, and why it is measured here.**
+        ``Σ (original − isolated) × cell_area`` wherever the isolated burn lowered ground.
+        It is the same expression :meth:`_warn_steep` computes for its advisory, and it is
+        the figure the report's *Cut (measured)* column wants: it carries the level-floor
+        over-dig, which on falling ground is most of the difference between the drawn section
+        and the earth a contractor moves.
+
+        It is measured on the **isolated** burn and over the **whole grid**, and both halves
+        of that matter. The site burn lowers one shared array feature by feature with
+        ``np.minimum``, so a feature whose footprint overlaps a neighbour's finished trench
+        writes nothing there and would be credited with earth the neighbour moved — the
+        attribution :func:`burn_quantities` refuses to invent. Burning alone removes the
+        ordering entirely. Whole-grid rather than over ``burned_masks`` because a recorded
+        mask is not always the cut: a diversion drain records its contact band and cuts a
+        separately rasterised set of cells, so integrating the mask would miss earth it moves.
+
+        For a dam ``isolated_dem`` is the caller's idealised keyed wall rather than the burn,
+        so the figure describes that idealisation; nothing reads it, because a dam has no
+        drawn section to compare against and :func:`capacity_breakdown` reports no cut for one.
         """
         from rasterio.transform import Affine
         from scipy.ndimage import binary_dilation
@@ -2343,6 +2413,15 @@ class DEMBurner:
             return FeatureStorage(0.0, None, None, 0.0, 0.0)
 
         cell_area = self.cell_area
+        # Both idioms are :func:`burn_quantities`', and for its reasons. nansum, not sum:
+        # a DEM clipped to a boundary always has nodata, one NaN would take the whole
+        # total with it, and a cell with no elevation moved no earth. float64, not the
+        # DEM's float32: accumulating twenty thousand cells in float32 costs the last
+        # four digits, which is enough to stop this agreeing with the site total it is
+        # supposed to sum toward.
+        excavation_m3 = float(np.nansum(np.clip(
+            self.original.astype("float64") - np.asarray(isolated_dem, dtype="float64"),
+            0.0, None))) * cell_area
         rows, cols = self.shape
         r_lo, r_hi, c_lo, c_hi = self._feature_cell_bounds(ew)
         pad = _DAM_WINDOW_PAD_CELLS
@@ -2373,7 +2452,9 @@ class DEMBurner:
             pad *= 2
 
         if not region.any():
-            return FeatureStorage(0.0, None, None, 0.0, 0.0)
+            # It holds nothing, but it was still dug: a cut-off drain on falling ground
+            # ponds nowhere and is the most earth-moving feature on some sites.
+            return FeatureStorage(0.0, None, None, 0.0, 0.0, excavation_m3)
 
         volume = float(new_pond[region].sum() * cell_area)
         surface = isolated_dem[win][region] + new_pond[region]
@@ -2389,7 +2470,7 @@ class DEMBurner:
         retained = float(np.clip(level - ground[raised], 0.0, None).max()) \
             if raised.any() else 0.0
 
-        return FeatureStorage(volume, level, region, above_m3, retained)
+        return FeatureStorage(volume, level, region, above_m3, retained, excavation_m3)
 
     def feature_storage_m3(self, ew, baseline_ponding=None):
         """Just the volume from :meth:`feature_storage` — the common case."""

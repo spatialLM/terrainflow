@@ -29,6 +29,7 @@ the same section types, so they cannot drift apart again.
 import base64
 import io
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
@@ -204,19 +205,32 @@ def round_volume(m3):
     The balance reports to 0.1 m³. Printing that claims a survey nobody did, and
     one over-precise figure invites the reader to distrust every other one. Below
     10,000 m³ round to the nearest 10; above it, to the nearest 100.
+
+    A NaN or infinity is treated as no figure at all — the same as ``None``, so it
+    prints as an em dash. Every volume in the document comes through here, and
+    ``int(round(nan))`` raises, so one unmeasurable number used to abort the whole
+    export with "cannot convert float NaN to integer" rather than leave one cell
+    blank. A figure that is not a number is not one this document can print.
     """
     if m3 is None:
         return None
     v = float(m3)
+    if not math.isfinite(v):
+        return None
     step = 10.0 if abs(v) < 10000.0 else 100.0
     return int(round(v / step) * step)
 
 
 def fmt_volume(m3, unit="m³"):
-    """A rounded volume with thousands separators, or an em dash for None."""
-    if m3 is None:
+    """A rounded volume with thousands separators, or an em dash for no figure.
+
+    "No figure" is ``None`` *or* anything :func:`round_volume` cannot round — a NaN
+    volume is not a volume.
+    """
+    rounded = round_volume(m3)
+    if rounded is None:
         return "—"
-    return f"{round_volume(m3):,}{(' ' + unit) if unit else ''}"
+    return f"{rounded:,}{(' ' + unit) if unit else ''}"
 
 
 def fmt_pct(pct, places=0):
@@ -309,6 +323,10 @@ def cut_fill_sentence(cut_m3, fill_m3):
     """
     cut = round_volume(cut_m3 or 0.0)
     fill = round_volume(fill_m3 or 0.0)
+    if cut is None or fill is None:
+        # One of the two is not a number — say so, rather than subtracting it.
+        return ("The earthmoving quantities could not be measured for this "
+                "design.")
     net = cut - fill
     if abs(net) < 10:
         return (f"About {cut:,} m³ comes out and {fill:,} m³ goes back in — "
@@ -645,10 +663,28 @@ class SpillOver(NamedTuple):
     alt_saddle_m: float        # lowest rim point that is NOT this barrier (inf if none)
     pool_volume_m3: float
     mask: object               # bool array — the crest cells water goes over
+    # Where the water surface actually stands this event, or None when no event
+    # pond was supplied. Everything above is a property of the ground and the
+    # structure and holds whatever the storm does; this is the one figure that
+    # depends on the storm.
+    event_level_m: float = None
+
+    @property
+    def overtops_this_event(self):
+        """Does the modelled event reach the pour level, or only capacity would?
+
+        None when there is no event pond to answer from — which is not False. A
+        barrier that has not been asked is not a barrier that has been cleared.
+        """
+        if self.event_level_m is None:
+            return None
+        # A millimetre, matching ``min_depth``: below that the pool is at the pour
+        # level as far as anything measured off a metre-grid DEM can tell.
+        return self.event_level_m >= self.pour_level_m - 1e-3
 
 
 def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
-                      min_depth=0.001, cell_area_m2=None):
+                      min_depth=0.001, cell_area_m2=None, event_depth=None):
     """Which barriers their own pools pour over, and along what length of crest.
 
     A pool fills to the lowest point of its rim and leaves there. Where that low point
@@ -704,6 +740,20 @@ def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
     natural saddle either. Defaults to the barrier's own crest, which is the weaker
     answer but never a wrong-shaped one.
 
+    ``ponding`` is the **full-capacity** raster, and everything above is therefore an
+    answer about the structure rather than about the storm: *filled to its spill point,
+    this pool leaves over its own crest*. That is the right reference state for the
+    question the layer exists to ask — a wall with no freeboard is a fault whether or
+    not this particular event finds it — but on the map it sat one row from an event
+    water line drawn well below the crest, and read as a claim that the modelled storm
+    was going over the top. It was not.
+
+    ``event_depth`` is what closes that gap: the event pond depth raster
+    (:func:`event_pond_depth`) on the same grid. Each spill then also carries
+    ``event_level_m``, the elevation the water actually reaches, so a caller can tell
+    *this event overtops it* from *filling it would*. Omit it and ``event_level_m`` is
+    None, which the callers read as "not asked" rather than as "no".
+
     Returns a list of :class:`SpillOver`, one per barrier that pours over itself,
     deepest pool first. A barrier whose pool escapes elsewhere is simply absent.
     """
@@ -730,6 +780,10 @@ def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
     if made_ground is not None and made_ground.shape != pond.shape:
         made_ground = None
 
+    event = None if event_depth is None else np.asarray(event_depth, dtype="float64")
+    if event is not None and event.shape != pond.shape:
+        event = None
+
     for name, crest, drawn_len in barriers:
         crest = np.asarray(crest, dtype=bool)
         if crest.shape != pond.shape or not crest.any():
@@ -750,6 +804,15 @@ def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
             alt = float(bed[other].min()) if other.any() else float("inf")
             length = min(float(own.sum()) * float(cell_size_m),
                          float(drawn_len) if drawn_len else float("inf"))
+            # The water surface this event puts in *this* pool. A pool is level, so
+            # any wet cell answers it and the max is taken only to be immune to the
+            # pool's edge cells. Dry this event → the floor, which is below the pour
+            # level by construction and so reads as "does not reach the crest".
+            event_level = None
+            if event is not None:
+                filled = pool & (event > min_depth)
+                event_level = (float((bed + event)[filled].max()) if filled.any()
+                               else float(bed[pool].min()))
             out.append(SpillOver(
                 name=name,
                 pour_level_m=pour,
@@ -757,6 +820,7 @@ def overtopping_spill(ponding, ground, cell_size_m, barriers, built=None,
                 alt_saddle_m=alt,
                 pool_volume_m3=float(pond[pool].sum() * cell_area),
                 mask=own,
+                event_level_m=event_level,
             ))
     out.sort(key=lambda s: -s.pool_volume_m3)
     return out
@@ -932,13 +996,11 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     (``rasterisable``) rather than the design capacity, which is what makes it
     interpretable: a non-zero delta then means the burn is wrong, and nothing else.
 
-    Unrelated gaps used to be summed into one percentage — a burn error, the grid's
-    distortion of the drawn shape, and the freeboard allowance the user chose. That is
-    why a headline of "Verified · Δ −38%" carried no actionable meaning. Each is now
-    reported separately, and the first two are *calculated* while the last two are
-    *measured*, which is the division that matters:
+    Unrelated gaps used to be summed into one percentage — a burn error and the grid's
+    distortion of the drawn shape. That is why a headline of "Verified · Δ −38%" carried
+    no actionable meaning. Each is now reported separately, and the first is *calculated*
+    while the rest are *measured*, which is the division that matters:
 
-    ``design`` → ``geometric``     the freeboard allowance (a choice)
     ``section`` → ``cut``          did the grid hold the section you drew?
     ``section`` → ``rasterisable`` what the bank and the hillside add (``impoundment_m3``)
     ``rasterisable`` → ``terrain``   interaction with neighbouring features
@@ -1031,6 +1093,7 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
         berm_credit = float(b.get("berm_credit_m3", 0.0))
         penalty = float(b.get("resolution_penalty_m3", 0.0))
         cut = b.get("cut_m3")
+        excavation = b.get("excavation_m3")
         # What the bank and the hillside add beyond the drawn trench. Positive and often
         # large; not an error, and deliberately its own key so it can never be mistaken
         # for one.
@@ -1061,7 +1124,10 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
 
         per_feature.append({
             "name": name,
-            "analytic_m3": float(analytic_m3),          # design (with freeboard)
+            # The whole drawn shape, brim-full. It carried a blanket 20% freeboard
+            # deduction until that allowance was removed, so this and ``geometric_m3``
+            # are now the same quantity for anything with a drawn section.
+            "analytic_m3": float(analytic_m3),
             "geometric_m3": geometric,                   # the drawn shape
             # What geometric is made of. The grid columns describe the trench only, so
             # a reader comparing them needs to know how much of Geometric is not trench.
@@ -1070,10 +1136,16 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
             "rasterisable_m3": reference,                # what it impounds, alone
             "terrain_m3": terrain_m3,                    # what the finished site ponds
             "delta_pct": feat_delta_pct,                 # interaction with neighbours
-            "freeboard_m3": float(b.get("freeboard_m3", 0.0)),
             # The trench as cut, and the grid-fidelity gap it implies. None where no burn
             # has run — a claim about the cut needs a cut.
             "cut_m3": float(cut) if cut is not None else None,
+            # The earth that comes out, which is a different question from the one above
+            # and the one the build schedule prices from: `cut_m3` is the trench filled to
+            # its own pour point, this is `original − burned`. They part company by the
+            # over-dig a level invert makes on falling ground. Kept as separate keys
+            # because the panel narrates the first and the report prints the second, and
+            # the single name they used to share is how one came to be printed as the other.
+            "excavation_m3": float(excavation) if excavation is not None else None,
             "resolution_penalty_m3": penalty,
             "impoundment_m3": impoundment,
             "routing_only": routing_only,
@@ -1118,7 +1190,7 @@ def build_verification(analytic_by_name, terrain_by_name, baseline_total_m3,
     caveats = [
         "Δ compares measured terrain storage against what a "
         f"{cell_size:.2f} m grid can represent — so a non-zero Δ is a burn issue, not "
-        "a resolution or freeboard effect.",
+        "a resolution effect.",
         "Terrain volume is attributed by connected depression. A pool that reaches "
         "two features belongs to neither alone, so it is reported once for the pair.",
         "Terrain total includes barrier-impounded storage (e.g. dams) that has no "

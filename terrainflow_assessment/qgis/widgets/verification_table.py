@@ -2,9 +2,8 @@
 verification_table.py — per-earthwork design vs measured storage.
 
 Replaces a single site-wide "Verified · Δ −38%" chip, which conflated three unrelated
-gaps and so meant nothing. Four columns, each answering one question:
+gaps and so meant nothing. Three columns, each answering one question:
 
-  Design       geometric x 0.8 freeboard        "What do I plan on?"
   Geometric    the drawn shape, exactly          "How big is the hole I drew?"
   At grid      that shape as the terrain model   "What did the terrain model make of it?"
                represents it
@@ -15,13 +14,22 @@ touches the DEM, so it is the number to trust for "will this hold enough". At-gr
 Measured check placement, routing and the burn against real terrain — for a feature the
 terrain model cannot hold, they are not storage volumes at all.
 
+There was a fourth column, **Design**, and it led: ``geometric`` less a blanket 20%
+freeboard. It is gone, and so is the deduction it was made of. Freeboard on a real
+feature is set by its spillway, which is sized on the Spillways table from a peak flow
+this column knew nothing about — so a figure from a rule of thumb sat first in a run of
+columns meant to be compared against each other, and invited exactly the comparison it
+could not support. Dropping the column left the 20% deduction itself inside
+``calculate_capacity``, still reaching the build schedule under a heading that said
+*geometric*, so it is gone too: **Geometric is the whole drawn section, brim-full.**
+The panel and the report now say the same thing.
+
 Only the last comparison is a correctness check. **Δ = Measured vs At-grid**, and it
-should sit near zero — a non-zero Δ there is a burn bug and nothing else. The other two
-gaps are expected, and both are now small: Design → Geometric is the freeboard
-allowance, a fixed −20%, and Geometric → At-grid is the terrain model cutting the
-section that was drawn. The burner tapers the walls to the feature's own two widths, so
-the trench it cuts is the trapezoid rather than a full-depth rectangle a third to a half
-larger; and At-grid is *measured* off that trench rather than modelled beside it.
+should sit near zero — a non-zero Δ there is a burn bug and nothing else. The remaining
+expected gap is Geometric → At-grid, the terrain model cutting the section that was
+drawn. The burner tapers the walls to the feature's own two widths, so the trench it cuts
+is the trapezoid rather than a full-depth rectangle a third to a half larger; and At-grid
+is *measured* off that trench rather than modelled beside it.
 
 Where the gap is still material the grid genuinely cannot hold the section — a footprint
 two cells across has no cell more than half a cell from its own edge, so it cannot reach
@@ -85,7 +93,7 @@ _OVERSTATED_MARK = "†"
 # feature genuinely built into a hollow clears it by orders of magnitude.
 _EXISTING_PONDING_FLOOR = 10.0
 
-_HEADERS = ("Feature", "Design", "Geometric", "At grid", "Measured", "Δ")
+_HEADERS = ("Feature", "Geometric", "At grid", "Measured", "Δ")
 
 # Per-column hover copy. The header row has no space for the distinction that matters
 # most — which columns are calculated and which are measured — so it is said here and
@@ -174,8 +182,11 @@ class VerificationTable(QWidget):
         delta = row.get("delta_pct")
 
         # A dam has no drawn cross-section — the shape of the water is the shape of
-        # the valley — so repeating one number across three columns would imply an
-        # agreement that was never tested. Show it once, under Design.
+        # the valley — so repeating one number across two columns would imply an
+        # agreement that was never tested. Show it once, in Geometric, tagged with why
+        # it is not a drawn section. That is the report's own convention for this row
+        # (``_volume_ladder`` prints "N (barrier-impounded)"), and following it here is
+        # what stopped a dam losing its only volume figure when Design went.
         barrier = bool(row.get("barrier_impounded"))
 
         # The terrain model does not hold this feature's drawn section, so neither of
@@ -195,8 +206,8 @@ class VerificationTable(QWidget):
 
         cells = [
             (row.get("name", "—"), _INK, Qt.AlignmentFlag.AlignLeft),
-            (_m3(row.get("analytic_m3")), _MUTED, Qt.AlignmentFlag.AlignRight),
-            ("impounded" if barrier else _m3(row.get("geometric_m3")),
+            (f"{_m3(row.get('analytic_m3'))} impounded" if barrier
+             else _m3(row.get("geometric_m3")),
              _FAINT if barrier else _MUTED, Qt.AlignmentFlag.AlignRight),
             ("—" if barrier else _m3(row.get("rasterisable_m3")),
              _FAINT if barrier else _INK, Qt.AlignmentFlag.AlignRight),
@@ -250,11 +261,12 @@ class VerificationTable(QWidget):
             return (
                 f"{name} impounds water against the terrain, so there is no drawn "
                 f"cross-section to rasterise — the shape of the pool is the shape of "
-                f"the valley. Its design figure is already a flooded-volume "
-                f"calculation over this same grid.\n\n"
+                f"the valley. The {design:,.0f} m³ under Geometric is already a "
+                f"flooded-volume calculation over this same grid, which is why it is "
+                f"marked impounded rather than read as a drawn section.\n\n"
                 f"Δ therefore compares the burn ({_m3(measured)} m³) against that "
-                f"calculation ({design:,.0f} m³) directly. Near zero means the two "
-                f"agree; there is no freeboard or resolution term to separate out."
+                f"calculation directly. Near zero means the two agree; there is no "
+                f"resolution term to separate out."
             )
         if row.get("routing_only"):
             return (f"{name} is narrower than one DEM cell. It is verified for "
@@ -270,12 +282,10 @@ class VerificationTable(QWidget):
                     f"footer gives the pair's measured volume against the pair's "
                     f"at-grid capacity, which is the comparison that tests the burn.")
 
-        design = row.get("analytic_m3") or 0.0
         geometric = row.get("geometric_m3") or 0.0
         at_grid = row.get("rasterisable_m3") or 0.0
         measured = row.get("terrain_m3")
         penalty = row.get("resolution_penalty_m3") or 0.0
-        freeboard = row.get("freeboard_m3") or 0.0
 
         overstated = bool(row.get("section_overstated"))
         gap_pct = row.get("section_gap_pct")
@@ -283,14 +293,14 @@ class VerificationTable(QWidget):
         section = row.get("section_m3") or geometric
         impoundment = row.get("impoundment_m3") or 0.0
         cut = row.get("cut_m3")
+        excavation = row.get("excavation_m3")
 
         parts = [f"{name}"]
-        if geometric > 0 and freeboard:
+        if geometric > 0:
             parts.append(
-                f"Design {design:,.0f} m³ is the drawn {geometric:,.0f} m³ less "
-                f"{freeboard:,.0f} m³ of freeboard — your allowance, not an error. Both "
-                f"are calculated from your dimensions; the two columns after them are "
-                f"measured off the ground.")
+                f"Geometric {geometric:,.0f} m³ is the shape you drew, calculated from "
+                f"your dimensions and brim-full; the two columns after it are measured "
+                f"off the ground.")
         if at_grid > 0 and section > 0 and impoundment > section * 0.05:
             parts.append(
                 f"At grid {at_grid:,.0f} m³ is what this feature impounds on this "
@@ -306,10 +316,22 @@ class VerificationTable(QWidget):
         if cut is not None and penalty:
             gap = gap_pct if gap_pct is not None else penalty / section * 100.0
             parts.append(
-                f"The trench itself came out at {cut:,.0f} m³ against the "
+                f"The trench holds {cut:,.0f} m³ to its own rim against the "
                 f"{section:,.0f} m³ drawn, {gap:+.0f}%. That is purely whether the grid "
                 f"could hold the section — a feature narrower than about three cells "
                 f"cannot reach full depth at any cell size.")
+        # Deliberately a separate sentence from the one above, and never folded into it.
+        # They are two measurements of different things that agree only on flat ground:
+        # the rim figure is what fits in the hole, this is what comes out of the hillside,
+        # and the gap is the over-dig a level invert makes as the ground rises away from
+        # the pour point. Narrating the second against the first's percentage was the
+        # defect this pair was split to prevent.
+        if excavation is not None and excavation > 0:
+            parts.append(
+                f"Excavation {excavation:,.0f} m³ is the earth that comes out — measured "
+                f"off the ground rather than the section, so it carries the extra dig "
+                f"where the hillside rises away from the trench's level floor. This is "
+                f"the figure the Site Water Plan prices from.")
         if measured is not None and at_grid > 0:
             parts.append(
                 f"Measured {measured:,.0f} m³ against {at_grid:,.0f} m³ at grid is the "
@@ -359,8 +381,8 @@ class VerificationTable(QWidget):
                 bits.append(
                     f"{worst['name']} ponds {worst_pct:+.0f}% against what it holds on "
                     f"its own. Both figures are floods, so that is a neighbouring "
-                    f"feature changing where its water goes — not resolution, not "
-                    f"freeboard, and not the burn.")
+                    f"feature changing where its water goes — not resolution "
+                    f"and not the burn.")
 
         # The headline the two measured columns cannot show on their own: how much of the
         # storage is the hillside rather than the cross-section. On a keyed design this is
@@ -389,8 +411,8 @@ class VerificationTable(QWidget):
             name, pct = max(penalties, key=lambda p: abs(p[1]))
             bits.append(
                 f"The widest gap between the trench you drew and the one the grid could "
-                f"cut is {pct:+.0f}% on {name}; the site-wide −20% between Design and "
-                f"Geometric is your freeboard.")
+                f"cut is {pct:+.0f}% on {name}.")
+
         if flagged:
             names = ", ".join(r.get("name", "?") for r in flagged[:3])
             more = f" and {len(flagged) - 3} more" if len(flagged) > 3 else ""

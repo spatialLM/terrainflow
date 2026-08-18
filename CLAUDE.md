@@ -39,6 +39,18 @@ at the top of the legend and expanded, which is what the grouping exists to prev
 Stage groups are found by a custom property, not by name, because their name carries
 the run tag (`_state.run_tag`, frozen when Baseline runs).
 
+Raster overlay colours live in `core/registry/map_palette.py` — one set of stops per
+quantity, read by the renderers, the panel key and the report legend alike. Two rules
+it holds: **darker means more water**, and **alpha is for absence, not magnitude**.
+Surface runoff takes the one bounded exception: below `SURFACE_RUNOFF_FADE_TOP_M3`
+(2 m³) the ramp is a single colour fading to nothing, so no two stops can re-order
+against each other. Whole-layer opacity is not used anywhere.
+
+A Baseline layer and its Earthworks counterpart must share one ramp top — go through
+`_symbols.apply_shared_ramp(state, project, family, layer, stops)`, never
+`apply_raster_ramp` directly. A pair drawn on two scales shows a difference that
+belongs to the ramp and not to the design.
+
 ## The hydrology chain (read before touching any sizing number)
 
 Two different questions, deliberately answered by different code. Conflating them is
@@ -66,6 +78,48 @@ Non-obvious invariants:
   up CN zones.
 - Verification compares **measured vs rasterisable**, not vs design. Dams are
   `barrier_impounded` and skip that path entirely (no drawn section to rasterise).
+- **Two accumulation fields, and only one of them retains.** `runoff_accumulation`
+  (m³ — the Surface Runoff layer, exit volumes, volume-mode streams) has every hollow
+  hold back what it can store, so it is the water that *actually* gets downstream:
+  `spread_crests(capacities=plan.capacities)`, measured off the DEM as Σ(filled − ground)
+  and needing no idea what an earthwork is. `FlowAnalysis.acc` is a **cell count** —
+  contributing area, feeding streams, keypoints and Tc — and must never be retained
+  against, because capping a count with a volume is a category error. `retain=` is off by
+  default for exactly that reason. Conservation is
+  `terminal flux + retained + residual + stranded == total`; `retained` is a terminal,
+  `residual` is only water the loop ran out of passes to place. **`stranded` is a
+  docstring term, not a computed one** — grep finds it only in `crest_routing`'s header,
+  so this identity is asserted by prose and not by code. Compute it or drop it.
+- **The flat-inflation step is derived, never pysheds' default.** `resolve_flats` returns
+  `filled + eps × drainage_gradient`, and that gradient is an integer BFS distance to the
+  flat's outlet — so the inflation grows with the *size* of the flat while `eps` stays a
+  fixed 1e-5 m. On a tile 70% covered by one harbour plane the gradient reached 1842 and
+  lifted it 1.84 cm, burying every low bump standing under a centimetre proud: **516 cells
+  that had a way downhill lost it, and swallowed 12.5% of the tile's drainage into
+  self-loops.** Go through `resolve_flats_safely()`, which bounds the step by
+  `eps × (g[B] − g[A]) < z[A] − z[B]` over every neighbour pair (`safe_flat_epsilon`) —
+  gentler than the default by construction, floored so the gradient still routes in
+  float64, and reporting what it could not save rather than hiding it. The conditioned
+  DEM is saved **float64** because that step can be small.
+- **A share of runoff must be m³ over m³, over the same ground.** `unrouted_flow()` and
+  the warnings take `domain=` and `field=` because they once took neither: the numerator
+  was summed over the whole tile while the denominator counted only the site, off a cell
+  count the message called runoff. That is how a field run reported **105% of runoff**
+  unrouted. An impossible share is printed and flagged, never clamped, and
+  `unrouted_diagnostics()` writes `unrouted_{label}.txt` beside the rasters when anything
+  is stuck — pass it `runoff_volume_m3`, or its m³ ratios divide by the sum of the
+  throughflow field, which is each cubic metre counted once per cell it passes.
+- **"The site" can be a guess, and a run that guessed says so.** `footprint.domain_mask`
+  falls through drawn area → boundary → every usable DEM cell → the whole grid, and
+  `with_source=True` returns which. A DEM can declare a nodata sentinel and contain none
+  of it, so "usable cells" is not "land" — on the Quail Island tile it was 285 ha, 200 of
+  them harbour, and that mask is the denominator of every percentage the report prints.
+- **Overtopping is measured on the *full* pond, not the event.** `overtopping_spill`
+  takes the brim-full ponding raster, so it answers *filled, does this pool leave over
+  its own crest* — a freeboard fact about the structure. Pass `event_depth=` and each
+  spill also carries `event_level_m` / `overtops_this_event`, where `None` means "not
+  asked" and is not `False`. The map draws the two as separate `Overtopping (full)` and
+  `Overtopping (event)` layers.
 
 ## The report (`Site Water Plan`, PDF)
 
@@ -98,10 +152,22 @@ Timing claims live **only** in `_page_simulation`, which appears when `state.com
 exists and says on the page that it came from the simulation. Nothing else in the report
 may imply *when* water arrives — the rest is an event-total balance.
 
-Three presentation rules the tests enforce: the four storage figures appear in derivation
+Three presentation rules the tests enforce: the three storage figures appear in derivation
 order with **Δ only ever against the grid**, the two exit volumes are never in one table,
 and anything unreliable is **suppressed rather than printed as zero** (`drain_hours=None`
-is "does not empty by soaking", not `0`).
+is "does not empty by soaking", not `0`; a NaN volume is an em dash, not `nan` — see
+`round_volume`).
+
+There were four storage figures until "Design storage" was dropped: it was `geometric`
+less a blanket freeboard fraction, and freeboard on a real feature is set by its
+spillway, which is sized on its own page from a peak flow that column knew nothing
+about. A figure from a rule of thumb, sitting first in a run of columns meant to be
+compared against each other, invited exactly the comparison it could not support.
+
+Two kinds of figure, named the same way everywhere: **geometric calculated** (from the
+drawn dimensions, assumes flat ground) and **measured** (off the elevation model). The
+words are the `CALCULATED` / `MEASURED` constants in `report_model.py` and every table
+carries one via `_tag()`.
 
 Non-obvious layout facts, all measured rather than assumed:
 - `QgsLayoutItemTextTable.totalSize()` returns the **frame** height, not the content height,
@@ -139,11 +205,22 @@ Only add/modify what's asked — no drive-by refactors of working code.
   untracked by definition. Every `.ps1` is ASCII-only and BOM-less, because PowerShell 5.1
   reads a `.ps1` as ANSI and a stray em dash is a parse error — enforced by
   `tests/test_architecture.py`, which also guards the layering rules below.
-- **Tests:** `python -m pytest tests/` (target Python 3.9). `pyproject.toml` sets a 95%
-  coverage gate on pure-Python `modules/`; the `qgis/*` Qt/QGIS layer is omitted from that
-  gate — it is covered by the real-QGIS harness below instead.
-- **Lint:** `ruff check terrainflow_assessment/`. CI (`.github/workflows/ci.yml`) runs ruff +
-  pytest + a grep-gate against deprecated QGIS APIs on every push.
+- **Tests:** `python -m pytest tests/` (target Python 3.9) — **run the whole suite; do not
+  scope it.** ~2,480 tests in ~70 s (~80 s with coverage), and the profile is flat (one test over
+  2 s), so there is no slow tail to skip. Scoping saves under a minute and costs
+  correctness: `earthwork_design.py` fans out to 11 test files and `catchment.py` to 6,
+  and there is no `modules/earthwork.py` or `modules/dem_burner.py` despite tests named
+  for them. A mapping that lossy sells false confidence for a few seconds.
+- **Coverage is asked for, never assumed.** `pyproject.toml` gates pure-Python `modules/`
+  at 95% but keeps `--cov` **out of `addopts`**, because a forced gate made every scoped
+  run print `43 passed` *and* `FAIL Required test coverage`, exiting 1 — an exit code that
+  says failure on a green run teaches you to stop reading exit codes. Before a commit run
+  `python -m pytest tests/ --cov=terrainflow_assessment --cov-report=term-missing`; that
+  is what CI runs, and the `qgis/*` Qt/QGIS layer is omitted from the gate because the
+  real-QGIS harness below covers it instead.
+- **Lint:** `python -m ruff check terrainflow_assessment/` — bare `ruff` is not on PATH
+  here. CI (`.github/workflows/ci.yml`) runs ruff + pytest + a grep-gate against
+  deprecated QGIS APIs on every push.
 
 ## Real-QGIS testing (`tests_qgis/`) — run this after touching `qgis/`, `panel.py` or `map_tools/`
 
@@ -154,12 +231,54 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, ~8 min (189 checks). Exit code gates.
-.\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
+.\run_qgis_tests.ps1              # the full suite, headless, 8-10 min (195 checks). Exit code gates.
+#                                   longer than a 10-min tool timeout — background it.
+.\run_qgis_tests.ps1 checks_baseline   # one module, ~30-40 s. This is the iteration loop.
+.\run_qgis_tests.ps1 --skip=checks_report   # everything else
 .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept changed screenshots
 .\run_qgis_tests.ps1 -Accept      # accept the screenshots on disk (instant, no re-run)
 .\run_qgis_gui_shot.ps1           # load in real QGIS, screenshot the window, quit
 ```
+
+**Scope this suite while iterating; run it whole before you commit.** It is the expensive
+one — 8-10 min against ~70 s for `pytest tests/` — and each module is its own QGIS
+subprocess costing ~9-10 s to boot, so ~160 s of a full run is boot alone and there is a
+~30 s floor under any run at all. One named module is ~30-40 s. Eight minutes every edit
+is the kind of honest-but-unaffordable habit that quietly decays into running nothing.
+
+**Pass the full `checks_*` module name, not a bare word.** Patterns are matched against
+check *names* as well as module names — which is how a single check gets run by name, and
+also how `.\run_qgis_tests.ps1 report` silently selected `checks_crs`, `checks_simulation`
+and `checks_threading` (they hold `check_..._reported` / `..._reports_...`) and paid three
+extra QGIS boots for three checks nobody wanted. `checks_report` matches only itself. Every
+run now prints which modules it chose and what matched them, so check that line.
+
+| Touching | Run |
+|---|---|
+| `controllers/baseline.py`, `workers/analysis_worker.py` | `checks_baseline` |
+| `controllers/contour.py`, `modules/contour_analysis.py`, `modules/keypoint_analysis.py` | `checks_contour` |
+| `controllers/earthworks.py` | `checks_earthworks` |
+| `controllers/simulation.py`, `workers/simulation_worker.py` | `checks_simulation` |
+| `controllers/reporting.py`, `modules/report_*.py`, `adapters/layout_pdf.py` | `checks_report` |
+| `adapters/map_image.py`, anything CRS-shaped | `checks_crs checks_report` |
+| `controllers/design_file.py`, `modules/project_io.py` | `checks_design_file` |
+| `controllers/_symbols.py`, `core/registry/map_palette.py` | `checks_symbology checks_visual` |
+| `qgis/widgets/*`, the dialogs, `help_text.py` | `checks_visual` |
+| `map_tools/*` | `checks_maptools checks_visual` |
+| `qgis/workers/*` | `checks_threading checks_threading_restart checks_threading_tasks` |
+| `qgis/plugin.py`, teardown paths | `checks_lifecycle` |
+| sizing or hydrology numbers | `checks_fixture_regression` |
+| `controllers/_groups.py`, `_layers.py` | `checks_layer_tree`, then the full suite |
+
+**Some files have no scope.** `panel.py`, `_state.py`, `_groups.py`, `_layers.py`,
+`_symbols.py`, `core/registry/*`, `qgis/plugin.py` and `tests_qgis/_harness.py` reach every
+module — touching one means the full run, no shortcut. `tests/test_architecture.py` asserts
+this table names every `checks_*.py` on disk and nothing that isn't, so a new module cannot
+be added without a row here.
+
+**Say which suites ran.** A scoped pass is not "tests pass". Report it as *"pytest tests/:
+all passed. QGIS: `checks_earthworks` only — full suite not yet run."* Before any commit
+touching `qgis/`, `panel.py` or `map_tools/`, run `.\run_qgis_tests.ps1` bare and say so.
 
 - Needs QGIS's own Python; the scripts find it. **Not in CI** (no QGIS on the runner) —
   these are local, pre-deploy commands.

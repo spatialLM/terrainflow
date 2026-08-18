@@ -196,6 +196,15 @@ def taper_reach(mask, batter_run: float, cell_size=1.0):
     how much that is. They did not for one revision: the berm was sized from a
     full-depth rectangular cut while the trench was tapered, so it was handed roughly
     half again the spoil the excavation actually yields.
+
+    On an axis-aligned footprint the result integrates to the drawn section exactly —
+    it is a midpoint-rule quadrature of a piecewise-linear profile — whenever
+    ``batter_run`` is a whole multiple of the crossing axis's spacing. Off that, the
+    kink at full depth falls inside a cell rather than on its edge and the quadrature
+    over-reads: about +7% at ``batter_run`` 1.5 m on metre cells, and +33% for the
+    registry's default swale, whose 0.5 m run is half a cell and leaves no taper at all.
+    That is a separate error from the one this function guards against, it is always an
+    over-cut, and it is not fixed here.
     """
     import numpy as np
 
@@ -211,10 +220,36 @@ def taper_reach(mask, batter_run: float, cell_size=1.0):
     # column spacings for any other, so a 2 m x 5 m cell tapers over five metres
     # north-south and two east-west, as the ground does.
     cell_h, cell_w = _axis_spacing(cell_size)
-    # The outermost cells sit half a cell in from the true boundary, so the transform
-    # reports 1.0 for them; subtracting half a cell puts the taper on the real edge.
-    dist = distance_transform_edt(inside, sampling=(cell_h, cell_w))
-    inset = min(cell_h, cell_w) / 2.0
+    # The transform measures cell centre to nearest *outside cell centre*, but the taper
+    # starts at the mask edge, which is half a cell further out. So half a cell comes
+    # off — and the half has to be of the axis the distance was actually measured along.
+    if cell_h == cell_w:
+        # Square cells: both axes agree, so there is one answer and no need to ask
+        # which way the nearest outside cell lies. This is also the whole of the old
+        # behaviour, kept bit-for-bit, because it was only ever wrong when the axes
+        # disagreed.
+        dist = distance_transform_edt(inside, sampling=(cell_h, cell_w))
+        return np.clip((dist - cell_h / 2.0) / float(batter_run), 0.0, 1.0)
+
+    # Rectangular cells, and `min()` used to answer here — the *finest* axis, whichever
+    # way the boundary actually lay. On a 1 m x 2 m grid that under-subtracts for a
+    # feature crossed row-wise, and since the shortfall goes straight into `reach` it is
+    # always an over-cut: an east-west swale on those cells collapsed to `reach == 1` and
+    # was burned as a full-depth rectangle, +60% against the same swale drawn north-south.
+    #
+    # Where the nearest outside cell is straight across an axis, the mask edge is
+    # unambiguously half *that* axis away, and this is then exact. Where it lies
+    # diagonally the cell is at a corner of the mask with no single edge direction to
+    # measure from, and `min()` is kept: projecting a half-cell along the diagonal was
+    # measurably worse against the true geometry, and worse on square grids too.
+    dist, idx = distance_transform_edt(
+        inside, sampling=(cell_h, cell_w), return_indices=True)
+    rows, cols = np.indices(inside.shape)
+    d_row = rows - idx[0]
+    d_col = cols - idx[1]
+    inset = np.where(d_col == 0, cell_h / 2.0,
+                     np.where(d_row == 0, cell_w / 2.0,
+                              min(cell_h, cell_w) / 2.0))
     return np.clip((dist - inset) / float(batter_run), 0.0, 1.0)
 
 
@@ -443,7 +478,8 @@ def impoundment_warning(name: str, retained_depth_m=None, above_ground_m3=None,
 
 
 def overtopping_warning(name: str, length_m: float, pour_level_m: float,
-                        alt_saddle_m=None, has_spillway: bool = False):
+                        alt_saddle_m=None, has_spillway: bool = False,
+                        reaches_crest=None, event_level_m=None):
     """Advisory when a pool's only way out is over the structure holding it.
 
     Measured, not assumed: the pool's rim was walked and its lowest point is this
@@ -473,6 +509,14 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
     crest **whether or not one is designed**. With a spillway sited this is therefore a
     limit of the model rather than a fault in the design, and it says so; without one it
     is the design.
+
+    ``reaches_crest`` says which storm this is about. The pour level is measured on the
+    **full** pond — the pool filled to its spill point — so the sentence holds whatever
+    the event does, and that is the right reference state for a freeboard fault. But
+    said without qualification beside an event water line drawn well below the crest, it
+    read as a claim about the modelled storm. ``None`` (nothing was asked) keeps the
+    unqualified wording; ``True``/``False`` add the one sentence that separates *this
+    event goes over* from *filling it would*, with ``event_level_m`` for the figure.
     """
     if not length_m or length_m <= 0:
         return None
@@ -482,12 +526,25 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
             f"stream layer draws a channel, which is where the flow map concentrates it "
             f"rather than where the water goes")
 
+    event_note = ""
+    if reaches_crest is True:
+        event_note = (" The modelled event fills it to that level, so the water goes "
+                      "over in this run and not only in a larger one.")
+    elif reaches_crest is False:
+        where = (f"'{name}' has no freeboard — filled to {pour_level_m:.2f} m it leaves "
+                 f"over its own crest")
+        stands = ("" if event_level_m is None
+                  else f", standing at {event_level_m:.2f} m")
+        event_note = (f" The modelled event does not fill it that far{stands}, so this "
+                      f"is the structure's freeboard rather than something this storm "
+                      f"does.")
+
     if has_spillway:
         return (
             f"{where}{span}. A spillway is designed here, but it is not cut into the "
             f"terrain model, so the analysis cannot route water through it: on the "
             f"ground the spillway takes this flow, and these figures describe the "
-            f"structure without it."
+            f"structure without it.{event_note}"
         )
 
     tail = ""
@@ -509,6 +566,7 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
     return (
         f"{where}{span}. Nothing is designed to take it — give it a spillway, or the "
         f"overflow chooses its own place to cut and takes the bank with it.{tail}"
+        f"{event_note}"
     )
 
 

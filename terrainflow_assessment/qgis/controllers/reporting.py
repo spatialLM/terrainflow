@@ -33,6 +33,75 @@ from terrainflow_assessment.qgis.controllers._layers import resolve_layer
 # "Smith 1/2 Block" would otherwise produce an unopenable path.
 _UNSAFE = re.compile(r'[\\/:*?"<>|]+')
 
+#: How far the overview map is pulled back beyond the site boundary, as a
+#: fraction of the boundary's own width and height on each side.
+_OVERVIEW_MARGIN = 0.25
+
+#: How far the design map is pulled back beyond the earthworks themselves. Small
+#: — the map is meant to be as close in as it can get and still show every
+#: feature — but not nothing: each feature carries a name label placed outside
+#: its geometry, and framed on the geometry alone the outermost labels are cut
+#: in half by the neat line.
+_DESIGN_MARGIN = 0.08
+
+#: Providers that mean "a tile basemap". XYZ, WMS and WMTS layers all arrive
+#: through the ``wms`` provider, and nothing this plugin creates is anything but
+#: a local file, so a raster answering to this is the operator's own imagery.
+_BASEMAP_PROVIDERS = ("wms",)
+
+#: Outline colour for a catchment whose earthwork the registry cannot colour —
+#: a feature deleted between the re-analysis and the export. Grey, matching
+#: ``report_charts.type_colour``'s own fallback.
+CATCHMENT_OUTLINE_FALLBACK = "#7f8c8d"
+
+
+def _padded(extent, fraction):
+    """*extent* padded on every side by *fraction* of its **larger** dimension.
+
+    Not by each side's own size, which is what :func:`_grown` does. A design can
+    be perfectly flat in one axis — one straight swale, or a row of them on the
+    same contour — and its extent is then a line with zero height. Scaling that
+    proportionally pads it by zero and leaves a rectangle a map item cannot
+    frame, so the design map silently fell back to the whole block: the one
+    thing the zoom exists to stop.
+    """
+    if extent is None:
+        return None
+    try:
+        from qgis.core import QgsRectangle
+
+        span = max(extent.width(), extent.height())
+        if span <= 0:
+            return None            # a single point has no scale to pad by
+        pad = span * fraction
+        return QgsRectangle(extent.xMinimum() - pad, extent.yMinimum() - pad,
+                            extent.xMaximum() + pad, extent.yMaximum() + pad)
+    except Exception:
+        return None
+
+
+def _grown(extent, fraction):
+    """A rectangle expanded by *fraction* of its own size on every side.
+
+    Returns None for a None or empty extent rather than a degenerate rectangle:
+    a map item handed a zero-width extent renders at whatever scale QGIS falls
+    back to, which is not a failure anyone would notice on the page.
+    """
+    if extent is None:
+        return None
+    try:
+        from qgis.core import QgsRectangle
+
+        width, height = extent.width(), extent.height()
+        if width <= 0 or height <= 0:
+            return None
+        return QgsRectangle(extent.xMinimum() - width * fraction,
+                            extent.yMinimum() - height * fraction,
+                            extent.xMaximum() + width * fraction,
+                            extent.yMaximum() + height * fraction)
+    except Exception:
+        return None
+
 
 class ReportingController:
     def __init__(self, state, panel, project, iface, canvas):
@@ -41,6 +110,9 @@ class ReportingController:
         self._project = project
         self._iface = iface
         self._canvas = canvas
+        # Layers built for one document and registered outside the layer tree.
+        # See :meth:`_open_transients`.
+        self._transients = {}
 
     # ------------------------------------------------------------------ entry
 
@@ -96,12 +168,15 @@ class ReportingController:
         from terrainflow_assessment.modules.report_model import build_report
 
         held_selections = self._clear_interactive_state()
-        data = self._collect(site)
-        report = build_report(data)
-
         work = os.path.join(self._state.output_dir, "report_assets")
         os.makedirs(work, exist_ok=True)
         try:
+            # Before the data is collected, not after: whether the catchment
+            # labelling traced to anything is a fact about this document, and
+            # the model builds the summary map's key out of it.
+            self._open_transients(work)
+            data = self._collect(site)
+            report = build_report(data)
             images = self._render_charts(data, work)
             if as_html:
                 from terrainflow_assessment.modules.report_html import write_html
@@ -114,6 +189,10 @@ class ReportingController:
                 export_pdf(path, self._project.instance(), report,
                            images=images, maps=self._map_specs(data))
         finally:
+            # Before the working directory goes: a raster layer holds its file
+            # open, and on Windows a tree with an open handle in it does not
+            # delete.
+            self._close_transients()
             # Consumed synchronously, so nothing outlives the export. Both
             # outputs embed what they need and survive output_dir being cleared.
             _rmtree(work)
@@ -241,6 +320,7 @@ class ReportingController:
             inputs=self._inputs(),
             dem=self._dem_provenance(),
             maps=self._map_reasons(),
+            catchment_outline="catchment_outline" in (self._transients or {}),
         )
 
     def _site_name(self):
@@ -319,6 +399,10 @@ class ReportingController:
     def _map_reasons(self):
         """Why a map cannot be drawn, keyed the same way as the specs."""
         reasons = {}
+        if not self._layers_for("overview"):
+            reasons["overview"] = (
+                "There is nothing on the map to draw the site from yet — load a "
+                "DEM and run Baseline.")
         if not self._layers_for("design"):
             reasons["design"] = (
                 "No earthwork layers are on the map to draw a design plan from.")
@@ -340,18 +424,39 @@ class ReportingController:
     def _map_specs(self, data):
         from terrainflow_assessment.qgis.adapters.layout_pdf import MapSpec
         from terrainflow_assessment.qgis.adapters.map_image import (
-            layers_extent,
             usable_layers,
         )
 
         crs = self._map_crs()
         frame = self._frame_extent(crs)
         specs = {}
-        for key in ("design", "flow"):
-            layers = usable_layers(self._layers_for(key))
-            if layers:
-                specs[key] = MapSpec(
-                    layers, frame or layers_extent(layers, crs), crs)
+        # The overview is the one map deliberately *not* on the common frame: it
+        # exists to place the block in its surroundings, and a frame drawn tight
+        # to the boundary shows the property with nothing around it, which is the
+        # one thing an orientation figure must not do.
+        overview = usable_layers(self._layers_for("overview"))
+        if overview:
+            extent = _grown(frame if frame is not None
+                            else self._content_extent(overview, crs),
+                            _OVERVIEW_MARGIN)
+            if extent is not None:
+                specs["overview"] = MapSpec(overview, extent, crs,
+                                            height_mm=95.0)
+        # The design map is the one that is *not* framed on the boundary. It is
+        # read to build from, so it wants to be as close in as it can get and
+        # still show every feature; on a block whose earthworks sit in one
+        # corner, the common frame spent most of the page on ground the design
+        # never touches.
+        design = usable_layers(self._layers_for("design"))
+        if design:
+            extent = (_padded(self._earthworks_extent(crs), _DESIGN_MARGIN)
+                      or frame or self._content_extent(design, crs))
+            if extent is not None:
+                specs["design"] = MapSpec(design, extent, crs)
+        layers = usable_layers(self._layers_for("flow"))
+        if layers:
+            specs["flow"] = MapSpec(
+                layers, frame or self._content_extent(layers, crs), crs)
         before, after = self._ponding_pair()
         if before and after and self._ponding_tags_agree():
             layers = usable_layers(
@@ -359,9 +464,60 @@ class ReportingController:
                 + self._terrain_layers())
             if layers:
                 specs["ponding"] = MapSpec(
-                    layers, frame or layers_extent(layers, crs), crs,
+                    layers, frame or self._content_extent(layers, crs), crs,
                     height_mm=110.0)
         return specs
+
+    def _content_extent(self, layers, crs):
+        """The extent of *layers*, ignoring anything that covers the world.
+
+        A tile basemap's extent is the whole globe. Left in the union it does not
+        widen the fallback frame so much as replace it, and a map that had merely
+        lost its boundary would come out showing the Pacific.
+        """
+        from terrainflow_assessment.qgis.adapters.map_image import layers_extent
+
+        basemap = self._basemap_layer()
+        return layers_extent([layer for layer in layers if layer is not basemap],
+                             crs)
+
+    def _earthworks_extent(self, crs):
+        """The bounding extent of every drawn earthwork, or None if there are none.
+
+        Deliberately not ``map_image.layers_extent``, which drops any rectangle
+        ``isEmpty()`` calls empty — and ``QgsRectangle.isEmpty()`` is true of a
+        rectangle with **zero height**, not just of one with no area. A design
+        of one straight swale, or of several sitting on the same contour, has
+        exactly that extent, so the whole design was discarded and the map fell
+        back to the block. A flat design is a real design; it is
+        :func:`_padded`'s job to give it a rectangle, and it can only do that if
+        it is handed one.
+        """
+        from qgis.core import QgsCoordinateTransform, QgsRectangle
+
+        from terrainflow_assessment.qgis.adapters.map_image import usable_layers
+
+        combined = None
+        for layer in usable_layers([resolve_layer(self._project, i)
+                                    for i in
+                                    self._state.ew_layer_ids.values() if i]):
+            try:
+                rect = layer.extent()
+                # Null is an empty layer; inverted is QGIS's "minimal" seed. A
+                # zero-width or zero-height rectangle is neither — it is a line.
+                if rect.isNull() or rect.width() < 0 or rect.height() < 0:
+                    continue
+                if crs is not None and layer.crs() != crs:
+                    rect = QgsCoordinateTransform(
+                        layer.crs(), crs,
+                        self._project.instance()).transformBoundingBox(rect)
+                if combined is None:
+                    combined = QgsRectangle(rect)
+                else:
+                    combined.combineExtentWith(rect)
+            except Exception as exc:
+                print(f"TerrainFlow Assessment — earthwork extent: {exc}")
+        return combined
 
     def _map_crs(self):
         """The CRS the report's maps are drawn in — the DEM's, not the project's.
@@ -402,8 +558,50 @@ class ReportingController:
         boundary = usable_layers([self._boundary_layer()])
         return layers_extent(boundary, crs) if boundary else None
 
+    #: What the operator chose, most specific first. The boundary is the site;
+    #: the other two are what stands in for it when nobody set one. Each is a
+    #: ``_state`` id and the matching panel property, which answer the same
+    #: question from the two ends of the same signal.
+    _AREA_SOURCES = (("boundary_layer_id", "boundary_layer"),
+                     ("analysis_area_layer_id", "analysis_area_layer"),
+                     ("earthworks_area_layer_id", "earthworks_area_layer"))
+
     def _boundary_layer(self):
-        """The drawn site boundary, or the analysis area standing in for it."""
+        """The site boundary, or the area standing in for it.
+
+        What the operator actually chose — recorded as a layer id when the
+        picker fired, and read back off the panel if it was not — with the layer
+        names only as a last fallback. This used to search the project for a layer called "Drawn Site Boundary"
+        and nothing else — which is the name the *draw-on-canvas* tool gives its
+        output, and nothing else has it. An operator who instead **picked** an
+        existing polygon in the boundary combo, which is the ordinary way to use
+        a cadastral parcel or a title boundary, had no layer of that name
+        anywhere in the project. So ``_frame_extent`` came back None and every
+        figure in the document fell back to the extent of whichever raster
+        happened to be in its layer list — usually the whole DEM tile.
+
+        Nothing said so, and nothing could: a map drawn to the wrong extent
+        renders exactly as well as one drawn to the right one. It is also why
+        the report's own test for this rule passed throughout — the harness
+        picks its boundary rather than drawing it, so the rule was never
+        actually exercised.
+
+        Drawing still works, and reaches the same place: the draw tool calls
+        ``panel.set_area_layer``, which selects the new layer in the combo.
+        """
+        for state_attr, panel_attr in self._AREA_SOURCES:
+            layer = resolve_layer(self._project,
+                                  getattr(self._state, state_attr, None))
+            if layer is None:
+                try:
+                    layer = getattr(self._panel, panel_attr, None)
+                except (AttributeError, RuntimeError):
+                    layer = None
+            try:
+                if layer is not None and layer.isValid():
+                    return layer
+            except RuntimeError:
+                continue
         for fragment in ("Drawn Site Boundary", "Drawn Analysis Area",
                          "Drawn Earthworks Area"):
             layer = self._named_layer(fragment)
@@ -420,38 +618,319 @@ class ReportingController:
         """
         return [self._hillshade_layer(), self._dem_layer()]
 
+    def _basemap_layer(self):
+        """The operator's own aerial photograph, where they have one loaded.
+
+        The report has never had a basemap — the hillshade exists precisely
+        because it did not — and it still does not fetch one: a LINZ aerial
+        needs an API key, and the operator who wants the photograph behind their
+        scheme already has it on the canvas. So this finds it rather than making
+        it. Every raster this plugin creates is a local file read through
+        ``gdal``; a raster on the ``wms`` provider is a tile service and is
+        therefore not ours.
+
+        Bottom-most first, and visible only. A project can hold several tile
+        layers — an aerial, a topo, a cadastral overlay — and the one at the
+        bottom of the tree with its box ticked is the one the operator is using
+        as their ground, which is the job being filled here.
+        """
+        from qgis.core import QgsMapLayer
+
+        found = None
+        try:
+            nodes = self._project.instance().layerTreeRoot().findLayers()
+        except Exception:
+            return None
+        for node in nodes:
+            layer = node.layer()
+            if layer is None or not node.isVisible():
+                continue
+            try:
+                if layer.type() != QgsMapLayer.RasterLayer:
+                    continue
+                if layer.dataProvider().name() not in _BASEMAP_PROVIDERS:
+                    continue
+            except Exception:
+                continue
+            found = layer
+        return found
+
+    def _backdrop(self):
+        """What a map is drawn over: the operator's aerial, or the terrain.
+
+        Never nothing. A summary map composed of a boundary and two ponds over
+        blank white is the failure the hillshade was introduced to prevent, and
+        a project with no tile layer loaded must not fall into it just because
+        this report now prefers a photograph.
+        """
+        basemap = self._basemap_layer()
+        return [basemap] if basemap is not None else self._terrain_layers()
+
     def _layers_for(self, key):
         """Layers for a report map, top-first — the reverse of the layer tree.
 
         The stacking is the whole of the map's legibility, so it is written out
         rather than assembled: **markers and labels, then the design, then the
-        boundary, then the water rasters, then terrain.** The boundary has to
-        sit above the rasters — the surface-runoff ramp reaches full opacity at
-        its top stop and would bury a line drawn under it — and the thresholded
-        stream network has to sit above the diffuse runoff wash it is the
-        distilled version of.
+        boundary, then the water rasters, then the backdrop.** The boundary has
+        to sit above the rasters — the surface-runoff ramp reaches full opacity
+        at its top stop and would bury a line drawn under it — and the
+        thresholded stream network has to sit above the diffuse runoff wash it
+        is the distilled version of.
+
+        Each of the three answers one question, and carries only what that
+        question needs. They used to differ by a layer or two around a common
+        core, which is how the summary page came to be a shaded terrain model
+        with forty feature labels on it — a figure a reader has to decode before
+        it has told them where they are.
         """
         state = self._state
-        design = [resolve_layer(self._project, i) for i in
-                  ([state.spillway_layer_id, state.connections_layer_id]
-                   + list(state.ew_layer_ids.values())) if i]
-        catchments = resolve_layer(self._project,
-                                   state.catchment_labels_layer_id)
-        if key == "design":
-            top = design
-            # catchment_labels is a Design-tier layer behind a panel checkbox
-            # that defaults off, so it can only ever be an optional overlay.
-            water = [self._named_layer("Streams"), catchments]
+        if key == "overview":
+            # Where the block is, and what the scheme does to the water on it.
+            # No terrain model and no feature labels: those are the design map's
+            # job, and repeating them here only buries the photograph that makes
+            # this figure worth having. The catchment outline is the one
+            # analysis product that belongs — it is the answer to "how much of
+            # my land does this actually catch", drawn as a line so the ground
+            # underneath it stays visible.
+            resolved = [
+                self._transients.get("catchment_outline"),
+                self._boundary_layer(),
+                self._named_layer("Pond Capacity (event)", group="earthworks"),
+                self._stage_layer("Pond Capacity (full)"),
+                self._stage_layer("Streams"),
+            ] + self._backdrop()
+        elif key == "design":
+            # Every feature as drawn, over the ground it is to be dug in, as
+            # close in as the page allows. Nothing analytical: this is the sheet
+            # somebody stands in a paddock holding.
+            resolved = ([resolve_layer(self._project, i)
+                         for i in state.ew_layer_ids.values() if i]
+                        + [self._boundary_layer()] + self._backdrop())
         elif key == "flow":
-            top = [self._named_layer("Exit Points")]
-            water = [self._named_layer("Streams"),
-                     resolve_layer(self._project, state.throughflow_layer_id),
-                     catchments]
+            # The baseline, before anything was dug. The runoff wash is the
+            # clipped copy where there is one: unclipped it covers the whole DEM
+            # tile, and on a coastal tile the block ends up sitting in a fan of
+            # blue streaks running off every edge of the page, none of which is
+            # ground the owner can do anything about.
+            runoff = (self._transients.get("runoff_clipped")
+                      or resolve_layer(self._project, state.throughflow_layer_id))
+            resolved = [
+                self._named_layer("Exit Points", group="baseline"),
+                self._boundary_layer(),
+                self._named_layer("Streams", group="baseline"),
+                runoff,
+                self._named_layer("Pond Capacity (full)", group="baseline"),
+            ] + self._terrain_layers()
         else:
             return []
-        resolved = (top + [self._boundary_layer()] + water
-                    + self._terrain_layers())
         return [layer for layer in resolved if layer is not None]
+
+    def _stage_layer(self, fragment):
+        """An earthworks-stage layer, falling back to the baseline's.
+
+        The summary map is about the scheme, so it wants the re-analysed answer.
+        A design that has been drawn but not re-analysed has no such layer, and
+        showing the baseline's streams is closer to the truth than showing the
+        reader an empty photograph.
+        """
+        return (self._named_layer(fragment, group="earthworks")
+                or self._named_layer(fragment, group="baseline"))
+
+    # ------------------------------------------------------ document layers
+
+    def _open_transients(self, work):
+        """Build the layers that exist only for this document.
+
+        Both are derived products the canvas has no use for: a clipped copy of
+        the runoff raster, and the catchment labelling traced as a line. They go
+        into the project because the PDF renderer's ``QgsLayoutItemMap`` resolves
+        its layers by id at render time and cannot see one that is not there —
+        and they stay out of the layer tree because a legend that grows two
+        layers every time anyone presses Export is not a legend.
+        """
+        from terrainflow_assessment.qgis.controllers._groups import (
+            register_render_only,
+        )
+
+        self._transients = {}
+        for key, build in (("catchment_outline", self._catchment_outline_layer),
+                           ("runoff_clipped",
+                            lambda: self._clipped_runoff_layer(work))):
+            try:
+                layer = build()
+            except Exception as exc:
+                print(f"TerrainFlow Assessment — report layer '{key}': {exc}")
+                continue
+            if layer is not None:
+                self._transients[key] = register_render_only(
+                    self._project, layer)
+
+    def _close_transients(self):
+        """Take them out again. Paired with :meth:`_open_transients`."""
+        from terrainflow_assessment.qgis.controllers._groups import discard
+
+        for layer in (self._transients or {}).values():
+            discard(self._project, layer)
+        self._transients = {}
+
+    def _boundary_geometries(self, crs=None):
+        """The drawn boundary as shapely polygons, in *crs* if given."""
+        from qgis.core import QgsCoordinateTransform, QgsGeometry
+
+        from terrainflow_assessment.qgis.adapters.geom import qgs_to_shapely
+
+        layer = self._boundary_layer()
+        if layer is None:
+            return []
+        transform = None
+        if crs is not None and crs.isValid() and layer.crs() != crs:
+            transform = QgsCoordinateTransform(layer.crs(), crs,
+                                               self._project.instance())
+        out = []
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+            if transform is not None:
+                geometry = QgsGeometry(geometry)
+                if geometry.transform(transform) != 0:
+                    continue
+            shape = qgs_to_shapely(geometry)
+            if shape is not None and not shape.is_empty:
+                out.append(shape)
+        return out
+
+    def _catchment_outline_layer(self):
+        """The ground each earthwork catches, traced as a line.
+
+        The filled version of this already exists — the paletted "Catchment by
+        earthwork" raster — and it is drawn at alpha 150 over everything beneath
+        it, which on an aerial photograph is most of the point of having the
+        photograph. An outline answers the same question and leaves the ground
+        visible.
+
+        Built here rather than kept on the canvas because the canvas one is only
+        ever refreshed by a panel checkbox: a re-analysis rebuilds the labelling
+        underneath it and leaves the layer showing the run before last. The
+        labelling itself is recomputed on every geometry edit, so reading it
+        directly is the version that cannot be stale.
+        """
+        from qgis.core import (
+            QgsCategorizedSymbolRenderer,
+            QgsFeature,
+            QgsField,
+            QgsGeometry,
+            QgsLineSymbol,
+            QgsPointXY,
+            QgsRendererCategory,
+            QgsVectorLayer,
+        )
+        from qgis.PyQt.QtCore import QMetaType
+
+        from terrainflow_assessment.core.registry.earthwork_types import get_type
+        from terrainflow_assessment.modules.catchment import label_outlines
+        from terrainflow_assessment.qgis.controllers._layers import (
+            MissingDemCrs,
+            dem_crs,
+        )
+
+        state = self._state
+        labels = getattr(state, "catchment_labels", None)
+        meta = getattr(state, "flow_grid_meta", None)
+        if labels is None or not meta or meta.get("transform") is None:
+            return None
+        try:
+            # These are DEM grid coordinates in metres, so the project's CRS is
+            # not a fallback — drawn as degrees they land off the coast of
+            # Ghana. No DEM, no outline, and nothing to report about it: a map
+            # that has lost its DEM has larger problems, and says so elsewhere.
+            crs = dem_crs(state)
+        except MissingDemCrs:
+            return None
+        rings = label_outlines(labels, meta["transform"],
+                               list(state.catchment_label_ids or []))
+        if not rings:
+            return None
+
+        manager = getattr(state, "earthwork_manager", None)
+        by_id = {ew.id: ew for ew in (manager.get_all() if manager else [])}
+        layer = QgsVectorLayer(f"LineString?crs={crs}",
+                               "Catchment outline", "memory")
+        if not layer.isValid():
+            return None
+        layer.dataProvider().addAttributes(
+            [QgsField("ew_type", QMetaType.QString)])
+        layer.updateFields()
+
+        feats = []
+        types = []
+        for ew_id, ring_list in rings.items():
+            ew = by_id.get(ew_id)
+            ew_type = getattr(ew, "type", "") or ""
+            if ew_type and ew_type not in types:
+                types.append(ew_type)
+            for ring in ring_list:
+                points = [QgsPointXY(x, y) for x, y in ring]
+                feature = QgsFeature(layer.fields())
+                feature.setGeometry(QgsGeometry.fromPolylineXY(points))
+                feature.setAttribute("ew_type", ew_type)
+                feats.append(feature)
+        if not feats:
+            return None
+        layer.dataProvider().addFeatures(feats)
+        layer.updateExtents()
+
+        # Categorised on the type, so a catchment is drawn in the colour of the
+        # thing that catches it and the map needs no second key to be read.
+        categories = []
+        for ew_type in types:
+            try:
+                colour = get_type(ew_type).style[1]
+            except Exception:
+                colour = CATCHMENT_OUTLINE_FALLBACK
+            categories.append(QgsRendererCategory(
+                ew_type,
+                QgsLineSymbol.createSimple({"color": colour, "width": "0.4"}),
+                ew_type))
+        categories.append(QgsRendererCategory(
+            "", QgsLineSymbol.createSimple(
+                {"color": CATCHMENT_OUTLINE_FALLBACK, "width": "0.4"}), ""))
+        layer.setRenderer(QgsCategorizedSymbolRenderer("ew_type", categories))
+        return layer
+
+    def _clipped_runoff_layer(self, work):
+        """The Surface Runoff raster, masked to the drawn boundary.
+
+        A copy, styled with the source layer's own renderer rather than a
+        rebuilt one: the ramp top is shared across a family through
+        ``_symbols.apply_shared_ramp``, and a second derivation of it here would
+        be a second place for the pair to drift apart.
+        """
+        from qgis.core import QgsRasterLayer
+
+        from terrainflow_assessment.modules.footprint import (
+            clip_raster_to_polygons,
+        )
+
+        source = resolve_layer(self._project, self._state.throughflow_layer_id)
+        if source is None or not source.isValid():
+            return None
+        geometries = self._boundary_geometries(source.crs())
+        if not geometries:
+            return None
+        clipped = clip_raster_to_polygons(
+            source.source(), geometries,
+            os.path.join(work, "runoff_clipped.tif"))
+        if clipped is None:
+            return None
+        layer = QgsRasterLayer(clipped, source.name())
+        if not layer.isValid():
+            return None
+        try:
+            layer.setRenderer(source.renderer().clone())
+        except Exception:
+            pass
+        return layer
 
     def _ponding_pair(self):
         """The two capacity rasters, before and after the earthworks.

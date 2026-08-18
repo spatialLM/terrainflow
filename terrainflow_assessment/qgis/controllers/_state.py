@@ -18,6 +18,13 @@ class PluginState:
     dem_path: str | None = None
     dem_info: Any | None = None           # DEMInfo from dem_loader
     boundary_path: str | None = None
+    # Which layer each area picker is pointing at. The paths above are what the
+    # analysis reads; these are what the report *draws*, and they are not the
+    # same thing — a memory layer is converted to a GPKG on its way to a path,
+    # so the path cannot be matched back to the layer the operator chose.
+    boundary_layer_id: str | None = None
+    analysis_area_layer_id: str | None = None
+    earthworks_area_layer_id: str | None = None
     analysis_area_path: str | None = None
     earthworks_area_path: str | None = None
     modified_dem_path: str | None = None
@@ -47,6 +54,13 @@ class PluginState:
     # ------------------------------------------------------------------ Before/after layer IDs
     baseline_layer_ids: list[str] = field(default_factory=list)
     earthworks_layer_ids: list[str] = field(default_factory=list)
+    # family name → {"members": {layer id: claimed maximum}, "top": float}
+    # The ramp top shared by a Baseline layer and its Earthworks counterpart, so a
+    # colour means the same depth (or the same m³) on both and the pair can be read
+    # against each other. ``members`` is the mechanism and ``top`` the answer it
+    # derives. Ids, never layer objects — see _symbols.apply_shared_ramp, which
+    # prunes the ones that no longer resolve.
+    ramp_scales: dict = field(default_factory=dict)
     slope_class_layer_id: str | None = None
     slope_vectors_layer_id: str | None = None
 

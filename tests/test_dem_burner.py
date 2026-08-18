@@ -463,10 +463,24 @@ class TestDiversionBurnEquivalence:
     def _reference_burn(burner, dem, line, ew, start_elev):
         from shapely.geometry import Point
 
-        from terrainflow_assessment.modules.burn_strategy import enforce_monotonic_path
+        from terrainflow_assessment.modules.burn_strategy import (
+            enforce_monotonic_path,
+            taper_reach,
+        )
+        from terrainflow_assessment.modules.earthwork_design import channel_batter_run
 
         dem = dem.copy()
         coords = list(line.coords)
+        # The reference models the old *sampling*, not the old cross-section. It cut a
+        # full-depth rectangle, which is the thing the real burn was fixed to stop doing;
+        # left that way this reference would pin the bug rather than the rewrite. The
+        # taper belongs to the section and the sampling belongs to this class, so the
+        # depth model is shared and what stays under test is chainage and footprint.
+        # Cells only the discs claim — the rounded ends in the docstring above — sit
+        # outside the band and so taper to nothing, which is what they are worth.
+        band = burner._rasterize(line.buffer(ew.width / 2.0))
+        reach = taper_reach(band, channel_batter_run(ew),
+                            (burner.cell_h, burner.cell_size))
         cum = [0.0]
         for i in range(1, len(coords)):
             dx = coords[i][0] - coords[i - 1][0]
@@ -484,10 +498,12 @@ class TestDiversionBurnEquivalence:
             for step in range(n_steps + 1):
                 t = step / n_steps
                 x, y = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
-                burn = start_elev - (cum[seg_i] + t * seg) * grad - ew.depth
+                invert = start_elev - (cum[seg_i] + t * seg) * grad
                 cell_mask = burner._rasterize(Point(x, y).buffer(ew.width / 2))
                 if cell_mask.any():
-                    dem[cell_mask] = np.minimum(dem[cell_mask], burn)
+                    depth = (ew.depth if reach is None
+                             else ew.depth * reach[cell_mask])
+                    dem[cell_mask] = np.minimum(dem[cell_mask], invert - depth)
         # The real burn breaches one-cell humps along the alignment afterwards. Not
         # part of what changed, so the reference does it too.
         return enforce_monotonic_path(dem, burner._line_path_cells(line))
@@ -545,6 +561,34 @@ class TestDiversionBurnEquivalence:
         assert dropped <= max(3, 0.05 * cut_old.sum()), (
             f"{dropped} of {int(cut_old.sum())} cells lost — more than the rounded "
             f"ends can account for")
+
+    def test_the_drain_is_cut_as_the_trapezoid_it_is_priced_as(self, tmp_path):
+        """A diversion is specified with a batter and was burned without one.
+
+        The registry gives it ``default_side_slope`` and derives its bottom width, and
+        ``calculate_cut_volume`` prices it as a trapezoid — but the burn floored every
+        cell of the band at full depth, so the terrain model held a rectangle. That is
+        the same mismatch ``_storage_invert`` was written to remove for swales, and it
+        survived here because a graded invert cannot use ``tapered_invert``, whose floor
+        is a single elevation. It does not need to: the taper is a fraction of depth per
+        cell and the grade is a datum per cell, so they multiply.
+
+        Measured across the middle of the drain, away from the buffer's rounded ends.
+        A 6 m top on a 1.0 m depth at 1:1 gives a 4 m bed and a 1.0 m batter run, so the
+        section is 5.0 m2 per metre and the rectangle it used to cut was 6.0.
+        """
+        data = np.full((40, 40), 100.0)
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        ew = _mock_ew("diversion", make_mock_line_geom([(5.0, 20.0), (35.0, 20.0)]),
+                      depth=1.0, width=6.0, bottom_width_m=4.0, gradient_pct=0.0)
+        out = b.burn_earthworks([ew])
+
+        mid = out[:, 20]                     # one transverse slice, mid-alignment
+        cut = float(np.clip(b.original[:, 20] - mid, 0.0, None).sum()) * b.cell_size
+        assert cut == pytest.approx(5.0, rel=0.02), (
+            f"{cut:.2f} m2 per metre against a drawn 5.00 m2 — 6.00 is the "
+            f"full-depth rectangle this used to cut"
+        )
 
     def test_a_sub_cell_drain_still_carves_a_connected_path(self, tmp_path):
         """The buffer rasterises empty, so the centreline path is the fallback."""
@@ -661,3 +705,97 @@ class TestTaperSamplesPerAxis:
         mask[2:9, 2:9] = True
         assert np.allclose(taper_reach(mask, 6.0, 2.0),
                            taper_reach(mask, 6.0, (2.0, 2.0)))
+
+    def _band(self, n, across, shape=(41, 41)):
+        """A straight band *n* cells wide, running east-west or north-south."""
+        import numpy as np
+
+        m = np.zeros(shape, dtype=bool)
+        if across == "rows":                 # an E-W band, crossed row-wise
+            m[20:20 + n, :] = True
+        else:                                # a N-S band, crossed column-wise
+            m[:, 20:20 + n] = True
+        return m
+
+    def _exact(self, n, spacing, batter_run):
+        """What the taper should integrate to, from the geometry alone.
+
+        Cell *i* of an *n*-cell band has its centre ``min(i+0.5, n-i-0.5) × spacing``
+        from the band edge, and the trapezoid's depth there is that over the batter run,
+        capped at full. No distance transform involved — this is the answer the
+        transform is supposed to reproduce.
+        """
+        import numpy as np
+
+        i = np.arange(n)
+        d = np.minimum(i + 0.5, n - i - 0.5) * spacing
+        return float(np.clip(d / batter_run, 0.0, 1.0).sum()) * spacing
+
+    @pytest.mark.parametrize("cell_h,cell_w", [(1.0, 1.0), (2.0, 1.0),
+                                               (1.0, 2.0), (5.0, 2.0)])
+    @pytest.mark.parametrize("across", ["rows", "cols"])
+    @pytest.mark.parametrize("n,batter_run", [(4, 1.5), (5, 2.0), (6, 3.0)])
+    def test_a_straight_band_tapers_to_the_section_it_was_drawn_as(
+            self, cell_h, cell_w, across, n, batter_run):
+        """The half-cell inset must come off the axis the distance was measured along.
+
+        It used to come off ``min(cell_h, cell_w)`` — the finest axis, whichever way the
+        boundary lay. On a 1 m x 2 m grid that under-subtracts for a band crossed on the
+        coarse axis, and the shortfall goes straight into ``reach``, so it is always an
+        over-cut: up to +20% here, and on the field case an east-west swale collapsed to
+        ``reach == 1`` and was cut as a full-depth rectangle at +60% against the same
+        swale drawn north-south.
+        """
+        from terrainflow_assessment.modules.burn_strategy import taper_reach
+
+        mask = self._band(n, across)
+        reach = taper_reach(mask, batter_run, (cell_h, cell_w))
+        spacing = cell_h if across == "rows" else cell_w
+        profile = (reach[20:20 + n, 20] if across == "rows"
+                   else reach[20, 20:20 + n])
+        got = float(profile.sum()) * spacing
+
+        assert got == pytest.approx(self._exact(n, spacing, batter_run), rel=1e-9)
+
+    def test_the_same_swale_cuts_the_same_either_way_round(self):
+        """The bug as a user would meet it: one design, one number, two bearings.
+
+        A swale drawn east-west and the same swale drawn north-south are the same
+        excavation. On rectangular cells they were not — the taper collapsed on one
+        bearing and survived on the other.
+        """
+        import numpy as np
+
+        from terrainflow_assessment.modules.burn_strategy import taper_reach
+
+        ew = taper_reach(self._band(4, "rows"), 1.5, (2.0, 1.0))
+        ns = taper_reach(self._band(4, "cols"), 1.5, (1.0, 2.0))
+        # Same feature, transposed grid: the cut per metre must match.
+        assert float(ew[20:24, 20].sum()) * 2.0 == pytest.approx(
+            float(ns[20, 20:24].sum()) * 2.0, rel=1e-9)
+        assert np.isclose(ew[20:24, 20], ns[20, 20:24]).all()
+
+    def test_a_square_grid_is_untouched_at_every_bearing(self):
+        """The safety property that makes the fix cheap: square cells cannot change.
+
+        Both axes agree, so there is nothing for the correction to choose between, and
+        the function takes its old path bit-for-bit. Asserted on diagonal footprints
+        too, where the nearest outside cell is a corner rather than a neighbour — that
+        is the case where a direction-aware inset would have moved the answer, and it
+        measured *worse* against the true geometry than leaving it alone.
+        """
+        import numpy as np
+
+        from terrainflow_assessment.modules.burn_strategy import taper_reach
+
+        rr, cc = np.indices((61, 61))
+        for angle in (0.0, 15.0, 30.0, 45.0, 60.0, 90.0):
+            th = np.radians(angle)
+            perp = np.abs(-np.sin(th) * (cc - 30.0) + np.cos(th) * (rr - 30.0))
+            mask = perp <= 3.0
+            got = taper_reach(mask, 2.0, (2.0, 2.0))
+            # The old expression, inlined: distance less half of min(h, w).
+            from scipy.ndimage import distance_transform_edt
+            dist = distance_transform_edt(mask, sampling=(2.0, 2.0))
+            want = np.clip((dist - 1.0) / 2.0, 0.0, 1.0)
+            assert np.array_equal(got, want), f"square grid moved at {angle}deg"

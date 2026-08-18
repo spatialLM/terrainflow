@@ -68,6 +68,8 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     from shapely.geometry import shape as shapely_shape
     from shapely.ops import unary_union
 
+    from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
+
     def _p(pct, msg):
         if progress_callback:
             progress_callback(pct, msg)
@@ -206,7 +208,10 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
             filled = grid.breach_depressions(pit_filled)
         except AttributeError:
             filled = grid.fill_depressions(pit_filled)
-        inflated = grid.resolve_flats(filled)
+        # The step is derived from this surface, not pysheds' fixed default: on a big
+        # flat the default lifts cells over neighbours that were genuinely lower. See
+        # ``flow_analysis.safe_flat_epsilon``.
+        inflated, _eps, _inv = resolve_flats_safely(grid, filled)
         # Use dinf routing — avoids np.in1d which was removed in NumPy 2.x
         try:
             fdir = grid.flowdir(inflated, routing="dinf")
@@ -277,6 +282,54 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
         "coverage_pct": round(coverage_pct, 1),
         "scale": scale,
     }
+
+
+def label_outlines(labels, transform, label_ids=None):
+    """Cell-edge rings around each earthwork's catchment.
+
+    ``labels`` is the int grid ``recompute_catchments`` leaves on the state: cell
+    value *i* means "the earthwork at ``label_ids[i]`` is the first thing that
+    intercepts this cell". Negative values are the sentinels in
+    :mod:`flow_graph` — nothing labelled, water leaving the site, unresolved —
+    and none of them is an earthwork, so only non-negative values are traced.
+
+    Returns ``{earthwork id: [ring, ...]}``, each ring a list of ``(x, y)``. A
+    catchment arrives in several pieces more often than not — ground on both
+    sides of a spur drains to the same swale — so a feature gets a list rather
+    than a polygon, and holes come through as rings of their own.
+
+    Deliberately unsmoothed, for the same reason the event water line is: the
+    boundary is known to the cell, and drawing it as a curve would claim a
+    precision the grid does not have.
+
+    An outline, not a fill. The filled version already exists as a paletted
+    raster and covers the aerial photograph it is drawn over; the summary map
+    needs to show which ground feeds the scheme *and* what that ground looks
+    like.
+    """
+    arr = np.asarray(labels)
+    out = {}
+    for value in np.unique(arr[arr >= 0]):
+        index = int(value)
+        if label_ids is not None:
+            if index >= len(label_ids):
+                continue
+            key = label_ids[index]
+        else:
+            key = index
+        mask = arr == index
+        rings = []
+        for geom, _value in rasterio_shapes(mask.astype("uint8"), mask=mask,
+                                            transform=transform):
+            for ring in geom.get("coordinates", []):
+                pts = [(float(x), float(y)) for x, y in ring]
+                # A closed ring is at least a triangle plus its repeated first
+                # point; anything shorter is not an area and cannot be drawn.
+                if len(pts) >= 4:
+                    rings.append(pts)
+        if rings:
+            out[key] = rings
+    return out
 
 
 def clip_dem_to_polygon(dem_path, clip_polygon, output_path):

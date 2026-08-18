@@ -402,27 +402,43 @@ def check_report_maps_include_the_stream_network(dem_path):
 
         controller = h.plugin._reporting
         specs = controller._map_specs(controller._collect("Site"))
-        for key in ("design", "flow"):
+        # The summary and flow maps are the two that carry water. The design map
+        # deliberately does not: it is the sheet somebody stands in a paddock
+        # holding, and it shows the features and the ground and nothing else.
+        for key in ("overview", "flow"):
             names = [layer.name() for layer in specs[key].layers]
             assert any("Streams" in name for name in names), (
                 f"the {key} map has no stream network: {names}")
+        design = [layer.name() for layer in specs["design"].layers]
+        assert not any("Streams" in name for name in design), (
+            f"the design map is carrying analysis layers again: {design}")
 
 
 def check_report_maps_have_terrain_behind_them(dem_path):
-    """Item 20: the design printed as coloured lines on blank white paper."""
+    """Item 20: the design printed as coloured lines on blank white paper.
+
+    The backdrop is now the operator's own aerial photograph where the project
+    has one loaded, and the shaded relief where it does not. The harness project
+    has no tile layer, so this exercises the fallback — which is the branch that
+    matters: a project without a basemap must not fall back into the blank white
+    page the hillshade was introduced to prevent.
+    """
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.add_earthwork("swale", line_across_valley())
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
+        assert controller._basemap_layer() is None, (
+            "the harness project has no tile layer; something matched anyway")
         specs = controller._map_specs(controller._collect("Site"))
-        names = [layer.name() for layer in specs["design"].layers]
-        assert any("Hillshade" in name for name in names), (
-            f"no shaded relief behind the design map: {names}")
-        # Bottom-last: the layer list is top-first, so terrain must not be
-        # drawn over the design it is meant to sit behind.
-        assert "Hillshade" in names[-1] or "DEM" in names[-1], names
+        for key in ("overview", "design", "flow"):
+            names = [layer.name() for layer in specs[key].layers]
+            assert any("Hillshade" in name for name in names), (
+                f"no shaded relief behind the {key} map: {names}")
+            # Bottom-last: the layer list is top-first, so the backdrop must not
+            # be drawn over the thing it is meant to sit behind.
+            assert "Hillshade" in names[-1] or "DEM" in names[-1], (key, names)
 
 
 def check_report_map_stacking_keeps_everything_visible(dem_path):
@@ -480,20 +496,167 @@ def check_report_maps_are_framed_on_the_boundary(dem_path):
     figures came out at three different scales — and on a design whose DEM did
     not resolve, the design map zoomed to whatever the features happened to
     span.
+
+    Two maps are exceptions, and both are excluded by name rather than by
+    loosening the rule. The overview on page 1 exists to place the block in its
+    surroundings, so it is deliberately pulled back — but it still has to be the
+    *same* frame enlarged, concentric rather than a different view, or it stops
+    being the figure the others are a zoom into. The design map is framed on the
+    earthworks instead: it is read to build from, so it goes as close in as it
+    can and still show every feature, which on a block whose design sits in one
+    corner is a great deal closer than the boundary.
     """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", line_across_valley())
+        # The drawn layer has to exist for the design map to have anything to
+        # frame itself on; add_earthwork alone only reaches the store.
+        h.plugin._earthworks._refresh_ew_layer()
+        h.panel.analysis_inputs_changed.emit()
+
+        controller = h.plugin._reporting
+        specs = controller._map_specs(controller._collect("Site"))
+        extents = {k: spec.extent for k, spec in specs.items()}
+        comparable = {k: e for k, e in extents.items()
+                      if k not in ("overview", "design")}
+        assert len(comparable) >= 1, f"expected several maps, got {list(extents)}"
+        first = next(iter(comparable.values()))
+        for key, extent in comparable.items():
+            assert extent == first, (
+                f"the {key} map is framed differently: {extent} vs {first}")
+
+        design = extents.get("design")
+        assert design is not None, "page 3 lost its design map"
+        assert design.width() < first.width(), (
+            f"the design map is not zoomed to its earthworks: {design} vs {first}")
+        assert first.contains(design.center()), (
+            f"the design map has wandered off the block: {design}")
+
+        overview = extents.get("overview")
+        assert overview is not None, "page 1 lost its overview map"
+        assert overview.width() > first.width(), (
+            f"the overview is not pulled back: {overview} vs {first}")
+        for axis in ("x", "y"):
+            centre = getattr(overview, f"{axis}Minimum")() + \
+                getattr(overview, f"{axis}Maximum")()
+            same = getattr(first, f"{axis}Minimum")() + \
+                getattr(first, f"{axis}Maximum")()
+            assert abs(centre - same) < 1.0, (
+                f"the overview is off-centre on {axis}: {overview} vs {first}")
+
+
+def check_summary_map_is_the_scheme_over_the_ground(dem_path):
+    """Log #1/#2: page one is a photograph of the block with its water on it.
+
+    It used to be a shaded terrain model carrying every earthwork and its name
+    label — a figure a reader has to decode before it has told them where they
+    are, and the one page they look at first. What it draws now is the boundary,
+    what the scheme holds, where the water runs, and the ground each feature
+    catches; the earthworks and their labels moved to the design map.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", line_across_valley())
+        h.plugin._earthworks._refresh_ew_layer()
+        h.panel.analysis_inputs_changed.emit()
+
+        controller = h.plugin._reporting
+        specs = controller._map_specs(controller._collect("Site"))
+        layers = specs["overview"].layers
+        names = [layer.name() for layer in layers]
+
+        assert controller._boundary_layer() in layers, names
+        assert any("Pond Capacity" in name for name in names), names
+        assert any("Streams" in name for name in names), names
+        # The drawn earthwork layers are named for their type — "Swales",
+        # "Basins". None of them belongs on this map.
+        assert not any(name in ("Swales", "Basins", "Dams", "Diversions",
+                                "Berms") for name in names), (
+            f"the summary map is carrying the design again: {names}")
+
+
+def check_summary_map_outlines_what_the_scheme_catches(dem_path):
+    """Log #2: the catchment traced as a line, not the filled raster.
+
+    The filled version draws at alpha 150 over everything beneath it, which on
+    an aerial photograph is most of the point of having the photograph. It is
+    also only ever refreshed by a panel checkbox, so it shows the run before
+    last; this is built from the labelling itself, which is recomputed on every
+    edit.
+    """
+    from qgis.core import QgsWkbTypes
+
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.add_earthwork("swale", line_across_valley())
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        specs = controller._map_specs(controller._collect("Site"))
-        extents = {k: spec.extent for k, spec in specs.items()}
-        assert len(extents) >= 2, f"expected several maps, got {list(extents)}"
-        first = next(iter(extents.values()))
-        for key, extent in extents.items():
-            assert extent == first, (
-                f"the {key} map is framed differently: {extent} vs {first}")
+        state = h.plugin._state
+        assert state.catchment_labels is not None, (
+            "nothing was labelled, so there is no outline to check")
+
+        work = os.path.join(state.output_dir, "outline_check")
+        os.makedirs(work, exist_ok=True)
+        controller._open_transients(work)
+        try:
+            outline = controller._transients.get("catchment_outline")
+            assert outline is not None, "the labelling traced to nothing"
+            assert outline.featureCount() > 0, "an outline with no rings"
+            assert outline.geometryType() == QgsWkbTypes.LineGeometry, (
+                "the outline is not a line — the filled version already exists")
+            # In the project so the layout can resolve it, out of the tree so the
+            # operator's legend does not grow a layer per export.
+            root = h.project.instance().layerTreeRoot()
+            assert h.project.instance().mapLayer(outline.id()) is not None
+            assert root.findLayer(outline.id()) is None, (
+                "a report-only layer reached the layer tree")
+
+            outline_id = outline.id()
+            assert outline in controller._map_specs(
+                controller._collect("S"))["overview"].layers, (
+                "the summary map is not drawing the catchment outline")
+        finally:
+            controller._close_transients()
+        assert h.project.instance().mapLayer(outline_id) is None, (
+            "the report-only layer outlived the export")
+
+
+def check_flow_map_runoff_stops_at_the_boundary(dem_path):
+    """Log #3: the wash used to run off every edge of the page.
+
+    The Surface Runoff raster covers the whole DEM tile, so the figure captioned
+    "where the water goes" showed the block sitting in a fan of blue streaks
+    over ground its owner can do nothing about. The clipped copy is a copy on
+    purpose — the layer on the canvas is the analysis output, and the numbers
+    behind it are measured over the whole grid.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+
+        controller = h.plugin._reporting
+        state = h.plugin._state
+        source = controller._named_layer("Surface Runoff", group="baseline")
+        assert source is not None, "the baseline drew no runoff layer"
+
+        work = os.path.join(state.output_dir, "clip_check")
+        os.makedirs(work, exist_ok=True)
+        controller._open_transients(work)
+        try:
+            clipped = controller._transients.get("runoff_clipped")
+            assert clipped is not None, "the runoff raster was not clipped"
+            assert clipped.isValid(), "the clipped copy did not open"
+            assert clipped.source() != source.source(), (
+                "the source raster was clipped in place")
+            # Same ramp, by cloning rather than by re-deriving it.
+            assert type(clipped.renderer()) is type(source.renderer()), (
+                "the clipped copy was restyled instead of inheriting")
+            layers = controller._map_specs(controller._collect("S"))["flow"].layers
+            assert clipped in layers, (
+                "the flow map is still drawing the unclipped raster")
+            assert source not in layers, [ly.name() for ly in layers]
+        finally:
+            controller._close_transients()
 
 
 def check_report_map_never_draws_a_selection(dem_path):
@@ -698,9 +861,16 @@ def check_report_page_shots(dem_path):
         h.panel._site_name_edit.setText("Quail Island")
         h.run_baseline()
         h.add_earthwork("swale", line_across_valley())
+        # The drawn layer, and the layers the exporter builds for the document
+        # itself. Without them these shots were of a report missing three of the
+        # things it now draws — the design map framed on the block instead of on
+        # its earthworks, no catchment outline, and the runoff wash unclipped —
+        # so the one visual record of the map work showed none of it.
+        h.plugin._earthworks._refresh_ew_layer()
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
+        controller._open_transients(str(tmp))
         data = controller._collect(controller._site_name())
         # These shots test layout, not which run produced them. The footer
         # timestamp and the temp DEM path change every run, so left alone they
@@ -726,15 +896,98 @@ def check_report_page_shots(dem_path):
                 from qgis.PyQt.QtGui import QImage
                 save_qimage(QImage(png), "report_flow_network")
 
-        layout = build_layout(h.project, build_report(data), images=images,
-                              maps=controller._map_specs(data))
-        pages = layout.pageCollection().pageCount()
-        assert pages >= 4, f"expected a multi-page report, got {pages}"
+        try:
+            layout = build_layout(h.project, build_report(data), images=images,
+                                  maps=controller._map_specs(data))
+            pages = layout.pageCollection().pageCount()
+            assert pages >= 4, f"expected a multi-page report, got {pages}"
 
-        for page in range(pages):
-            image = render_page_image(layout, page, dpi=72)
-            assert not image.isNull(), f"page {page + 1} rendered null"
-            save_qimage(image, f"report_page{page + 1}")
+            for page in range(pages):
+                image = render_page_image(layout, page, dpi=72)
+                assert not image.isNull(), f"page {page + 1} rendered null"
+                save_qimage(image, f"report_page{page + 1}")
+        finally:
+            controller._close_transients()
+
+
+def check_report_cascade_is_laid_out_by_height(dem_path):
+    """The flow diagram on the one shape it exists for: a chain of features.
+
+    Every other check in this module builds a single swale, so the diagram is one
+    box and `_layout` falls back to ranked columns — which left the elevation
+    layout, the orthogonal edge routing and the channel staggering with no
+    coverage here at all, resting entirely on unit tests over hand-made node
+    dicts. This drives them through the real pipeline: real centroid elevations
+    sampled off the DEM, real routing targets resolved downhill, real overflow.
+
+    Four swales down the valley rather than across one. The synthetic surface
+    falls ~15% at the top easing to ~3%, so features at different rows sit at
+    genuinely different heights and each one drains into the next — which is
+    exactly the arrangement the cascade is meant to make legible and the one a
+    single feature can say nothing about.
+    """
+    from terrainflow_assessment.modules import report_charts
+    from terrainflow_assessment.modules.report_model import build_flow_graph
+
+    with PluginHarness(dem_path) as h, workdir() as tmp:
+        h.run_baseline()
+        for row in (40, 90, 140, 190):
+            h.add_earthwork("swale", line_across_valley(row=row))
+        h.panel.analysis_inputs_changed.emit()
+
+        data = h.plugin._reporting._collect("Site")
+        assert data.balance is not None, "no balance to draw a cascade from"
+        graph = build_flow_graph(data.balance, data.display_names)
+        nodes = graph["nodes"]
+        assert len(nodes) == 4, f"expected four features, got {len(nodes)}"
+
+        # The DEM has to have supplied real heights, or everything below is
+        # testing the fallback and quietly passing.
+        known = [n for n in nodes if n.get("elevation_known")]
+        assert len(known) == 4, (
+            f"only {len(known)} of 4 features got an elevation off the DEM")
+        heights = {n["id"]: float(n["elevation"]) for n in known}
+        assert max(heights.values()) - min(heights.values()) >= 1.0, (
+            f"features are too close in height to test a cascade: {heights}")
+
+        positions = report_charts._layout(nodes)
+        assert positions != report_charts._layout_by_rank(nodes), (
+            "fell back to ranked columns despite four known elevations")
+
+        # Downhill is down the page. That is the whole claim the caption makes.
+        by_height = sorted(heights, key=lambda i: -heights[i])
+        page_y = [positions[i][1] for i in by_height]
+        assert page_y == sorted(page_y), (
+            f"height order does not match page order: {list(zip(by_height, page_y))}")
+
+        # No link may cross a box it does not connect to — the misreading that
+        # made a link appear to run into a feature and out the other side.
+        stagger = report_charts._channel_stagger(nodes, positions)
+        w, hgt = report_charts._NODE_W, report_charts._NODE_H
+        for node in nodes:
+            target = node.get("target_id")
+            if not target or target not in positions:
+                continue
+            sx, sy = positions[node["id"]]
+            tx, ty = positions[target]
+            others = [p for nid, p in positions.items()
+                      if nid not in (node["id"], target)]
+            route = report_charts._edge_route(
+                (sx + w, sy + hgt / 2.0), (tx, ty + hgt / 2.0), others,
+                stagger.get(node["id"], 0.0))
+            for (x1, y1), (x2, y2) in zip(route, route[1:]):
+                for bx, by in others:
+                    crosses = (min(x1, x2) < bx + w and max(x1, x2) > bx
+                               and min(y1, y2) < by + hgt and max(y1, y2) > by)
+                    assert not crosses, (
+                        f"{node['name']} -> {target} crosses the box at "
+                        f"({bx:.1f}, {by:.1f}); route {route}")
+
+        png = str(tmp / "cascade.png")
+        assert report_charts.render_flow_network(graph, path=png), \
+            "the cascade did not render"
+        from qgis.PyQt.QtGui import QImage
+        save_qimage(QImage(png), "report_flow_network_cascade")
 
 
 def check_report_verification_page_renders(dem_path):

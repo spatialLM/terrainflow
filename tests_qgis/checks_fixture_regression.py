@@ -45,7 +45,9 @@ STORM = {
     "runoff_coefficient": 0.50,
 }
 
-# Recorded 2026-08-05 against fixture quail_island_catchment.tif.
+# Recorded 2026-08-05 against fixture quail_island_catchment.tif; the two capacities
+# re-recorded 2026-08-18 when the blanket 20% freeboard deduction was removed from
+# `calculate_capacity` — both moved by exactly 1/0.8, which is the whole of the change.
 #
 # The three catchment figures and uncaptured_cells come off the conditioned flow graph —
 # they are the terrain-dependent ones, and what the regional-CN work will move. The two
@@ -60,8 +62,8 @@ EXPECTED = {
     "swale_b_catchment_ha": 2.1829,
     "basin_c_catchment_ha": 0.1884,
     "uncaptured_cells": 89336.0000,
-    "swale_capacity_m3": 201.6000,
-    "basin_capacity_m3": 936.0000,
+    "swale_capacity_m3": 252.0000,
+    "basin_capacity_m3": 1170.0000,
 }
 TOLERANCE = 0.005
 

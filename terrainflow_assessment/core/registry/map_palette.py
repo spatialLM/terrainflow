@@ -16,10 +16,22 @@ Two rules the stops here follow, because the report leans on both:
 
 * **Darker means more water.** Every ramp runs light-to-dark with volume, so a
   reader who has learnt one map can read the next.
-* **Alpha is for absence, not for magnitude.** Only the zero stop is
-  transparent. Encoding volume as fading opacity — which the water-captured
-  ramp used to do — makes a shallow pond indistinguishable from bare ground and
-  leaves the whole layer looking like a smudge over the basemap.
+* **Alpha is for absence, not for magnitude.** Encoding volume as fading
+  opacity — which the water-captured ramp used to do, and the surface-runoff
+  ramp did until a field run-through — makes a shallow pond indistinguishable
+  from bare ground and leaves the whole layer looking like a smudge over the
+  basemap. Layer opacity was the compromise that replaced it, and it is gone
+  too: it dilutes evenly rather than re-ordering the stops, but a 55% wash over
+  an aerial still hands the basemap's own lightness range to a ramp whose whole
+  low end is light.
+
+  **Surface runoff takes one bounded exception**, and it is a fade-in rather
+  than a magnitude encoding. Below :data:`SURFACE_RUNOFF_FADE_TOP_M3` the ramp
+  is one colour, so alpha is the only channel left and nothing can be
+  re-ordered against anything: the band exists to bring the map up out of
+  nothing over the first couple of cubic metres instead of switching it on at a
+  hard edge. Above that value every stop is opaque and the rule holds as
+  written.
 """
 
 # --------------------------------------------------------------------------- surface runoff
@@ -29,24 +41,88 @@ Two rules the stops here follow, because the report leans on both:
 #: hillsides feeding them — so a linear stretch renders everything but the main
 #: channels as near-nothing. ``log`` places the stops at decades of the maximum
 #: so minor flow paths stay legible.
+#:
+#: Fraction 0.0 is the *bottom of the colour ramp*, and for this one ramp that is
+#: an absolute volume rather than the raster's zero — see
+#: ``SURFACE_RUNOFF_FADE_TOP_M3``. The remaining fractions are unchanged from when
+#: there were five stops; only the transparent one at the bottom has gone, because
+#: the fade below now does that job over a range instead of at a point.
 SURFACE_RUNOFF_SCALES = {
-    "linear": (0.0, 0.15, 0.4, 0.7, 1.0),
-    "quantile": (0.0, 0.02, 0.08, 0.25, 1.0),
-    "log": (0.0, 1e-4, 1e-3, 1e-2, 1.0),
+    "linear": (0.0, 0.4, 0.7, 1.0),
+    "quantile": (0.0, 0.08, 0.25, 1.0),
+    "log": (0.0, 1e-3, 1e-2, 1.0),
 }
 DEFAULT_SURFACE_RUNOFF_SCALE = "log"
 
-#: Hue and weight per stop. Diffuse sheet flow covers nearly the whole site, so
-#: at any real weight it reads as a wash over the map rather than an overlay on
-#: it — and the point of the layer is to see what the flow is going *over*. The
-#: gathering and channel stops keep their weight; those are the answer.
+#: The volume at which the ramp's lowest colour is fully opaque, in cubic metres.
+#:
+#: Everything about this ramp above this value is a fraction of whatever the run
+#: produced. This one number is not, and deliberately: it is the bottom sliver of
+#: a heavily skewed field, where a fraction of the maximum means nothing to a
+#: reader and one cubic metre of water means something to everybody.
+#:
+#: Below it the ramp holds the "diffuse" colour and fades its alpha linearly to
+#: nothing at 0 m³ — so 1 m³ draws at 50%, and a cell carrying only the rain that
+#: landed on it (a quarter of a cubic metre on a 2 m grid in a 65 mm storm) is
+#: barely on the map at all. That is the same end a hard floor at one cell's own
+#: rainfall served, reached without an edge: a threshold drawn as an edge invites
+#: the reading that water *stops* there, which is exactly the complaint this
+#: layer has collected twice already.
+SURFACE_RUNOFF_FADE_TOP_M3 = 2.0
+
+#: Hue per stop. Every stop is fully opaque; weight is carried by value, light
+#: cyan to dark blue, exactly as in ``WATER_CAPTURED`` and ``STREAMS``. The fade
+#: below the bottom stop is not in here — it is one alpha over one colour, and
+#: putting it in the tuple would put a second meaning in a column that carries
+#: hue.
+#:
+#: These alphas used to climb 0 -> 40 -> 140 -> 225 -> 245, on the argument that
+#: diffuse sheet flow covers nearly the whole site and at any real weight reads as
+#: a wash over the map rather than an overlay on it. The problem was real; alpha
+#: was the wrong instrument for it, for three reasons a field run-through made
+#: plain:
+#:
+#: 1. Per-stop alpha does not dilute, it **re-orders**. The same value at 16%
+#:    reads one colour over sunlit pasture and another over bush shadow, so two
+#:    parts of one map cannot be compared. That is precisely the defect
+#:    ``WATER_CAPTURED`` was converted to fix; it does not weaken because the
+#:    field is throughflow rather than depth.
+#: 2. **The key was lying.** ``hex_of`` drops alpha deliberately, so the panel
+#:    key and the report legend drew "diffuse" solid while the map drew it at
+#:    16%. Going opaque is what makes the legend and the map agree.
+#: 3. The ramp is anchored on the band maximum and ``log`` opens at 1e-4 of it,
+#:    so on a real site the "diffuse" stop lands somewhere around a few hundred
+#:    upslope cells. Everything below that was drawn at under a fifth opacity —
+#:    which is why runoff appeared to *stop* below a pond that retains its
+#:    catchment, when in fact it was drawn and could not be seen.
+#:
+#: The low end is light cyan — the same cyan ``WATER_CAPTURED`` opens on, so the
+#: shallowest water on one map and the faintest flow on the next are the same
+#: colour. It was briefly white, which reads its distance from the background
+#: quickly but has nowhere left to go underneath it: the fade below needs a
+#: *colour* to fade, and white fading out over an aerial is indistinguishable
+#: from white fading out over paper.
 SURFACE_RUNOFF_COLOURS = (
-    ((255, 255, 255, 0), "none"),          # nothing flows here
-    ((226, 240, 250, 40), "diffuse"),      # off-white sheet flow, ~16%
-    ((144, 196, 232, 140), "gathering"),
-    ((48, 122, 190, 225), "concentrated"),
-    ((8, 36, 110, 245), "channel"),        # concentrated channel
+    ((168, 224, 240, 255), "diffuse"),     # light cyan, sheet flow
+    ((108, 179, 216, 255), "gathering"),
+    ((48, 118, 172, 255), "concentrated"),
+    ((16, 46, 82, 255), "channel"),        # concentrated channel
 )
+
+
+def surface_runoff_alpha(volume_m3, fade_top_m3=SURFACE_RUNOFF_FADE_TOP_M3):
+    """Alpha (0–255) for a cell below the bottom of the colour ramp.
+
+    Straight-line from nothing at 0 m³ to fully opaque at ``fade_top_m3``, which
+    puts the midpoint at half — the shape the renderer produces from two stops
+    and an interpolated shader, stated here so the panel key and anything that
+    has to explain the map can read it off the same definition rather than
+    reconstruct it.
+    """
+    if not fade_top_m3 or fade_top_m3 <= 0:
+        return 255
+    fraction = float(volume_m3) / float(fade_top_m3)
+    return int(round(255 * min(max(fraction, 0.0), 1.0)))
 
 # --------------------------------------------------------------------------- streams
 
@@ -104,7 +180,20 @@ EVENT_WATER_LINE = (255, 176, 46, 255)
 #: read as a hazard at a glance rather than as more water. Filled rather than outlined,
 #: because the point it exists to make is that the spill happens along the *whole* band
 #: and not at the single cell the flow routing draws.
-OVERTOPPING_FILL = (192, 57, 43, 110)
+#: Two reference states, two layers — "Overtopping (event)" and "Overtopping (full)",
+#: named to match the pond pair beside them — and one colour between them. The band is
+#: measured on the full pond, so it says "filled, this pool leaves over its own crest"
+#: whatever the storm does; the event layer is the subset the modelled storm actually
+#: reaches, and is drawn over the other.
+#:
+#: The distinction is carried by the layer name and by fill *pattern*, never by hue: it
+#: is the same fault on the same crest, and a second colour would read as a second kind
+#: of thing. The capacity bands are hatched so the two stay legible where they overlap,
+#: and given more alpha because a diagonal hatch at 110 over an aerial is barely there —
+#: the two have to carry comparable weight or the qualified one reads as the lesser
+#: problem.
+OVERTOPPING_FILL = (192, 57, 43, 110)           # solid — this event reaches the crest
+OVERTOPPING_CAPACITY_FILL = (192, 57, 43, 205)  # hatched — only a full pond would
 OVERTOPPING_EDGE = (150, 30, 20, 255)
 
 

@@ -5,6 +5,11 @@ from rasterio.transform import from_origin
 from shapely.geometry import LineString, Polygon, box
 
 from terrainflow_assessment.modules.footprint import (
+    DOMAIN_FROM_POLYGON,
+    DOMAIN_FROM_VALID_DEM,
+    DOMAIN_FROM_WHOLE_GRID,
+    clip_raster_to_polygons,
+    domain_fallback_warning,
     domain_mask,
     internal_relief,
     min_dimension,
@@ -239,3 +244,147 @@ class TestXyToRc:
     def test_bounds_checking_is_left_to_the_caller(self):
         """Out of range comes back as out of range, not clamped and not raised."""
         assert xy_to_rc(TRANSFORM, -40.0, 60.0) == (-48, -40)
+
+
+class TestDomainSource:
+    """Which branch answered — because the mask alone cannot say, and it matters.
+
+    On the Quail Island tile the DEM declares a nodata sentinel and contains no nodata
+    cells, so "every usable DEM cell" was all 2.85 km², 70% of it harbour. The mask looked
+    like a site; it was a guess.
+    """
+
+    def test_a_drawn_area_reports_polygon(self):
+        mask, source = domain_mask((ROWS, COLS), TRANSFORM,
+                                   polygons=[[box(2.0, 2.0, 6.0, 6.0)]],
+                                   with_source=True)
+        assert source == DOMAIN_FROM_POLYGON
+        assert mask.any()
+
+    def test_falling_through_to_the_dem_reports_valid_dem(self):
+        valid = np.ones((ROWS, COLS), dtype=bool)
+        valid[0, :] = False
+        mask, source = domain_mask((ROWS, COLS), TRANSFORM, polygons=[],
+                                   valid=valid, with_source=True)
+        assert source == DOMAIN_FROM_VALID_DEM
+        assert mask.sum() == (ROWS - 1) * COLS
+
+    def test_falling_through_to_nothing_reports_whole_grid(self):
+        mask, source = domain_mask((ROWS, COLS), TRANSFORM, with_source=True)
+        assert source == DOMAIN_FROM_WHOLE_GRID
+        assert mask.all()
+
+    def test_the_mask_is_unchanged_without_the_flag(self):
+        """Existing callers keep getting an array, not a tuple."""
+        assert domain_mask((ROWS, COLS), TRANSFORM).all()
+
+
+class TestDomainFallbackWarning:
+    def test_a_drawn_site_says_nothing(self):
+        assert domain_fallback_warning(DOMAIN_FROM_POLYGON, 1000, 1.0) is None
+
+    def test_a_guessed_site_gives_its_area_in_hectares(self):
+        msg = domain_fallback_warning(DOMAIN_FROM_VALID_DEM, 2_845_083, 1.0)
+        assert "285 ha" in msg
+        assert "Site Boundary" in msg
+
+    def test_the_whole_grid_says_so(self):
+        msg = domain_fallback_warning(DOMAIN_FROM_WHOLE_GRID, 10_000, 1.0)
+        assert "the whole DEM" in msg
+
+    def test_no_figure_is_quoted_as_a_percentage(self):
+        """The denominator is what is unset; a share measured over it would be circular.
+
+        "capture %" as the *name* of a quantity is fine — a number in front of one is not.
+        """
+        import re
+
+        msg = domain_fallback_warning(DOMAIN_FROM_WHOLE_GRID, 10_000, 1.0)
+        assert re.search(r"[\d.]\s*%", msg) is None
+
+
+# ---------------------------------------------------------------------------
+# clip_raster_to_polygons — the runoff wash stops at the boundary
+# ---------------------------------------------------------------------------
+
+class TestClipRasterToPolygons:
+    """The Surface Runoff raster covers the whole tile, and on a coastal tile
+    most of that tile is not the block. Masking it to the drawn boundary leaves
+    the same ramp saying the same thing about the same ground."""
+
+    def _raster(self, tmp_path, nodata=-9999.0, dtype="float32"):
+        import rasterio
+
+        path = str(tmp_path / "src.tif")
+        data = np.arange(ROWS * COLS, dtype=dtype).reshape(ROWS, COLS)
+        profile = dict(driver="GTiff", height=ROWS, width=COLS, count=1,
+                       dtype=dtype, transform=TRANSFORM, crs="EPSG:2193")
+        if nodata is not None:
+            profile["nodata"] = nodata
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(data, 1)
+        return path, data
+
+    def _read(self, path):
+        import rasterio
+
+        with rasterio.open(path) as src:
+            return src.read(1), src.nodata
+
+    def test_inside_is_untouched_and_outside_is_nodata(self, tmp_path):
+        src, data = self._raster(tmp_path)
+        out = str(tmp_path / "clipped.tif")
+        assert clip_raster_to_polygons(src, [box(2.0, 2.0, 6.0, 6.0)], out) == out
+        got, nodata = self._read(out)
+        keep = got != nodata
+        assert keep.any() and not keep.all()
+        assert np.array_equal(got[keep], data[keep])
+
+    def test_the_kept_cells_are_the_ones_the_polygon_covers(self, tmp_path):
+        src, _ = self._raster(tmp_path)
+        out = str(tmp_path / "clipped.tif")
+        poly = box(2.0, 2.0, 6.0, 6.0)
+        clip_raster_to_polygons(src, [poly], out)
+        got, nodata = self._read(out)
+        assert np.array_equal(got != nodata,
+                              rasterize_footprint(poly, (ROWS, COLS), TRANSFORM))
+
+    def test_nothing_to_clip_to_returns_none(self, tmp_path):
+        """An empty list means "print the unclipped layer", not "print an empty
+        map" — the caller falls back on None."""
+        src, _ = self._raster(tmp_path)
+        assert clip_raster_to_polygons(src, [], str(tmp_path / "o.tif")) is None
+        assert clip_raster_to_polygons(src, None, str(tmp_path / "o.tif")) is None
+
+    def test_a_polygon_that_misses_the_raster_returns_none(self, tmp_path):
+        src, _ = self._raster(tmp_path)
+        out = clip_raster_to_polygons(src, [box(500.0, 500.0, 600.0, 600.0)],
+                                      str(tmp_path / "o.tif"))
+        assert out is None
+
+    def test_a_float_band_with_no_sentinel_gets_nan(self, tmp_path):
+        src, _ = self._raster(tmp_path, nodata=None)
+        out = str(tmp_path / "clipped.tif")
+        clip_raster_to_polygons(src, [box(2.0, 2.0, 6.0, 6.0)], out)
+        got, nodata = self._read(out)
+        assert np.isnan(nodata)
+        assert np.isnan(got[0, 0])
+
+    def test_an_integer_band_with_no_sentinel_keeps_its_zeros(self, tmp_path):
+        """NaN is not a value an integer band can hold, so the band minimum
+        stands in — and a real zero inside the boundary survives it."""
+        src, _ = self._raster(tmp_path, nodata=None, dtype="int32")
+        out = str(tmp_path / "clipped.tif")
+        clip_raster_to_polygons(src, [box(0.0, 0.0, 12.0, 12.0)], out)
+        got, nodata = self._read(out)
+        assert nodata == 0
+        assert got.max() == ROWS * COLS - 1
+
+    def test_the_source_is_left_alone(self, tmp_path):
+        """The canvas layer is the analysis output, and the numbers behind it
+        are measured over the whole grid."""
+        src, data = self._raster(tmp_path)
+        clip_raster_to_polygons(src, [box(2.0, 2.0, 6.0, 6.0)],
+                                str(tmp_path / "clipped.tif"))
+        again, _ = self._read(src)
+        assert np.array_equal(again, data)

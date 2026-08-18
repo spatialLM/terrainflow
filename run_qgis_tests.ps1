@@ -4,9 +4,14 @@
 #
 #   .\run_qgis_tests.ps1              # everything
 #   .\run_qgis_tests.ps1 baseline     # only checks matching "baseline"
+#   .\run_qgis_tests.ps1 --skip=report # everything except the report module
 #   .\run_qgis_tests.ps1 -Snapshot    # run, then store the screenshots as the baseline
 #   .\run_qgis_tests.ps1 -Accept      # accept the screenshots already on disk (no re-run)
 #   .\run_qgis_tests.ps1 -Prompt      # run, then ASK whether to accept any changes
+#
+# Patterns match check names as well as module names, so a loose word selects more
+# than it looks like ("report" also pulls in checks_crs, checks_simulation and
+# checks_threading). Every run prints which modules it chose and why.
 #
 # Visual-diff workflow: the summary lists exactly which screenshots moved. A changed
 # image is reported, never treated as a failure. Use -Prompt if you would otherwise

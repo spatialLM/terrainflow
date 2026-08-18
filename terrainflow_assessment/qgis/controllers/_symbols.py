@@ -54,13 +54,26 @@ def band_max(layer, band=1):
     return maximum if maximum > 0 else 1.0
 
 
-def apply_raster_ramp(layer, stops, max_value=None):
+def apply_raster_ramp(layer, stops, max_value=None, min_value=None,
+                      fade_from=0.0):
     """Paint ``layer`` with a ``core.registry.map_palette`` ramp.
 
     ``stops`` are ``(fraction_of_max, (r, g, b, a), label)``. Baseline and the
     simulation both draw the same quantities — captured water, the channel
     network — and each used to carry its own copy of the stops, so a change on
     one side left two views of one thing in different colours.
+
+    ``min_value`` moves the **bottom of the colour ramp** to an absolute value:
+    the stops are laid out over ``[min_value, top]`` rather than ``[0, top]``,
+    and one extra stop is prepended at ``fade_from`` carrying the lowest colour
+    at zero alpha. Between the two the shader interpolates alpha, so the layer
+    comes up out of nothing over that range instead of switching on at an edge —
+    a threshold drawn as an edge reads as water *stopping* there. Values below
+    ``fade_from`` clamp onto that transparent stop, which is what makes one stop
+    enough. See ``map_palette.SURFACE_RUNOFF_FADE_TOP_M3``, the only caller.
+
+    A ``min_value`` at or above ``top`` is ignored: blanking or flattening a
+    whole layer is never the useful reading of a display floor.
     """
     from qgis.core import (
         QgsColorRampShader,
@@ -71,16 +84,73 @@ def apply_raster_ramp(layer, stops, max_value=None):
     top = band_max(layer) if max_value is None else max_value
     if not top or top <= 0:
         top = 1.0
+    try:
+        floor = float(min_value or 0.0)
+    except (TypeError, ValueError):
+        floor = 0.0
+    if floor <= 0.0 or floor >= top:
+        floor = 0.0
+    span = top - floor
+    items = [
+        QgsColorRampShader.ColorRampItem(floor + span * fraction,
+                                         QColor(*rgba), label)
+        for fraction, rgba, label in stops
+    ]
+    if floor and stops:
+        clear = QColor(*stops[0][1])
+        clear.setAlpha(0)
+        items.insert(0, QgsColorRampShader.ColorRampItem(
+            float(fade_from), clear, stops[0][2]))
     ramp = QgsColorRampShader()
     ramp.setColorRampType(QgsColorRampShader.Interpolated)
-    ramp.setColorRampItemList([
-        QgsColorRampShader.ColorRampItem(top * fraction, QColor(*rgba), label)
-        for fraction, rgba, label in stops
-    ])
+    ramp.setColorRampItemList(items)
     shader = QgsRasterShader()
     shader.setRasterShaderFunction(ramp)
     layer.setRenderer(
         QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader))
+
+
+def apply_shared_ramp(state, project, family, layer, stops,
+                      max_value=None, min_value=None):
+    """Paint ``layer`` on a ramp whose top every layer of ``family`` shares.
+
+    A Baseline layer and its Earthworks counterpart answer the same question
+    about the same ground, and the only reason to draw both is to read one
+    against the other. That works only while a colour means one quantity on
+    both — and it did not. Each layer stretched its stops over its own band
+    maximum, so the same two metres of water was mid-blue before the design and
+    navy after it purely because the deepest pond on the site had moved, and the
+    "difference" the pair appeared to show was the ramp rescaling itself. The
+    event pond was scaled to the full pond deliberately for exactly this reason;
+    this is that argument applied to every pair rather than to one of them.
+
+    A family's top is the largest maximum any live member has claimed. Raising it
+    repaints the earlier members, because a shared scale only the last layer drawn
+    is on is not shared. Members are held by id and pruned when they no longer
+    resolve, so a cleared stage group releases its claim on the scale instead of
+    propping it up with rasters nobody can see.
+
+    ``state`` carries ``ramp_scales``; ``project`` resolves the ids.
+    """
+    from terrainflow_assessment.qgis.controllers._layers import resolve_layer
+
+    entry = state.ramp_scales.setdefault(family, {"members": {}})
+    claimed = band_max(layer) if max_value is None else max_value
+    entry["members"][layer.id()] = float(claimed) if claimed and claimed > 0 else 1.0
+
+    live = {}
+    for layer_id, top in entry["members"].items():
+        found = layer if layer_id == layer.id() else resolve_layer(project, layer_id)
+        if found is not None:
+            live[layer_id] = (found, top)
+    entry["members"] = {lid: top for lid, (_l, top) in live.items()}
+
+    shared = max((top for _l, top in live.values()), default=1.0)
+    entry["top"] = shared
+    for member, _top in live.values():
+        apply_raster_ramp(member, stops, shared, min_value)
+        if member is not layer:
+            member.triggerRepaint()
 
 # --- the metres/millimetres split, as numbers -------------------------------
 #

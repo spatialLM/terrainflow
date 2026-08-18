@@ -7,9 +7,14 @@ license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.9"
 readme = "README.md"
 
+# Coverage is deliberately NOT in addopts. With fail_under=95 below, a forced --cov
+# made every scoped run self-contradictory: `pytest tests/test_map_palette.py` printed
+# "43 passed" and "FAIL Required test coverage of 95.0% not reached" and exited 1. An
+# exit code that says failure on a green run trains you to stop reading exit codes,
+# which is how a real failure gets missed. Ask for coverage explicitly instead — CI
+# does (ci.yml passes --cov on the command line), so the gate is unaffected.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=terrainflow_assessment --cov-report=term-missing --cov-branch"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

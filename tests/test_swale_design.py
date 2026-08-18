@@ -91,9 +91,9 @@ class TestRecommendSwaleLength:
     def test_basic_calculation_storage_only(self):
         # Trapezoidal area for T=2.0, d=0.5, side_slope=1.0:
         #   b = 2 - 2·1·0.5 = 1.0;  A = (2+1)/2 · 0.5 = 0.75 m²
-        #   capacity/m = 0.75 · 0.8 = 0.6 m³/m;  L = 100 / 0.6 = 166.7 m
+        #   capacity/m = 0.75 m³/m, brim-full;  L = 100 / 0.75 = 133.3 m
         length = recommend_swale_length(100.0, 0.5, 2.0)
-        assert length == pytest.approx(166.7, rel=1e-3)
+        assert length == pytest.approx(133.3, rel=1e-3)
 
     def test_infiltration_shortens_length(self):
         # Adding infiltration over the event increases capacity per metre,
@@ -135,12 +135,17 @@ class TestRecommendSwaleLength:
         assert length == round(length, 1)
 
     def test_storage_only_formula_consistency(self):
-        """With no infiltration, length × trapezoidal_area × 0.8 == inflow volume."""
+        """With no infiltration, length × trapezoidal_area == inflow volume.
+
+        No allowance in the middle of that identity: the sizing used to divide by
+        ``area × 0.8``, which made every recommended length 25% longer than the
+        storage it was sized from. Freeboard is the spillway's job now.
+        """
         depth, width, volume = 0.5, 2.0, 150.0
         length = recommend_swale_length(volume, depth, width)
         bottom = max(0.0, width - 2.0 * 1.0 * depth)
         area = (width + bottom) / 2.0 * depth
-        assert length * area * 0.8 == pytest.approx(volume, rel=1e-3)
+        assert length * area == pytest.approx(volume, rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +249,12 @@ class TestSnapPointToContourElevation:
 
 class TestRequiredStorageAtLength:
     # Default swale: top 2.0 m, depth 0.5 m, 1:1 batter → bottom 1.0 m,
-    # trapezoid section 0.75 m², usable at 0.8 freeboard = 0.60 m³/m.
-    DIMS = dict(depth=0.5, width=2.0, side_slope=1.0, freeboard=0.8)
+    # trapezoid section 0.75 m², brim-full = 0.75 m³/m.
+    DIMS = dict(depth=0.5, width=2.0, side_slope=1.0)
 
     def test_available_storage_uses_the_trapezoid_not_a_rectangle(self):
         r = required_storage_at_length(0.0, 100.0, **self.DIMS)
-        assert r.storage_m3 == pytest.approx(60.0)     # 0.75 × 0.8 × 100
+        assert r.storage_m3 == pytest.approx(75.0)     # 0.75 × 100
         # The old dialog assumed depth×width = 1.0 m³/m → 100 m³, 67% optimistic.
         assert r.storage_m3 < 100.0
 
@@ -261,11 +266,11 @@ class TestRequiredStorageAtLength:
     def test_deficit_reported_when_short(self):
         r = required_storage_at_length(100.0, 100.0, **self.DIMS)
         assert r.holds is False
-        assert r.deficit_m3 == pytest.approx(40.0)
+        assert r.deficit_m3 == pytest.approx(25.0)
 
     def test_required_depth_closes_the_deficit_exactly(self):
         """The headline promise: deepen to this and the deficit goes to zero."""
-        inflow, length = 70.0, 100.0          # 70 m³ against 60 m³ available
+        inflow, length = 90.0, 100.0          # 90 m³ against 75 m³ available
         r = required_storage_at_length(inflow, length, **self.DIMS)
         assert not r.holds
         assert r.depth_reachable
@@ -277,7 +282,7 @@ class TestRequiredStorageAtLength:
 
     def test_required_depth_with_vertical_walls(self):
         r = required_storage_at_length(80.0, 100.0, depth=0.5, width=2.0,
-                                       side_slope=0.0, freeboard=1.0)
+                                       side_slope=0.0)
         # Needs 0.8 m³/m over a 2.0 m rectangle → 0.4 m.
         assert r.required_depth_m == pytest.approx(0.4)
 
@@ -289,13 +294,13 @@ class TestRequiredStorageAtLength:
         the caller must say "widen it", not "deepen to 0.50 m" (the current depth).
         """
         r = required_storage_at_length(1e6, 10.0, depth=0.5, width=2.0,
-                                       side_slope=1.0, freeboard=0.8)
+                                       side_slope=1.0)
         assert r.depth_reachable is False
         assert r.required_depth_m == 0.5      # unchanged → no bogus advice
         assert not r.holds
 
     def test_reachable_deficit_is_not_flagged_unreachable(self):
-        r = required_storage_at_length(70.0, 100.0, **self.DIMS)
+        r = required_storage_at_length(90.0, 100.0, **self.DIMS)
         assert r.depth_reachable is True
 
     def test_infiltration_counts_toward_holding_the_event(self):
@@ -318,7 +323,7 @@ class TestRequiredStorageAtLength:
     def test_recommended_length_is_carried_as_a_secondary_figure(self):
         r = required_storage_at_length(120.0, 100.0, **self.DIMS)
         assert r.recommended_length_m == pytest.approx(
-            recommend_swale_length(120.0, 0.5, 2.0, side_slope=1.0, freeboard=0.8)
+            recommend_swale_length(120.0, 0.5, 2.0, side_slope=1.0)
         )
 
     def test_invalid_inputs_give_a_safe_empty_result(self):

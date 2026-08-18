@@ -414,14 +414,21 @@ class TestCapacityBreakdown:
         ew.bottom_width_m = 1.0
         ew.batter_run_m = 0.0
         ew.companion_berm = False
-        ew.capacity_m3 = 60.0          # 0.75 m² × 100 m × 0.8 freeboard
+        ew.capacity_m3 = 75.0          # 0.75 m² × 100 m, brim-full
         return ew
 
-    def test_splits_freeboard_from_geometry(self):
+    def test_geometry_is_the_whole_drawn_section(self):
+        """No allowance comes off, and no key survives that says one did.
+
+        ``geometric`` used to be recovered by dividing a freeboarded
+        ``calculate_capacity`` back out by 0.8, with the difference reported as
+        ``freeboard_m3`` and the discounted figure as ``design``. Both are gone:
+        the section is the section.
+        """
         b = capacity_breakdown(self._swale(), cell_size=1.0)
-        assert b["design"] == pytest.approx(60.0)
         assert b["geometric"] == pytest.approx(75.0)
-        assert b["freeboard_m3"] == pytest.approx(15.0)
+        assert "freeboard_m3" not in b
+        assert "design" not in b
 
     def test_resolution_penalty_measures_the_trench_the_burn_cut(self):
         """The penalty is ``cut − section``: did the grid hold the section you drew?
@@ -463,6 +470,50 @@ class TestCapacityBreakdown:
         assert b["rasterisable"] == b["geometric"]
         assert b["cut_m3"] is None
         assert b["resolution_penalty_m3"] == 0.0
+
+    def test_excavation_is_carried_separately_from_the_trench_void(self):
+        """Two cut figures, two questions, and the penalty stays pointed at the void.
+
+        ``cut_m3`` is the trench filled to its own pour point — the right operand for a
+        grid-fidelity check and nothing else. ``excavation_m3`` is the earth that comes
+        out, which on falling ground is the larger and is what the build schedule prices
+        from. Folding one into the other is what printed a trench void as an excavation.
+        """
+        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200,
+                               cut_m3=100.0, excavation_m3=140.0)
+        assert b["cut_m3"] == pytest.approx(100.0)
+        assert b["excavation_m3"] == pytest.approx(140.0)
+        # The penalty is cut − section, and the excavation must not have moved it.
+        assert b["resolution_penalty_m3"] == pytest.approx(25.0)
+
+    def test_an_unmeasured_excavation_is_absent_rather_than_zero(self):
+        """A feature that has not been measured moves an unknown amount of earth.
+
+        Zero would read as "moves none", in a column of volumes, for a trench.
+        """
+        b = capacity_breakdown(self._swale(), cell_size=1.0, n_cells=200, cut_m3=100.0)
+        assert b["excavation_m3"] is None
+
+    def test_a_dam_claims_neither_cut_figure(self):
+        """No drawn section, and a contact band that is the line rather than the wall.
+
+        The barrier branch returns before either figure could be set, and that is
+        deliberate: an excavation integrated over a dam's recorded band would be a
+        number about the wrong shape.
+        """
+        ew = self._swale()
+        ew.type = "dam"
+        ew.geometry = make_mock_line_geom([(0.0, 0.0), (100.0, 0.0)])
+        ew.depth = 0.0                      # no section, so geometric collapses to 0
+        ew.width = 0.0
+        ew.top_width_m = 0.0
+        ew.bottom_width_m = 0.0
+        ew.capacity_m3 = 2148.0
+        b = capacity_breakdown(ew, cell_size=1.0, n_cells=200,
+                               cut_m3=100.0, excavation_m3=140.0)
+        assert b["barrier_impounded"] is True
+        assert b["cut_m3"] is None
+        assert b["excavation_m3"] is None
 
 
 class TestAsFloat:

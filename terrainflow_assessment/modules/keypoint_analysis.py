@@ -901,6 +901,8 @@ class YeomansKeylineAnalysis:
 
         from pysheds.grid import Grid
 
+        from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
+
         if self._fdir_path and self._acc_path:
             # float32, not int32: a supplied raster may be dinf radians as easily as
             # D8 codes, and truncating the former loses the direction entirely.
@@ -932,7 +934,10 @@ class YeomansKeylineAnalysis:
                 filled = grid.breach_depressions(pit_filled)
             except AttributeError:
                 filled = grid.fill_depressions(pit_filled)
-            inflated = grid.resolve_flats(filled)
+            # The step is derived from this surface, not pysheds' fixed default: on a
+            # big flat the default lifts cells over neighbours that were genuinely
+            # lower. See ``flow_analysis.safe_flat_epsilon``.
+            inflated, _eps, _inv = resolve_flats_safely(grid, filled)
             try:
                 fdir = grid.flowdir(inflated, routing="dinf")
                 _routing = "dinf"

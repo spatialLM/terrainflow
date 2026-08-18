@@ -11,6 +11,7 @@ from terrainflow_assessment.modules.earthwork_design import (
     Earthwork,
     EarthworkManager,
     berm_height_estimate,
+    burn_quantities,
     calculate_capacity,
     calculate_cut_volume,
     calculate_diversion_discharge,
@@ -181,7 +182,7 @@ class TestExplicitBottomWidth:
         narrow_v, _ = calculate_capacity("swale", geom, 0.5, 2.0, bottom_width=0.5)
         # bottom 0.5 < derived 1.0 → smaller trapezoid
         assert narrow_v < default_v
-        assert narrow_v == pytest.approx(((0.5 + 2.0) / 2) * 0.5 * 100.0 * 0.8, rel=1e-3)
+        assert narrow_v == pytest.approx(((0.5 + 2.0) / 2) * 0.5 * 100.0, rel=1e-3)
 
     def test_cut_volume_explicit_bottom(self):
         geom = self._line()
@@ -261,10 +262,10 @@ class TestCalculateCapacity:
     def test_swale_basic(self):
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
-        # top_width=2.0, depth=0.5 → bottom=1.0, cs=(1+2)/2*0.5=0.75, vol=0.75*100*0.8=60
+        # top_width=2.0, depth=0.5 → bottom=1.0, cs=(1+2)/2*0.5=0.75, vol=0.75*100=75
         vol_m3, vol_l = calculate_capacity("swale", geom, 0.5, 2.0)
-        assert vol_m3 == pytest.approx(60.0, rel=1e-3)
-        assert vol_l == pytest.approx(60_000.0, rel=1e-3)
+        assert vol_m3 == pytest.approx(75.0, rel=1e-3)
+        assert vol_l == pytest.approx(75_000.0, rel=1e-3)
 
     def test_swale_companion_berm_increases_capacity(self):
         geom = make_mock_line_geom()
@@ -277,21 +278,21 @@ class TestCalculateCapacity:
         geom = make_mock_polygon_geom()
         geom.area.return_value = 200.0
         vol, _ = calculate_capacity("basin", geom, 1.5, 0)
-        assert vol == pytest.approx(200.0 * 1.5 * 0.8, rel=1e-3)
+        assert vol == pytest.approx(200.0 * 1.5, rel=1e-3)
 
     def test_basin_batter_none_matches_zero(self):
         # batter_run=None and 0 both mean vertical walls — historical numbers.
         geom = make_mock_polygon_geom()  # 10×10 → A=100, P=40
         v_none, _ = calculate_capacity("basin", geom, 1.5, 0, batter_run=None)
         v_zero, _ = calculate_capacity("basin", geom, 1.5, 0, batter_run=0.0)
-        assert v_none == v_zero == pytest.approx(100.0 * 1.5 * 0.8, rel=1e-3)
+        assert v_none == v_zero == pytest.approx(100.0 * 1.5, rel=1e-3)
 
     def test_basin_batter_reduces_capacity(self):
         geom = make_mock_polygon_geom()  # A=100, P=40
         vertical, _ = calculate_capacity("basin", geom, 1.0, 0)
         battered, _ = calculate_capacity("basin", geom, 1.0, 0, batter_run=1.0)
-        # z=1: V = (100·1 − 40·1·1²/2) × 0.8 = 64.0
-        assert battered == pytest.approx(64.0, rel=1e-3)
+        # z=1: V = 100·1 − 40·1·1²/2 = 80.0
+        assert battered == pytest.approx(80.0, rel=1e-3)
         assert battered < vertical
 
     def test_basin_converging_batter_clamps(self):
@@ -299,9 +300,32 @@ class TestCalculateCapacity:
         # never negative.
         geom = make_mock_polygon_geom((0.0, 0.0, 1.0, 1.0))  # A=1, P=4
         vol, _ = calculate_capacity("basin", geom, 2.0, 0, batter_run=4.0)
-        # z=2: t*=1/8, V = 1²/(2·8) × 0.8 = 0.05
-        assert vol == pytest.approx(0.05, rel=1e-3)
+        # z=2: t*=1/8, V = 1²/(2·8) = 0.0625
+        assert vol == pytest.approx(0.06, rel=1e-3)   # 0.0625, rounded to 2 dp
         assert vol > 0.0
+
+    def test_capacity_is_the_section_with_nothing_taken_off(self):
+        """No blanket allowance anywhere in the storage figure.
+
+        ``calculate_capacity`` returned ``section x length x 0.8`` for as long as the
+        plugin had a FREEBOARD constant, and that discounted number was what reached
+        the report under a column headed *Capacity (geometric)*. Beside a measured
+        pond the deduction was large enough to invert the comparison: a swale holding
+        11% less than it was drawn to hold printed as holding 11% more. Freeboard is
+        the height a spillway leaves between the design nappe and the crest -- per
+        feature, in metres, on the Spillways table -- and never a site-wide fraction.
+        """
+        import terrainflow_assessment.modules.earthwork_design as ed
+
+        assert not hasattr(ed, "FREEBOARD"), (
+            "the blanket freeboard fraction is gone; nothing may reintroduce it"
+        )
+
+        geom = make_mock_line_geom()
+        geom.length.return_value = 100.0
+        section = ((2.0 + 1.0) / 2) * 0.5          # trapezoid, top 2.0, bottom 1.0
+        vol, _ = calculate_capacity("swale", geom, 0.5, 2.0)
+        assert vol == pytest.approx(section * 100.0, rel=1e-9)
 
     def test_berm_zero(self):
         assert calculate_capacity("berm", make_mock_line_geom(), 0.5, 2.0) == (0.0, 0.0)
@@ -389,6 +413,34 @@ class TestCalculateFillVolume:
 
     def test_diversion_zero_fill(self):
         assert calculate_fill_volume("diversion", make_mock_line_geom(), 0.3, 1.0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# burn_quantities
+# ---------------------------------------------------------------------------
+
+class TestBurnQuantities:
+    """What the terrain model actually moved, over a surface with holes in it."""
+
+    def _surfaces(self):
+        original = np.full((4, 4), 10.0)
+        original[0, 0] = np.nan          # a nodata hole, as DEMBurner leaves them
+        burned = original.copy()
+        burned[2, 2] = 8.0               # 2 m cut in one cell
+        burned[3, 3] = 11.0              # 1 m fill in one cell
+        return original, burned
+
+    def test_cut_and_fill_are_measured(self):
+        q = burn_quantities(*self._surfaces(), 4.0)
+        assert q["cut_m3"] == pytest.approx(8.0)
+        assert q["fill_m3"] == pytest.approx(4.0)
+
+    def test_a_nodata_hole_does_not_take_the_whole_site_with_it(self):
+        """Holes are NaN in the burner's surfaces and a DEM clipped to a boundary
+        always has them. Summed without ``nansum`` the site total came back NaN,
+        and the report's ``int(round(nan))`` aborted the export."""
+        q = burn_quantities(*self._surfaces(), 4.0)
+        assert np.isfinite(q["cut_m3"]) and np.isfinite(q["fill_m3"])
 
 
 # ---------------------------------------------------------------------------
@@ -1616,6 +1668,176 @@ class TestFeatureStorage:
         s = b.feature_storage(ew)
         assert s.volume_m3 == 0.0
         assert s.level_m is None
+
+
+class TestMeasuredExcavation:
+    """``FeatureStorage.excavation_m3`` — the earth a feature takes out of the hillside.
+
+    This is the figure the report's *Cut (measured)* column prints. It used to print
+    ``burned_cut`` instead — the trench filled to its own bare pour point — which answers
+    a different question: not *what came out* but *what fits in*. The two agree on flat
+    ground and part company as soon as the ground falls, because the burn cuts to a level
+    invert and the hillside rises away from it. Quoted to a contractor the rim figure is
+    the low one, and it sat in the column the page tells the reader to price from, one
+    table above a site total that disagreed with it.
+
+    Measured on the isolated burn, so it cannot be inflated by whichever neighbour was
+    burned first — the attribution ``burn_quantities`` refuses to invent.
+    """
+
+    def _flat(self, tmp_path, rows=80, cols=160, elev=50.0):
+        return _make_dem(tmp_path, np.full((rows, cols), elev, dtype="float32"))
+
+    def _hillside(self, tmp_path, slope=0.10, rows=120, cols=160):
+        data = np.fromfunction(
+            lambda r, c: 60.0 - r * slope, (rows, cols)).astype("float32")
+        return _make_dem(tmp_path, data)
+
+    def _swale(self, y=40.0, x0=30.0, x1=130.0, **kw):
+        kw.setdefault("depth", 1.0)
+        kw.setdefault("width", 3.0)
+        kw.setdefault("bottom_width_m", 1.0)
+        kw.setdefault("companion_berm", False)
+        return _mock_ew("swale", make_mock_line_geom([(x0, y), (x1, y)]), **kw)
+
+    def test_on_flat_ground_it_equals_what_the_trench_holds(self, tmp_path):
+        """Nowhere for an over-dig to hide: the hole and the spoil are the same volume.
+
+        The equality is exact rather than approximate, and it has to be — the two
+        expressions differ only by ``original − spill``, which a plane makes identically
+        zero over the footprint.
+        """
+        b = DEMBurner(self._flat(tmp_path))
+        ew = self._swale()
+        b.burn_earthworks([ew])
+        held = next(iter(b.burned_cut.values()))
+        assert b.feature_storage(ew).excavation_m3 == pytest.approx(held, rel=1e-9)
+
+    def test_on_falling_ground_more_comes_out_than_fits_in(self, tmp_path):
+        """The level-floor over-dig, which is the whole reason the column was wrong.
+
+        The trench floor is one elevation, set at the downhill pour point, so every
+        metre the ground climbs away from that datum is another metre of dig that the
+        rim figure cannot see because it is above the rim.
+        """
+        b = DEMBurner(self._hillside(tmp_path, slope=0.10))
+        ew = self._swale(y=60.0)
+        b.burn_earthworks([ew])
+        held = next(iter(b.burned_cut.values()))
+        dug = b.feature_storage(ew).excavation_m3
+
+        assert dug > held * 1.05, (
+            f"{dug:,.1f} m³ dug against {held:,.1f} m³ held — on 10% ground these "
+            f"should differ by the over-dig, and they are barely apart"
+        )
+
+    def test_a_basin_in_a_hollow_digs_less_than_it_holds(self, tmp_path):
+        """The direction is not fixed, and a one-way assertion would have missed this.
+
+        ``pour_point`` is the minimum of the ring *outside* the mask, so ground inside
+        the mask may already sit below it. Excavating a natural depression takes out
+        less earth than the finished hole holds — the terrain supplied the difference.
+        """
+        data = np.full((120, 160), 60.0, dtype="float32")
+        # Half a metre of hollow under a one-metre basin: shallower than the dig, so
+        # earth still comes out. At two metres the basin floor never reaches the ground
+        # and the excavation is a clean zero — true, and it tests nothing.
+        data[50:70, 60:90] -= 0.5
+        b = DEMBurner(_make_dem(tmp_path, data))
+        ew = _mock_ew("basin", make_mock_polygon_geom((60.0, 50.0, 90.0, 70.0)),
+                      depth=1.0, width=0.0, batter_run_m=0.0)
+        b.burn_earthworks([ew])
+        held = next(iter(b.burned_cut.values()))
+        dug = b.feature_storage(ew).excavation_m3
+
+        assert 0.0 < dug < held, (
+            f"a basin dug into a hollow should take out less ({dug:,.1f} m³) than it "
+            f"holds to its rim ({held:,.1f} m³)"
+        )
+
+    def test_one_feature_reconciles_exactly_with_the_site_total(self, tmp_path):
+        """The assertion the old column could not have passed.
+
+        For a lone swale the burn writes two disjoint regions — the trench down, the
+        berm up — so the per-feature excavation and the whole-grid site cut cover the
+        same cells and must agree to floating point, not to a tolerance. A few percent
+        of slack here would pass while hiding a few percent of real error: getting the
+        cell set wrong — dropping the over-dig, or counting the berm — moves this figure
+        by tens of percent, never by parts per million.
+
+        ``rel=1e-9`` and not exact equality because the two sums walk the same values in
+        a different order. It is float32 ground summed in float64; both sides must do
+        the widening, and this test failed by 4e-8 while only one of them did.
+        """
+        b = DEMBurner(self._hillside(tmp_path, slope=0.10))
+        ew = self._swale(y=60.0, companion_berm=True)
+        out = b.burn_earthworks([ew])
+        site = burn_quantities(b.original, out, b.cell_area)["cut_m3"]
+
+        assert b.feature_storage(ew).excavation_m3 == pytest.approx(site, rel=1e-9), (
+            "the per-feature figure and the site total describe the same earth for a "
+            "single feature; if they differ, one of them is measuring the wrong cells"
+        )
+
+    def test_the_companion_berm_never_overlaps_the_trench(self, tmp_path):
+        """The invariant the reconciliation above rests on, asserted directly.
+
+        Cut and fill are netted per cell, so a berm standing inside its own trench would
+        cancel part of the excavation and quietly understate it. The berm masks are all
+        built ``& ~swale_mask``; nothing asserted it until the cut figure came to depend
+        on it.
+        """
+        b = DEMBurner(self._hillside(tmp_path, slope=0.10))
+        ew = self._swale(y=60.0, companion_berm=True)
+        out = b.burn_earthworks([ew])
+        trench = b.original - out > 1e-9
+        bank = out - b.original > 1e-9
+
+        assert trench.any() and bank.any(), "fixture cut nothing or built nothing"
+        assert not (trench & bank).any(), (
+            f"{int((trench & bank).sum())} cells are both cut and filled — the netting "
+            f"is silent, so this understates the excavation rather than failing"
+        )
+
+    def test_a_neighbour_burned_first_does_not_inflate_it(self, tmp_path):
+        """Why the figure is taken off the isolated burn and not the running array.
+
+        The site burn lowers one shared surface with ``np.minimum``, so where two
+        footprints meet, the second feature writes nothing into cells the first already
+        cut — and ``original − dem`` over its mask would hand it earth its neighbour
+        moved. Burning alone removes the ordering, so the pair measures the same both
+        ways round.
+        """
+        b = DEMBurner(self._hillside(tmp_path, slope=0.10))
+        a = self._swale(y=60.0)
+        c = self._swale(y=61.0)                       # one metre away: footprints touch
+        b.burn_earthworks([a, c])
+        first = (b.feature_storage(a).excavation_m3, b.feature_storage(c).excavation_m3)
+        b.burn_earthworks([c, a])
+        second = (b.feature_storage(a).excavation_m3, b.feature_storage(c).excavation_m3)
+
+        assert first == pytest.approx(second, rel=1e-9)
+        assert first[0] > 0.0 and first[1] > 0.0
+
+    def test_a_feature_that_ponds_nothing_still_reports_its_dig(self, tmp_path):
+        """A cut-off drain on falling ground holds no water and moves plenty of earth.
+
+        The pond-region early return used to be the end of the function, so a feature
+        with nothing to flood reported zero for everything — including the one figure
+        that does not depend on there being a pond.
+        """
+        b = DEMBurner(self._hillside(tmp_path, slope=0.10))
+        # Straight down the fall line: a level floor under falling ground, no impoundment.
+        ew = self._swale(x0=80.0, x1=80.0, y=20.0)
+        ew.geometry = make_mock_line_geom([(80.0, 20.0), (80.0, 100.0)])
+        b.burn_earthworks([ew])
+        s = b.feature_storage(ew)
+        assert s.excavation_m3 > 0.0
+
+    def test_without_a_burn_there_is_nothing_to_report(self, tmp_path):
+        b = DEMBurner(self._hillside(tmp_path))
+        ew = self._swale(x0=500.0, x1=600.0, y=500.0)     # entirely off the grid
+        assert b.feature_storage(ew).excavation_m3 == 0.0
 
 
 class TestDamWindowedFlood:

@@ -6,12 +6,20 @@ Must run under QGIS's own Python. Use run_qgis_tests.ps1 from the repo root:
     .\run_qgis_tests.ps1                    # everything except OPT_IN_MODULES
     .\run_qgis_tests.ps1 baseline           # only checks matching "baseline"
     .\run_qgis_tests.ps1 slow               # run a quarantined module explicitly
+    .\run_qgis_tests.ps1 --skip=report      # everything except the report module
     .\run_qgis_tests.ps1 --timeout=600      # raise the per-module time limit
 
+A pattern is matched against check names as well as module names, so a loose word
+selects more than it looks like: `report` also picks up checks_crs, checks_simulation
+and checks_threading, which hold check_..._reported / ..._reports_... Every run prints
+which modules it chose and what matched them, because the cost of an over-match is a
+full QGIS boot per module and the old silence made that invisible.
+
 Each checks_*.py module runs in its own QGIS subprocess with a time limit. That
-costs ~5 s of boot per module and buys two things worth more than the seconds: a
-hung check (or a PyQGIS segfault) reports as one failed module instead of
-wedging the whole run, and no module can leak state into the next.
+costs ~9-10 s of boot per module — about 160 s of a full 8-minute run — and buys two
+things worth more than the seconds: a hung check (or a PyQGIS segfault) reports as one
+failed module instead of wedging the whole run, and no module can leak state into the
+next.
 
 Exit code is 0 when every check passes, 1 otherwise — so CI can gate on it.
 """
@@ -45,6 +53,17 @@ DEFAULT_TIMEOUT_S = 300
 # rest of the keypoint path. Kept as a mechanism, because quarantining beats deleting a
 # check that has found something real.
 OPT_IN_MODULES = set()
+
+# What a --skip= takes with it. `checks_report` is misnamed: 15 of its checks are not
+# report checks, and it is the only place three unrelated things are covered at all — so
+# skipping it quietly deletes them from the run. Say so at the point of skipping, because
+# the module name is exactly what makes the loss easy to miss.
+SKIP_WARNINGS = {
+    "checks_report": (
+        "also the only real-QGIS coverage of qgis/adapters/map_image.py, the canvas\n"
+        "    selection-highlight lifecycle, and the stage-stepper tick logic"
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +257,12 @@ def main(argv):
     timeout_s = DEFAULT_TIMEOUT_S
     snapshot = False
     patterns = []
+    skip = []
     for arg in argv:
         if arg.startswith("--timeout="):
             timeout_s = int(arg.split("=", 1)[1])
+        elif arg.startswith("--skip="):
+            skip.extend(s for s in arg.split("=", 1)[1].split(",") if s)
         elif arg == "--snapshot":
             snapshot = True
         elif arg == "--accept":
@@ -253,18 +275,48 @@ def main(argv):
         elif not arg.startswith("-"):
             patterns.append(arg)
 
-    modules = [p.stem for p in sorted(HERE.glob("checks_*.py"))]
+    available = [p.stem for p in sorted(HERE.glob("checks_*.py"))]
+    # Why each module was picked, so an over-match is visible instead of just expensive.
+    # A pattern is matched against check *names* as well as module names, which is what
+    # lets a single check be run by name — and also what made `run_qgis_tests.ps1 report`
+    # quietly select checks_crs, checks_simulation and checks_threading (they hold
+    # check_..._reported / ..._reports_...), paying three extra 10-second QGIS boots for
+    # three checks nobody asked for. The matching is right; the silence was not.
+    reasons = {}
     if patterns:
-        modules = [
-            m for m in modules
-            if any(p in m for p in patterns) or collect(m, patterns)
-        ]
+        modules = []
+        for m in available:
+            if any(p in m for p in patterns):
+                reasons[m] = "module name"
+            else:
+                matched = collect(m, patterns)
+                if not matched:
+                    continue
+                reasons[m] = matched[0][0]
+            modules.append(m)
     else:
-        # Quarantined modules run only when named. checks_slow holds checks that do
-        # not terminate on this fixture (recommend_ponds), so including it by default
-        # would make the plain `run_qgis_tests.ps1` always burn a full timeout and
-        # exit non-zero — a default command that always fails is one nobody runs.
-        modules = [m for m in modules if m not in OPT_IN_MODULES]
+        # Quarantined modules run only when named — see OPT_IN_MODULES, currently empty.
+        # Nothing is quarantined; the mechanism is kept because quarantining a check that
+        # has found something real beats deleting it.
+        modules = [m for m in available if m not in OPT_IN_MODULES]
+
+    # Report what the patterns chose *before* --skip removes any of it, or "all 16"
+    # silently becomes "all 15" and the skip is the one thing the line fails to mention.
+    if patterns:
+        width = max((len(m) for m in modules), default=0)
+        print(f"Selected {len(modules)}/{len(available)} modules:")
+        for m in modules:
+            print(f"  {m.ljust(width)}  ({reasons[m]})")
+    else:
+        print(f"Selected all {len(modules)} modules")
+
+    dropped = [m for m in modules if any(s in m for s in skip)]
+    modules = [m for m in modules if m not in dropped]
+    for m in dropped:
+        print(f"  skipped: {m}")
+        if m in SKIP_WARNINGS:
+            print(f"    {SKIP_WARNINGS[m]}")
+
     if not modules:
         print("No checks matched.")
         return 1

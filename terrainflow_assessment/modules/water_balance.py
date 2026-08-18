@@ -159,6 +159,13 @@ def run_water_balance(stores, duration_hr, total_runoff_m3=0.0,
             "target_id": target_id,
             "is_user_link": bool(routing.is_user.get(s.id, False)),
             "is_terminal": is_terminal,
+            # Centroid elevation, carried through for the report's cascade
+            # diagram — which draws the chain down the page by height, so a
+            # stand-in for an unknown elevation would put a feature on the wrong
+            # contour rather than merely mis-ordering it. ``elevation_known``
+            # travels with it for exactly that reason.
+            "elevation": float(getattr(s, "elevation", 0.0) or 0.0),
+            "elevation_known": bool(getattr(s, "elevation_known", False)),
         })
 
     return BalanceResult(

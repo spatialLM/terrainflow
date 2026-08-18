@@ -83,8 +83,24 @@ INPUT_FIELDS = {
     "max_slope_deg": (float, 15.0),
     "min_contour_length_m": (float, 50.0),
     "min_catchment_ha": (float, 0.5),
-    "swale_depth_m": (float, 0.6),
+    # These three must match the panel spin boxes they restore, and they did not: the
+    # pair was written as 0.6/2.0 while the criteria boxes were 0.3/0.6.
+    # ``normalise_inputs`` fills every absent key from these defaults, so a file saved
+    # before the keys existed came back with a different cross-section from the one the
+    # session was using, and the next "Find Best Swale Segments" answered a different
+    # question without saying so.
+    #
+    # All three now sit on ``core/registry``'s swale — 2.0 m top, 1.0 m floor, 0.5 m
+    # deep, which works out at a 1:1 batter. A swale is built to three tape
+    # measurements and dug with a flat bottom; the old criteria pair described a V-drain
+    # of 0.09 m², which asked for tens of kilometres of swale on any real catchment.
+    #
+    # The batter is **not** stored. It is ``(top − bottom) / 2·depth`` and saving a
+    # derived value beside the three it derives from is how a reloaded file comes back
+    # describing a section that never existed.
+    "swale_depth_m": (float, 0.5),
     "swale_width_m": (float, 2.0),
+    "swale_bottom_width_m": (float, 1.0),
 }
 
 # Inputs whose value must come from a fixed set. An unrecognised value falls back to the
