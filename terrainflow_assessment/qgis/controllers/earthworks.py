@@ -755,7 +755,15 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             spillway = getattr(ew, "spillway", None)
             if (spillway is not None and spillway.point_wkt
                     and spillway.crest_elevation is not None):
-                sources.append((ew.id, ew.name, ew.geometry))
+                # The sill **point**, not the feature it sits on. The two are within a
+                # few metres of each other, so hit-testing the feature meant a click
+                # aimed at an outflow could land on the feature carrying it and be
+                # right by accident — and could not tell an outflow from an inlet on
+                # the same bank, which is the pair this link has to distinguish.
+                point = self._sill_point(ew)
+                if point is not None:
+                    sources.append((ew.id, ew.name, point,
+                                    spillway.crest_elevation))
 
         if not drains:
             self._iface.messageBar().pushInfo(
@@ -767,8 +775,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not sources:
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
-                "No spillway is sited yet. Place one on the map — a drain takes its "
-                "start level from the crest, so there has to be a crest to take.",
+                "No outflow spillway is sited yet. Place one on the map — a drain "
+                "takes its start level from the crest, so there has to be a crest "
+                "to take.",
             )
             return
 
@@ -781,16 +790,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         tool.drain_picked.connect(
             lambda name, end: self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
-                f"{name}'s {end} end starts at… click the feature whose spillway feeds "
-                f"it. Esc to undo.",
+                f"{name}'s {end} end starts at… click the outflow spillway that feeds "
+                f"it — the sills are marked. Esc to undo.",
             )
         )
         tool.cancelled.connect(self._on_draw_cancelled)
         self.use_tool(tool)
         self._iface.messageBar().pushInfo(
             "TerrainFlow Assessment",
-            "Click the end of the drain that attaches, then the feature it takes its "
-            "level from.",
+            "Click the end of the drain that attaches — both ends of every drain are "
+            "marked — then the outflow spillway it takes its level from.",
         )
 
     def on_spillway_link_made(self, drain_id, end, source_id):

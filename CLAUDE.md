@@ -219,7 +219,10 @@ Non-obvious invariants:
   a decision recoverable from nothing (`SCHEMA_VERSION` 3). `invert_start_m` is the level
   it resolves to; it is derived and never serialised, and it replaces `_burn_diversion`'s
   **ground sample**, so the bed comes out one depth below it and it is not the invert its
-  name suggests. It must be an absolute off the design: the notch is a post-pass, so when
+  name suggests. Bed-*at*-crest was considered and refused: the notch is cut to the crest
+  too, so the two would meet at one level and leave a flat for the conditioning to
+  resolve, and under `np.minimum` a drain raised by one depth cuts nothing wherever the
+  ground is already below the crest. It must be an absolute off the design: the notch is a post-pass, so when
   `_burn_diversion` runs the source's spillway is not in the array yet, and reading the
   surface would reintroduce the order dependence the link removes. **The end travels with
   the link rather than the alignment being reversed on attachment** — reversing mutates a

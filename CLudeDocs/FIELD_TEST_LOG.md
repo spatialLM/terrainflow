@@ -1848,6 +1848,36 @@ take their level from the crest, because removing it leaves their links dangling
 correctly, by the read-time rule above — and they go back to grading from sampled ground.
 Without that sentence the user answers a smaller question than the one being asked.
 
+### Two follow-ups from the first look at it running
+
+**The drain bed stays one depth below the crest, and that was asked and answered.** The
+plan's field name (`invert_start_m`) reads as *bed at the crest*; its instruction —
+"`_burn_diversion` prefers it over its ground sample" — makes it a *datum*, since the
+ground sample is a surface. Measured on a flat fixture with a 96.00 crest: bed comes out
+95.50 / 95.00 / 94.50 for a 0.5 / 1.0 / 1.5 m drain. Bed-at-crest is how a chute is
+built and is easier to set out; against it, the notch is cut to the crest too, so the two
+would land at the same level and leave a flat at the junction for the conditioning to
+resolve, and — since the burn is `np.minimum` — raising the drain by one depth means it
+cuts nothing wherever natural ground is already below the crest, which on ground falling
+away from a dam is most of its length. **Kept as the datum.** The field's docstring and
+the tool's help text now both say the bed sits one depth below it.
+
+**The second click hit-tests the sill, not the feature carrying it.** It was the feature,
+which was right by accident: a feature carries an outflow *and* an inlet, a few metres
+apart on the same bank, and only the outflow is a source of water — so the feature test
+could not tell them apart. It now measures to the spillway point, and the markers swap
+between the two halves of the gesture: drain ends while the first click is pending, sills
+once one is picked. Showing both at once puts a field of dots on the canvas and makes the
+second click a guess. Pinned by an assertion that a click on the feature *away* from the
+sill does not link and leaves the tool armed.
+
+For the record, since it came up: **spillway placement already snaps**, and for a polygon
+it snaps to the boundary rather than the interior (`_spillway_constraint` takes
+`geom.constGet().boundary()` — "a spillway is a notch in the edge the water leaves over").
+`PlacePointTool` shows a hover marker at the snapped position within 12 px and *refuses* a
+click outside tolerance with the distance, rather than placing it. It snaps to the polygon
+**as drawn**, not to the burned footprint, which is wider by the buffer.
+
 ### Not done, and why
 
 **No inlet-linked drains** (above). **No column on the Spillways review** — which drains

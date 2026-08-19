@@ -1199,11 +1199,13 @@ TOOL_ROUTE_OVERFLOW = (
     "A link that would close a loop is refused."
 )
 TOOL_LINK_DRAIN = (
-    "Click the END of a diversion drain, then the feature whose spillway\n"
-    "feeds it. The drain is then cut from that crest instead of from the\n"
-    "ground under its own line — which is a guess about where the water\n"
-    "arrives.\n"
+    "Click the END of a diversion drain, then the OUTFLOW SPILLWAY that\n"
+    "feeds it. Both are marked on the map as you go. The drain is then cut\n"
+    "from that crest instead of from the ground under its own line — which\n"
+    "is a guess about where the water arrives.\n"
     "The end you click is the end it grades DOWN from.\n"
+    "The drain bed sits one depth below the crest, as it does below sampled\n"
+    "ground.\n"
     "Run it again on the same pair to unlink."
 )
 

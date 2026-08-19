@@ -1133,6 +1133,17 @@ def check_linking_a_drain_to_a_spillway_grades_it_from_the_crest(dem_path):
         # so the link must record "end" — not "start", which is what a tool that only
         # picked whole features would have had to assume.
         click_map(h.canvas, *east)
+
+        # The second click hit-tests the **sill**, not the feature carrying it. A click
+        # on the swale but well away from the sill must therefore do nothing and leave
+        # the tool armed — otherwise a feature carrying both an outflow and an inlet
+        # could not be told apart, and a click aimed at one would be right by accident.
+        far_end = source.geometry.asPolyline()[0]
+        click_map(h.canvas, far_end.x(), far_end.y())
+        assert drain.spillway_link_id is None, (
+            "a click on the feature away from the sill linked anyway — the second "
+            "click is still hit-testing the feature rather than the spillway")
+
         click_map(h.canvas, sill.x(), sill.y())
         h.assert_no_errors("linking the drain to the spillway")
 
