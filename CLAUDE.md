@@ -120,6 +120,32 @@ Non-obvious invariants:
   spill also carries `event_level_m` / `overtops_this_event`, where `None` means "not
   asked" and is not `False`. The map draws the two as separate `Overtopping (full)` and
   `Overtopping (event)` layers.
+- **A spillway crest sits under the level water is *held* to, which is not the lowest
+  ground.** `_spillway_datums` returns `(lip, invert, containment, source)` and the three
+  levels do different jobs: `containment` is the ceiling `spillway_datum` and
+  `spillway_validity` work against — the measured `ew.terrain_spill_level_m`, else the
+  companion berm's crest as built, else a dam's wall, else the lip — and `lip` is the bare
+  ring minimum, **reported** beside it. Never a berm *height estimate*: there are four
+  incompatible derivations of that in the tree. A crest above the lip is a `spillway_notes`
+  note, never a `spillway_validity` problem, because `_spillway_row` fails a row on any
+  problem at all. Once a sill is sited the lip is taken **locally** (`pour_point_near`,
+  within a sill width), because a contour swale's global ring minimum is at one of its
+  ends. The datums read the **raw** DEM through `_burn_surface`, not `state.flow_dem`, so
+  the crest and the burn share a surface — and the footprint mask passes
+  `all_touched=False` there and only there.
+- **`crest_elevation` is the authoritative crest; the other two are views of it.**
+  `bind_crest` binds all three (↔ `drop_below_rim_m` ↔ `height_above_floor_m`) and clamps
+  into the band *before* deriving partners — one function, because three call sites is how
+  a binding creeps apart. Both relatives are re-derived from the crest on restore
+  (`rebase_spillway`, run by `_rebase_restored_spillways`): a serialised drop measured
+  against a datum that has since changed meaning still looks like a setting-out figure.
+- **A pond's stage–storage curve is free, and is never serialised.**
+  `FeatureStorage.stage_storage` comes off arrays `feature_storage` already holds — one
+  sort and a running sum — and is retained on `ew.stage_storage` under the same rule as
+  `terrain_capacity_m3`. It is sampled, not one point per cell, and its datum is the pond
+  bed **net of natural ponding**, so `volume_at(level_m)` reproduces `volume_m3` exactly.
+  A dam's curve comes from `DEMBurner.dam_storage`, because `dam_stage_storage` returns
+  only the volume.
 
 ## The report (`Site Water Plan`, PDF)
 

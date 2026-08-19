@@ -27,7 +27,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-SCHEMA_VERSION = 1
+# 2 (2026-08-19): ``Spillway.height_above_floor_m``. The field itself needs no version
+# gate — ``Spillway.from_dict`` probes per field, so an older document simply has none.
+# The bump is for the *other* direction: an older build re-saving one of these designs
+# iterates its own shorter field tuple and drops the height silently, and the version is
+# what lets ``is_from_newer_build`` say so before that happens.
+SCHEMA_VERSION = 2
 
 # Recognised DEM carriage modes. "embedded" means the archive holds a (buffered) clip of
 # the DEM; "reference" means it holds only a fingerprint and the DEM must be located.

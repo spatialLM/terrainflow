@@ -183,7 +183,8 @@ class EarthworkPropertiesDialog(QDialog):
                  peak_inflow_m3=None, crest_elevation=None, duration_hours=None,
                  dem_path=None, soil_name=None, cn=None, overflow_options=None,
                  own_elevation=None, catchment_m2=None, count_infiltration=False,
-                 rim_elevation=None, invert_elevation=None,
+                 containment_elevation=None, invert_elevation=None,
+                 lip_elevation=None, containment_source=None, stage_storage=None,
                  peak_flow_m3s=None, upstream_flow_m3s=0.0,
                  harvesting_coefficient=False,
                  inflow_profile=None, overtop_station=None, overtop_surplus=0.0):
@@ -203,13 +204,22 @@ class EarthworkPropertiesDialog(QDialog):
         self._catchment_m2 = catchment_m2        # direct contributing area (flow_graph)
         self._count_infiltration = count_infiltration  # does soakage count as capture?
         self._overflow_elevations = {}           # id → elevation (None when unknown)
-        # Spillway datums, sampled by the controller from footprint.pour_point:
-        # the rim is the lowest containing ground (where it would spill unaided),
-        # the invert the burned floor. Both None without a DEM — the crest is then
+        # Spillway datums, sampled by the controller off the *raw* DEM — the same
+        # surface the burn takes its own datum from.
+        #
+        # ``containment`` is the level the water is actually held to, which on a bermed
+        # swale is the berm crest and on a dam is the wall; ``lip`` is the bare ring
+        # minimum round the footprint, reported beside it rather than used as the
+        # ceiling. ``invert`` is the floor. All None without a DEM — the crest is then
         # editable but unanchored, and the dialog says so.
-        self._rim_elevation = rim_elevation
+        self._containment_elevation = containment_elevation
+        self._lip_elevation = lip_elevation
+        self._containment_source = containment_source
         self._invert_elevation = invert_elevation
-        self._spillway_binding = False           # re-entrancy guard for crest ↔ drop
+        # Measured stage–storage curve for this feature, or None before anything has
+        # been measured. What lets the crest control say what it is giving up.
+        self._stage_storage = stage_storage
+        self._spillway_binding = False           # re-entrancy guard across the three
         # Per-type spillway policy: a swale overflows over a low sill in its own bank,
         # an embankment over a designed wall, and the published 0.30 m figure describes
         # only the second. Resolved once here so every row below reads the same source.
@@ -638,24 +648,41 @@ class EarthworkPropertiesDialog(QDialog):
             grp_outer.addWidget(self._spillway_body)
 
             # Datum. Every other number here is relative to it, so it is stated
-            # rather than assumed.
-            if self._rim_elevation is not None:
-                rim_txt = f"{self._rim_elevation:.2f} m"
+            # rather than assumed — and it now says *which* datum, because a bermed
+            # swale is held up by ground that was not there when the DEM was flown.
+            if self._containment_elevation is not None:
+                rim_txt = f"{self._containment_elevation:.2f} m"
                 rim_style = f"color: {_MUTED};"
+                provenance = {
+                    "measured": "measured off the last analysis",
+                    "berm": "the companion berm as built",
+                    "wall": "the wall crest you specified",
+                    "lip": "the lowest natural ground round the footprint",
+                }.get(self._containment_source)
+                if provenance:
+                    rim_txt += f"  — {provenance}"
             else:
                 rim_txt = "unknown — load a DEM to anchor the crest"
                 rim_style = f"color: {_WARN}; font-style: italic;"
-            if (self._rim_elevation is not None and self.ew_type == "swale"
-                    and getattr(ew, "companion_berm", False)):
-                # The burn raises the berm before taking its own pour point, so the real
-                # spill level is higher than this. Said out loud rather than folded in:
-                # the berm is one-sided, so where the low point is at an end it adds
-                # nothing, and quietly crediting it would claim headroom that is not there.
-                rim_txt += "  (excludes the companion berm)"
             lbl_rim = QLabel(rim_txt)
             lbl_rim.setStyleSheet(rim_style)
-            lbl_rim.setToolTip(H.SPILLWAY_RIM)
-            spill_layout.addRow("Rim (natural spill level):", lbl_rim)
+            lbl_rim.setToolTip(H.SPILLWAY_CONTAINMENT)
+            spill_layout.addRow("Held to (spill level):", lbl_rim)
+
+            # The bare ring minimum, shown only where it differs from the containment
+            # level. Where they are the same it is the same row twice; where they are
+            # not, the gap is the whole of what the built structure is holding up, and
+            # a reader given only the higher figure cannot see it.
+            if (self._lip_elevation is not None
+                    and self._containment_elevation is not None
+                    and self._containment_elevation - self._lip_elevation > 0.005):
+                lbl_lip = QLabel(
+                    f"{self._lip_elevation:.2f} m  — "
+                    f"{self._containment_elevation - self._lip_elevation:.2f} m below "
+                    f"the level above")
+                lbl_lip.setStyleSheet(f"color: {_MUTED};")
+                lbl_lip.setToolTip(H.SPILLWAY_LIP)
+                spill_layout.addRow("Natural ground (lip):", lbl_lip)
 
             self.spin_spillway_crest = QDoubleSpinBox()
             self.spin_spillway_crest.setRange(-500, 9000)
@@ -663,6 +690,29 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_crest.setSingleStep(0.05)
             self.spin_spillway_crest.setSuffix(" m")
             self.spin_spillway_crest.setToolTip(H.SPILLWAY_CREST)
+
+            # Height above the floor — the primary control on a cut feature, and the
+            # only one of the three a builder can set out with a staff standing in the
+            # trench. It is offered first for that reason, and because it is the one
+            # that stays true on a swale that falls along its run: the containment
+            # level is a single global minimum over the whole footprint, usually at an
+            # end, so a notch sited mid-run and measured down from it is measured from
+            # ground a hundred metres away.
+            #
+            # Not offered on a dam. There the invert is the lowest ground the wall
+            # touches rather than a cut floor, so "height above the floor" would be the
+            # wall height and not a setting-out figure.
+            self.spin_spillway_height = None
+            if self.ew_type != "dam":
+                self.spin_spillway_height = QDoubleSpinBox()
+                self.spin_spillway_height.setRange(0.0, 50.0)
+                self.spin_spillway_height.setDecimals(2)
+                self.spin_spillway_height.setSingleStep(0.05)
+                self.spin_spillway_height.setSuffix(" m")
+                self.spin_spillway_height.setEnabled(self._invert_elevation is not None)
+                self.spin_spillway_height.setToolTip(H.SPILLWAY_HEIGHT_ABOVE_FLOOR)
+                spill_layout.addRow("Height above floor:", self.spin_spillway_height)
+
             spill_layout.addRow("Crest elevation:", self.spin_spillway_crest)
 
             self.spin_spillway_drop = QDoubleSpinBox()
@@ -670,9 +720,17 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_drop.setDecimals(2)
             self.spin_spillway_drop.setSingleStep(0.05)
             self.spin_spillway_drop.setSuffix(" m")
-            self.spin_spillway_drop.setEnabled(self._rim_elevation is not None)
+            self.spin_spillway_drop.setEnabled(self._containment_elevation is not None)
             self.spin_spillway_drop.setToolTip(H.SPILLWAY_DROP)
-            spill_layout.addRow("Below rim:", self.spin_spillway_drop)
+            spill_layout.addRow("Below spill level:", self.spin_spillway_drop)
+
+            # What this sill costs, in the units the decision is made in. Nothing in the
+            # UI answered it before: the user chose a crest and was told the freeboard
+            # it bought, never the storage it gave away.
+            self.lbl_spillway_giveup = QLabel("")
+            self.lbl_spillway_giveup.setWordWrap(True)
+            self.lbl_spillway_giveup.setToolTip(H.SPILLWAY_GIVE_UP)
+            spill_layout.addRow("Storage at this sill:", self.lbl_spillway_giveup)
 
             self.spin_spillway_head = QDoubleSpinBox()
             self.spin_spillway_head.setRange(0.05, 2.0)
@@ -788,6 +846,9 @@ class EarthworkPropertiesDialog(QDialog):
 
             self.spin_spillway_crest.valueChanged.connect(self._on_spillway_crest_changed)
             self.spin_spillway_drop.valueChanged.connect(self._on_spillway_drop_changed)
+            if self.spin_spillway_height is not None:
+                self.spin_spillway_height.valueChanged.connect(
+                    self._on_spillway_height_changed)
             self.spin_spillway_head.valueChanged.connect(self._on_spillway_head_changed)
             # Freeboard moves the ceiling of the crest band exactly as head does, so it
             # has to re-bind the crest through the new band rather than only re-warn.
@@ -806,6 +867,8 @@ class EarthworkPropertiesDialog(QDialog):
             self._spillway_body = None
             self.spin_spillway_crest = None
             self.spin_spillway_drop = None
+            self.spin_spillway_height = None
+            self.lbl_spillway_giveup = None
             self.spin_spillway_head = None
             self.spin_spillway_freeboard = None
             self.lbl_actual_head = None
@@ -1129,30 +1192,53 @@ class EarthworkPropertiesDialog(QDialog):
         """
         head = (self.spin_spillway_head.value() if self.spin_spillway_head
                 else self._policy_head)
-        return spillway_datum(self._rim_elevation, self._invert_elevation,
+        return spillway_datum(self._containment_elevation, self._invert_elevation,
                               head_m=head, min_freeboard_m=self._current_freeboard())
 
+    def _bind(self, **which):
+        """Re-resolve all three crest controls from whichever one moved, and write them.
+
+        One entry point rather than one per control: :func:`bind_crest` clamps into the
+        band **before** deriving the partners, and doing that at three call sites is
+        exactly how a hand-written binding creeps apart.
+        """
+        crest, drop, height = bind_crest(
+            self._containment_elevation, band=self._crest_band(),
+            invert_elevation=self._invert_elevation, **which)
+        self._set_spillway_controls(crest, drop, height)
+
     def _seed_spillway(self, existing):
-        """Initial crest/drop pair — the saved one, or the highest crest that fits.
+        """Initial crest/drop/height triple — the saved one, or the highest that fits.
 
         A fresh spillway starts as high as the head and freeboard allow, because
         that is the crest which stores the most water while still being a spillway.
+
+        A **saved** one is seeded from its crest wherever it has one, never from its
+        stored drop: the crest is the authoritative value and the drop is a measurement
+        against a datum that may have moved since the design was written. That is the
+        same rule :func:`rebase_spillway` applies on the way in from disk, held here too
+        so the dialog cannot re-introduce a stale pair the restore path just corrected.
         """
         crest = existing.crest_elevation if existing is not None else None
         drop = existing.drop_below_rim_m if existing is not None else None
-        if crest is None and drop is None:
+        height = existing.height_above_floor_m if existing is not None else None
+        if crest is None and drop is None and height is None:
             _lo, hi = self._crest_band()
             crest = hi
-        crest, drop = bind_crest(
-            self._rim_elevation, crest=crest, drop=drop, band=self._crest_band())
-        self._set_spillway_pair(crest, drop)
+        if crest is not None:
+            self._bind(crest=crest)
+        elif drop is not None:
+            self._bind(drop=drop)
+        else:
+            self._bind(height=height)
 
-    def _set_spillway_pair(self, crest, drop):
-        """Write both controls without re-entering the binding."""
+    def _set_spillway_controls(self, crest, drop, height):
+        """Write all three controls without re-entering the binding."""
         self._spillway_binding = True
         try:
             for widget, value in ((self.spin_spillway_crest, crest),
-                                  (self.spin_spillway_drop, drop)):
+                                  (self.spin_spillway_drop, drop),
+                                  (self.spin_spillway_height, height)):
                 if widget is None or value is None:
                     continue
                 widget.blockSignals(True)
@@ -1164,31 +1250,63 @@ class EarthworkPropertiesDialog(QDialog):
     def _on_spillway_crest_changed(self):
         if self._spillway_binding:
             return
-        crest, drop = bind_crest(
-            self._rim_elevation, crest=self.spin_spillway_crest.value(),
-            band=self._crest_band())
-        self._set_spillway_pair(crest, drop)
+        self._bind(crest=self.spin_spillway_crest.value())
         self._update_spillway_sizing()
 
     def _on_spillway_drop_changed(self):
         if self._spillway_binding:
             return
-        crest, drop = bind_crest(
-            self._rim_elevation, drop=self.spin_spillway_drop.value(),
-            band=self._crest_band())
-        self._set_spillway_pair(crest, drop)
+        self._bind(drop=self.spin_spillway_drop.value())
+        self._update_spillway_sizing()
+
+    def _on_spillway_height_changed(self):
+        if self._spillway_binding:
+            return
+        self._bind(height=self.spin_spillway_height.value())
         self._update_spillway_sizing()
 
     def _on_spillway_head_changed(self):
-        # Head moves the ceiling of the valid band (rim − head − freeboard), so the
-        # crest may need to come down with it. Re-bind through the new band.
+        # Head moves the ceiling of the valid band (containment − head − freeboard), so
+        # the crest may need to come down with it. Re-bind through the new band.
         if self._spillway_binding:
             return
-        crest, drop = bind_crest(
-            self._rim_elevation, crest=self.spin_spillway_crest.value(),
-            band=self._crest_band())
-        self._set_spillway_pair(crest, drop)
+        self._bind(crest=self.spin_spillway_crest.value())
         self._update_spillway_sizing()
+
+    def _update_spillway_giveup(self):
+        """Say what the sill costs, in m³ and as a share, while the crest moves.
+
+        The denominator is the **containment** level — what this feature would hold with
+        no spillway at all — so "100%" means something the user can point at rather than
+        the full depth of a hole the water never reaches.
+
+        Degrades the way :meth:`_update_berm_crest` does in this same dialog: with
+        nothing measured there is no curve, and a zero would read as "this sill gives up
+        nothing", which is the opposite of not knowing.
+        """
+        label = getattr(self, "lbl_spillway_giveup", None)
+        if label is None:
+            return
+        curve = self._stage_storage
+        if curve is None:
+            label.setText("run Re-analyse with Earthworks to measure it")
+            label.setStyleSheet(f"color: {_MUTED}; font-style: italic;")
+            return
+        crest = (self.spin_spillway_crest.value()
+                 if self.spin_spillway_crest is not None else None)
+        full = curve.volume_at(self._containment_elevation)
+        held = curve.volume_at(crest)
+        if full is None or held is None or full <= 0:
+            label.setText("nothing measured to give up")
+            label.setStyleSheet(f"color: {_MUTED}; font-style: italic;")
+            return
+        given = max(0.0, full - held)
+        pct = 100.0 * given / full
+        label.setText(
+            f"{held:,.0f} m³ of {full:,.0f} — giving up {given:,.0f} m³ ({pct:.0f}%)")
+        # A sill is *meant* to give something up; only a large share is worth flagging.
+        label.setStyleSheet(
+            f"color: {_WARN if pct >= 40 else _INK}; font-weight: 600;")
 
     def _required_width(self, head):
         if self._peak_flow_m3s is None:
@@ -1287,9 +1405,11 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_spillway_warn.setText("")
             return
 
+        self._update_spillway_giveup()
+
         problems = spillway_validity(
             self.spin_spillway_crest.value() if self.spin_spillway_crest else None,
-            self._rim_elevation,
+            self._containment_elevation,
             invert_elevation=self._invert_elevation,
             head_m=head,
             min_freeboard_m=self._current_freeboard(),
@@ -1370,7 +1490,11 @@ class EarthworkPropertiesDialog(QDialog):
         return Spillway(
             crest_elevation=self.spin_spillway_crest.value(),
             drop_below_rim_m=(self.spin_spillway_drop.value()
-                              if self._rim_elevation is not None else None),
+                              if self._containment_elevation is not None else None),
+            height_above_floor_m=(
+                self.spin_spillway_height.value()
+                if (self.spin_spillway_height is not None
+                    and self._invert_elevation is not None) else None),
             head_m=head,
             width_m=self.spin_built_width.value(),
             width_auto=self.chk_width_auto.isChecked(),

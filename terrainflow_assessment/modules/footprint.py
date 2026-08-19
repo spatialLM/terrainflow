@@ -271,6 +271,49 @@ def pour_point(dem, mask, nodata=None):
     return float(dem.ravel()[flat]), np.unravel_index(flat, dem.shape)
 
 
+def pour_point_near(dem, mask, centre_rc, radius_cells, nodata=None):
+    """Lowest rim cell of *mask* **within *radius_cells* of *centre_rc***.
+
+    The same measurement as :func:`pour_point`, restricted to the part of the ring that
+    is near a given place. That distinction only starts to matter once something is sited
+    on a feature rather than describing the whole of it: a contour swale's global ring
+    minimum is usually at one of its ends, so a sill placed half way along and referenced
+    to it is referenced to ground it does not share and, on a swale that falls along its
+    run, to an elevation it never reaches.
+
+    *centre_rc* is a ``(row, col)``; *radius_cells* is a Chebyshev radius, which is the
+    right shape for a square window over a grid and costs nothing to build. Falls back
+    to the global :func:`pour_point` whenever the local window catches no usable rim —
+    off the grid, or a footprint that reaches the edge — because a datum from further
+    away beats no datum at all, and the caller cannot tell the difference in the answer
+    it gets either way.
+    """
+    dem = np.asarray(dem, dtype="float64")
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any() or centre_rc is None:
+        return pour_point(dem, mask, nodata)
+
+    rim = _valid(dem, outer_ring(mask), nodata)
+    if not rim.any():
+        return pour_point(dem, mask, nodata)
+
+    row, col = int(centre_rc[0]), int(centre_rc[1])
+    reach = max(1, int(radius_cells))
+    rows, cols = dem.shape
+    r0, r1 = max(0, row - reach), min(rows, row + reach + 1)
+    c0, c1 = max(0, col - reach), min(cols, col + reach + 1)
+    if r0 >= r1 or c0 >= c1:
+        return pour_point(dem, mask, nodata)
+
+    local = np.zeros_like(rim)
+    local[r0:r1, c0:c1] = rim[r0:r1, c0:c1]
+    if not local.any():
+        return pour_point(dem, mask, nodata)
+
+    flat = int(np.argmin(np.where(local, dem, np.inf)))
+    return float(dem.ravel()[flat]), np.unravel_index(flat, dem.shape)
+
+
 def outlet_cell(dem, mask, nodata=None):
     """Lowest cell *inside* *mask* — where its overflow leaves from.
 

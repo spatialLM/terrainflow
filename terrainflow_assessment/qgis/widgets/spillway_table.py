@@ -29,7 +29,16 @@ Data contract — ``set_rows(rows, context)``:
     {index, id, name, ew_type, enabled, designed, sited, inlet_sited, width_auto,
      target_head_m, actual_head_m, freeboard_min_m, standard_freeboard_m,
      peak_flow_m3s, upstream_m3s, required_width_m, built_width_m, freeboard_m,
-     crest_elevation, rim_elevation, problems, state}
+     crest_elevation, height_above_floor_m, rim_elevation, lip_elevation,
+     containment_source, sill_storage_m3, containment_storage_m3, given_up_m3,
+     given_up_pct, problems, notes, state}
+
+  ``rim_elevation`` is the **containment** level — the level this feature's water is
+  actually held to, which on a bermed swale is the berm crest as built. ``lip_elevation``
+  is the bare ring minimum beside it. ``notes`` is a parallel channel to ``problems`` and
+  the difference is load-bearing: a row goes to ``"fail"`` on any problem at all, so
+  anything that is true-and-fine has to travel separately or every bermed swale reads as
+  broken.
   context : {intensity_mm_hr, intensity_is_default, has_idf, harvesting_coefficient}
 """
 
@@ -64,7 +73,7 @@ _IN_GLYPH, _IN_COLOUR = "▲", "#2e7d55"
 # is below setting-out resolution on a DEM, so tighter than this is noise.
 _HEAD_TOLERANCE_M = 0.01
 
-_HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Sited")
+_HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Storage", "Sited")
 
 _QSS = f"""
 QTableWidget {{
@@ -188,6 +197,7 @@ class SpillwayTable(QWidget):
             self._head_cell(row, disabled),
             self._width_cell(row, disabled),
             self._freeboard_cell(row, disabled),
+            self._storage_cell(row, disabled),
             self._sited_cell(row, disabled),
         ]
         for c, (text, colour, align) in enumerate(cells):
@@ -263,6 +273,28 @@ class SpillwayTable(QWidget):
         return (f"{freeboard:.2f} m", colour, Qt.AlignmentFlag.AlignRight)
 
     @staticmethod
+    def _storage_cell(row, disabled):
+        """What this sill leaves the feature holding, and what that costs.
+
+        The decision the user is actually making when they move a crest, readable across
+        the whole design instead of one modal dialog at a time. Blank until the feature
+        has been flooded — a zero here would read as "this sill gives up nothing", which
+        is the opposite of not knowing.
+        """
+        if disabled:
+            return ("—", _FAINT, Qt.AlignmentFlag.AlignRight)
+        held = row.get("sill_storage_m3")
+        pct = row.get("given_up_pct")
+        if held is None:
+            return ("not measured", _FAINT, Qt.AlignmentFlag.AlignRight)
+        if pct is None:
+            return (f"{held:,.0f} m³", _MUTED, Qt.AlignmentFlag.AlignRight)
+        # Giving something up is what a spillway is for, so this is only coloured once
+        # the sill rather than the excavation has become what sizes the feature.
+        colour = _WARN if pct >= 40 else _INK
+        return (f"{held:,.0f} m³  −{pct:.0f}%", colour, Qt.AlignmentFlag.AlignRight)
+
+    @staticmethod
     def _sited_cell(row, disabled):
         if disabled:
             return ("—", _FAINT, Qt.AlignmentFlag.AlignCenter)
@@ -300,19 +332,42 @@ class SpillwayTable(QWidget):
 
         if row.get("rim_elevation") is None and flow:
             bits.append(
-                "No rim elevation — the crest and freeboard cannot be checked until a "
-                "DEM is loaded and Baseline has run.")
+                "No spill level — the crest and freeboard cannot be checked until a "
+                "DEM is loaded.")
         elif row.get("freeboard_m") is not None:
             minimum = row.get("freeboard_min_m") or 0.0
             bits.append(
                 f"At the design flow the water surface sits {row['freeboard_m']:.2f} m "
-                f"below the rim; this type is designed for {minimum:.2f} m.")
+                f"below the level this feature is held to; this type is designed for "
+                f"{minimum:.2f} m.")
 
-        if row.get("ew_type") == "dam":
+        held = row.get("sill_storage_m3")
+        full = row.get("containment_storage_m3")
+        if held is not None and full is not None:
+            given = row.get("given_up_m3") or 0.0
             bits.append(
-                "For a dam the rim is the wall crest you specified, so this margin is "
-                "measured against the wall you intend to build rather than against "
-                "existing ground.")
+                f"With the crest where it is, this holds {held:,.0f} m³ of the "
+                f"{full:,.0f} m³ it would hold with no spillway — giving up "
+                f"{given:,.0f} m³. Both measured by flooding this feature alone on the "
+                f"terrain model.")
+
+        source = row.get("containment_source")
+        if source == "measured":
+            bits.append(
+                f"The level above ({row['rim_elevation']:.2f} m) is where the built "
+                f"feature was measured to pond to, not where bare ground sits.")
+        elif source == "berm":
+            bits.append(
+                f"The level above ({row['rim_elevation']:.2f} m) is the companion berm's "
+                f"crest as built — the water is held by the bank, not the hillside.")
+        elif row.get("ew_type") == "dam":
+            bits.append(
+                "For a dam the level above is the wall crest you specified, so this "
+                "margin is measured against the wall you intend to build rather than "
+                "against existing ground.")
+
+        for note in row.get("notes", []):
+            bits.append(note)
 
         for problem in row.get("problems", []):
             bits.append("⚠ " + problem)
@@ -353,7 +408,7 @@ class SpillwayTable(QWidget):
             bits.append(
                 f"{len(undesigned)} feature{'s' if len(undesigned) != 1 else ''} have no "
                 f"spillway designed: {names}{more}. They will still overflow — at "
-                f"whichever point of the rim happens to be lowest."
+                f"whichever point of the containing ground happens to be lowest."
             )
 
         unsited = [r for r in live if r.get("designed") and not r.get("sited")]
@@ -363,14 +418,28 @@ class SpillwayTable(QWidget):
                 f"yet a design — place it where you can armour it."
             )
 
-        # Named once, quietly, because it is a real limitation of the reported storage
-        # and the user will otherwise carry the capacity figure to site.
-        if any(r.get("crest_elevation") is not None for r in live):
-            bits.append(
-                "Storage is reported to each feature's full depth, not down to its "
-                "crest, so a crest set well below the rim holds less than the capacity "
-                "figure states."
-            )
+        # Named once, quietly, because it decides whether the capacity figures elsewhere
+        # on the panel can be carried to site.
+        #
+        # This used to say only that storage is reported to full depth and a crest set
+        # low holds less than that — a true caveat about a question nothing answered.
+        # The Storage column answers it now, so the line says which figure is which
+        # instead, and falls back to the caveat only while nothing has been measured.
+        crested = [r for r in live if r.get("crest_elevation") is not None]
+        if crested:
+            if any(r.get("sill_storage_m3") is not None for r in crested):
+                bits.append(
+                    "The storage column is what each feature holds up to its sill, "
+                    "measured on the terrain model. The capacity figures elsewhere on "
+                    "the panel are to full depth, so they are the larger number."
+                )
+            else:
+                bits.append(
+                    "Storage elsewhere on the panel is reported to each feature's full "
+                    "depth, not down to its crest, so a crest set well below the spill "
+                    "level holds less than the capacity figure states. Run Re-analyse "
+                    "with Earthworks and this list will measure what each sill leaves."
+                )
 
         return "  ·  ".join(bits)
 

@@ -613,6 +613,194 @@ def check_spillway_survives_a_project_roundtrip(dem_path):
         assert restored.inflow_spillway is not None, "the inlet did not survive"
 
 
+def check_unticking_a_sited_spillway_asks_first(dem_path):
+    """Clearing the Spillway tick must not silently delete a sited overflow.
+
+    ``get_spillway()`` returns None when the group is unticked, and that used to be
+    assigned straight onto the feature — taking the location, the crest and the width
+    with it, from one small gesture, with no undo stack anywhere in this plugin to get
+    them back. Harmless while a spillway changed no terrain; from the moment one cuts a
+    notch, an accidental untick un-cuts a hole in a dam.
+
+    The harness answers ``question()`` with No unless told otherwise, which is the case
+    that matters: declining has to keep everything.
+    """
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+    from terrainflow_assessment.modules.earthwork_design import Spillway
+
+    original_exec = EarthworkPropertiesDialog.exec
+    original_get = EarthworkPropertiesDialog.get_spillway
+    EarthworkPropertiesDialog.exec = lambda self: 1
+    EarthworkPropertiesDialog.get_spillway = lambda self: None      # the tick, cleared
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            ew = h.add_earthwork("swale", geometry=line_across_valley(row=60))
+            ew.spillway = Spillway(crest_elevation=41.5, width_m=3.0,
+                                   width_auto=False, point_wkt="POINT (100 100)")
+
+            h.plugin._earthworks.edit_earthwork_at(0)
+            h.assert_no_errors("edit with the spillway group unticked")
+
+            asked = h.dialogs.of("question")
+            assert asked, "unticking a sited spillway was accepted without asking"
+            assert "41.50" in asked[-1][2], (
+                f"the question must name what is being lost: {asked[-1][2]!r}")
+            assert ew.spillway is not None, (
+                "declining the question still removed the spillway")
+            assert ew.spillway.point_wkt == "POINT (100 100)", (
+                "the sited location was lost even though the removal was declined")
+
+            # And accepting really does remove it — otherwise the tick means nothing.
+            h.dialogs.answer = QMessageBox.Yes
+            h.plugin._earthworks.edit_earthwork_at(0)
+            h.assert_no_errors("edit with the removal accepted")
+            assert ew.spillway is None, "accepting the question did not remove it"
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        EarthworkPropertiesDialog.get_spillway = original_get
+
+
+def check_an_unsited_spillway_is_cleared_without_asking(dem_path):
+    """The confirmation is about losing a *placed* structure, not about the tick itself.
+
+    A spillway that was never sited carries nothing the user cannot retype, so asking
+    about it would be a dialog on an ordinary edit — which is how a confirmation stops
+    being read.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+    from terrainflow_assessment.modules.earthwork_design import Spillway
+
+    original_exec = EarthworkPropertiesDialog.exec
+    original_get = EarthworkPropertiesDialog.get_spillway
+    EarthworkPropertiesDialog.exec = lambda self: 1
+    EarthworkPropertiesDialog.get_spillway = lambda self: None
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            ew = h.add_earthwork("swale", geometry=line_across_valley(row=60))
+            ew.spillway = Spillway(crest_elevation=41.5, width_m=3.0)   # never placed
+
+            h.plugin._earthworks.edit_earthwork_at(0)
+            h.assert_no_errors("edit clearing an unsited spillway")
+
+            assert not h.dialogs.of("question"), (
+                "an unsited spillway should be cleared without a confirmation")
+            assert ew.spillway is None
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        EarthworkPropertiesDialog.get_spillway = original_get
+
+
+def check_a_map_placed_crest_is_held_inside_its_band(dem_path):
+    """A click records a place, not a licence to put the crest anywhere.
+
+    ``_on_spillway_placed`` bound the crest without a band, so a click on ground above
+    the level that contains the feature was stored verbatim — a crest that cannot pass
+    its design head with any freeboard at all, and once the notch is cut, a hole at
+    whatever elevation happened to be under the cursor.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=60))
+        point = ew.geometry.interpolate(ew.geometry.length() / 2.0).asPoint()
+
+        _lip, invert, containment, _src = controller._spillway_datums(
+            ew.geometry, ew.type, top_width_m=ew.top_width_m, depth=ew.depth, ew=ew)
+        assert containment is not None, "no datum — the check cannot say anything"
+
+        # A click a clear metre above anything this feature can contain.
+        controller._on_spillway_placed(ew.id, point, containment + 1.0, kind="outflow")
+        h.assert_no_errors("spillway placed above the containing ground")
+
+        assert ew.spillway is not None and ew.spillway.crest_elevation is not None
+        # The ceiling is read back through the controller's own helper, with the
+        # spillway that was actually created: head and freeboard are per-type policy,
+        # so recomputing it here with the embankment defaults would test a different
+        # feature from the one that was placed.
+        _lo, ceiling = controller._crest_band_for(ew, ew.spillway, containment, invert)
+        assert ew.spillway.crest_elevation <= ceiling + 1e-6, (
+            f"a clicked crest of {containment + 1.0:.2f} m was stored as "
+            f"{ew.spillway.crest_elevation:.2f} m, above the {ceiling:.2f} m ceiling "
+            f"this feature can offer")
+        assert ew.spillway.crest_elevation < containment + 1.0 - 1e-6, (
+            "the clicked elevation was stored verbatim — the band was never applied")
+        # And the partners have to have come with it, or the dialog opens disagreeing
+        # with the value it is showing.
+        assert abs(ew.spillway.drop_below_rim_m
+                   - (containment - ew.spillway.crest_elevation)) < 1e-6, (
+            "the crest was clamped but its drop was left describing the unclamped value")
+
+        # An inlet is not a weir and must NOT be held under a weir's ceiling — clamping
+        # one would move the recorded entry point off the ground the user clicked.
+        controller._on_spillway_placed(ew.id, point, containment + 1.0, kind="inflow")
+        h.assert_no_errors("inflow spillway placed")
+        assert ew.inflow_spillway.crest_elevation == containment + 1.0, (
+            f"the inlet was clamped to {ew.inflow_spillway.crest_elevation:.2f} m; it "
+            f"records where water enters, not a weir crest")
+
+
+def check_the_review_says_what_each_sill_gives_up(dem_path):
+    """The Spillways review carries the storage figures, or says nothing at all.
+
+    Two states, and the second is the one worth pinning: before anything is measured
+    there is no stage-storage curve, and the row must be blank rather than reporting
+    that this sill gives up zero cubic metres.
+    """
+    from terrainflow_assessment.modules.earthwork_design import Spillway
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("basin", geometry=line_across_valley(
+            row=60, half_width_m=15.0))
+        ew.spillway = Spillway(crest_elevation=None, width_m=2.0)
+        h.panel.analysis_inputs_changed.emit()
+        controller._build_spillway_rows()
+        h.assert_no_errors("spillway review, unmeasured")
+
+        row = next(r for r in h.panel._spillway_table._rows if r["id"] == ew.id)
+        assert "lip_elevation" in row and "given_up_m3" in row, (
+            "the review row lost the datum keys the report reads")
+        assert row["given_up_m3"] is None, (
+            "an unmeasured feature reported a give-up figure — a blank is the honest "
+            "answer, and a zero reads as 'this sill costs nothing'")
+
+        # A row that never gets past the flow gate returns before the datums are read,
+        # so the rest of this check would be asserting against an early return.
+        if row["state"] in ("no_flow", "disabled", "no_datum"):
+            raise AssertionError(
+                f"the review row for {ew.name} is {row['state']!r}, so the storage "
+                f"figures were never reached — the fixture stopped producing flow")
+
+        # Now measure it, and set a sill part way down the pond.
+        controller._refresh_terrain_capacity(ew, quiet=True)
+        curve = getattr(ew, "stage_storage", None)
+        level = ew.terrain_spill_level_m
+        assert curve is not None and level is not None, (
+            f"{ew.name} was measured at {ew.terrain_capacity_m3} m3 but produced no "
+            f"stage-storage curve — the readout has nothing to show")
+
+        floor = float(curve.levels_m[0])
+        ew.spillway.crest_elevation = floor + 0.5 * (level - floor)
+        controller._build_spillway_rows()
+        h.assert_no_errors("spillway review, measured")
+
+        row = next(r for r in h.panel._spillway_table._rows if r["id"] == ew.id)
+        assert row["containment_storage_m3"] is not None, (
+            f"no full-pond figure on a measured feature (row state {row['state']!r}, "
+            f"held to {row['rim_elevation']})")
+        assert row["sill_storage_m3"] is not None, "no at-the-sill figure"
+        assert row["sill_storage_m3"] <= row["containment_storage_m3"] + 1e-6, (
+            f"a sill below the spill level holds {row['sill_storage_m3']} m3 against a "
+            f"full pond of {row['containment_storage_m3']} m3")
+        assert row["given_up_m3"] > 0, (
+            "a sill half way down the pond gives up nothing at all")
+
+
 def check_simulation_runs(dem_path):
     """Fill simulation over the burned DEM, then frame stepping."""
     with PluginHarness(dem_path) as h:

@@ -1247,6 +1247,45 @@ def _page_spillways(data):
                   "each has to pass is the peak off a catchment read from the "
                   "terrain.")))
 
+    # What each sill costs, in storage. Shown only where something has actually been
+    # measured: the figures come from flooding each feature alone on the terrain model,
+    # and a table of dashes says nothing a sentence cannot say better.
+    levels = [r for r in data.spillway_rows
+              if r.get("crest_elevation") is not None
+              and r.get("rim_elevation") is not None]
+    if levels:
+        out.append(Paragraph(text=(
+            "A spillway buys you the choice of where water leaves, and it pays for "
+            "that in storage: everything above the sill goes out rather than being "
+            "held. These are the levels each feature is working between.")))
+        out.append(DataTable(
+            title="Where each feature lets go, and what that costs",
+            headers=["Feature", "Sill (designed)", "Held to", "Natural ground",
+                     "Holds to the sill", "Would hold to the top", "Given up"],
+            rows=[[
+                r.get("name", ""),
+                _m(r.get("crest_elevation")),
+                _m(r.get("rim_elevation")),
+                _m(r.get("lip_elevation")),
+                fmt_volume(r.get("sill_storage_m3")),
+                fmt_volume(r.get("containment_storage_m3")),
+                _giveup(r),
+            ] for r in levels],
+            wide=True,
+            note=_tag(MEASURED,
+                      "The sill is the level you set. The other two come from the "
+                      "terrain model: 'held to' is where this feature was measured to "
+                      "pond to, and 'natural ground' is the lowest bare ground round "
+                      "it. Where those differ, the gap is water standing on ground you "
+                      "built.")))
+
+    notes = []
+    for r in data.spillway_rows:
+        for n in (r.get("notes") or []):
+            notes.append(f"{r.get('name', 'A feature')}: {n}")
+    if notes:
+        out.append(Callout(tone="info", title="Worth knowing", text="\n".join(notes)))
+
     problems = []
     for r in data.spillway_rows:
         for p in (r.get("problems") or []):
@@ -1255,6 +1294,21 @@ def _page_spillways(data):
         out.append(Callout(tone="warn", title="What needs attention",
                            text="\n".join(problems)))
     return out
+
+
+def _giveup(row):
+    """The given-up figure as ``856 m³ (32%)`` — or an em dash where nothing is measured.
+
+    Never "0 m³" for an unmeasured feature: a spillway that gives up nothing is a real
+    and unusual state, and printing it for a feature nobody has flooded claims it.
+    """
+    given = row.get("given_up_m3")
+    if given is None:
+        return "—"
+    pct = row.get("given_up_pct")
+    if pct is None:
+        return fmt_volume(given)
+    return f"{fmt_volume(given)} ({pct:.0f}%)"
 
 
 def _ls(m3s):

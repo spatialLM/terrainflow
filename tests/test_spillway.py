@@ -85,24 +85,24 @@ class TestSpillwayDatum:
 
 class TestBindCrest:
     def test_crest_gives_drop(self):
-        crest, drop = bind_crest(100.0, crest=99.4)
+        crest, drop, _h = bind_crest(100.0, crest=99.4)
         assert (crest, drop) == pytest.approx((99.4, 0.6))
 
     def test_drop_gives_crest(self):
-        crest, drop = bind_crest(100.0, drop=0.6)
+        crest, drop, _h = bind_crest(100.0, drop=0.6)
         assert (crest, drop) == pytest.approx((99.4, 0.6))
 
     @pytest.mark.parametrize("value", [0.05, 0.3, 0.62, 1.4, 3.0])
     def test_round_trip_is_exact(self, value):
         """Crest → drop → crest must not drift; the dialog cycles this on every
         keystroke, so any loss compounds."""
-        crest, drop = bind_crest(100.0, drop=value)
-        back_crest, back_drop = bind_crest(100.0, crest=crest)
+        crest, drop, _h = bind_crest(100.0, drop=value)
+        back_crest, back_drop, _h = bind_crest(100.0, crest=crest)
         assert back_crest == pytest.approx(crest)
         assert back_drop == pytest.approx(value)
 
     def test_absolute_crest_wins_when_both_are_given(self):
-        crest, drop = bind_crest(100.0, crest=99.0, drop=5.0)
+        crest, drop, _h = bind_crest(100.0, crest=99.0, drop=5.0)
         assert (crest, drop) == pytest.approx((99.0, 1.0))
 
     def test_clamps_into_the_band_and_the_partner_follows(self):
@@ -110,28 +110,28 @@ class TestBindCrest:
         controls end up describing different crests."""
         # ceiling = rim − head − freeboard = 100.0 − 0.30 − 0.30 = 99.40
         band = spillway_datum(100.0, 98.0, head_m=0.30)
-        crest, drop = bind_crest(100.0, crest=99.9, band=band)
+        crest, drop, _h = bind_crest(100.0, crest=99.9, band=band)
         assert crest == pytest.approx(99.40)
         assert drop == pytest.approx(0.60)
         assert crest + drop == pytest.approx(100.0)
 
     def test_clamps_up_to_the_floor(self):
         band = spillway_datum(100.0, 98.0, head_m=0.30)
-        crest, _drop = bind_crest(100.0, crest=90.0, band=band)
+        crest, _drop, _h = bind_crest(100.0, crest=90.0, band=band)
         assert crest == pytest.approx(98.0)
 
     def test_an_inverted_band_does_not_clamp(self):
         """No value satisfies an inverted band; clamping to either end would
         invent one and hide the real problem."""
         band = spillway_datum(100.0, 99.8, head_m=0.50)
-        crest, _drop = bind_crest(100.0, crest=99.9, band=band)
+        crest, _drop, _h = bind_crest(100.0, crest=99.9, band=band)
         assert crest == pytest.approx(99.9)
 
     def test_no_rim_passes_values_through_untouched(self):
-        assert bind_crest(None, crest=99.0, drop=None) == (99.0, None)
+        assert bind_crest(None, crest=99.0, drop=None) == (99.0, None, None)
 
     def test_nothing_given_returns_nothing(self):
-        assert bind_crest(100.0) == (None, None)
+        assert bind_crest(100.0) == (None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ class TestSpillwayValidity:
         """0.2 m of drop cannot carry 0.3 m of head plus freeboard."""
         problems = spillway_validity(99.8, 100.0, head_m=0.30)
         assert problems
-        assert "0.20 m between the crest and the rim" in problems[0]
+        assert "0.20 m between the crest and the containing" in problems[0]
         assert "0.60 m" in problems[0]      # head + NRCS-378's 0.30 m freeboard
 
     def test_crest_at_the_floor_stores_nothing(self):
@@ -183,15 +183,15 @@ class TestSpillwayValidity:
         point, so a freshly seeded spillway accused itself of insufficient
         freeboard at some rim/head combinations and not others."""
         band = spillway_datum(rim, rim - 2.0, head_m=head)
-        crest, _drop = bind_crest(rim, crest=rim, band=band)   # clamps to the ceiling
+        crest, _drop, _h = bind_crest(rim, crest=rim, band=band)   # clamps to the ceiling
         problems = spillway_validity(
             crest, rim, invert_elevation=rim - 2.0, head_m=head)
-        assert not any("between the crest and the rim" in p for p in problems)
+        assert not any("between the crest and the containing" in p for p in problems)
 
     def test_a_crest_genuinely_short_of_freeboard_is_still_caught(self):
         """The tolerance is a millimetre, not a licence — 10 cm short still fails."""
         problems = spillway_validity(99.65, 100.0, invert_elevation=98.0, head_m=0.30)
-        assert any("between the crest and the rim" in p for p in problems)
+        assert any("between the crest and the containing" in p for p in problems)
 
     def test_nothing_to_check_without_a_crest_or_rim(self):
         assert spillway_validity(None, 100.0) == []
@@ -459,7 +459,7 @@ class TestTheDefaultSwaleIsBuildable:
         depth, head, freeboard = self._default_swale()
         rim = 100.0
         band = spillway_datum(rim, rim - depth, head_m=head, min_freeboard_m=freeboard)
-        crest, _drop = bind_crest(rim, crest=band[1], band=band)
+        crest, _drop, _h = bind_crest(rim, crest=band[1], band=band)
         problems = spillway_validity(
             crest, rim, invert_elevation=rim - depth, head_m=head,
             min_freeboard_m=freeboard,
@@ -583,13 +583,13 @@ class TestTheSeededCrestNeverAccusesItself:
     def test_auto_width_mode_is_silent_at_the_ceiling(self, rim, head, freeboard):
         """The auto path passes the design head itself, never an inverted one."""
         band = spillway_datum(rim, rim - 2.0, head_m=head, min_freeboard_m=freeboard)
-        crest, _drop = bind_crest(rim, crest=rim, band=band)
+        crest, _drop, _h = bind_crest(rim, crest=rim, band=band)
         problems = spillway_validity(
             crest, rim, invert_elevation=rim - 2.0, head_m=head,
             min_freeboard_m=freeboard, standard_freeboard_m=freeboard,
             typical_head_m=(0.05, 1.0),
         )
-        assert not any("between the crest and the rim" in p for p in problems)
+        assert not any("between the crest and the containing" in p for p in problems)
 
     @pytest.mark.parametrize("flow", [0.05, 0.12, 0.48, 1.5])
     @pytest.mark.parametrize("head", [0.15, 0.30, 0.50])
@@ -607,14 +607,14 @@ class TestTheSeededCrestNeverAccusesItself:
         actual = effective_head_m(head, peak_flow_m3s=flow, width_m=width,
                                   width_auto=False)
         band = spillway_datum(rim, rim - 2.0, head_m=head, min_freeboard_m=freeboard)
-        crest, _drop = bind_crest(rim, crest=rim, band=band)
+        crest, _drop, _h = bind_crest(rim, crest=rim, band=band)
 
         problems = spillway_validity(
             crest, rim, invert_elevation=rim - 2.0, head_m=actual,
             min_freeboard_m=freeboard, standard_freeboard_m=freeboard,
             typical_head_m=(0.05, 1.0), width_m=width, required_width_m=width,
         )
-        assert not any("between the crest and the rim" in p for p in problems), (
+        assert not any("between the crest and the containing" in p for p in problems), (
             f"design head {head}, recovered {actual:.5f}: {problems}"
         )
 

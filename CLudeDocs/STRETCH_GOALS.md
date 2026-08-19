@@ -241,7 +241,18 @@ swale, or the steep-ground warning starts firing routinely on real designs.
 
 ---
 
-## 5a. Cut the spillway into the terrain — NEXT UP (user, 2026-08-14)
+## 5a. Cut the spillway into the terrain — IN PROGRESS (plan approved 2026-08-19)
+
+**The approved plan is [SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md), and it supersedes
+this section.** Read it rather than the paragraphs below, which are kept only as the record
+of what was known before it was written. Three stages, each shippable: **A** the datum
+(reference the crest to the swale floor, containment as a reported clearance, the live
+give-up readout, the migration), **B** the notch itself (the cut, the keyed-dam path, width
+rounding, the three elevations, overtopping), **C** the spillway-linked diversion drain.
+Stage A landed 2026-08-19; B and C are separate sessions.
+
+The plan also reduces §6 below to a presentation follow-on rather than a prerequisite — see
+its B7 — and closes §10(a)/(b)/(c)/(d) along the way.
 
 **Priority: the next substantive change after the demo video is recorded.** Flagged by the
 user as an urgent usability upgrade, not a backlog item.
@@ -257,8 +268,11 @@ volumes, capacity, verification Δ, the ponding and event-pond layers, and the r
 also collides with §6: `simulation.py:308` uses `capacity_m3` for both *how much it holds*
 and *when it spills*, so a crest cannot drive an overflow threshold until those are split.
 
-**Do first:** a measured before/after plan over the Quail Island design, and the
-capacity/threshold split from §6. Do **not** attempt the notch directly.
+**Do first (superseded).** This section said: a measured before/after plan over the Quail
+Island design, and the capacity/threshold split from §6 — do **not** attempt the notch
+directly. The plan keeps the measured before/after (its B0, as the gate on Stage B) and
+drops the §6 split as a prerequisite: once the notch is cut, capacity and threshold coincide
+correctly, so the lip-volume denominator is a cheap follow-on rather than a gate.
 
 ---
 
@@ -393,6 +407,13 @@ before exposing any zone-painting UI, or the per-feature numbers go quietly wron
 Four things surfaced while answering the spillway review questions and building the
 Design-stage Spillways list. Each is real; none belonged in that pass.
 
+**Status (2026-08-19): (a), (b) and (c) are closed by Stage A of
+[SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md).** (d) is open and belongs to that
+plan's Stage B, which is where the width rounding it interacts with lands. The original
+text of all four is kept below, because each records the reasoning that made it a
+deferral rather than a bug, and (a) in particular asked a question the fix had to answer
+rather than dodge.
+
 **(a) Sample the rim from the burned DEM.** `_spillway_datums` takes `pour_point` on the
 *pre-earthwork* conditioned DEM, so a swale's companion berm is invisible to it — while
 `_burn_swale` raises the berm *before* taking its own pour point, and `calculate_capacity`
@@ -411,6 +432,18 @@ the rim means before the first burn.
 *Revisit trigger:* users report crest bands that feel too tight on bermed swales, or the
 burned/analytic freeboard figures are seen to disagree.
 
+**Closed 2026-08-19.** `_spillway_datums` now returns *lip*, *invert*, *containment* and
+which of the three the containment came from. The story the note asked for — what the rim
+means before the first burn — is: **before any measurement, the analytic level, said so;
+after one, the measured level.** In preference order the containment is
+`ew.terrain_spill_level_m` (the pond's own measured spill level, retained off
+`FeatureStorage.level_m` and never serialised), then `ew.berm_crest_elevation` (the bank
+as built), then the wall crest for a dam, then the lip. Every one of those is a
+measurement or a stated design value, so the note's own ruling — *not* a berm height
+estimate, of which there are four incompatible derivations — is respected. The lip is
+kept and reported beside it, and a crest standing above it is a **note** rather than a
+problem, because `_spillway_row` fails a row on any problem at all.
+
 **(b) Clamp a map-placed crest into its band.** `_on_spillway_placed` calls `bind_crest`
 without `band=`, so unlike the dialog path a clicked point is not held inside
 `rim − head − freeboard`. Not a safe one-liner: on a **dam** the rim is
@@ -419,11 +452,27 @@ the wall, so clamping could move a crest by metres. The placement tool also samp
 **raw** DEM (`state.dem_path`) while the rim comes from the **conditioned** one, so the
 two are not on the same surface to begin with. Fix both together or neither.
 
+**Closed 2026-08-19, both together as the note required.** `_spillway_datums` moved off
+`state.flow_dem` onto the burner's `original` — the raw file `PlacePointTool` was already
+sampling — so the click and the band are on one surface, and `_on_spillway_placed` now
+binds through `_crest_band_for`, which resolves the same band the dialog does. A clamped
+click says so in the message bar rather than moving the crest silently. The dam concern
+stands and is handled by the containment rule above: a dam's containment is its wall
+crest, which is what the band is computed against.
+
 **(c) Unticking the spillway group discards a placed location.**
 `ew.spillway = dlg.get_spillway()` runs unconditionally, and `get_spillway()` returns
 `None` when the group is unticked — taking `point_wkt` with it. Pre-existing and
 previously invisible; the Spillways list now makes a sited row blank out, so it will get
 reported as new. Wants a confirm-before-clear, or to preserve the location separately.
+
+**Closed 2026-08-19 as a confirm-before-clear.** `_apply_spillway_from_dialog` asks before
+assigning `None` over a **sited** spillway, and the question names the crest and the width
+so it can be answered without reopening anything. An unsited one is still cleared without
+asking: it carries nothing the user cannot retype, and a confirmation on an ordinary edit
+is a confirmation nobody reads. Landed in Stage A deliberately, ahead of the notch — the
+protection wanted to be in place *before* the untick gained the power to un-cut a hole in
+a dam.
 
 **(d) An auto width is derived state and probably should not be persisted.** It now
 genuinely tracks (`_refresh_auto_spillway_widths`), but it is written during
@@ -435,10 +484,18 @@ the cost of a schema change and a new source for the map label's width.
 *Revisit trigger:* any report of a design file changing on open, or (d) alongside the next
 `Spillway` schema change.
 
+**(d) is still open.** The `Spillway` schema did change on 2026-08-19 —
+`height_above_floor_m` was added and `SCHEMA_VERSION` went to 2 — and (d) was
+deliberately *not* folded in, because it is bound up with rounding the burned width to
+whole DEM cells and that decision belongs to Stage B. See the plan's B4.
+
 ---
 
 _Last updated alongside the Design-tab correctness rework (2026-07-28): direct-catchment
 water balance, level-bottom burn, verification split into design / geometric /
 rasterisable / measured. Spillways and peak-flow sizing added 2026-07-30; per-type
 spillway policy, the two-mode head/width model and the Design-stage Spillways review
-added 2026-08-06._
+added 2026-08-06. Stage A of the spillway-notch work landed 2026-08-19: the crest is bound
+three ways, the ceiling is the level water is held to rather than the lowest bare ground,
+the lip is taken locally under the sill, and every feature carries a measured
+stage–storage curve — see [SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md)._

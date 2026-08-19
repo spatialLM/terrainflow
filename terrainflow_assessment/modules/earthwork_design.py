@@ -75,6 +75,52 @@ _DAM_WINDOW_PAD_CELLS = 64      # initial crop padding for the windowed per-feat
 _POND_MIN_DEPTH_M = 0.001
 
 
+class StageStorage(NamedTuple):
+    """How much water this feature holds at any level — the stage–storage curve.
+
+    ``levels_m``    ascending water-surface elevations, the last one being the spill level
+    ``volumes_m3``  cumulative volume held at each of those levels
+    ``area_m2``     wetted area at the top level, used only to extrapolate above it
+
+    Built by :meth:`DEMBurner.feature_storage` from arrays it already has in hand — one
+    sort and a cumulative sum over the pond it just flooded, no second pass. It has to be
+    built there because ``region`` is in the flood window's frame and no caller can
+    integrate it.
+
+    Sampled rather than exact. The full curve is one point per pond cell, which on a
+    forty-feature design is tens of megabytes retained on the model for a readout that is
+    printed to the nearest cubic metre; the samples are taken at exact volumes and
+    interpolated between, and the top sample is placed exactly at the spill level so
+    ``volume_at(level_m)`` reproduces ``volume_m3`` and not something near it.
+
+    The datum is the pond's own bed **net of any natural ponding**, the same basis
+    ``volume_m3`` is measured on, so the two answer one question and not two.
+    """
+
+    levels_m: object
+    volumes_m3: object
+    area_m2: float
+
+    def volume_at(self, elevation):
+        """Volume (m³) held with the water surface at *elevation*.
+
+        Zero at or below the lowest bed cell. Above the spill level the pond is no
+        longer a pond — it is leaving — so this extrapolates on the top wetted area and
+        the answer is a *what the hole would hold*, not a prediction.
+        """
+        if elevation is None:
+            return None
+        z = float(elevation)
+        levels, volumes = self.levels_m, self.volumes_m3
+        if len(levels) == 0:
+            return 0.0
+        if z <= float(levels[0]):
+            return 0.0
+        if z >= float(levels[-1]):
+            return float(volumes[-1]) + (z - float(levels[-1])) * float(self.area_m2)
+        return float(np.interp(z, levels, volumes))
+
+
 class FeatureStorage(NamedTuple):
     """What one earthwork impounds, measured by flooding it alone on the original ground.
 
@@ -84,6 +130,7 @@ class FeatureStorage(NamedTuple):
     ``above_ground_m3``  the part standing proud of natural ground (the bank's work)
     ``retained_depth_m`` how deep the water stands against the bank that holds it
     ``excavation_m3``    the earth it takes out of this hillside — see :meth:`feature_storage`
+    ``stage_storage``    the volume at any level below the spill level (:class:`StageStorage`)
 
     ``above_ground_m3`` and ``retained_depth_m`` are what separate a swale from a small
     dam, and neither is visible in a volume alone: a 1,095 m³ pond is unremarkable if it
@@ -97,6 +144,62 @@ class FeatureStorage(NamedTuple):
     above_ground_m3: float
     retained_depth_m: float
     excavation_m3: float = 0.0
+    stage_storage: Optional[StageStorage] = None
+
+
+#: Points on a retained stage–storage curve. Twenty-five centimetres of pond depth
+#: sampled at 128 levels is under 2 mm a step, which is finer than the DEM can place a
+#: water surface anyway; the cost is two 128-float arrays per feature.
+_STAGE_SAMPLES = 128
+
+
+def build_stage_storage(depths, level_m, cell_area, samples=_STAGE_SAMPLES):
+    """Stage–storage curve for a pond of *depths* standing at *level_m*.
+
+    *depths* is the water depth at each pond cell, so ``level_m - depth`` is that cell's
+    effective bed — natural ground where there was none, the pre-existing water surface
+    where there was. Working from depths rather than from the DEM is what makes the curve
+    integrate to the *new* volume the caller reports rather than to the total standing
+    water, which are different numbers wherever the site ponds naturally.
+
+    Mirrors ``reporting.level_for_volume``, which solves the inverse by the same sorted
+    array method; the two should stay recognisable as one technique.
+    """
+    depths = np.asarray(depths, dtype="float64").ravel()
+    depths = depths[np.isfinite(depths) & (depths > 0.0)]
+    if depths.size == 0 or level_m is None:
+        return None
+
+    bed = np.sort(float(level_m) - depths)
+    n = bed.size
+    # V(bed[k]) = sum_{i<k} (bed[k] - bed[i]) — accumulated one step at a time, because
+    # each step raises the water over exactly the cells already wet.
+    cum = np.empty(n, dtype="float64")
+    cum[0] = 0.0
+    if n > 1:
+        np.cumsum(np.arange(1, n, dtype="float64") * np.diff(bed), out=cum[1:])
+    cum *= float(cell_area)
+
+    if n <= samples:
+        levels, volumes = bed, cum
+    else:
+        # Even in *level*, not in cell index: the readout is asked for volumes at
+        # elevations, and a pond's cells cluster round its bed.
+        levels = np.linspace(bed[0], bed[-1], samples)
+        idx = np.searchsorted(bed, levels, side="right") - 1
+        idx = np.clip(idx, 0, n - 1)
+        volumes = cum[idx] + (idx + 1) * (levels - bed[idx]) * float(cell_area)
+
+    # The spill level itself is always the last sample, exactly, so the curve and the
+    # volume the caller publishes agree at the one elevation both are read at.
+    top = float(level_m)
+    if top > float(levels[-1]) + 1e-12:
+        k = n - 1
+        top_volume = cum[k] + n * (top - bed[k]) * float(cell_area)
+        levels = np.append(levels, top)
+        volumes = np.append(volumes, top_volume)
+
+    return StageStorage(levels, volumes, float(n) * float(cell_area))
 
 
 def extend_to_abutments(coords, elevation_at, crest_elev, max_extend_m=250.0,
@@ -284,12 +387,26 @@ _CREST_FIT_EPS = 0.01
 class Spillway:
     """Where a feature is *designed* to overflow, and how wide that has to be.
 
-    Two numbers describe one crest, and the dialog binds them both ways.
-    ``crest_elevation`` is absolute; ``drop_below_rim_m`` is how far it sits below
-    the rim — the lowest containing ground, which is where the feature would spill
-    if nothing were built. The rim is the datum because it is the elevation the DEM
-    actually supplies: an absolute crest typed without reference to it is
-    unanchored, and a drop is meaningless without it.
+    **Three numbers describe one crest**, and the dialog binds all three (see
+    :func:`bind_crest`). ``crest_elevation`` is absolute and is the authoritative one —
+    it is what gets set out on the ground and what a burn would cut to; the other two
+    are views of it against a datum, and either datum can move under a saved design.
+
+    ``drop_below_rim_m`` measures down from the **containment level**: the lowest ground
+    that actually holds this feature's water, which is where it would spill if no
+    spillway were built. That is not always undisturbed ground — on a swale with a
+    companion berm it is the berm crest, and on a dam it is the wall.
+
+    ``height_above_floor_m`` measures **up from the feature's own floor**, and it is the
+    only one of the three a builder can set out with a staff standing in the trench. It
+    is also the one that survives a falling alignment: the containment level is a single
+    global minimum over the whole footprint, usually at one end of a contour swale, so a
+    notch sited mid-run and referenced to it is referenced to ground a hundred metres
+    away. The floor is under the sill.
+
+    Because the crest is authoritative, the other two are **re-derived whenever the
+    datums are recomputed** — see :func:`rebase_spillway`, which the design-restore path
+    runs so a stored drop cannot outlive the datum it was measured against.
 
     ``auto`` means a crest seeded from the ground is still the tool's rather than the
     user's, so placing the spillway on the map may re-read it from the DEM. It does
@@ -300,9 +417,14 @@ class Spillway:
 
     def __init__(self, crest_elevation=None, drop_below_rim_m=None, head_m=0.30,
                  width_m=0.0, point_wkt=None, auto=True, width_auto=True,
-                 freeboard_m=None):
+                 freeboard_m=None, height_above_floor_m=None):
         self.crest_elevation = crest_elevation
         self.drop_below_rim_m = drop_below_rim_m
+        # Crest measured up from the feature's floor. ``None`` means "not known on this
+        # feature" — there is no floor for a dam (its invert is the ground under the
+        # wall, not a cut), and a design saved before this field existed has none until
+        # ``rebase_spillway`` runs against a DEM.
+        self.height_above_floor_m = height_above_floor_m
         self.head_m = head_m
         # Clear height demanded below the rim. ``None`` inherits the feature type's
         # policy (see spillway_policy) rather than freezing today's number into the
@@ -317,9 +439,13 @@ class Spillway:
         self.point_wkt = point_wkt    # placed location, or None for "not sited yet"
         self.auto = auto
 
+    # ``from_dict`` probes the data dict per field, so adding one here reads an older
+    # document without a version gate. The bump on SCHEMA_VERSION is for the other
+    # direction: an older build re-saving this design iterates its own shorter tuple
+    # and drops the field silently, and the version is what lets that be noticed.
     _SERIAL_FIELDS = (
-        "crest_elevation", "drop_below_rim_m", "head_m", "width_m",
-        "width_auto", "point_wkt", "auto", "freeboard_m",
+        "crest_elevation", "drop_below_rim_m", "height_above_floor_m", "head_m",
+        "width_m", "width_auto", "point_wkt", "auto", "freeboard_m",
     )
 
     def to_dict(self):
@@ -355,51 +481,73 @@ def effective_freeboard_m(spillway, ew_type):
     return spillway_policy(ew_type)[0]
 
 
-def spillway_datum(rim_elevation, invert_elevation=None, head_m=0.30,
+def spillway_datum(containment_elevation, invert_elevation=None, head_m=0.30,
                    min_freeboard_m=SPILLWAY_MIN_FREEBOARD_M):
     """Crest elevations physically available on this feature — ``(lowest, highest)``.
 
-    The ceiling is not the rim itself but ``rim − head − freeboard``: the crest has
-    to sit low enough that a full design nappe still clears the containing ground.
-    Raising the head therefore lowers the highest usable crest, which is exactly the
-    trade-off the dialog needs to show.
+    The ceiling is not the containment level itself but ``containment − head −
+    freeboard``: the crest has to sit low enough that a full design nappe still clears
+    the ground that holds the water in. Raising the head therefore lowers the highest
+    usable crest, which is exactly the trade-off the dialog needs to show.
+
+    *containment_elevation* is the level water is actually held to — the measured spill
+    level where a burn has been run, else the companion berm's crest where one was
+    built, else the bare ring minimum. It is **not** necessarily undisturbed ground, and
+    that distinction is the point: a bermed swale holding to 69.60 m against a ring
+    minimum of 68.88 m had its crest clamped 0.72 m too low while this was the ring, and
+    the storage went with it.
 
     The floor is the feature's invert — a crest there stores nothing, which is
     degenerate rather than invalid, so it is the bound rather than an error.
 
-    Returns ``(None, None)`` when the rim is unknown. ``highest < lowest`` is a
-    meaningful answer: the feature is too shallow to pass that head at all.
+    Returns ``(None, None)`` when the containment level is unknown. ``highest < lowest``
+    is a meaningful answer: the feature is too shallow to pass that head at all.
     """
-    if rim_elevation is None:
+    if containment_elevation is None:
         return (None, None)
-    rim = float(rim_elevation)
+    rim = float(containment_elevation)
     highest = rim - max(0.0, float(head_m)) - max(0.0, float(min_freeboard_m))
     lowest = float(invert_elevation) if invert_elevation is not None else highest
     return (lowest, highest)
 
 
-def bind_crest(rim_elevation, crest=None, drop=None, band=None):
-    """Resolve the crest/drop pair from whichever one the user just changed.
+def bind_crest(rim_elevation, crest=None, drop=None, band=None,
+               invert_elevation=None, height=None):
+    """Resolve the crest / drop / height triple from whichever one the user changed.
 
-    Give ``crest`` to derive the drop, or ``drop`` to derive the crest; passing both
-    lets the absolute crest win. Returns ``(crest, drop)``, exact inverses of each
-    other so a round trip through either control cannot drift.
+    Returns ``(crest, drop, height)``:
+
+    * ``crest``  — absolute elevation, the authoritative value
+    * ``drop``   — how far it sits below *rim_elevation*, the **containment** level
+    * ``height`` — how far it stands above *invert_elevation*, the feature's floor
+
+    Give any one of ``crest`` / ``drop`` / ``height`` and the other two are derived.
+    Passing more than one lets the absolute crest win, then the drop, then the height —
+    the same "the more anchored value wins" order the two-way binding used.
+
+    They are exact inverses of one another, so a round trip through any control cannot
+    drift. A partner whose datum is unknown comes back ``None`` rather than guessed:
+    without a DEM there is no containment level, and a dam has no floor to stand on.
 
     *band* is an optional ``(lowest, highest)`` from :func:`spillway_datum`. When
-    supplied the crest is clamped into it **before** the partner value is computed,
-    so the two controls never disagree after a clamp — the failure mode that makes
-    hand-written two-way bindings creep apart.
+    supplied the crest is clamped into it **before** the partners are computed, so the
+    three controls never disagree after a clamp — the failure mode that makes
+    hand-written bindings creep apart. Clamping once, here, is the whole reason this is
+    one function rather than three assignments at three call sites.
     """
-    if rim_elevation is None:
-        return (crest, drop)
-    rim = float(rim_elevation)
+    rim = None if rim_elevation is None else float(rim_elevation)
+    invert = None if invert_elevation is None else float(invert_elevation)
 
     if crest is not None:
         value = float(crest)
-    elif drop is not None:
+    elif drop is not None and rim is not None:
         value = rim - float(drop)
+    elif height is not None and invert is not None:
+        value = invert + float(height)
     else:
-        return (None, None)
+        # Nothing resolvable — hand the inputs straight back rather than inventing a
+        # crest from a datum that is not there.
+        return (crest, drop, height)
 
     if band is not None:
         lo, hi = band
@@ -409,10 +557,38 @@ def bind_crest(rim_elevation, crest=None, drop=None, band=None):
         if lo is not None and hi is not None and hi >= lo:
             value = max(lo, min(hi, value))
 
-    return (value, rim - value)
+    return (value,
+            None if rim is None else rim - value,
+            None if invert is None else value - invert)
 
 
-def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
+def rebase_spillway(spillway, containment_elevation, invert_elevation=None):
+    """Re-derive a spillway's relative figures against datums measured *now*.
+
+    ``crest_elevation`` is the value that must not move. The other two are measurements
+    of it against ground, and both datums can change under a design that has been sitting
+    on disk — the containment level moved when it stopped being a bare ring minimum, and
+    ``height_above_floor_m`` did not exist at all before this build. A stored
+    ``drop_below_rim_m`` left alone would then describe a rim nothing computes any more,
+    while still looking like a setting-out figure.
+
+    So: keep the crest, recompute the pair, and mutate in place. Returns *spillway* for
+    convenience. A spillway with no crest yet is left entirely alone — there is nothing
+    authoritative to re-base against, and a stored drop is then the only thing the user
+    chose.
+    """
+    if spillway is None or getattr(spillway, "crest_elevation", None) is None:
+        return spillway
+    crest, drop, height = bind_crest(
+        containment_elevation, crest=spillway.crest_elevation,
+        invert_elevation=invert_elevation)
+    spillway.crest_elevation = crest
+    spillway.drop_below_rim_m = drop
+    spillway.height_above_floor_m = height
+    return spillway
+
+
+def spillway_validity(crest_elevation, containment_elevation, invert_elevation=None,
                       head_m=0.30, min_freeboard_m=SPILLWAY_MIN_FREEBOARD_M,
                       width_m=None, required_width_m=None,
                       standard_freeboard_m=None, typical_head_m=None,
@@ -421,6 +597,14 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
 
     Every message quotes the numbers it is objecting to, because "invalid" on its
     own gives the user nothing to act on.
+
+    *containment_elevation* is the level this feature's water is actually held to — see
+    :func:`spillway_datum`. It is deliberately not "the lowest natural ground": a crest
+    standing above the ring minimum but below a measured berm crest is a legitimate
+    design, and refusing it here would mark every bermed swale failed. The clearance
+    against bare ground is worth saying and is said by :func:`spillway_notes`, which is
+    a note rather than a problem because ``_spillway_row`` fails a row on any problem
+    at all.
 
     *min_freeboard_m* is the margin actually in force — a type default, or a user
     override. *standard_freeboard_m* is what that type's policy asks for, supplied
@@ -433,11 +617,11 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
     callers are unaffected.
     """
     problems = []
-    if crest_elevation is None or rim_elevation is None:
+    if crest_elevation is None or containment_elevation is None:
         return problems
 
     crest = float(crest_elevation)
-    rim = float(rim_elevation)
+    rim = float(containment_elevation)
     head = max(0.0, float(head_m))
     freeboard = max(0.0, float(min_freeboard_m))
 
@@ -449,7 +633,8 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
         )
     elif rim - crest < head + freeboard - _CREST_FIT_EPS:
         problems.append(
-            f"Only {rim - crest:.2f} m between the crest and the rim, but "
+            f"Only {rim - crest:.2f} m between the crest and the containing "
+            f"ground, but "
             f"{head:.2f} m of head plus {freeboard:.2f} m freeboard needs "
             f"{head + freeboard:.2f} m. Lower the crest or design for less head."
         )
@@ -510,6 +695,56 @@ def spillway_validity(crest_elevation, rim_elevation, invert_elevation=None,
             )
 
     return problems
+
+
+# Containment provenance, in the order :func:`spillway_datum`'s caller prefers them.
+# Public because three surfaces render the same distinction and none of them should
+# spell it themselves: the dialog, the Spillways review and the report.
+CONTAINMENT_MEASURED = "measured"     # the pond's own spill level, off a burn
+CONTAINMENT_BERM = "berm"             # the companion berm's crest, as built
+CONTAINMENT_WALL = "wall"             # a dam: the wall crest the user specified
+CONTAINMENT_LIP = "lip"               # bare ground: the ring minimum round the footprint
+
+
+def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=None,
+                   containment_source=None, berm_crest_elevation=None):
+    """Things worth saying about a crest that are **not** faults. Empty list means none.
+
+    A separate channel from :func:`spillway_validity` on purpose. ``_spillway_row`` sets
+    a row's state to ``"fail"`` on any non-empty ``problems``, so anything routed through
+    that list is an accusation. These are the opposite: a crest above the bare ring
+    minimum but under a measured berm crest is exactly what a bermed swale is *for*, and
+    it used to be refused.
+
+    One producer, several surfaces — the dialog, the review table and the report all
+    render this list rather than each composing its own sentence about the same fact.
+    """
+    notes = []
+    if crest_elevation is None:
+        return notes
+    crest = float(crest_elevation)
+
+    # The clearance that used to be the fail. Said in the direction the user can act on:
+    # what is holding the water up there, and how it was known.
+    if lip_elevation is not None and crest > float(lip_elevation) + _ELEV_EPS:
+        lip = float(lip_elevation)
+        line = (f"Crest {crest:.2f} m stands {crest - lip:.2f} m above natural ground "
+                f"({lip:.2f} m).")
+        if containment_source == CONTAINMENT_MEASURED and containment_elevation is not None:
+            line += (f" The last analysis measured this pond holding to "
+                     f"{float(containment_elevation):.2f} m, so the water is held by what "
+                     f"was built rather than by the hillside.")
+        elif containment_source == CONTAINMENT_BERM and berm_crest_elevation is not None:
+            line += (f" The companion berm was built to {float(berm_crest_elevation):.2f} m, "
+                     f"which is what holds it — so this is a sill in made ground.")
+        elif containment_source == CONTAINMENT_WALL:
+            line += " The wall is the containment here, not the valley floor."
+        else:
+            line += (" Nothing measured is holding it there yet — run Re-analyse with "
+                     "Earthworks to check what the built feature actually contains.")
+        notes.append(line)
+
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +847,17 @@ class Earthwork:
         # a DEM has been burned — "moves no earth" is a claim, and an unmeasured feature
         # is not making it. Not serialised, for `terrain_capacity_m3`'s reason above.
         self.excavation_m3 = None
+        # Where the finished pond was measured to let go — FeatureStorage.level_m from
+        # the same flood. This is the honest containment datum once anything has been
+        # built: the analytic ring minimum describes the hillside before the spoil went
+        # anywhere, and on a bermed swale that is 0.72 m and 656 m³ out. None before any
+        # measurement, and not serialised for the reason above it.
+        self.terrain_spill_level_m = None
+        # What this feature holds at any level below that one — a StageStorage, off the
+        # same flood. It costs one sort and a running sum on a pond already flooded, and
+        # it is the only thing that can answer "what does a sill here give up" without
+        # re-flooding on every spin of a crest control. Derived; never serialised.
+        self.stage_storage = None
 
     # ------------------------------------------------------------------
     # Derived geometry fields
@@ -2395,6 +2641,12 @@ class DEMBurner:
         mask is not always the cut: a diversion drain records its contact band and cuts a
         separately rasterised set of cells, so integrating the mask would miss earth it moves.
 
+        **``stage_storage`` — the volume at any level, not only at the top.** The pond is
+        already flooded and its depths are already in hand, so the cumulative curve is a
+        sort and a running sum away, and it is the only thing that can answer "what does
+        a sill *here* give up" without re-flooding on every spin of a crest control. It
+        is derived and is never serialised, the same rule ``terrain_capacity_m3`` follows.
+
         For a dam ``isolated_dem`` is the caller's idealised keyed wall rather than the burn,
         so the figure describes that idealisation; nothing reads it, because a dam has no
         drawn section to compare against and :func:`capacity_breakdown` reports no cut for one.
@@ -2470,7 +2722,13 @@ class DEMBurner:
         retained = float(np.clip(level - ground[raised], 0.0, None).max()) \
             if raised.any() else 0.0
 
-        return FeatureStorage(volume, level, region, above_m3, retained, excavation_m3)
+        # The curve comes off the same arrays, so it costs one sort and one cumulative
+        # sum over a pond that has already been flooded. That is the whole reason the
+        # live "what this sill gives up" readout does not need a second pass.
+        stage = build_stage_storage(new_pond[region], level, cell_area)
+
+        return FeatureStorage(volume, level, region, above_m3, retained, excavation_m3,
+                              stage)
 
     def feature_storage_m3(self, ew, baseline_ponding=None):
         """Just the volume from :meth:`feature_storage` — the common case."""
@@ -2496,6 +2754,24 @@ class DEMBurner:
         if getattr(dam, "crest_elevation", None) is None:
             return 0.0
 
+        return self.dam_storage(dam, baseline_ponding=baseline_ponding,
+                                key_into_banks=key_into_banks).volume_m3
+
+    def dam_storage(self, dam, baseline_ponding=None, key_into_banks=False):
+        """The full :class:`FeatureStorage` behind :meth:`dam_stage_storage`.
+
+        Same measurement; this one does not throw the rest of it away. The name has been
+        promising a curve since it was written and returning a single volume, and the
+        curve is what the live "what this sill gives up" readout reads — so a dam, which
+        is the type most likely to carry a spillway, would otherwise be the one type
+        without one.
+
+        Returns an empty measurement for a dam with no crest, which is what
+        :meth:`dam_stage_storage`'s ``0.0`` meant.
+        """
+        if getattr(dam, "crest_elevation", None) is None:
+            return FeatureStorage(0.0, None, None, 0.0, 0.0)
+
         self.warnings = []
         if key_into_banks:
             # ``_keyed_dam_dem`` raises the abutment advisory the caller then surfaces, so
@@ -2503,9 +2779,9 @@ class DEMBurner:
             dem = self._keyed_dam_dem(dam)
             mask = self._contact_mask(self._to_shapely(dam.geometry), dam)
             return self.feature_storage(dam, baseline_ponding=baseline_ponding,
-                                        isolated_dem=dem, isolated_mask=mask).volume_m3
+                                        isolated_dem=dem, isolated_mask=mask)
         return self.feature_storage(dam, baseline_ponding=baseline_ponding,
-                                    keep_warnings=True).volume_m3
+                                    keep_warnings=True)
 
     def _feature_cell_bounds(self, ew):
         """(row_lo, row_hi, col_lo, col_hi) of the feature geometry, clamped to the DEM."""
