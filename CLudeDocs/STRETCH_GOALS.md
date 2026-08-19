@@ -241,7 +241,7 @@ swale, or the steep-ground warning starts firing routinely on real designs.
 
 ---
 
-## 5a. Cut the spillway into the terrain — IN PROGRESS (plan approved 2026-08-19)
+## 5a. Cut the spillway into the terrain — STAGES A AND B DONE (2026-08-19)
 
 **The approved plan is [SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md), and it supersedes
 this section.** Read it rather than the paragraphs below, which are kept only as the record
@@ -249,13 +249,25 @@ of what was known before it was written. Three stages, each shippable: **A** the
 (reference the crest to the swale floor, containment as a reported clearance, the live
 give-up readout, the migration), **B** the notch itself (the cut, the keyed-dam path, width
 rounding, the three elevations, overtopping), **C** the spillway-linked diversion drain.
-Stage A landed 2026-08-19; B and C are separate sessions.
+
+**A and B both landed 2026-08-19. Only Stage C is open**, and it is a separate session.
+The measured before/after is Round 20 of `FIELD_TEST_LOG.md`; read it before touching any
+of this, because it settles two things this section got wrong.
+
+**The 1,832 m³ below is right, and it is the pool, not the dam's storage.** Measured: the
+pool behind Dam 15 truncates from 2,688.4 m³ at 56.12 m to **1,832.1 m³ at 55.52 m** once
+the notch is cut. Its `capacity_m3` — the pond the dam *adds*, natural ponding subtracted —
+goes 2,132.8 → 1,276.6 m³. The two were being compared as if they were one figure.
+
+**One decision in the plan changed under Stage B.** The per-feature isolated floods stay
+**brim-full**; the volume held to the sill is read off the stage–storage curve at the crest
+(measured equal to a notched flood on all five sited spillways). Cutting the notch into
+that flood collapses the containment datum onto the crest, which ratchets the crest down by
+`head + freeboard` on every re-open, fails `spillway_validity` on every spillwayed feature,
+and zeroes the give-up readout. The **site** burn still cuts the notch. See Round 20.
 
 The plan also reduces §6 below to a presentation follow-on rather than a prerequisite — see
-its B7 — and closes §10(a)/(b)/(c)/(d) along the way.
-
-**Priority: the next substantive change after the demo video is recorded.** Flagged by the
-user as an urgent usability upgrade, not a backlog item.
+its B7, **delivered in Stage B** — and closes §10(a)/(b)/(c)/(d) along the way.
 
 **What.** The burn is spillway-blind: no `_burn_*` method reads a spillway and nothing cuts
 a notch. A sized, sited spillway therefore changes no raster, no routing and no pond, and
@@ -268,15 +280,27 @@ volumes, capacity, verification Δ, the ponding and event-pond layers, and the r
 also collides with §6: `simulation.py:308` uses `capacity_m3` for both *how much it holds*
 and *when it spills*, so a crest cannot drive an overflow threshold until those are split.
 
-**Do first (superseded).** This section said: a measured before/after plan over the Quail
+**Do first (done).** This section said: a measured before/after plan over the Quail
 Island design, and the capacity/threshold split from §6 — do **not** attempt the notch
-directly. The plan keeps the measured before/after (its B0, as the gate on Stage B) and
-drops the §6 split as a prerequisite: once the notch is cut, capacity and threshold coincide
-correctly, so the lip-volume denominator is a cheap follow-on rather than a gate.
+directly. The plan kept the measured before/after (its B0, the gate on Stage B, now Round
+20) and dropped the §6 split as a prerequisite: once the notch is cut, capacity and
+threshold coincide correctly, so the lip-volume denominator was a cheap follow-on rather
+than a gate. It shipped with Stage B as `EarthworkStore.lip_capacity_m3`.
 
 ---
 
-## 6. Spillway crest as the level-bottom datum
+## 6. Spillway crest as the level-bottom datum — the "% full" half is DONE (2026-08-19)
+
+**The "% full should never reach 100%" goal shipped with Stage B of §5a**, and it shipped
+as a readout off the stage–storage curve rather than as the `simulation.py` redesign this
+section proposed. `EarthworkStore.lip_capacity_m3` carries the brim volume, `fill_pct()`
+divides by it, and `capacity_m3` — which `cascade_overflow` still thresholds on — is
+correctly the volume to the sill once the notch is cut. So the two-change list at the
+bottom of this section is answered: (1) is `FeatureStorage.stage_storage`, and (2) turned
+out not to need a separate threshold field at all.
+
+**What is left here is only the datum question**, which is what the section is titled for
+and which Stage B did not touch.
 
 **What.** Let a user-placed spillway's crest elevation set the invert datum for its
 feature, instead of the automatically-detected pour point.
@@ -407,12 +431,11 @@ before exposing any zone-painting UI, or the per-feature numbers go quietly wron
 Four things surfaced while answering the spillway review questions and building the
 Design-stage Spillways list. Each is real; none belonged in that pass.
 
-**Status (2026-08-19): (a), (b) and (c) are closed by Stage A of
-[SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md).** (d) is open and belongs to that
-plan's Stage B, which is where the width rounding it interacts with lands. The original
-text of all four is kept below, because each records the reasoning that made it a
-deferral rather than a bug, and (a) in particular asked a question the fix had to answer
-rather than dodge.
+**Status (2026-08-19): all four are closed.** (a), (b) and (c) by Stage A of
+[SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md); (d) by its Stage B, which is where the
+width rounding it is bound up with landed. The original text of all four is kept below,
+because each records the reasoning that made it a deferral rather than a bug, and (a) in
+particular asked a question the fix had to answer rather than dodge.
 
 **(a) Sample the rim from the burned DEM.** `_spillway_datums` takes `pour_point` on the
 *pre-earthwork* conditioned DEM, so a swale's companion berm is invisible to it — while
@@ -484,10 +507,23 @@ the cost of a schema change and a new source for the map label's width.
 *Revisit trigger:* any report of a design file changing on open, or (d) alongside the next
 `Spillway` schema change.
 
-**(d) is still open.** The `Spillway` schema did change on 2026-08-19 —
-`height_above_floor_m` was added and `SCHEMA_VERSION` went to 2 — and (d) was
-deliberately *not* folded in, because it is bound up with rounding the burned width to
-whole DEM cells and that decision belongs to Stage B. See the plan's B4.
+**Closed 2026-08-19 (Stage B).** `Spillway.to_dict` drops `width_m` whenever
+`width_auto` is set, so the flag travels and the number is derived — which is what the
+flag always claimed. Its own restore path recomputes it (`_refresh_auto_spillway_widths`,
+now run before the feature list, the map label and the sill bar are drawn, all three of
+which read `width_m`), and `_spillway_row` derives it rather than trusting the stored
+figure, so a restored design cannot print a 0.0 in the window between the two.
+
+No schema bump was needed in either direction. Reading a document an older build wrote,
+the stored auto width is loaded and then immediately recomputed; reading one this build
+wrote, an older build starts from `width_m = 0.0` with `width_auto` set and its own
+`_refresh_auto_spillway_widths` fills it in. Nothing a user chose is lost either way,
+which is the whole distinction: a **committed** width (`width_auto` False) is a decision
+and is still stored, rounded.
+
+What made this worth closing now rather than leaving self-healing: the rewrite on open was
+silent while the figure was unrounded, and rounding to whole DEM cells would have made it a
+*visible* unexplained change to a saved design.
 
 ---
 
@@ -498,4 +534,11 @@ spillway policy, the two-mode head/width model and the Design-stage Spillways re
 added 2026-08-06. Stage A of the spillway-notch work landed 2026-08-19: the crest is bound
 three ways, the ceiling is the level water is held to rather than the lowest bare ground,
 the lip is taken locally under the sill, and every feature carries a measured
-stage–storage curve — see [SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md)._
+stage–storage curve. **Stage B landed the same day**: the crest bar runs along the
+alignment and is cut into the burned DEM as a post-pass, the keyed-dam path cuts it too,
+the burned width is whole DEM cells, an auto width is no longer persisted, "% full" is
+measured against the brim rather than the sill, and the overtopping check subtracts the
+notch from the barrier crest — so the caveat about the model not seeing the designed
+spillway is deleted rather than reworded. See
+[SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md) and Round 20 of
+[FIELD_TEST_LOG.md](FIELD_TEST_LOG.md)._

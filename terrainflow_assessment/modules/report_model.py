@@ -1279,6 +1279,9 @@ def _page_spillways(data):
                       "it. Where those differ, the gap is water standing on ground you "
                       "built.")))
 
+    out.extend(_spillway_gauge_table(data))
+    out.extend(_spillway_as_burned_table(data))
+
     notes = []
     for r in data.spillway_rows:
         for n in (r.get("notes") or []):
@@ -1294,6 +1297,122 @@ def _page_spillways(data):
         out.append(Callout(tone="warn", title="What needs attention",
                            text="\n".join(problems)))
     return out
+
+
+def _spillway_gauge_table(data):
+    """Three volumes off one curve: the sill, the surcharge, and the top.
+
+    "% full" used to divide by the sill volume, so a spillway pinned its feature at 100%
+    exactly when it started doing its job. These are the three marks that make that
+    band readable: what the feature holds to its sill, where the water actually stands
+    while the design storm passes the weir, and what it would hold before leaving over
+    the structure itself. Reaching the third means the spillway is not sufficient — the
+    same condition the freeboard check fires on, so the two cannot disagree.
+    """
+    rows = [r for r in (data.spillway_rows or [])
+            if r.get("surcharge_storage_m3") is not None
+            and r.get("containment_storage_m3") is not None]
+    if not rows:
+        return []
+    return [
+        Paragraph(text=(
+            "While the storm passes, the water in a spillwayed feature stands above "
+            "the sill — that is what drives it over the weir. These are the three "
+            "levels that matter: what it holds to the sill, where it actually stands "
+            "at the design flow, and the point at which water would start leaving over "
+            "the structure instead of through it.")),
+        DataTable(
+            title="How full each feature gets while the storm passes",
+            headers=["Feature", "Holds to the sill", "Storm water level",
+                     "Holds at that level", "Would hold to the top", "Verdict"],
+            rows=[[
+                r.get("name", ""),
+                fmt_volume(r.get("sill_storage_m3")),
+                _m(r.get("surcharge_level_m")),
+                fmt_volume(r.get("surcharge_storage_m3")),
+                fmt_volume(r.get("containment_storage_m3")),
+                ("Spillway is not passing enough — water reaches the top"
+                 if r.get("spillway_insufficient")
+                 else "Spillway holds the storm below the top"),
+            ] for r in rows],
+            wide=True,
+            note=_tag(MEASURED,
+                      "Volumes come off the stage-storage curve measured by flooding "
+                      "each feature alone; the storm water level is the sill plus the "
+                      "depth the built width actually produces at the peak flow.")),
+    ]
+
+
+def _spillway_as_burned_table(data):
+    """Did the terrain model take the sill, and does the pond agree?
+
+    Three elevations, and the disagreements are the content. The designed sill is what
+    the user set; the as-burned sill is what the notch cut into the terrain model came
+    out at; the measured spill level is where the finished pond was actually found to
+    let go once the whole site was burned. Each way they can differ names a different
+    fault, and none of them is visible from the design alone.
+
+    Absent until an earthworks re-analysis has run, because until then there is no burn
+    to measure — and a table of dashes asserts a question was asked and answered.
+    """
+    rows = [r for r in (data.spillway_rows or [])
+            if r.get("crest_elevation") is not None
+            and (r.get("burned_sill_m") is not None
+                 or r.get("actual_spill_level_m") is not None)]
+    if not rows:
+        return []
+    return [
+        Paragraph(text=(
+            "A designed spillway is cut into the terrain model as a notch, so the model "
+            "routes water through it rather than over the bank. These three levels say "
+            "whether that worked. They should agree; where they do not, the row says "
+            "what went wrong.")),
+        DataTable(
+            title="Did the model take the sill?",
+            headers=["Feature", "Sill designed", "Sill as cut", "Pond lets go at",
+                     "Reading"],
+            rows=[[
+                r.get("name", ""),
+                _m(r.get("crest_elevation")),
+                _m(r.get("burned_sill_m")),
+                _m(r.get("actual_spill_level_m")),
+                _sill_reading(r),
+            ] for r in rows],
+            wide=True,
+            note=_tag(MEASURED,
+                      "The sill designed is the level you set; the other two are read "
+                      "off the burned terrain model after the last earthworks "
+                      "re-analysis.")),
+    ]
+
+
+#: Elevations print to two decimals, so a disagreement finer than a centimetre is one
+#: nobody can act on and the reading would contradict its own figures.
+_SILL_TOLERANCE_M = 0.01
+
+
+def _sill_reading(row):
+    """One sentence naming which of the three elevations disagree, and why it matters."""
+    crest = row.get("crest_elevation")
+    burned = row.get("burned_sill_m")
+    actual = row.get("actual_spill_level_m")
+    if burned is None:
+        return "No notch was cut here — the spillway is not sited on the feature."
+    if burned > crest + _SILL_TOLERANCE_M:
+        return ("The notch was refused: the bank still stands above the sill. See the "
+                "warnings from the last re-analysis for which guard stopped it.")
+    if burned < crest - _SILL_TOLERANCE_M:
+        return ("The ground along the notch was already below the sill, so cutting it "
+                "moved nothing. The water was leaving here anyway.")
+    if actual is None:
+        return "Cut to the designed level."
+    if actual > burned + _SILL_TOLERANCE_M:
+        return ("Cut, but the pond lets go higher — the notch does not daylight, so "
+                "the water is going out somewhere else.")
+    if actual < crest - _SILL_TOLERANCE_M:
+        return ("A lower point on the rim is the control, so this spillway never comes "
+                "into play. Raise that point or move the sill.")
+    return "Cut to the designed level, and the pond lets go there."
 
 
 def _giveup(row):

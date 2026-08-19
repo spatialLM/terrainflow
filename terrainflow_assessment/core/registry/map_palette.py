@@ -196,6 +196,17 @@ OVERTOPPING_FILL = (192, 57, 43, 110)           # solid — this event reaches t
 OVERTOPPING_CAPACITY_FILL = (192, 57, 43, 205)  # hatched — only a full pond would
 OVERTOPPING_EDGE = (150, 30, 20, 255)
 
+#: The spillway notch **as it was actually cut into the terrain** — the Verify-stage
+#: partner to the crest bar drawn on the Design stage.
+#:
+#: The same blue as the outflow spillway symbol, on purpose: it is the same structure,
+#: seen after the burn rather than before it, and giving it its own hue would read as a
+#: second kind of thing sitting on the same feature. It carries no magnitude — a notch
+#: was cut here or it was not — so this is a flat fill and the alpha is for letting the
+#: ground through, which is what alpha is for everywhere in this file.
+SPILLWAY_BURNED_FILL = (18, 115, 181, 120)
+SPILLWAY_BURNED_EDGE = (18, 115, 181, 255)
+
 
 def surface_runoff_ramp(scale=DEFAULT_SURFACE_RUNOFF_SCALE):
     """Stops for the surface-runoff raster at the given panel scale mode."""

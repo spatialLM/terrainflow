@@ -10,6 +10,10 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
     line_cells           — connected, in-bounds cell path along a polyline
     enforce_monotonic_path — breach a strictly-downhill invert along a carved path
     level_invert         — excavate a footprint to a flat floor below its spill level
+    spillway_notch       — cut a designed sill through a bank, or refuse and say why
+    daylight_reach       — march a crest run outward until it finds ground below it
+    notch_pool           — the pond a notch must NOT discharge back into
+    spillway_burn_width  — the built width rounded up to whole DEM cells
     tapered_invert       — excavate a footprint as its true battered section
     rasterisable_capacity — storage the grid can represent, modelled (see its docstring:
                            prefer ``DEMBurner.burned_storage``, which measures it)
@@ -41,6 +45,8 @@ All functions are pure (grid indices + numpy arrays in, values out) and unit-agn
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 from terrainflow_assessment.modules.footprint import xy_to_rc
 
@@ -292,6 +298,249 @@ def tapered_invert(dem, mask, depth: float, batter_run: float, spill_elev: float
     return out
 
 
+#: How far a notch may be marched outward before it is called undaylighted, in
+#: metres. A spillway is a cut *through* a bank, so the distance that matters is a
+#: wall thickness or a keyed berm's width — both a few metres on any design this
+#: plugin sizes. Marching much further stops being a weir and starts being a
+#: diversion drain, which is a feature the user draws rather than one the burn
+#: invents. Generous enough to cross a keyed dam wall; short enough that a notch
+#: pointed at rising ground is reported rather than tunnelled to the horizon.
+SPILLWAY_MAX_REACH_M = 20.0
+
+
+class NotchCut(NamedTuple):
+    """What :func:`spillway_notch` did, and — when it did nothing — why.
+
+    ``dem`` is the surface after the cut, or the input unchanged when the notch was
+    refused. ``cells`` is ``(rows, cols)`` of what was lowered, empty on a refusal, so
+    the caller can record the mask without re-deriving it.
+
+    ``sill_elev`` is the **as-burned sill**: the highest level water has to clear on its
+    way through, measured on the surface as it stands afterwards. It is reported whether
+    or not anything was cut, and the disagreement is the information — equal to the
+    designed crest on a clean cut, *below* it where the whole path was already lower
+    than the sill, and *above* it wherever the notch was refused and the bank is still
+    standing at its own level.
+    """
+
+    dem: object
+    cells: tuple
+    reach_m: float
+    daylit: bool
+    into_pool: bool
+    sill_elev: float = None
+
+
+def notch_pool(dem, footprint, crest_elev, window=None, tolerance=1e-6):
+    """The water a notch at *crest_elev* would be cutting into — its own **enclosed** pond.
+
+    A cut whose outer end lands in here has not daylighted: the ground it found is below
+    the crest and still inside the pool, so the notch drains one part of the pond into
+    another and the water leaves wherever it was leaving before. That is the one failure
+    the plain daylight test cannot see, and it is exactly the geometry a keyed berm
+    presents — ``_key_berm_into_banks`` wraps the bank round both ends of the alignment,
+    so the march can walk downhill and still be inside.
+
+    **Enclosed is the whole of it.** "Below the crest and touching the footprint" is not
+    a pond: on any hillside the entire slope below the sill answers that description, and
+    using it would refuse every spillway on falling ground — the ordinary case. So the
+    below-crest region is labelled and any component reaching the edge of *window* is
+    thrown away as open ground with a way out. What is left is water the crest is
+    actually holding in, and only that counts as "still inside".
+
+    *window* is an optional ``(rows_slice, cols_slice)`` bounding the flood; the whole
+    grid otherwise. The window edge is the escape test, so it must be padded well past
+    the march's reach — see ``DEMBurner._notch_window``. Returns a bool array the same
+    shape as *dem*.
+    """
+    import numpy as np
+    from scipy.ndimage import label as _label
+
+    dem = np.asarray(dem)
+    footprint = np.asarray(footprint, dtype=bool)
+    pool = np.zeros(dem.shape, dtype=bool)
+    if not footprint.any():
+        return pool
+
+    win = window if window is not None else (slice(None), slice(None))
+    sub = dem[win]
+    under = np.zeros(sub.shape, dtype=bool)
+    finite = np.isfinite(sub)
+    under[finite] = sub[finite] <= float(crest_elev) + tolerance
+    if not under.any():
+        return pool
+    # 8-connected, matching every other pond question in this codebase: a pool that
+    # touches its neighbour only at a corner is one pool, not two.
+    labels, _n = _label(under, structure=np.ones((3, 3), dtype=int))
+    escapes = set(np.unique(np.concatenate([
+        labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])))
+    own = set(np.unique(labels[footprint[win] & under])) - {0} - escapes
+    if own:
+        pool[win] = np.isin(labels, list(own))
+    return pool
+
+
+def daylight_reach(dem, crest_cells, crest_elev, step_rc, max_reach_m,
+                   cell_size=1.0, pool=None, tolerance=1e-6):
+    """March the crest run outward until it reaches ground already below the crest.
+
+    *crest_cells* is ``(rows, cols)`` of the cells the crest bar claims; *step_rc* is a
+    ``(drow, dcol)`` unit step pointing to the **lower** side of the bank (the caller
+    chooses it — see ``DEMBurner._ground_mean``). The bar is translated one step at a
+    time and every cell it passes over joins the notch, so what comes back is a channel
+    of the crest's width running down through the bank.
+
+    The march stops as soon as **every** cell of the translated bar sits at or below the
+    crest: that is the outside face, and cutting past it would take ground the water
+    does not have to cross. It stops for the other reason at *max_reach_m*, and that is
+    the reported failure — a notch pointed at rising ground discharges nowhere, so
+    cutting it would move terrain and change nothing anyone can see.
+
+    *pool* is the feature's own pond (:func:`notch_pool`). Ground found inside it does
+    not count as daylight, however far down it is.
+
+    Returns ``(rows, cols, reach_m, daylit, into_pool, control)``. ``rows``/``cols``
+    always include the crest run itself, so a refused notch still knows where it was.
+    ``control`` is the highest level water crossing this channel has to clear on the
+    surface **as given** — the greatest, over the march, of the lowest cell across the
+    bar. That is the pour point along the channel, and it is what the as-burned sill is
+    measured from; cutting to *crest_elev* simply takes the lower of the two.
+    """
+    import numpy as np
+
+    dem = np.asarray(dem)
+    rows0 = np.asarray(crest_cells[0], dtype=int)
+    cols0 = np.asarray(crest_cells[1], dtype=int)
+    if rows0.size == 0:
+        return rows0, cols0, 0.0, False, False, None
+
+    dr, dc = float(step_rc[0]), float(step_rc[1])
+    norm = (dr * dr + dc * dc) ** 0.5
+    if norm == 0:
+        return rows0, cols0, 0.0, False, False, None
+    dr, dc = dr / norm, dc / norm
+
+    cell = float(cell_size) if cell_size else 1.0
+    max_steps = max(1, int(round(float(max_reach_m) / cell)))
+    n_rows, n_cols = dem.shape
+    claimed = {(int(r), int(c)) for r, c in zip(rows0, cols0)}
+
+    def _bar_low(rr, cc):
+        """The lowest cell across the bar at this step — holes ignored."""
+        z = dem[rr, cc]
+        z = z[np.isfinite(z)]
+        return float(z.min()) if z.size else None
+
+    control = _bar_low(rows0, cols0)
+    daylit = into_pool = False
+    reach_m = 0.0
+    for k in range(1, max_steps + 1):
+        rr = rows0 + int(round(k * dr))
+        cc = cols0 + int(round(k * dc))
+        inside = (rr >= 0) & (rr < n_rows) & (cc >= 0) & (cc < n_cols)
+        if not inside.any():
+            break                      # walked off the grid: nothing left to daylight to
+        rr, cc = rr[inside], cc[inside]
+        reach_m = k * cell
+        low = _bar_low(rr, cc)
+        if low is not None:
+            control = low if control is None else max(control, low)
+        z = dem[rr, cc]
+        # NaN is not "below the crest". A hole in the DEM is ground we cannot see, and
+        # calling it daylight would let a notch discharge into unmapped terrain.
+        below = np.isfinite(z) & (z <= float(crest_elev) + tolerance)
+        if below.all():
+            if pool is not None and bool(np.asarray(pool)[rr, cc].all()):
+                into_pool = True
+                # Keep marching: the pool may be crossed and real ground found beyond
+                # it, which is what a berm keyed round one end looks like.
+            else:
+                daylit = True
+                into_pool = False
+                break
+        claimed.update((int(r), int(c)) for r, c in zip(rr, cc))
+
+    rows = np.fromiter((rc[0] for rc in claimed), dtype=int, count=len(claimed))
+    cols = np.fromiter((rc[1] for rc in claimed), dtype=int, count=len(claimed))
+    return rows, cols, reach_m, daylit, into_pool, control
+
+
+def spillway_notch(dem, crest_cells, crest_elev, step_rc,
+                   max_reach_m=SPILLWAY_MAX_REACH_M, cell_size=1.0, pool=None,
+                   floor_elev=None):
+    """Cut a **level** notch at *crest_elev*, from the crest run out through the bank.
+
+    The one thing that makes a designed spillway visible to everything downstream. The
+    cut is ``np.minimum(dem, crest_elev)`` over the marched channel — absolute, taken
+    from the stored design, never re-derived from the terrain at burn time, so it is
+    order-independent and a second burn of the same design produces the same surface.
+
+    It refuses rather than approximates, and each refusal names a different fault:
+
+    * **no daylight** — the march hit its cap with the bank still standing above the
+      crest, so the notch would discharge into rising ground.
+    * **into its own pool** — it found ground below the crest that is still inside the
+      pond (:func:`notch_pool`), so the water would leave where it already leaves.
+    * **below the floor** — a crest at or under *floor_elev*, the **burned** floor of
+      the feature, empties it. Checked against what was cut rather than against the
+      analytic ``rim − depth``, because a footprint too narrow for its batter never
+      reaches full depth and the analytic figure would refuse a legitimate sill.
+
+    Returns a :class:`NotchCut`. On a refusal ``dem`` is the input untouched and
+    ``cells`` is empty, so a caller can record "nothing cut" without inspecting flags —
+    and ``sill_elev`` still reports the level the bank is standing at, which is the
+    figure that says *how far* the refusal is from working.
+    """
+    import numpy as np
+
+    dem = np.asarray(dem)
+    empty = (np.empty(0, dtype=int), np.empty(0, dtype=int))
+    if crest_elev is None:
+        return NotchCut(dem, empty, 0.0, False, False, None)
+    if floor_elev is not None and float(crest_elev) <= float(floor_elev):
+        return NotchCut(dem, empty, 0.0, False, False, None)
+
+    rows, cols, reach_m, daylit, into_pool, control = daylight_reach(
+        dem, crest_cells, crest_elev, step_rc, max_reach_m,
+        cell_size=cell_size, pool=pool)
+    if not daylit:
+        return NotchCut(dem, empty, reach_m, False, into_pool, control)
+
+    out = dem.copy()
+    out[rows, cols] = np.minimum(out[rows, cols], float(crest_elev))
+    # Cutting to an absolute level lowers every step of the march that stood above it,
+    # so the channel's control afterwards is simply the lower of the two.
+    burned = (None if control is None
+              else min(float(control), float(crest_elev)))
+    return NotchCut(out, (rows, cols), reach_m, True, False, burned)
+
+
+def spillway_burn_width(width_m, cell_size):
+    """The built width rounded **up to a whole number of DEM cells**.
+
+    A sill narrower than a cell cannot be cut as one, and rounding down would burn a
+    weir narrower than the design flow needs. Rounding up is about *rasterisability*,
+    not conservatism: nothing in the raster tier meters flow rate, so the burned width
+    cannot change a total. What it does change is ``cells.size`` at the exit, and with
+    it the per-cell runoff and the ``q = Q/L`` the erosion advisory is judged by.
+
+    *cell_size* may be a scalar or a ``(cell_h, cell_w)`` pair; the **larger** axis is
+    used, matching the caution ``taper_reach`` already carries about non-square grids —
+    the crest axis is not known here, and the coarser axis is the one that can fail to
+    resolve the sill.
+    """
+    import math
+
+    cell_h, cell_w = _axis_spacing(cell_size)
+    cell = max(float(cell_h), float(cell_w))
+    if cell <= 0:
+        return max(0.0, float(width_m or 0.0))
+    wanted = max(0.0, float(width_m or 0.0))
+    if wanted <= 0:
+        return cell
+    return math.ceil(wanted / cell - 1e-9) * cell
+
+
 def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
                           top_width: float, bottom_width: float, cell_size: float,
                           batter_run: float = 0.0):
@@ -504,11 +753,17 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
     the length below has always described. Only the threshold is left, so a wall with no
     channel drawn on it means the layer's cut-off and nothing more.
 
-    ``has_spillway`` changes what the message can honestly claim. The burn does not cut
-    a spillway notch into the terrain, so the flow analysis routes overflow over the
-    crest **whether or not one is designed**. With a spillway sited this is therefore a
-    limit of the model rather than a fault in the design, and it says so; without one it
-    is the design.
+    ``has_spillway`` used to change what the message could honestly claim, because the
+    burn did not cut a spillway notch and the flow analysis routed overflow over the
+    crest whether or not one was designed — so a sited spillway made this a limit of the
+    model rather than a fault in the design, and the message said so at length.
+
+    **The burn now cuts the notch** (``spillway_notch``), and the overtopping check
+    subtracts it from the barrier's crest, so a spillway that works no longer reaches
+    this function at all. Reaching it *with* a spillway therefore means something
+    specific and worth saying plainly: the pool is leaving over the bank as well as, or
+    instead of, through the structure — the sill is too high, too narrow, or it did not
+    daylight. No caveat, because there is nothing left to caveat.
 
     ``reaches_crest`` says which storm this is about. The pour level is measured on the
     **full** pond — the pool filled to its spill point — so the sentence holds whatever
@@ -541,10 +796,10 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
 
     if has_spillway:
         return (
-            f"{where}{span}. A spillway is designed here, but it is not cut into the "
-            f"terrain model, so the analysis cannot route water through it: on the "
-            f"ground the spillway takes this flow, and these figures describe the "
-            f"structure without it.{event_note}"
+            f"{where}{span}. The designed spillway is cut into the terrain model and "
+            f"this water is going over the bank anyway — so the sill is not taking it. "
+            f"Check that the crest is below this level, that the weir is wide enough, "
+            f"and that the notch daylights onto falling ground.{event_note}"
         )
 
     tail = ""

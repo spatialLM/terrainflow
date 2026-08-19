@@ -629,6 +629,29 @@ def spillway_symbol():
     return symbol
 
 
+def burned_spillway_symbol():
+    """The notch the burn cut, drawn as a band on the ground.
+
+    Deliberately the same blue as :func:`spillway_symbol`'s outflow bar — this is that
+    same spillway after the terrain was cut, not a different object. The outline is
+    solid and the fill light, because the useful reading is *where the band is and how
+    far it reaches through the bank*, and a heavy fill over a Verify-stage map already
+    carrying ponding and overtopping would bury both.
+    """
+    from qgis.core import QgsFillSymbol
+
+    from terrainflow_assessment.core.registry.map_palette import (
+        SPILLWAY_BURNED_EDGE,
+        SPILLWAY_BURNED_FILL,
+    )
+
+    return QgsFillSymbol.createSimple({
+        "color": ",".join(str(c) for c in SPILLWAY_BURNED_FILL),
+        "outline_color": ",".join(str(c) for c in SPILLWAY_BURNED_EDGE),
+        "outline_width": "0.5",
+    })
+
+
 def connection_symbol():
     """An overflow link: an annotation, drawn like one.
 

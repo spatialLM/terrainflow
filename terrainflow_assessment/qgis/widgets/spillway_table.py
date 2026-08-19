@@ -31,7 +31,9 @@ Data contract — ``set_rows(rows, context)``:
      peak_flow_m3s, upstream_m3s, required_width_m, built_width_m, freeboard_m,
      crest_elevation, height_above_floor_m, rim_elevation, lip_elevation,
      containment_source, sill_storage_m3, containment_storage_m3, given_up_m3,
-     given_up_pct, problems, notes, state}
+     given_up_pct, surcharge_level_m, surcharge_storage_m3, spillway_insufficient,
+     burned_sill_m, actual_spill_level_m, event_level_m, passes_this_event,
+     problems, notes, state}
 
   ``rim_elevation`` is the **containment** level — the level this feature's water is
   actually held to, which on a bermed swale is the berm crest as built. ``lip_elevation``
@@ -66,6 +68,10 @@ _BAD = "#c0392b"
 
 # Glyph and colour per spillway kind — the same pair the tool menu and the map layer
 # use, so the three surfaces read as one thing rather than three.
+# Elevations are reported to two decimals, so a disagreement finer than a centimetre
+# is one the user cannot see, cannot act on, and would be told about anyway.
+_LEVEL_TOLERANCE_M = 0.01
+
 _OUT_GLYPH, _OUT_COLOUR = "▽", "#1273b5"
 _IN_GLYPH, _IN_COLOUR = "▲", "#2e7d55"
 
@@ -73,7 +79,8 @@ _IN_GLYPH, _IN_COLOUR = "▲", "#2e7d55"
 # is below setting-out resolution on a DEM, so tighter than this is noise.
 _HEAD_TOLERANCE_M = 0.01
 
-_HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Storage", "Sited")
+_HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Sill", "Storage",
+            "Sited")
 
 _QSS = f"""
 QTableWidget {{
@@ -197,6 +204,7 @@ class SpillwayTable(QWidget):
             self._head_cell(row, disabled),
             self._width_cell(row, disabled),
             self._freeboard_cell(row, disabled),
+            self._sill_cell(row, disabled),
             self._storage_cell(row, disabled),
             self._sited_cell(row, disabled),
         ]
@@ -271,6 +279,39 @@ class SpillwayTable(QWidget):
         else:
             colour = _GOOD
         return (f"{freeboard:.2f} m", colour, Qt.AlignmentFlag.AlignRight)
+
+    @staticmethod
+    def _sill_cell(row, disabled):
+        """The level water is designed to leave at — and whether the terrain agrees.
+
+        Three elevations describe one sill and they are allowed to disagree: the
+        designed crest, the sill **as burned** into the DEM, and where the finished pond
+        was actually measured letting go. The column shows the designed figure, because
+        that is the one the user set; a disagreement is marked and named in the tooltip,
+        because a mark is enough to make someone look and a third decimal place in a
+        narrow column is not.
+        """
+        if disabled:
+            return ("—", _FAINT, Qt.AlignmentFlag.AlignRight)
+        crest = row.get("crest_elevation")
+        if crest is None:
+            return ("—", _FAINT, Qt.AlignmentFlag.AlignRight)
+        burned = row.get("burned_sill_m")
+        actual = row.get("actual_spill_level_m")
+        if burned is not None and burned > crest + _LEVEL_TOLERANCE_M:
+            # The bank is still standing where the notch was meant to be.
+            return (f"{crest:.2f} m  not cut", _BAD, Qt.AlignmentFlag.AlignRight)
+        if actual is not None and burned is not None                 and actual > burned + _LEVEL_TOLERANCE_M:
+            # A notch was cut and the pond is leaving somewhere else anyway.
+            return (f"{crest:.2f} m  bypassed", _BAD, Qt.AlignmentFlag.AlignRight)
+        if actual is not None and actual < crest - _LEVEL_TOLERANCE_M:
+            # Something lower on the rim is the control; the sill is not.
+            return (f"{crest:.2f} m  not control", _WARN,
+                    Qt.AlignmentFlag.AlignRight)
+        if row.get("passes_this_event") is False:
+            return (f"{crest:.2f} m  untested", _MUTED, Qt.AlignmentFlag.AlignRight)
+        colour = _GOOD if burned is not None else _INK
+        return (f"{crest:.2f} m", colour, Qt.AlignmentFlag.AlignRight)
 
     @staticmethod
     def _storage_cell(row, disabled):
@@ -365,6 +406,54 @@ class SpillwayTable(QWidget):
                 "For a dam the level above is the wall crest you specified, so this "
                 "margin is measured against the wall you intend to build rather than "
                 "against existing ground.")
+
+        crest = row.get("crest_elevation")
+        burned = row.get("burned_sill_m")
+        actual = row.get("actual_spill_level_m")
+        if crest is not None and (burned is not None or actual is not None):
+            line = f"Designed sill {crest:.2f} m."
+            if burned is not None:
+                line += f" The burn cut it to {burned:.2f} m"
+                if burned > crest + _LEVEL_TOLERANCE_M:
+                    line += (" — higher than the design, so the notch was refused and "
+                             "the bank is still there. Check the message bar for why.")
+                elif burned < crest - _LEVEL_TOLERANCE_M:
+                    line += (" — lower, because the ground along the notch was already "
+                             "under the sill, so cutting it moved nothing.")
+                else:
+                    line += " exactly."
+            if actual is not None:
+                line += f" The finished pond was measured letting go at {actual:.2f} m"
+                if burned is not None and actual > burned + _LEVEL_TOLERANCE_M:
+                    line += (" — above the notch, so the water is leaving somewhere "
+                             "else and the spillway is not taking it.")
+                elif actual < crest - _LEVEL_TOLERANCE_M:
+                    line += (" — below the sill, so a lower point on the rim is the "
+                             "control and this spillway never comes into play.")
+                else:
+                    line += ", which is the sill."
+            bits.append(line)
+
+        surcharge = row.get("surcharge_storage_m3")
+        full = row.get("containment_storage_m3")
+        held = row.get("sill_storage_m3")
+        if surcharge is not None and full is not None and held is not None:
+            line = (f"At the design storm the water stands at "
+                    f"{row['surcharge_level_m']:.2f} m, holding {surcharge:,.0f} m³ — "
+                    f"between the {held:,.0f} m³ the sill holds and the "
+                    f"{full:,.0f} m³ that would reach the top of the structure. That "
+                    f"band is the spillway doing its job.")
+            if row.get("spillway_insufficient"):
+                line += (" It reaches the top, so the spillway is not passing enough: "
+                         "water leaves over the structure as well as through it.")
+            bits.append(line)
+
+        if row.get("passes_this_event") is False and row.get("event_level_m") is not None:
+            bits.append(
+                f"The modelled event fills this to {row['event_level_m']:.2f} m, which "
+                f"is below the sill — so this spillway passes nothing in this run. It "
+                f"is untested rather than proven; size it against the design storm you "
+                f"want it to survive, not this one.")
 
         for note in row.get("notes", []):
             bits.append(note)

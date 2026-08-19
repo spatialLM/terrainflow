@@ -597,9 +597,16 @@ class TestOvertoppingWarning:
         assert "artefact" not in msg
         assert "1.78 m" in msg     # how much crest would have to rise to miss it
 
-    def test_a_designed_spillway_makes_it_a_model_caveat_not_a_fault(self):
+    def test_reaching_this_with_a_spillway_designed_means_the_sill_is_not_taking_it(self):
+        """The notch is cut and the check subtracts it from the crest.
+
+        So a working spillway never reaches this function. Getting here anyway is a
+        statement about the design rather than about the model, and it used to be
+        the other way round.
+        """
         msg = overtopping_warning("Dam 15", 34.0, 56.12, has_spillway=True)
-        assert "not cut into the terrain" in msg
+        assert "cut into the terrain model" in msg
+        assert "not cut into the terrain" not in msg
         assert "Nothing is designed to take it" not in msg
 
     def test_no_length_no_warning(self):

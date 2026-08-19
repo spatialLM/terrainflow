@@ -890,6 +890,97 @@ class TestSpillways:
         assert table.rows[0][1] == "393 L/s"
 
 
+class TestSpillwayGauge:
+    """The band between the sill volume and the brim, and what it means.
+
+    "% full" divided by the sill volume, so a spillway pinned its feature at 100%
+    exactly when it started doing its job. These three marks are what make that band
+    readable — and the verdict has to agree with the freeboard check, because the two
+    are the same condition said twice.
+    """
+
+    def _gauged(self, **kw):
+        row = _spill(sill_storage_m3=1276.6, containment_storage_m3=2132.8,
+                     surcharge_level_m=214.27, surcharge_storage_m3=1700.0,
+                     spillway_insufficient=False)
+        row.update(kw)
+        return row
+
+    def _table(self, r):
+        return [t for t in _sections(r, DataTable)
+                if t.title.startswith("How full each feature")]
+
+    def test_the_three_marks_reach_the_page(self):
+        r = build_report(_data(spillway_rows=[self._gauged()]))
+        table = self._table(r)
+        assert table, "the gauge table was not built"
+        row = table[0].rows[0]
+        # Through `fmt_volume`, which rounds like every other volume on the page.
+        assert "1,280" in row[1]
+        assert "214.27 m" in row[2]
+        assert "below the top" in row[5]
+
+    def test_reaching_the_top_is_named_as_the_spillway_not_coping(self):
+        r = build_report(_data(spillway_rows=[
+            self._gauged(spillway_insufficient=True)]))
+        assert "not passing enough" in self._table(r)[0].rows[0][5]
+
+    def test_nothing_measured_means_no_table_rather_than_a_row_of_dashes(self):
+        r = build_report(_data(spillway_rows=[_spill()]))
+        assert not self._table(r)
+
+
+class TestSpillwayAsBurned:
+    """Three elevations, and the disagreements are the content."""
+
+    def _burned(self, **kw):
+        row = _spill(crest_elevation=55.52, burned_sill_m=55.52,
+                     actual_spill_level_m=55.52)
+        row.update(kw)
+        return row
+
+    def _table(self, r):
+        return [t for t in _sections(r, DataTable)
+                if t.title == "Did the model take the sill?"]
+
+    def test_absent_until_a_burn_has_run(self):
+        r = build_report(_data(spillway_rows=[
+            _spill(burned_sill_m=None, actual_spill_level_m=None)]))
+        assert not self._table(r)
+
+    def test_a_clean_cut_says_so(self):
+        r = build_report(_data(spillway_rows=[self._burned()]))
+        assert "pond lets go there" in self._table(r)[0].rows[0][4]
+
+    def test_a_refused_notch_is_named(self):
+        r = build_report(_data(spillway_rows=[self._burned(burned_sill_m=57.10)]))
+        assert "refused" in self._table(r)[0].rows[0][4]
+
+    def test_ground_already_below_the_sill_is_named(self):
+        r = build_report(_data(spillway_rows=[self._burned(burned_sill_m=53.99)]))
+        assert "already below the sill" in self._table(r)[0].rows[0][4]
+
+    def test_a_notch_that_does_not_daylight_is_named(self):
+        r = build_report(_data(spillway_rows=[
+            self._burned(actual_spill_level_m=56.12)]))
+        assert "does not daylight" in self._table(r)[0].rows[0][4]
+
+    def test_a_lower_saddle_taking_the_control_is_named(self):
+        r = build_report(_data(spillway_rows=[
+            self._burned(actual_spill_level_m=55.00)]))
+        assert "never comes into play" in self._table(r)[0].rows[0][4]
+
+    def test_a_cut_with_no_measured_pond_still_reports_the_cut(self):
+        r = build_report(_data(spillway_rows=[
+            self._burned(actual_spill_level_m=None)]))
+        assert self._table(r)[0].rows[0][4] == "Cut to the designed level."
+
+    def test_a_sill_that_was_never_sited_says_so(self):
+        r = build_report(_data(spillway_rows=[
+            self._burned(burned_sill_m=None)]))
+        assert "not sited on the feature" in self._table(r)[0].rows[0][4]
+
+
 # ---------------------------------------------------------------- build sheet
 
 class _FakeEarthwork:

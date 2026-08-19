@@ -119,7 +119,12 @@ Non-obvious invariants:
   its own crest* — a freeboard fact about the structure. Pass `event_depth=` and each
   spill also carries `event_level_m` / `overtops_this_event`, where `None` means "not
   asked" and is not `False`. The map draws the two as separate `Overtopping (full)` and
-  `Overtopping (event)` layers.
+  `Overtopping (event)` layers. **The designed spillway is subtracted from the barrier
+  crest** (`burner.burned_notches[id]`, in `_build_overtopping_layer`): a notch cut into
+  raised ground is still raised, so without it a correctly spillwayed dam reports leaving
+  over its own crest *at its own spillway*. Reaching `overtopping_warning` with a spillway
+  designed therefore now means something specific — the sill is not taking the water — and
+  the old caveat about the model not seeing the structure is **deleted**, not reworded.
 - **A spillway crest sits under the level water is *held* to, which is not the lowest
   ground.** `_spillway_datums` returns `(lip, invert, containment, source)` and the three
   levels do different jobs: `containment` is the ceiling `spillway_datum` and
@@ -133,6 +138,68 @@ Non-obvious invariants:
   ends. The datums read the **raw** DEM through `_burn_surface`, not `state.flow_dem`, so
   the crest and the burn share a surface — and the footprint mask passes
   `all_touched=False` there and only there.
+- **A designed spillway is cut into the burned DEM, as a post-pass.** `burn_earthworks`
+  takes `sills={ew_id: crest-bar WKT}` and runs `_cut_spillway` **after** the type
+  dispatch, because fills are `np.maximum` and `_burn_berm` is additive — a notch cut
+  inside a `_burn_*` is plugged by a later feature. The cut is `np.minimum(dem, crest)`,
+  absolute and taken from the stored design, so it is order-independent. The snap stays in
+  the controller (`_spillway_sills` → `_spillway_sill`), because `plan_geometry` forbids a
+  second implementation of *nearest point on this alignment*; the burner receives only
+  `Earthwork` objects. **Outflows only** — an inlet is a protected entry, and notching one
+  drains the pond through its own inlet. `burned_notches` is a **fourth** mask record and is
+  in `_isolated_burn`'s snapshot list; widening `burned_masks` instead would move pool
+  attribution and every bermed swale's Δ. **`_keyed_dam_dem` calls the same
+  `_cut_spillway`** — it bypasses `burn_earthworks` entirely, and a keyed dam is the case
+  the whole change is about.
+- **The crest bar runs *along* the alignment; the perpendicular is the breach axis.**
+  `plan_geometry.crest_bar` is what gets cut — a weir's crest is the line the flow crosses,
+  so it lies along the bank. `perpendicular_sill` is kept for the map symbol and for
+  "which way does the water go". Cutting across the alignment would run the notch down the
+  flow path instead of through the bank.
+- **A notch refuses rather than approximates, and each refusal is a different fault.**
+  No daylight (the outward march hit its cap with the bank still above the crest);
+  discharges back into its own **enclosed** pond (`notch_pool` — "below the crest and
+  touching the footprint" describes the whole hillside, so components reaching the window
+  edge are discarded as open ground, or every spillway on falling ground is refused); a
+  crest at or below the **burned** floor (`_burned_floor` takes the lower of the burned
+  surface and the original, so a barrier's raised line does not read as its bed); an
+  orphaned sill the controller could not snap. Every one warns through `DEMBurner.warnings`
+  → the message bar, because a notch that quietly does nothing looks like a working
+  spillway in every figure the design tier prints.
+- **The per-feature isolated flood stays brim-full — the notch is not cut into it.**
+  Measured with the notch, the pond lets go *at the sill*, so `FeatureStorage.level_m`
+  comes back as the crest, `_spillway_datums` prefers it as the containment, and the crest
+  band becomes `sill − head − freeboard`: every re-open ratchets the crest down by that
+  much, `spillway_validity` fails every spillwayed feature, and the give-up readout goes to
+  zero. So the flood measures the container and `_sill_limited_capacity` reads the volume
+  held to the sill off `stage_storage` at the crest — measured equal to a notched flood on
+  all five sited spillways of the Quail Island design (Round 20). The **site** burn still
+  cuts the notch, which is where the rasters, the routing and the overtopping check see it.
+- **The burned width is whole DEM cells** (`spillway_burn_width`, coarser axis). Nothing in
+  the raster tier meters flow *rate*, so this cannot change a total — it changes
+  `cells.size` at the exit, and with it the `q = Q/L` the erosion advisory is judged by.
+  The note that says so is `spillway_notes`', and it must **not** say "the extra width
+  lowers the head": true of the weir equation, and it reads as though widening moved the
+  water level in the feature, which it does not.
+- **An auto spillway width is derived, never serialised.** `Spillway.to_dict` drops
+  `width_m` when `width_auto` is set: it tracks a requirement the design file does not pin
+  down, so storing it meant opening an old project silently rewrote a figure the user never
+  chose. `width_required_m` carries the un-rounded requirement beside the built width.
+  The restore path runs `_refresh_auto_spillway_widths` **before** the feature list, the map
+  label and the sill bar — all three read `width_m` — and `_spillway_row` derives it rather
+  than trusting the stored value.
+- **Three elevations describe one spillway, and the disagreements are the point.**
+  Designed (`Spillway.crest_elevation`), as burned (`ew.burned_sill_elevation_m`, the
+  highest level water crossing the notch must clear) and actual (`ew.actual_spill_level_m`,
+  where the finished pond was measured letting go). Both measured ones come from the site
+  burn via `_record_spillway_levels` and are cleared with the DEM. As-burned above designed
+  = the notch was refused; actual above as-burned = it did not daylight; actual below
+  designed = a lower saddle is the control.
+- **"% full" divides by the brim volume, not the sill volume.** `EarthworkStore.
+  lip_capacity_m3` (from `ew.containment_capacity_m3`) defaults to 0.0 and every reader
+  falls back to `capacity_m3`, so nothing unmeasured changed. Without it a working spillway
+  pins its feature at 100% exactly when it starts doing its job. `cascade_overflow` keeps
+  thresholding on `capacity_m3`, which with the notch cut is correctly the sill volume.
 - **`crest_elevation` is the authoritative crest; the other two are views of it.**
   `bind_crest` binds all three (↔ `drop_below_rim_m` ↔ `height_above_floor_m`) and clamps
   into the band *before* deriving partners — one function, because three call sites is how
@@ -232,7 +299,7 @@ Only add/modify what's asked — no drive-by refactors of working code.
   reads a `.ps1` as ANSI and a stray em dash is a parse error — enforced by
   `tests/test_architecture.py`, which also guards the layering rules below.
 - **Tests:** `python -m pytest tests/` (target Python 3.9) — **run the whole suite; do not
-  scope it.** ~2,480 tests in ~70 s (~80 s with coverage), and the profile is flat (one test over
+  scope it.** ~2,590 tests in ~60 s (~70 s with coverage), and the profile is flat (one test over
   2 s), so there is no slow tail to skip. Scoping saves under a minute and costs
   correctness: `earthwork_design.py` fans out to 11 test files and `catchment.py` to 6,
   and there is no `modules/earthwork.py` or `modules/dem_burner.py` despite tests named
@@ -257,7 +324,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, 8-10 min (195 checks). Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, 8-10 min (200 checks). Exit code gates.
 #                                   longer than a 10-min tool timeout — background it.
 .\run_qgis_tests.ps1 checks_baseline   # one module, ~30-40 s. This is the iteration loop.
 .\run_qgis_tests.ps1 --skip=checks_report   # everything else

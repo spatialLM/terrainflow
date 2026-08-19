@@ -49,6 +49,14 @@ def _mock_ew(ew_type, geom, **kwargs):
     ew.companion_berm = kwargs.get("companion_berm", False)
     ew.crest_elevation = kwargs.get("crest_elevation", None)
     ew.gradient_pct = kwargs.get("gradient_pct", 1.0)
+    ew.key_into_banks = kwargs.get("key_into_banks", False)
+    # Both names, because `_cut_spillway` reads the property and everything else reads
+    # the attribute. A MagicMock would answer either with a truthy mock whose
+    # `crest_elevation` floats to 1.0, so an unset spillway has to be explicitly None.
+    ew.spillway = kwargs.get("spillway", None)
+    ew.outflow_spillway = ew.spillway
+    ew.inflow_spillway = kwargs.get("inflow_spillway", None)
+    ew.id = kwargs.get("id", ew.name)
     return ew
 
 

@@ -132,7 +132,7 @@ def run_water_balance(stores, duration_hr, total_runoff_m3=0.0,
     per_feature = []
     terminal_deficit = 0.0
     for s in stores:
-        fill_pct = (s.stored_m3 / s.capacity_m3 * 100.0) if s.capacity_m3 > 0 else 0.0
+        fill_pct = s.fill_pct()
         direct = direct_inflow.get(s.id, 0.0)
         total_in = s.total_inflow_m3
         target_id = routing.edges.get(s.id)

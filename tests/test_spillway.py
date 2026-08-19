@@ -234,7 +234,7 @@ class TestSpillwayPersistence:
         ew = Earthwork("swale", _WktGeom("LINESTRING (0 0, 100 0)"), "Swale 1")
         ew.spillway = Spillway(
             crest_elevation=99.55, drop_below_rim_m=0.45, head_m=0.30,
-            width_m=2.4, point_wkt="POINT (50 0)", auto=False,
+            width_m=2.4, point_wkt="POINT (50 0)", auto=False, width_auto=False,
         )
         return ew
 
@@ -253,6 +253,37 @@ class TestSpillwayPersistence:
         assert sp.width_m == pytest.approx(2.4)
         assert sp.point_wkt == "POINT (50 0)"
         assert sp.auto is False
+
+    def test_a_committed_width_is_stored(self):
+        """Unticking `auto` is a decision, and decisions are saved."""
+        data = self._sited_swale().to_dict()["spillway"]
+        assert data["width_auto"] is False
+        assert data["width_m"] == pytest.approx(2.4)
+
+    def test_an_auto_width_is_not_stored(self):
+        """It tracks a requirement the design file does not pin down.
+
+        Storm, catchment and routing all move under a saved design, so a stored auto
+        width is rewritten on the first live recompute after opening — silently, and
+        for a figure the user never chose. Once the grid rounds it that rewrite becomes
+        a *visible* unexplained change. So the flag travels and the number is derived.
+        """
+        ew = self._sited_swale()
+        ew.spillway.width_auto = True
+        ew.spillway.width_m = 1.43
+        data = ew.to_dict()["spillway"]
+        assert "width_m" not in data
+        assert data["width_auto"] is True
+
+    def test_a_restored_auto_width_is_a_number_not_none(self):
+        """The list, the map label and the sill bar all read it before the recompute."""
+        ew = self._sited_swale()
+        ew.spillway.width_auto = True
+        mgr = EarthworkManager()
+        mgr.add(ew)
+        restored = EarthworkManager()
+        restored.from_json(mgr.to_json(), geometry_factory=_factory)
+        assert restored.get(0).spillway.width_m == 0.0
 
     def test_a_feature_without_a_spillway_restores_as_none(self):
         mgr = EarthworkManager()

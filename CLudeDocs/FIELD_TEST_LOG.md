@@ -1609,6 +1609,151 @@ plateau, a pit that survived the fill — was wrong, and the file said so in one
 (`no nodata in the DEM`, 479 singletons, `filled.has_lower: 516`). A day's instrumentation
 bought a diagnosis that no amount of staring at the terrain would have produced.
 
+## Round 20 — 2026-08-19 (Stage B: the spillway becomes terrain)
+
+`SPILLWAY_NOTCH_PLAN.md` Stage B. Stage A gave the crest an honest datum; this cuts it
+into the burned DEM, so a designed spillway finally moves a raster.
+
+### The B0 gate — measured before and after, on the Quail Island design
+
+`Quail_Island TerrainFlow Project.tfd` (42 features, 1 m clip, 858 x 1027) burned headless
+under plain CPython, Round 14's method. The design carries four spillways, two of them
+sited; **Dam 15 was given one** for this table, because it is the case STRETCH_GOALS §5a
+is written about. Every sill is set to `spillway_datum`'s ceiling under its type's policy.
+
+Reproduction check first: with notches off, Dam 15 comes back at **2,688.4 m³ pooling to
+56.12 m** — Round 14's figure to the decimal, so the harness is measuring the same run.
+
+| Feature | Sill | Terrain capacity, no notch | with notch | Measured spill level, no notch | with notch |
+|---|---|---|---|---|---|
+| Swale 4 | 69.19 | 300 m³ | **103 m³** | 69.85 | **69.19** |
+| Swale 8 | 69.33 | 284 m³ | **111 m³** | 69.89 | **69.33** |
+| Swale 13 | 57.25 | 247 m³ | **129 m³** | 57.70 | **57.25** |
+| **Dam 15** | **55.52** | **2,133 m³** | **1,277 m³** | 56.12 | **55.52** |
+| Swale 26 | 74.11 | 134 m³ | **25 m³** | 74.87 | **74.11** |
+
+Site totals: cut 20,096 → **20,119 m³**, fill 9,888 → **9,863 m³**, Σ terrain capacity
+17,813 → **16,360 m³**, total ponding 19,594 → **18,137 m³**.
+
+**The shape is right, and it is the shape the plan asked for**: every notched feature's
+*measured* spill level lands exactly on its sill, capacity falls to what the sill holds,
+and Dam 15 drops out of the overtopping list entirely — it no longer leaves over its own
+crest, because it leaves through its spillway.
+
+### The 1,832 m³ figure — found, and it is a different quantity
+
+§5a predicts "~1,832 m³ to a sill at 55.52" and the plan flags that it has no recorded
+derivation. It does now. Two figures were being compared that are not the same thing:
+
+| | no notch | with notch |
+|---|---|---|
+| **pool volume** — all water standing behind the wall, natural ponding included (what `overtopping_spill` reports, and where the 2,688 came from) | 2,688.4 m³ @ 56.12 | **1,832.1 m³ @ 55.52** |
+| **`dam_storage`** — the pond the dam *adds*, natural ponding subtracted (what `capacity_m3` is) | 2,132.8 m³ | 1,276.6 m³ |
+
+**1,832.1 against §5a's 1,832.** The prediction was right and it was about the pool, not
+about the dam's storage. Both figures are now in the table above so the next reader does
+not have to re-derive which is which.
+
+### One decision in the plan had to change, and Stage B is what forced it
+
+The plan has the per-feature isolated floods cut the notch too. Doing that collapses the
+containment datum onto the crest: with the notch cut, the pond lets go **at the sill**, so
+`FeatureStorage.level_m` comes back as the sill, `_spillway_datums` prefers the measured
+level, and the crest band becomes `sill − head − freeboard`. Three consequences, all
+silent: every re-open ratchets the crest down by 0.60 m, `spillway_validity` fails every
+spillwayed feature for having no freeboard, and A6's "what this sill gives up" readout goes
+to zero because the curve now tops out at the sill.
+
+So the isolated flood stays **brim-full** — a container's capacity is a fact about the
+container; the spillway is a control on top of it — and the volume held to the sill is read
+off the stage–storage curve at the crest. Measured across all five notched features, the
+curve answers the notched flood exactly:
+
+| | crest | off the brim-full curve | notched flood | difference |
+|---|---|---|---|---|
+| Swale 4 | 69.19 | 103.3 | 103.3 | 0.0 |
+| Swale 8 | 69.33 | 110.7 | 110.7 | 0.0 |
+| Swale 13 | 57.25 | 128.9 | 128.9 | −0.0 |
+| Dam 15 | 55.52 | 1,276.6 | 1,276.6 | −0.0 |
+| Swale 26 | 74.11 | 24.9 | 24.9 | −0.1 (−0.2%) |
+
+One flood, both numbers, and the datum stays a datum. The **site** burn still cuts the
+notch, which is where the rasters, the routing, the ponding layers and the overtopping
+check see it. `burn_earthworks(..., sills=)` and `_keyed_dam_dem(..., sills=)` keep the
+notched measurement available and tested; nothing in the controller asks for it.
+
+### What else landed
+
+| Change | Why it is not cosmetic |
+|---|---|
+| **The crest bar runs *along* the alignment** (`plan_geometry.crest_bar`) | A weir's crest is the line the flow crosses; across the bank is the flow direction. Arguable as a map symbol, wrong as the cut — a notch lowered across the alignment runs down the flow path instead of through the bank. `perpendicular_sill` is kept as the breach axis. `tests/test_plan_geometry.py` and `checks_symbology.check_spillway_sill_is_drawn_at_the_built_width` both asserted the old orientation and were rewritten, not accepted. |
+| **The notch is a post-pass**, after the type dispatch | Fills are `np.maximum` and `_burn_berm` is additive, so a notch cut inside a `_burn_*` is plugged by a later feature. Pinned by a test that burns a berm straight over a notched dam. |
+| **`_keyed_dam_dem` cuts it too** | It bypasses `burn_earthworks` entirely and Dam 15 is keyed, so without this the change is invisible on dams. Both paths call one `_cut_spillway`. |
+| **Four guards, each with its own message** | No daylight (the march hits its cap with the bank still above the crest); discharges back into its own *enclosed* pond (the keyed-berm geometry, which the daylight test cannot see); a crest at or below the burned floor; an orphaned sill the controller could not snap. A notch that quietly does nothing looks exactly like a working spillway in every figure the design tier prints. |
+| **"Enclosed" is load-bearing in the pool test** | "Below the crest and touching the footprint" describes the whole hillside under the sill, and using it refuses every spillway on falling ground — the ordinary case. Components reaching the window edge are discarded as open ground. |
+| **Overtopping subtracts the notch from the barrier crest** | Without it a correctly spillwayed dam still reports "leaves over its own crest" — at its own spillway. `overtopping_warning`'s `has_spillway` caveat ("not cut into the terrain model, so the analysis cannot route water through it") is **deleted**; reaching that function with a spillway now means the sill is not taking the water, and it says so. |
+| **`fill_pct` divides by the brim volume**, not the sill volume | Otherwise a working spillway pins its feature at 100% exactly when it starts doing its job. `EarthworkStore.lip_capacity_m3` defaults to 0.0 and every reader falls back to `capacity_m3`, so nothing without a measurement changed. `cascade_overflow` keeps thresholding on `capacity_m3`, which with the notch is correctly the sill volume. |
+| **An auto width is no longer persisted** (STRETCH_GOALS §10(d)) | `width_auto` means the width tracks a requirement the design file does not pin down, so opening an old project already rewrote it silently on the first live recompute. Rounding to whole cells would have made that rewrite a *visible* unexplained change to a saved design. The flag is stored; the number is derived, and the restore path recomputes it before the list, the map label or the sill bar render. |
+| **The burned width is whole DEM cells** | A sill narrower than a cell cannot be cut as one. Nothing in the raster tier meters flow *rate*, so this cannot change a total — it changes `cells.size` at the exit, and with it the `q = Q/L` the erosion advisory is judged by. The note says exactly that, and deliberately not "the extra width lowers the head": true of the weir equation, and it reads as though widening moved the water level in the feature, which it does not. |
+| **Three elevations per spillway**, all measured | Designed sill, sill as burned, and where the pond was actually found to let go. They are allowed to disagree and each disagreement names a different fault. On the Spillways review as a `Sill` column plus the tooltip, and on the report's *Overflow safety* page as its own table. |
+| **A `Spillways (burned)` layer under Verify** | "Did the model cut my spillway, and where?" had no answer on the map. The design-stage bar is what was asked for; this is what happened. |
+
+### Not done, and why
+
+**The measured spill level for B6 comes off the site burn's ponding**, per feature, rather
+than from a second isolated flood — one labelling pass over a raster the verification has
+already read. `_record_spillway_levels` runs beside `_compute_verification` for that
+reason.
+
+### Verification
+
+`python -m pytest tests/` — **2,590 passed**, coverage **95.34%** against the 95% gate.
+`.\run_qgis_tests.ps1` bare — **200 passed, 0 failed**, every screenshot pixel-identical.
+`python -m ruff check` clean.
+
+New cases in `tests/test_spillway_notch.py` (55) covering the pure grid functions, every
+refusal, the keyed-dam path and the isolated-burn snapshot; `tests/test_report_model.py`
+gains the gauge and as-burned tables; `tests/test_spillway.py` gains the auto-width
+persistence rule. `tests/test_plan_geometry.py`'s perpendicularity cases were rewritten to
+assert the crest runs along the alignment, with the breach axis kept as its own class.
+`checks_earthworks` gains `check_a_placed_spillway_is_cut_into_the_burned_dem`, which is
+the whole change end to end in real QGIS: place a sill, re-analyse, and assert the burn
+recorded a notch, the burned surface is down to the designed crest along it, the as-burned
+sill was measured, and the `Spillways (burned)` layer landed under **Verify** through
+`_groups` rather than loose at the top of the legend.
+
+**One screenshot moved and was accepted**: `panel_spillway_review.png` gains the **Sill**
+column. A second, `report_page8.png`, moved and **should not have** — and accepting it
+first is how the defect behind it was found. It showed *Width designed 2.00 m* beside a
+status of *No spillway designed*, which is a width for a structure that does not exist.
+Cause: `width_auto` reads True for a feature with no `Spillway` object at all (there is
+none to ask), so the row derived a built width for every undesigned feature. The panel hid
+it — `SpillwayTable._width_cell` branches on `designed` first and prints "0.6 m needed" —
+while the report printed `built_width_m` straight into its own column. What an undesigned
+feature has is a *requirement*, and `required_width_m` already carries it. Guarded on
+`spillway is not None`; the page is back to an em dash.
+
+Worth keeping the number that made it visible: on the suite's **2 m** fixture a 0.62 m weir
+rounds up to **one cell, 2.00 m** — not two cells. On a 1 m DEM the same weir comes out at
+1.00 m. The jump looks large only because the grid is coarse relative to the sill, and that
+is the honest reading: on a 2 m model the smallest weir that can be cut at all is 2 m wide.
+
+**Two assertions were rewritten rather than accepted**, as the plan required:
+`tests/test_plan_geometry.py`'s perpendicularity cases and
+`checks_symbology.check_spillway_sill_is_drawn_at_the_built_width`. The second is an
+assertion on rendered geometry, not a screenshot, so `-Accept` could never have absorbed
+it — it now asserts the bar runs *along* the feature and fails if it is square across.
+
+**Two things the run itself caught, worth recording because neither was visible from the
+code.** The new QGIS check first failed with *no crest to cut to*: `_on_spillway_placed`
+only seeds a crest when it is handed an elevation, and passing `None` sites a point with
+no sill. It then failed with *the as-burned sill was never recorded* — that figure was
+gated behind `state.pond_context`, which only exists once the verification pass has run,
+and the verification skips any feature with no analytic capacity. It comes off the burner
+and needs no pond, so `_record_spillway_levels` now records it first and unconditionally;
+only the measured spill level waits for the pond. A feature drawn but not yet sized would
+otherwise have had a notch in the terrain and nothing on the review saying so.
+
 ## Never run
 
 **Manual QGIS smoke tests.** Everything above is verified by `pytest`, `ruff`, the CI

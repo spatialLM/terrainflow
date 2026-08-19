@@ -24,6 +24,7 @@ from .core.sizing import (
     grade_advisory,
     trapezoid_section,
 )
+from .modules.burn_strategy import spillway_burn_width
 from .modules.earthwork_design import (
     Spillway,
     berm_height_estimate,
@@ -186,7 +187,7 @@ class EarthworkPropertiesDialog(QDialog):
                  containment_elevation=None, invert_elevation=None,
                  lip_elevation=None, containment_source=None, stage_storage=None,
                  peak_flow_m3s=None, upstream_flow_m3s=0.0,
-                 harvesting_coefficient=False,
+                 harvesting_coefficient=False, cell_size_m=None,
                  inflow_profile=None, overtop_station=None, overtop_surplus=0.0):
         super().__init__(parent)
         self.ew_type = ew_type
@@ -230,6 +231,12 @@ class EarthworkPropertiesDialog(QDialog):
         self._peak_flow_m3s = peak_flow_m3s
         self._upstream_flow_m3s = float(upstream_flow_m3s or 0.0)
         self._harvesting_coefficient = harvesting_coefficient
+        # The DEM's cell size, so the built width can be shown at the width that will
+        # actually be *cut*. The weir equation returns 1.43 m; a 1 m grid cuts 2 m,
+        # and a dialog that displays the first while the terrain gets the second is
+        # the mismatch the burn made visible. None means no DEM — the raw requirement
+        # is shown, because there is no grid to round to yet.
+        self._cell_size_m = None if cell_size_m is None else float(cell_size_m)
         # Where the catchment arrives along the alignment, and where (if anywhere)
         # arriving water outruns the storage upstream of it.
         self._inflow_profile = inflow_profile
@@ -1309,9 +1316,23 @@ class EarthworkPropertiesDialog(QDialog):
             f"color: {_WARN if pct >= 40 else _INK}; font-weight: 600;")
 
     def _required_width(self, head):
+        """The width the design flow needs at *head*, before any grid rounding."""
         if self._peak_flow_m3s is None:
             return None
         return calculate_spillway_width(self._peak_flow_m3s, head)
+
+    def _buildable_width(self, required):
+        """*required* rounded up to a whole number of DEM cells, or unchanged with no DEM.
+
+        The width the auto path commits to, and the one the burn cuts. Rounding here
+        rather than only inside the burn is what stops the dialog, the map label, the
+        review row and the terrain disagreeing about how wide the weir is.
+        """
+        if required is None:
+            return None
+        if not self._cell_size_m:
+            return required
+        return spillway_burn_width(required, self._cell_size_m)
 
     def _feature_length_m(self):
         """Characteristic length of the drawn feature, for the does-the-weir-fit check.
@@ -1362,6 +1383,7 @@ class EarthworkPropertiesDialog(QDialog):
                        else self._policy_head)
         required = self._required_width(target_head)
 
+        buildable = self._buildable_width(required)
         if required is not None:
             self.lbl_spillway_width.setText(f"{required:.2f} m")
         else:
@@ -1370,13 +1392,19 @@ class EarthworkPropertiesDialog(QDialog):
         # Auto keeps the built width on the requirement as head, catchment or
         # upstream routing change. Unticking it commits to a number, which is what
         # makes the shortfall check meaningful rather than tautological.
+        #
+        # It tracks the **buildable** width, not the raw requirement: the terrain model
+        # can only cut whole cells, so a 1.43 m weir is burned 2.00 m wide, and showing
+        # 1.43 here while cutting 2.00 there is the kind of quiet disagreement that
+        # takes a field run to find. Rounding up cannot change what the feature holds —
+        # the sill is at the same level either way — it only runs the overflow shallower.
         auto = True
         if self.chk_width_auto is not None:
             auto = self.chk_width_auto.isChecked()
             self.spin_built_width.setEnabled(not auto)
-            if auto and required is not None:
+            if auto and buildable is not None:
                 self.spin_built_width.blockSignals(True)
-                self.spin_built_width.setValue(required)
+                self.spin_built_width.setValue(buildable)
                 self.spin_built_width.blockSignals(False)
 
         built = self.spin_built_width.value() if self.spin_built_width else None

@@ -657,10 +657,20 @@ def check_spillway_near_feature_snaps_onto_it(dem_path):
 
 
 def check_spillway_sill_is_drawn_at_the_built_width(dem_path):
-    """The crest is drawn as a bar of the built width, square across the feature.
+    """The crest is drawn as a bar of the built width, running ALONG the feature.
 
-    Before this, Spillway.width_m existed only as label text: a 0.5 m sill and a
-    6 m emergency weir drew as the same 4 mm triangle at every scale.
+    Two things at once, and the second one changed. Spillway.width_m used to exist only
+    as label text — a 0.5 m sill and a 6 m emergency weir drew as the same 4 mm triangle
+    at every scale — so the bar has to be at the built width.
+
+    It also has to point the right way, and this check used to assert the opposite. A
+    weir's crest is the line the flow **crosses** on its way out, so it lies along the
+    bank; across the bank is the direction the water travels. That was arguable while
+    the bar was only a cartographic gate symbol, and it stopped being arguable when the
+    bar became the geometry the burn cuts: a notch lowered across the alignment runs
+    down the flow path instead of through the bank. The perpendicular is kept — it is
+    the breach axis, and ``plan_geometry.perpendicular_sill`` still returns it — but it
+    is not the crest.
     """
     import math
 
@@ -697,10 +707,12 @@ def check_spillway_sill_is_drawn_at_the_built_width(dem_path):
             ew_pts = ew.geometry.asPolyline()
             align = math.atan2(ew_pts[1].y() - ew_pts[0].y(),
                                ew_pts[1].x() - ew_pts[0].x())
-            off = abs((sill - align) % math.pi - math.pi / 2)
+            off = (sill - align) % math.pi
+            off = min(off, math.pi - off)
             if off > math.radians(5):
                 raise AssertionError(
-                    f"sill is {math.degrees(off):.1f}° off square to the feature")
+                    f"crest bar is {math.degrees(off):.1f}° off the feature's own "
+                    f"alignment — it must run along the bank, not across it")
 
 
 def check_basin_spillway_must_sit_on_the_rim(dem_path):

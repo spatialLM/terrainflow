@@ -796,6 +796,10 @@ SPILLWAY_DESIGN_FLOW_PEAK = (
 )
 SPILLWAY_BUILT_WIDTH = (
     "The width you intend to build, against the minimum the design flow needs.\n\n"
+    "Shown at the width the terrain model can actually cut: it works in whole DEM\n"
+    "cells, so a weir the flow sizes at 1.4 m is burned 2.0 m wide on a 1 m model.\n"
+    "That changes nothing the feature holds - water still leaves at the crest,\n"
+    "which is a level and not a width - it only runs the overflow shallower.\n\n"
     "'auto' decides which half of the weir equation you are holding fixed. Ticked, the\n"
     "width follows the design head and keeps following it as the design changes —\n"
     "including when a feature drawn upslope starts routing its overflow through this\n"
@@ -917,6 +921,9 @@ SPILLWAY_GIVE_UP = (
 SPILLWAY_HEAD = (
     "How deep you intend the water to run over the crest at peak flow — a target, not\n"
     "a measurement.\n\n"
+    "H is a depth of FLOW, not a dimension of the structure. Nothing about the sill\n"
+    "is H metres anything; it is how far the water surface stands above the crest\n"
+    "while the overflow is running, and it is zero once the storm is over.\n\n"
     "The weir equation Q = C x L x H^1.5 has one spare degree of freedom, so one of\n"
     "head and width has to be chosen and the other follows. While the width is on\n"
     "'auto' this is the one you choose: a lower head needs a wider sill to pass the\n"
@@ -991,6 +998,9 @@ SPILLWAY_WIDTH = (
     "    Q = C x L x H^1.5,  so  L = Q / (C x H^1.5),  with C = 1.45\n\n"
     "C is the SI broad-crested coefficient from Brater & King for a crest 0.6 m or\n"
     "wider at ordinary head - which is what an earthen dam crest is.\n\n"
+    "Widening a sill lowers the water depth over it, not the level it lets go at:\n"
+    "1.4 m to 2.0 m takes a 0.30 m nappe to about 0.24 m, so the peak water surface\n"
+    "sits 6 cm lower and freeboard gains that much. Stored volume is untouched.\n\n"
     "A minimum, not a recommendation. Standard practice adds 20-30% and protects\n"
     "the outlet against erosion — an under-armoured spillway scours, deepens, and\n"
     "drains the feature it was meant to protect."

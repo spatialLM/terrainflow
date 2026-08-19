@@ -1,5 +1,6 @@
 """Earthwork design: burn → re-analyse → compare, plus persistence."""
 
+import math
 import os
 
 from _harness import PluginHarness, line_across_valley
@@ -523,16 +524,118 @@ def check_auto_width_survives_leaving_the_dialog(dem_path):
             "an auto width never left its 0.0 default — nothing outside the dialog "
             "wrote it, which is exactly the defect"
         )
-        first = ew.spillway.width_m
+        first = ew.spillway.width_required_m
+        assert first, "the requirement was never recorded beside the built width"
 
         # Doubling the design intensity doubles the peak flow, and the weir width is
-        # linear in flow, so the stored width must follow without reopening anything.
+        # linear in flow, so the requirement must follow without reopening anything.
+        #
+        # Asserted on the **requirement**, not on the built width. The built width is
+        # the requirement rounded up to whole DEM cells, so on a 1 m grid it moves in
+        # 1 m steps and a real doubling can land inside one — which is a fact about the
+        # grid, not a width that went stale. That distinction is the whole reason the
+        # two figures are kept apart.
         h.panel.set_peak_intensity(h.panel.peak_intensity_mm_hr * 2)
         h.assert_no_errors("auto width after intensity change")
-        assert ew.spillway.width_m > first * 1.5, (
-            f"width stayed at {ew.spillway.width_m} m after the intensity doubled "
+        second = ew.spillway.width_required_m
+        assert second > first * 1.5, (
+            f"required width stayed at {second} m after the intensity doubled "
             f"(was {first} m)"
         )
+        # And the built width is that requirement, rounded up to a whole cell — which
+        # is the width the burn will cut and therefore the width the map must label.
+        cell = h.plugin._earthworks._dem_cell_size_m()
+        expected = math.ceil(second / cell - 1e-9) * cell
+        assert abs(ew.spillway.width_m - expected) < 1e-6, (
+            f"built width {ew.spillway.width_m} m is not the {second:.2f} m "
+            f"requirement rounded up to the {cell} m grid ({expected} m)"
+        )
+
+
+def check_a_placed_spillway_is_cut_into_the_burned_dem(dem_path):
+    """The whole of Stage B, end to end: a sited spillway moves the terrain.
+
+    Until this landed the burn was spillway-blind — a placed spillway changed no raster,
+    no routing and no pond — so the three things asserted here are the ones that could
+    not previously be true at once: the burn records a notch, the burned surface is
+    lowered to the designed crest along it, and the `Spillways (burned)` layer that says
+    so lands under **Verify** through ``_groups`` rather than loose at the top of the
+    legend.
+
+    Drawn across the valley, where the ground below the sill falls away — a notch that
+    cannot daylight is refused on purpose, and this check is about the case that works.
+    """
+    import numpy as np
+    import rasterio
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.qgis.controllers import _groups as G
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        geom = line_across_valley(row=60)
+        ew = h.add_earthwork("swale", geometry=geom)
+        # ``add_earthwork`` bypasses the dialog, and the dialog is what sizes a feature.
+        # Left at capacity 0 it drops out of the verification pass, and with it out of
+        # the pond attribution the measured spill level is read from — so the check
+        # would assert the notch and quietly skip half of what it is here for.
+        h.plugin._earthworks._on_vertex_edit_finished(0, geom)
+        point = ew.geometry.interpolate(ew.geometry.length() / 2.0).asPoint()
+
+        # Placed at the level the feature is held to, which the band then clamps down to
+        # `containment - head - freeboard` — the highest sill this feature can offer, and
+        # the one the headless before/after measured. Passing None here seeds no crest at
+        # all: `_on_spillway_placed` only reads the ground when it is given one.
+        _lip, _invert, containment, _src = controller._spillway_datums(
+            ew.geometry, ew.type, top_width_m=ew.top_width_m, depth=ew.depth, ew=ew)
+        assert containment is not None, "no datum — the check cannot site anything"
+        controller._on_spillway_placed(ew.id, point, containment, kind="outflow")
+        h.assert_no_errors("spillway placed")
+        assert ew.spillway is not None and ew.spillway.point_wkt, "the sill was not sited"
+        crest = ew.spillway.crest_elevation
+        assert crest is not None, "no crest to cut to"
+
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis with a sited spillway")
+
+        notches = getattr(h.state.burner, "burned_notches", None) or {}
+        assert ew.id in notches, (
+            f"no notch was cut for {ew.name} — warnings: "
+            f"{list(getattr(h.state.burner, 'warnings', []))}")
+        mask = notches[ew.id]
+
+        with rasterio.open(h.state.modified_dem_path) as src:
+            burned = src.read(1).astype("float64")
+        assert float(np.nanmax(burned[mask])) <= crest + 1e-3, (
+            f"the notch was recorded but the surface still stands at "
+            f"{float(np.nanmax(burned[mask])):.2f} m against a {crest:.2f} m crest")
+
+        # And the elevations the review reads, measured off that burn rather than
+        # echoed back from the design. On a clean cut the as-burned sill *is* the
+        # designed one; the value of the figure is that it can disagree.
+        assert ew.burned_sill_elevation_m is not None, (
+            "the as-burned sill was never recorded, so the review has nothing to "
+            "compare the designed sill against")
+        assert abs(ew.burned_sill_elevation_m - crest) < 0.01, (
+            f"the notch cut to {ew.burned_sill_elevation_m:.2f} m against a designed "
+            f"{crest:.2f} m sill")
+
+        layer = next(
+            (lyr for lyr in QgsProject.instance().mapLayers().values()
+             if "Spillways (burned)" in lyr.name()), None)
+        assert layer is not None, (
+            "no Spillways (burned) layer after a notch was cut: "
+            + str(sorted(lyr.name() for lyr in
+                         QgsProject.instance().mapLayers().values())))
+        assert layer.featureCount() > 0, "the burned spillway layer is empty"
+
+        group = G.group(h.plugin._project, G.VERIFY,
+                        site_name=h.panel.site_name, tag=h.state.run_tag)
+        assert group is not None, "no Verify group to place it under"
+        under = [n.layer().name() for n in group.findLayers() if n.layer() is not None]
+        assert any("Spillways (burned)" in name for name in under), (
+            f"the burned spillway layer is not under Verify — that group holds {under}")
 
 
 def check_auto_width_is_not_zeroed_without_an_intensity(dem_path):

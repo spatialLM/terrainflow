@@ -63,6 +63,15 @@ class EarthworkStore:
     # readouts say which, because the two differ by a factor of two on keyed swales and a
     # figure that size cannot be presented without saying where it came from.
     capacity_is_measured: bool = False
+    # What the feature holds **brim-full**, with no spillway — the level water would
+    # leave over the structure itself. 0.0 means "not known", and every reader falls back
+    # to ``capacity_m3``, which is what they all did before this field existed.
+    #
+    # It exists because ``capacity_m3`` is the volume **to the sill** once a spillway is
+    # sited, and a "% full" that divides by it reads 100% the moment the spillway starts
+    # taking water — which is exactly when the design is working. The band between the
+    # two is the spillway doing its job, and it is only visible if the gauge can see both.
+    lip_capacity_m3: float = 0.0
 
     # Direct contributing catchment — the cells whose runoff this feature is the FIRST
     # to intercept (from flow_graph.label_direct_catchments). Mutually exclusive across
@@ -90,6 +99,20 @@ class EarthworkStore:
     # Raster coordinates of the earthwork centroid (for inflow sampling)
     centroid_row: Optional[int] = None
     centroid_col: Optional[int] = None
+
+    @property
+    def fill_basis_m3(self):
+        """The denominator of "% full" — the brim volume where one is known.
+
+        Never ``capacity_m3`` where a lip volume exists: that is the sill volume, and
+        dividing by it pins a working spillway at 100%.
+        """
+        return self.lip_capacity_m3 or self.capacity_m3
+
+    def fill_pct(self):
+        """How full this store is, against the level water leaves the *structure* at."""
+        basis = self.fill_basis_m3
+        return (self.stored_m3 / basis * 100.0) if basis > 0 else 0.0
 
     def step_infiltration(self, dt_hr):
         """Infiltration *potential* this timestep (m³) — rate × wetted area × time.
@@ -337,7 +360,7 @@ def cascade_overflow(stores: list[EarthworkStore], time_hr: float,
             else:
                 site_exit_m3 += overflow
 
-        fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
+        fill_pct = store.fill_pct()
         if fill_pct > store.peak_fill_pct:
             store.peak_fill_pct = fill_pct
 
@@ -680,7 +703,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
             "outflow_ls_baseline": round(outflow_ls_baseline, 1),
         }
         for store in earthwork_stores:
-            fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
+            fill_pct = store.fill_pct()
             row[f"{store.name}_fill_pct"] = round(fill_pct, 1)
             row[f"{store.name}_overflow"] = store.overflowed
         timestep_table.append(row)
@@ -714,7 +737,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         # a caller drawing a label never has to key by it.
         frame_fills = {}
         for store in earthwork_stores:
-            fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
+            fill_pct = store.fill_pct()
             frame_fills[store.id or store.name] = {
                 "name": store.name,
                 "fill_pct": round(min(fill_pct, 100.0), 1),
@@ -738,7 +761,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     # Build earthwork summary
     earthwork_summary = []
     for store in earthwork_stores:
-        fill_pct = (store.stored_m3 / store.capacity_m3 * 100.0) if store.capacity_m3 > 0 else 0.0
+        fill_pct = store.fill_pct()
         earthwork_summary.append({
             # Carried alongside the name so consumers can join on identity rather
             # than on a label two features can share.
@@ -897,6 +920,11 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
         drawn = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
         terrain = getattr(ew, "terrain_capacity_m3", None)
         measured = (basis == "terrain" and terrain is not None and float(terrain) > 0)
+        # The brim volume, so "% full" is measured against the level water leaves the
+        # *structure* at rather than the level the spillway takes it at. Only on the
+        # terrain basis: the drawn figure is an analytic prism with no lip to speak of.
+        lip = getattr(ew, "containment_capacity_m3", None)
+        lip = float(lip) if (measured and lip is not None and float(lip) > 0) else 0.0
 
         store = EarthworkStore(
             name=ew.name,
@@ -904,6 +932,7 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
             capacity_m3=float(terrain) if measured else drawn,
             drawn_capacity_m3=drawn,
             capacity_is_measured=measured,
+            lip_capacity_m3=lip,
             area_m2=area_m2,
             infiltration_rate_mm_hr=infil_rate if wets_soil else 0.0,
             elevation=elevation,

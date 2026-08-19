@@ -43,12 +43,16 @@ from terrainflow_assessment.core.sizing import (
     trapezoid_section,
 )
 from terrainflow_assessment.modules.burn_strategy import (
+    SPILLWAY_MAX_REACH_M,
     berm_variation_warning,
     enforce_monotonic_path,
     level_invert,
     line_cells,
+    notch_pool,
     ponding_resolution_warning,
     rasterisable_capacity,
+    spillway_burn_width,
+    spillway_notch,
     steep_ground_warning,
     sub_cell_warning,
     taper_reach,
@@ -119,6 +123,34 @@ class StageStorage(NamedTuple):
         if z >= float(levels[-1]):
             return float(volumes[-1]) + (z - float(levels[-1])) * float(self.area_m2)
         return float(np.interp(z, levels, volumes))
+
+    def level_at(self, volume_m3):
+        """The water-surface elevation at which this pond holds *volume_m3*.
+
+        :meth:`volume_at` read the other way round, and it is the question the event
+        readout asks: the balance says how much water is in the feature, and what the
+        user needs to know is whether that water reaches the sill. Monotone by
+        construction, so it is one interpolation and never an iteration.
+
+        Above the spill level it extrapolates on the top wetted area, matching
+        :meth:`volume_at` — a feature the balance credits with more than its pond can
+        hold is overflowing, and saying so with a level above the rim is the honest
+        reading of a figure that is already past the model's edge.
+        """
+        if volume_m3 is None:
+            return None
+        v = max(0.0, float(volume_m3))
+        levels, volumes = self.levels_m, self.volumes_m3
+        if len(levels) == 0:
+            return None
+        if v <= float(volumes[0]):
+            return float(levels[0])
+        if v >= float(volumes[-1]):
+            area = float(self.area_m2)
+            if area <= 0:
+                return float(levels[-1])
+            return float(levels[-1]) + (v - float(volumes[-1])) / area
+        return float(np.interp(v, volumes, levels))
 
 
 class FeatureStorage(NamedTuple):
@@ -417,7 +449,8 @@ class Spillway:
 
     def __init__(self, crest_elevation=None, drop_below_rim_m=None, head_m=0.30,
                  width_m=0.0, point_wkt=None, auto=True, width_auto=True,
-                 freeboard_m=None, height_above_floor_m=None):
+                 freeboard_m=None, height_above_floor_m=None,
+                 width_required_m=None):
         self.crest_elevation = crest_elevation
         self.drop_below_rim_m = drop_below_rim_m
         # Crest measured up from the feature's floor. ``None`` means "not known on this
@@ -432,6 +465,12 @@ class Spillway:
         # Earthwork.soil_name uses. A stored value is a deliberate user override.
         self.freeboard_m = freeboard_m
         self.width_m = width_m        # width as BUILT (or tracking, while width_auto)
+        # What the design flow needs at this head, **before** the grid rounds it up.
+        # Derived and never serialised: it is a function of the storm and the catchment,
+        # both of which move under a saved design. It is kept beside the built width so
+        # the rounding note can quote both figures without recomputing the requirement in
+        # the sentence that describes it.
+        self.width_required_m = width_required_m
         # Whether the built width tracks the computed requirement. Separate from
         # ``auto`` (which tracks the crest against the rim) because a user who has
         # committed to a dug width has not thereby fixed the crest, or vice versa.
@@ -449,7 +488,23 @@ class Spillway:
     )
 
     def to_dict(self):
-        return {f: getattr(self, f, None) for f in self._SERIAL_FIELDS}
+        """Plain-data form.
+
+        **An auto width is not written.** ``width_auto`` means the built width tracks
+        the requirement, and the requirement is a function of the storm, the catchment
+        and the routing — none of which the design file pins down. Storing the number
+        anyway meant that opening an old project rewrote a width the user never chose,
+        silently, on the first live recompute; once the grid rounds that width the change
+        becomes *visible* and unexplained. So the flag is stored and the figure is
+        derived, which is what the flag always claimed.
+
+        A **committed** width (``width_auto`` False) is stored, rounded, exactly as
+        before — that is a decision, and decisions are saved.
+        """
+        data = {f: getattr(self, f, None) for f in self._SERIAL_FIELDS}
+        if self.width_auto:
+            data.pop("width_m", None)
+        return data
 
     @classmethod
     def from_dict(cls, data):
@@ -459,6 +514,13 @@ class Spillway:
         for field in cls._SERIAL_FIELDS:
             if field in data:
                 setattr(sp, field, data[field])
+        # An auto width is absent from a document this build wrote and *present* in one
+        # an older build wrote. Neither is a chosen figure, and the restore path's own
+        # `_recompute_live_assessment` puts the derived one back before anything renders
+        # — but until it runs, `width_m` has to be a number the map label, the sill bar
+        # and the review row can render rather than a None they would each crash on.
+        if sp.width_auto and not sp.width_m:
+            sp.width_m = 0.0
         return sp
 
     def summary(self):
@@ -707,7 +769,8 @@ CONTAINMENT_LIP = "lip"               # bare ground: the ring minimum round the 
 
 
 def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=None,
-                   containment_source=None, berm_crest_elevation=None):
+                   containment_source=None, berm_crest_elevation=None,
+                   built_width_m=None, required_width_m=None):
     """Things worth saying about a crest that are **not** faults. Empty list means none.
 
     A separate channel from :func:`spillway_validity` on purpose. ``_spillway_row`` sets
@@ -718,6 +781,11 @@ def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=No
 
     One producer, several surfaces — the dialog, the review table and the report all
     render this list rather than each composing its own sentence about the same fact.
+
+    *built_width_m* / *required_width_m* add the width-rounding sentence. The terrain
+    model can only cut whole cells, so a weir is burned at the next cell up from what the
+    flow needs. That is worth saying, and it is emphatically **not** a fault: the sill is
+    at the same level either way, so it changes nothing the feature holds.
     """
     notes = []
     if crest_elevation is None:
@@ -743,6 +811,20 @@ def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=No
             line += (" Nothing measured is holding it there yet — run Re-analyse with "
                      "Earthworks to check what the built feature actually contains.")
         notes.append(line)
+
+    # The rounding, stated as what it is. Deliberately not "the extra width lowers the
+    # head": true of the weir equation, and it reads as though widening moved the water
+    # level *in the feature*, which it does not. Width is horizontal; the level water
+    # leaves at is vertical, and it is the crest.
+    if built_width_m is not None and required_width_m is not None:
+        built, need = float(built_width_m), float(required_width_m)
+        if need > 0 and built > need + 0.005:
+            notes.append(
+                f"{built:.1f} m built — rounded up from the {need:.1f} m the flow needs, "
+                f"so the terrain model can cut it. Water still leaves at the same level, "
+                f"so this changes nothing the feature holds; a wider sill only runs the "
+                f"overflow shallower."
+            )
 
     return notes
 
@@ -858,6 +940,18 @@ class Earthwork:
         # it is the only thing that can answer "what does a sill here give up" without
         # re-flooding on every spin of a crest control. Derived; never serialised.
         self.stage_storage = None
+        # What it holds **brim-full**, with no spillway — the top of that same curve, and
+        # the denominator of "% full". `terrain_capacity_m3` is the volume to the sill
+        # once one is sited, so dividing by it would pin every spillwayed feature at 100%
+        # exactly when the spillway starts doing its job. Derived; never serialised.
+        self.containment_capacity_m3 = None
+        # The three levels a spillway is judged by, all measured, all derived (see the
+        # Spillways review). `burned_sill_elevation_m` is the highest level water has to
+        # clear on its way through the notch, off the burned surface;
+        # `actual_spill_level_m` is where the finished pond was found to let go once the
+        # whole site was burned. They disagree when the notch did not do what it claimed.
+        self.burned_sill_elevation_m = None
+        self.actual_spill_level_m = None
 
     # ------------------------------------------------------------------
     # Derived geometry fields
@@ -1699,8 +1793,19 @@ class DEMBurner:
         self.burned_masks = {}
         self.burned_cut = {}
         self.burned_raised = {}
+        # {earthwork id: bool mask} for the cells a designed spillway lowered. A
+        # **fourth** record rather than a widening of ``burned_masks``: that mask is what
+        # the pool attribution and the verification measure against, so widening it would
+        # move which pool belongs to which feature and with it every bermed swale's Δ.
+        # Contact, volume, raised and *notched* are four different questions.
+        self.burned_notches = {}
+        # {earthwork id: m} — the **as-burned sill**: the highest level water crossing
+        # the notch has to clear, on the surface as it stands afterwards. Recorded even
+        # where nothing was cut, because a refusal's own figure is what says how far the
+        # bank still stands above the crest that was designed.
+        self.burned_sills = {}
 
-    def burn_earthworks(self, earthworks):
+    def burn_earthworks(self, earthworks, sills=None):
         """
         Apply all enabled earthworks to a copy of the original DEM.
         Returns modified DEM as float32 numpy array.
@@ -1712,12 +1817,30 @@ class DEMBurner:
         it), so the mask that set the At-grid reference was not the mask that was cut.
         Measuring the burn against a footprint the burn did not use is a difference that
         can only ever be noise in the answer.
+
+        *sills* is ``{earthwork id: crest-bar WKT}`` — where each designed spillway's
+        crest actually lies on its feature. The snap that produces it stays in the
+        controller, because ``plan_geometry``'s docstring forbids a second implementation
+        of "nearest point on this alignment", and this method receives only ``Earthwork``
+        objects. A sill the controller could not resolve is simply absent from the dict,
+        and ``_cut_spillway`` never sees the feature; the controller warns about that
+        rather than this method inventing a location.
+
+        **The notches are cut as a second pass, after the type dispatch.** Fills are
+        ``np.maximum`` and ``_burn_berm`` is additive, so a notch cut inside a ``_burn_*``
+        is plugged by that feature's own companion berm or by a later feature that
+        overlaps it. A post-pass is the only place where *the notch is the last thing to
+        touch these cells* is true by construction — and it stays order-independent all
+        the same, because the level cut to is an absolute carried on the design rather
+        than anything read off the running array.
         """
         modified = self.original.copy()
         self.warnings = []
         self.burned_masks = {}
         self.burned_cut = {}
         self.burned_raised = {}
+        self.burned_notches = {}
+        self.burned_sills = {}
         _dispatch = {
             "swale":     self._burn_swale,
             "berm":      self._burn_berm,
@@ -1725,6 +1848,7 @@ class DEMBurner:
             "dam":       self._burn_dam,
             "diversion": self._burn_diversion,
         }
+        burned = []
         for ew in earthworks:
             if not ew.enabled:
                 continue
@@ -1735,6 +1859,11 @@ class DEMBurner:
             if burn_fn is None:
                 continue
             modified = burn_fn(modified, shapely_geom, ew)
+            burned.append(ew)
+
+        for ew in burned:
+            modified = self._cut_spillway(modified, ew, (sills or {}).get(
+                getattr(ew, "id", None) or getattr(ew, "name", None)))
         return modified
 
     def save(self, array, output_path):
@@ -1929,6 +2058,235 @@ class DEMBurner:
         if dem is not None and spill is not None and mask.any():
             held = np.clip(spill - dem[mask], 0.0, None)
             self.burned_cut[key] = float(held.sum()) * (self.cell_area)
+
+    # ------------------------------------------------------------- spillway notch
+
+    def _cut_spillway(self, dem, ew, sill_wkt):
+        """Cut *ew*'s **outflow** spillway into *dem*, or say why it could not be.
+
+        The one place a designed spillway becomes terrain. Everything downstream then
+        follows with no plumbing at all, because ``find_impoundments`` measures a
+        hollow's storage as ``Σ(filled − ground)`` and has no idea what made it: lower
+        the level water can leave at, and retention, exit cells, Surface Runoff, exit
+        volumes and the ponding layers all move with the cut.
+
+        **Outflow only.** Every earthwork can also carry an ``inflow_spillway`` with its
+        own crest, and an inlet is not a weir — it is a protected entry. Notching one
+        would cut a hole in the bank at the point water arrives and drain the pond
+        through its own inlet. ``_refresh_auto_spillway_widths`` already draws this line.
+
+        *sill_wkt* is the crest bar the controller snapped to the feature. ``None`` means
+        no spillway is sited (ordinary) or the recorded point is no longer on the feature
+        (a fault the controller reports); either way there is nothing to cut here.
+
+        Returns the DEM — the input untouched wherever the notch was refused, and every
+        refusal is recorded in :attr:`warnings` with the figure that explains it.
+        """
+        spillway = getattr(ew, "outflow_spillway", None)
+        crest = None if spillway is None else getattr(spillway, "crest_elevation", None)
+        if not sill_wkt or crest is None:
+            return dem
+        key = getattr(ew, "id", None) or getattr(ew, "name", None)
+        try:
+            from shapely import wkt as _wkt
+            bar = _wkt.loads(sill_wkt)
+        except Exception:
+            return dem
+        try:
+            coords = list(bar.coords)
+        except (AttributeError, NotImplementedError):
+            return dem
+        if len(coords) < 2:
+            return dem
+
+        # The **rounded** width, widened about the bar's own centre so the cut stays
+        # where the user sited it. A sill narrower than a cell cannot be cut as one.
+        burn_width = spillway_burn_width(getattr(spillway, "width_m", 0.0),
+                                         (self.cell_h, self.cell_size))
+        bar = self._scaled_bar(coords, burn_width)
+        crest_cells = self._bar_cells(bar)
+        if crest_cells[0].size == 0:
+            return dem
+
+        step = self._downhill_step(bar)
+        if step is None:
+            return dem
+
+        footprint = self.burned_masks.get(key)
+        if footprint is None or footprint.shape != self.shape:
+            footprint = np.zeros(self.shape, dtype=bool)
+            footprint[crest_cells] = True
+        floor = self._burned_floor(dem, footprint)
+        window = self._notch_window(crest_cells, footprint)
+        pool = notch_pool(dem, footprint, crest, window=window)
+
+        cut = spillway_notch(dem, crest_cells, crest, step,
+                             max_reach_m=SPILLWAY_MAX_REACH_M,
+                             cell_size=max(self.cell_size, self.cell_h),
+                             pool=pool, floor_elev=floor)
+
+        if key is not None and cut.sill_elev is not None:
+            self.burned_sills[key] = float(cut.sill_elev)
+
+        name = getattr(ew, "name", "This feature")
+        if floor is not None and float(crest) <= float(floor):
+            self.warnings.append(
+                f"{name}: the spillway crest at {float(crest):.2f} m sits at or below "
+                f"the floor the burn actually cut ({float(floor):.2f} m), so a notch "
+                f"there would empty the feature. No notch was cut — raise the crest, or "
+                f"deepen the feature under it."
+            )
+            return dem
+        if cut.into_pool:
+            self.warnings.append(
+                f"{name}: the spillway notch found ground below its crest, but that "
+                f"ground is still inside this feature's own pond — the bank wraps round "
+                f"it. Nothing was cut, because the water would leave where it already "
+                f"leaves. Move the sill to a point where the bank has ground below the "
+                f"crest on its far side."
+            )
+            return dem
+        if not cut.daylit:
+            self.warnings.append(
+                f"{name}: the spillway at {float(crest):.2f} m does not daylight — the "
+                f"ground stays above the crest for the whole {cut.reach_m:.0f} m tried, "
+                f"so the notch would discharge into rising ground. Nothing was cut. "
+                f"Site the sill where the bank falls away."
+            )
+            return dem
+
+        mask = np.zeros(self.shape, dtype=bool)
+        mask[cut.cells] = True
+        if key is not None:
+            self.burned_notches[key] = mask
+        return cut.dem
+
+    def _scaled_bar(self, coords, width_m):
+        """The crest bar re-cut to *width_m* about its own centre.
+
+        The controller draws the bar at the *built* width, which is what the map should
+        show; the burn needs it at the rounded width. Scaling here rather than asking for
+        a second bar keeps one snap and one geometry.
+        """
+        (x1, y1), (x2, y2) = coords[0][:2], coords[-1][:2]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        dx, dy = x2 - x1, y2 - y1
+        length = (dx * dx + dy * dy) ** 0.5
+        if length <= 0:
+            return LineString([(cx, cy), (cx, cy)])
+        wanted = float(width_m or 0.0)
+        half = (wanted if wanted > 0 else length) / 2.0
+        ux, uy = dx / length, dy / length
+        return LineString([(cx - ux * half, cy - uy * half),
+                           (cx + ux * half, cy + uy * half)])
+
+    def _bar_cells(self, bar):
+        """``(rows, cols)`` for the crest bar.
+
+        ``all_touched=True``, and here that is the right question: this is *did we lose
+        the sill?*, not *how much earth came out?* — the same distinction
+        :meth:`_rasterize` draws. A bar shorter than a cell, or one lying diagonally
+        between centres, still has to claim cells or the notch is not cut at all, so the
+        ``line_cells`` fallback backs it up.
+        """
+        mask = np.zeros(self.shape, dtype=bool)
+        try:
+            band = self._rasterize(bar, all_touched=True)
+            if band is not None and band.any():
+                mask |= band
+        except Exception:
+            pass
+        if not mask.any():
+            for rc in self._line_path_cells(bar):
+                mask[rc] = True
+        return np.nonzero(mask)
+
+    def _downhill_step(self, bar):
+        """``(drow, dcol)`` unit step from the crest bar toward the **lower** side.
+
+        Both normals to the bar are tried on the original ground — never on the running
+        array, where this feature's own companion berm or wall would make the built side
+        look like the high one and send the notch inward. The band is a few cells deep so
+        the answer is about the hillside rather than about one cell.
+        """
+        try:
+            coords = list(bar.coords)
+            (x1, y1), (x2, y2) = coords[0][:2], coords[-1][:2]
+        except Exception:
+            return None
+        dx, dy = x2 - x1, y2 - y1
+        length = (dx * dx + dy * dy) ** 0.5
+        if length <= 0:
+            return None
+        # Normal in map space, converted to grid space. transform.e is negative on a
+        # north-up grid, so a step north is a step to a *smaller* row.
+        nx, ny = -dy / length, dx / length
+        drow = ny / self.transform.e if self.transform.e else 0.0
+        dcol = nx / self.transform.a if self.transform.a else 0.0
+        norm = (drow * drow + dcol * dcol) ** 0.5
+        if norm == 0:
+            return None
+        drow, dcol = drow / norm, dcol / norm
+
+        reach = 3
+        rows0, cols0 = self._bar_cells(bar)
+        if rows0.size == 0:
+            return None
+        means = []
+        for sign in (1.0, -1.0):
+            side = np.zeros(self.shape, dtype=bool)
+            for k in range(1, reach + 1):
+                rr = rows0 + int(round(sign * k * drow))
+                cc = cols0 + int(round(sign * k * dcol))
+                ok = ((rr >= 0) & (rr < self.shape[0])
+                      & (cc >= 0) & (cc < self.shape[1]))
+                if ok.any():
+                    side[rr[ok], cc[ok]] = True
+            means.append(self._ground_mean(side))
+        if np.isinf(means[0]) and np.isinf(means[1]):
+            return None
+        sign = 1.0 if means[0] <= means[1] else -1.0
+        return (sign * drow, sign * dcol)
+
+    def _burned_floor(self, dem, footprint):
+        """The bed of whatever this feature holds water in, or ``None``.
+
+        Measured off the cut rather than off the analytic ``rim − depth``: a footprint
+        too narrow to hold its batter never reaches full depth (``tapered_invert``), so
+        the analytic figure would refuse a crest that is in fact well above the floor.
+
+        The **lower** of the burned surface and the original ground, because the two
+        kinds of feature put their bed in different places. A cut has its floor in the
+        burned array — the burn dug it. A barrier does not: its recorded mask is the
+        drawn line, the burn *raises* that line to the crest, and reading the floor off
+        the burned array would return the top of the wall and refuse every spillway on
+        every dam. Taking the minimum of both is the pond bed either way.
+        """
+        if footprint is None or not footprint.any():
+            return None
+        vals = np.minimum(dem[footprint], self.original[footprint])
+        vals = vals[np.isfinite(vals)]
+        return float(vals.min()) if vals.size else None
+
+    def _notch_window(self, crest_cells, footprint):
+        """A crop around the feature and its crest, padded by the march's own cap.
+
+        The pool flood only has to answer *is the far end of this notch still inside the
+        pond*, which is a local question. Flooding the whole grid to answer it would cost
+        a full-array labelling per spillway on every burn.
+        """
+        rows = [crest_cells[0].min(), crest_cells[0].max()]
+        cols = [crest_cells[1].min(), crest_cells[1].max()]
+        if footprint is not None and footprint.any():
+            fr, fc = np.nonzero(footprint)
+            rows += [fr.min(), fr.max()]
+            cols += [fc.min(), fc.max()]
+        pad = int(round(SPILLWAY_MAX_REACH_M / max(self.cell_size, self.cell_h))) + 2
+        r0 = max(0, int(min(rows)) - pad)
+        r1 = min(self.shape[0] - 1, int(max(rows)) + pad)
+        c0 = max(0, int(min(cols)) - pad)
+        c1 = min(self.shape[1] - 1, int(max(cols)) + pad)
+        return (slice(r0, r1 + 1), slice(c0, c1 + 1))
 
     def _record_raised(self, ew, mask):
         """Remember the ground *ew* raised, separately from what it claimed.
@@ -2554,8 +2912,19 @@ class DEMBurner:
             max_used = max(max_used, reach)
         return (keyed, max_used)
 
-    def _keyed_dam_dem(self, dam):
-        """DEM with the dam raised to its crest and keyed into the banks (analytical)."""
+    def _keyed_dam_dem(self, dam, sills=None):
+        """DEM with the dam raised to its crest and keyed into the banks (analytical).
+
+        **This path bypasses :meth:`burn_earthworks` entirely**, so the spillway notch has
+        to be cut here by hand or a keyed dam is the one type the whole change is invisible
+        on — and a keyed dam is the case the spillway spec is written about. The cut goes
+        through the same :meth:`_cut_spillway` the post-pass calls, so the two cannot drift:
+        one function, two callers.
+
+        The mask it records is discarded with the rest of this idealised surface — this is
+        an estimate of a wall the user drew shorter, and the site burn is what the map,
+        the streams and the verification are measured off.
+        """
         crest = dam.crest_elevation
         dem = self.original.copy()
         line = self._to_shapely(dam.geometry)
@@ -2576,9 +2945,26 @@ class DEMBurner:
                 f"keyed {reach:.0f} m into each abutment for the storage estimate; the "
                 f"dam must be built into higher ground or water escapes around the ends."
             )
+        # The notch, on the same surface. `_cut_spillway` reads `burned_masks` for the
+        # feature's footprint and none was recorded here, so the contact band is supplied
+        # — the drawn line is where this dam's water stands, which is what the pool test
+        # and the burned-floor check both want.
+        key = getattr(dam, "id", None) or getattr(dam, "name", None)
+        sill = (sills or {}).get(key)
+        if sill:
+            masks, notches = self.burned_masks, self.burned_notches
+            sill_levels = self.burned_sills
+            try:
+                self.burned_masks = dict(masks)
+                self.burned_masks[key] = self._contact_mask(line, dam)
+                self.burned_notches, self.burned_sills = {}, {}
+                dem = self._cut_spillway(dem, dam, sill)
+            finally:
+                self.burned_masks, self.burned_notches = masks, notches
+                self.burned_sills = sill_levels
         return dem
 
-    def _isolated_burn(self, ew, keep_warnings=False):
+    def _isolated_burn(self, ew, keep_warnings=False, sills=None):
         """*(dem, mask)* for **this feature alone** on the original ground.
 
         Burning one feature into a fresh copy is what makes the storage figure
@@ -2589,22 +2975,35 @@ class DEMBurner:
         burn's masks and trench volumes are snapshotted and put back. Warnings are
         discarded by default — the isolated pass regenerates advisories the real burn has
         already raised, and reporting a sub-cell swale twice helps nobody.
+
+        ``burned_notches`` is on that list for the same reason the other three are, and
+        it matters more: these isolated burns run **after** the site burn, once per
+        feature, so without the restore the dict would end up holding whichever feature
+        was measured last — and that dict is what the overtopping check subtracts its
+        barrier crest against.
+
+        *sills* is passed straight through, so the isolated measurement sees the same
+        notch the site burn cut. Without it every per-feature capacity would be measured
+        on a feature with its spillway plugged, which is the figure this whole change
+        exists to stop reporting.
         """
         masks, cuts, warns = self.burned_masks, self.burned_cut, self.warnings
-        raised = self.burned_raised
+        raised, notches = self.burned_raised, self.burned_notches
+        sill_levels = self.burned_sills
         try:
-            dem = self.burn_earthworks([ew])
+            dem = self.burn_earthworks([ew], sills=sills)
             key = getattr(ew, "id", None) or getattr(ew, "name", None)
             mask = self.burned_masks.get(key)
             if keep_warnings:
                 warns = self.warnings
         finally:
             self.burned_masks, self.burned_cut, self.warnings = masks, cuts, warns
-            self.burned_raised = raised
+            self.burned_raised, self.burned_notches = raised, notches
+            self.burned_sills = sill_levels
         return dem, mask
 
     def feature_storage(self, ew, baseline_ponding=None, isolated_dem=None,
-                        isolated_mask=None, keep_warnings=False):
+                        isolated_mask=None, keep_warnings=False, sills=None):
         """What *ew* impounds on this terrain, measured by flooding it in isolation.
 
         Returns a :class:`FeatureStorage`. This is the answer to "how much water does this
@@ -2657,7 +3056,7 @@ class DEMBurner:
 
         if isolated_dem is None:
             isolated_dem, isolated_mask = self._isolated_burn(
-                ew, keep_warnings=keep_warnings)
+                ew, keep_warnings=keep_warnings, sills=sills)
         if isolated_mask is None:
             key = getattr(ew, "id", None) or getattr(ew, "name", None)
             isolated_mask = self.burned_masks.get(key)
@@ -2730,11 +3129,13 @@ class DEMBurner:
         return FeatureStorage(volume, level, region, above_m3, retained, excavation_m3,
                               stage)
 
-    def feature_storage_m3(self, ew, baseline_ponding=None):
+    def feature_storage_m3(self, ew, baseline_ponding=None, sills=None):
         """Just the volume from :meth:`feature_storage` — the common case."""
-        return self.feature_storage(ew, baseline_ponding=baseline_ponding).volume_m3
+        return self.feature_storage(ew, baseline_ponding=baseline_ponding,
+                                    sills=sills).volume_m3
 
-    def dam_stage_storage(self, dam, baseline_ponding=None, key_into_banks=False):
+    def dam_stage_storage(self, dam, baseline_ponding=None, key_into_banks=False,
+                          sills=None):
         """Impounded volume (m³) of a dam = the new ponding it creates behind its crest.
 
         A thin wrapper over :meth:`feature_storage`, which is the same measurement
@@ -2755,9 +3156,11 @@ class DEMBurner:
             return 0.0
 
         return self.dam_storage(dam, baseline_ponding=baseline_ponding,
-                                key_into_banks=key_into_banks).volume_m3
+                                key_into_banks=key_into_banks,
+                                sills=sills).volume_m3
 
-    def dam_storage(self, dam, baseline_ponding=None, key_into_banks=False):
+    def dam_storage(self, dam, baseline_ponding=None, key_into_banks=False,
+                    sills=None):
         """The full :class:`FeatureStorage` behind :meth:`dam_stage_storage`.
 
         Same measurement; this one does not throw the rest of it away. The name has been
@@ -2776,12 +3179,12 @@ class DEMBurner:
         if key_into_banks:
             # ``_keyed_dam_dem`` raises the abutment advisory the caller then surfaces, so
             # this path builds its own DEM and hands it over rather than re-burning.
-            dem = self._keyed_dam_dem(dam)
+            dem = self._keyed_dam_dem(dam, sills=sills)
             mask = self._contact_mask(self._to_shapely(dam.geometry), dam)
             return self.feature_storage(dam, baseline_ponding=baseline_ponding,
                                         isolated_dem=dem, isolated_mask=mask)
         return self.feature_storage(dam, baseline_ponding=baseline_ponding,
-                                    keep_warnings=True)
+                                    keep_warnings=True, sills=sills)
 
     def _feature_cell_bounds(self, ew):
         """(row_lo, row_hi, col_lo, col_hi) of the feature geometry, clamped to the DEM."""

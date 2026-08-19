@@ -1,4 +1,4 @@
-"""Tests for modules/plan_geometry.py — sill placement across an alignment."""
+"""Tests for modules/plan_geometry.py — the crest bar and the breach axis."""
 
 import math
 
@@ -7,6 +7,7 @@ import pytest
 from terrainflow_assessment.modules.plan_geometry import (
     MIN_SILL_M,
     bearing_at,
+    crest_bar,
     perpendicular_sill,
 )
 
@@ -57,8 +58,75 @@ class TestBearingAt:
         assert bearing_at([P(0, 0), P(10, 0)], 0) == pytest.approx(0.0)
 
 
+class TestCrestBar:
+    """The crest runs ALONG the alignment — it is what the burn cuts.
+
+    These cases replace the perpendicularity assertions this module used to make
+    about the same geometry. The old ones were not wrong about the maths; they
+    were asserting that a weir's crest lies across the bank the water crosses,
+    which is the flow direction rather than the crest. Once the bar became the
+    burned notch that stopped being a drawing choice.
+    """
+
+    def test_crest_runs_along_an_east_west_line(self):
+        (x1, y1), (x2, y2), bearing = crest_bar([(0, 0), (10, 0)], 0, (5, 0), 4.0)
+        assert bearing == pytest.approx(0.0)
+        assert y1 == pytest.approx(0.0)
+        assert y2 == pytest.approx(0.0)
+        assert {round(x1, 6), round(x2, 6)} == {3.0, 7.0}
+
+    def test_crest_length_equals_the_built_width(self):
+        (x1, y1), (x2, y2), _ = crest_bar([(0, 0), (10, 0)], 0, (5, 0), 6.0)
+        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(6.0)
+
+    def test_crest_is_parallel_to_a_diagonal(self):
+        pts = [(0, 0), (10, 10)]
+        (x1, y1), (x2, y2), bearing = crest_bar(pts, 0, (5, 5), 2.0)
+        bar = math.atan2(y2 - y1, x2 - x1)
+        assert (bar - bearing) % math.pi == pytest.approx(0.0, abs=1e-9)
+
+    def test_crest_and_breach_axis_are_a_quarter_turn_apart(self):
+        """The two answer different questions about one sill, and both are kept."""
+        pts = [(0, 0), (10, 10)]
+        (ax1, ay1), (ax2, ay2), _ = crest_bar(pts, 0, (5, 5), 2.0)
+        (bx1, by1), (bx2, by2), _ = perpendicular_sill(pts, 0, (5, 5), 2.0)
+        along = math.atan2(ay2 - ay1, ax2 - ax1)
+        across = math.atan2(by2 - by1, bx2 - bx1)
+        assert abs((across - along) % math.pi - math.pi / 2) == pytest.approx(0.0)
+
+    def test_centred_on_the_snapped_point(self):
+        (x1, y1), (x2, y2), _ = crest_bar([(0, 0), (10, 0)], 0, (7, 0), 3.0)
+        assert (x1 + x2) / 2 == pytest.approx(7.0)
+        assert (y1 + y2) / 2 == pytest.approx(0.0)
+
+    def test_narrow_weirs_are_floored_so_they_stay_findable(self):
+        (x1, y1), (x2, y2), _ = crest_bar([(0, 0), (10, 0)], 0, (5, 0), 0.05)
+        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(MIN_SILL_M)
+
+    @pytest.mark.parametrize("width", [0.0, None])
+    def test_missing_width_still_draws_something(self, width):
+        (x1, y1), (x2, y2), _ = crest_bar([(0, 0), (10, 0)], 0, (5, 0), width)
+        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(MIN_SILL_M)
+
+    def test_none_when_the_alignment_has_no_direction(self):
+        assert crest_bar([(1, 1)], 0, (1, 1), 2.0) is None
+        assert crest_bar([], 0, (0, 0), 2.0) is None
+
+    def test_uses_the_local_tangent_on_a_bent_alignment(self):
+        # Corner at (10, 0): the second segment runs north, so a crest on it must
+        # run north-south too.
+        pts = [(0, 0), (10, 0), (10, 10)]
+        (x1, y1), (x2, y2), _ = crest_bar(pts, 1, (10, 5), 4.0)
+        assert x1 == pytest.approx(10.0)
+        assert x2 == pytest.approx(10.0)
+        assert {round(y1, 6), round(y2, 6)} == {3.0, 7.0}
+
+
 class TestPerpendicularSill:
-    def test_sill_is_square_across_an_east_west_line(self):
+    """The breach axis — kept, and still square across, because that is the
+    direction the water leaves through. It is the map symbol, never the cut."""
+
+    def test_axis_is_square_across_an_east_west_line(self):
         (x1, y1), (x2, y2), bearing = perpendicular_sill(
             [(0, 0), (10, 0)], 0, (5, 0), 4.0)
         assert bearing == pytest.approx(0.0)
@@ -66,44 +134,12 @@ class TestPerpendicularSill:
         assert x2 == pytest.approx(5.0)
         assert {round(y1, 6), round(y2, 6)} == {-2.0, 2.0}
 
-    def test_sill_length_equals_the_built_width(self):
-        (x1, y1), (x2, y2), _ = perpendicular_sill(
-            [(0, 0), (10, 0)], 0, (5, 0), 6.0)
-        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(6.0)
-
-    def test_sill_is_perpendicular_to_a_diagonal(self):
+    def test_axis_is_perpendicular_to_a_diagonal(self):
         pts = [(0, 0), (10, 10)]
         (x1, y1), (x2, y2), bearing = perpendicular_sill(pts, 0, (5, 5), 2.0)
-        sill = math.atan2(y2 - y1, x2 - x1)
-        # Perpendicular means a quarter turn from the alignment.
-        assert abs((sill - bearing) % math.pi - math.pi / 2) == pytest.approx(0.0)
-
-    def test_centred_on_the_snapped_point(self):
-        (x1, y1), (x2, y2), _ = perpendicular_sill(
-            [(0, 0), (10, 0)], 0, (7, 0), 3.0)
-        assert (x1 + x2) / 2 == pytest.approx(7.0)
-        assert (y1 + y2) / 2 == pytest.approx(0.0)
-
-    def test_narrow_weirs_are_floored_so_they_stay_findable(self):
-        (x1, y1), (x2, y2), _ = perpendicular_sill(
-            [(0, 0), (10, 0)], 0, (5, 0), 0.05)
-        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(MIN_SILL_M)
-
-    @pytest.mark.parametrize("width", [0.0, None])
-    def test_missing_width_still_draws_something(self, width):
-        result = perpendicular_sill([(0, 0), (10, 0)], 0, (5, 0), width)
-        (x1, y1), (x2, y2), _ = result
-        assert math.hypot(x2 - x1, y2 - y1) == pytest.approx(MIN_SILL_M)
+        axis = math.atan2(y2 - y1, x2 - x1)
+        assert abs((axis - bearing) % math.pi - math.pi / 2) == pytest.approx(0.0)
 
     def test_none_when_the_alignment_has_no_direction(self):
         assert perpendicular_sill([(1, 1)], 0, (1, 1), 2.0) is None
         assert perpendicular_sill([], 0, (0, 0), 2.0) is None
-
-    def test_uses_the_local_tangent_on_a_bent_alignment(self):
-        # Corner at (10, 0): the second segment runs north, so a sill on it must
-        # run east-west, not north-south.
-        pts = [(0, 0), (10, 0), (10, 10)]
-        (x1, y1), (x2, y2), _ = perpendicular_sill(pts, 1, (10, 5), 4.0)
-        assert y1 == pytest.approx(5.0)
-        assert y2 == pytest.approx(5.0)
-        assert {round(x1, 6), round(x2, 6)} == {8.0, 12.0}

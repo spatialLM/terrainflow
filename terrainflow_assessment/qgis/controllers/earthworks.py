@@ -286,13 +286,19 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     def _spillway_sill(self, ew, point_geom, width_m):
         """The crest bar for a spillway: a segment of the built width, lying
-        square across the feature at the recorded point.
+        **along** the feature at the recorded point.
+
+        Along, not across. A weir's crest is the line the flow crosses on its way
+        out, so it lies along the bank; across the bank is the direction the water
+        travels. That was the wrong way round while this was only a map symbol, and
+        it is the geometry the burn now cuts — see
+        :func:`~terrainflow_assessment.modules.plan_geometry.crest_bar`.
 
         Returns ``(QgsGeometry, bearing_rad)``, or ``None`` when the point is not
         on the feature — which is a statement worth making rather than papering
         over, since it means the crest was sized from the wrong ground.
         """
-        from terrainflow_assessment.modules.plan_geometry import perpendicular_sill
+        from terrainflow_assessment.modules.plan_geometry import crest_bar
 
         target = self._spillway_constraint(ew)
         if target is None:
@@ -313,7 +319,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 return None
 
             # closestSegmentWithContext reports the vertex *after* the segment.
-            result = perpendicular_sill(
+            result = crest_bar(
                 polyline, max(0, int(after) - 1),
                 (closest.x(), closest.y()), width_m,
             )
@@ -325,6 +331,51 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return geom, bearing
         except Exception:
             return None
+
+    def _spillway_sills(self, earthworks=None, warn=False):
+        """``{earthwork id: crest-bar WKT}`` for every sited **outflow** spillway.
+
+        What the burn is given so it can cut the notches (``DEMBurner.burn_earthworks``
+        takes it as ``sills=``). The snap stays here rather than moving into the burner:
+        ``plan_geometry``'s docstring forbids a second implementation of *nearest point
+        on this alignment*, QGIS already answers it, and the burner receives only
+        ``Earthwork`` objects. So the controller resolves the bar and the burner cuts it.
+
+        Outflows only, and the reason is the same one ``_refresh_auto_spillway_widths``
+        gives: an inlet is a protected entry, not a weir, and notching one would open the
+        bank at the point water arrives and drain the pond through its own inlet.
+
+        *warn* pushes the orphaned-sill message. A recorded point more than
+        ``_SILL_ORPHAN_TOLERANCE_M`` from its feature used to cost a map symbol; now it
+        costs the cut, which is a change the user has to be told about rather than left
+        to notice in a capacity figure. Off by default because this is called from the
+        live tier too, and a message bar that repaints on every edit is not a warning.
+        """
+        ews = (self._state.earthwork_manager.get_enabled()
+               if earthworks is None else earthworks)
+        sills, orphans = {}, []
+        for ew in ews:
+            spillway = getattr(ew, "spillway", None)
+            if spillway is None or not spillway.point_wkt:
+                continue
+            if spillway.crest_elevation is None:
+                continue
+            point = QgsGeometry.fromWkt(spillway.point_wkt)
+            if point is None or point.isEmpty():
+                continue
+            sill = self._spillway_sill(ew, point, spillway.width_m or 0.0)
+            if sill is None:
+                orphans.append(ew.name)
+                continue
+            sills[ew.id] = sill[0].asWkt()
+        if warn and orphans:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"{', '.join(orphans)}: the recorded spillway point is not on the "
+                f"feature, so no notch was cut into the terrain for it and the model "
+                f"still routes the overflow over the bank. Place the spillway again.",
+            )
+        return sills
 
     @staticmethod
     def _sill_point(ew, kind="outflow"):
@@ -434,6 +485,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                     f"set to {crest:.2f} m, the highest this feature can offer.")
         setattr(ew, attr, spillway)
 
+        # Siting an **outflow** now moves terrain, so what this feature holds has to be
+        # measured again. It bought nothing while a spillway changed no raster, which is
+        # why this was left out; from the notch onward, skipping it leaves the panel
+        # showing a capacity taken against an unbreached bank — 2,133 m³ against 1,277 on
+        # Dam 15 of the Quail Island design. An inlet is not cut, so it is not remeasured.
+        if kind != "inflow":
+            self._refresh_terrain_capacity(ew)
         self._refresh_spillway_layer()
         self._recompute_live_assessment()
         self._mark_design_edit()
@@ -705,6 +763,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             stage_storage=None,
             peak_flow_m3s=self._provisional_peak_flow(catchment_m2),
             harvesting_coefficient=self._using_harvesting_coefficient(),
+            cell_size_m=self._dem_cell_size_m(),
         )
 
         if dlg.exec():
@@ -860,6 +919,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             peak_flow_m3s=peak_total,
             upstream_flow_m3s=peak_upstream,
             harvesting_coefficient=self._using_harvesting_coefficient(),
+            cell_size_m=self._dem_cell_size_m(),
             inflow_profile=edit_profile,
             overtop_station=edit_station,
             overtop_surplus=edit_surplus,
@@ -1173,13 +1233,24 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         (:meth:`_compute_dam_capacity` floods the same way), so re-flooding would buy an
         identical number at the same price. Degrades to None without a DEM, which puts the
         readout back on the drawn figure and says so.
+
+        **Except once a dam carries a sited spillway.** Then ``capacity_m3`` is the wrong
+        figure: it is what the wall holds brim-full, and the sill lets water go well below
+        that — worth about 30% of Dam 15's pool on the Quail Island design. The flood
+        :meth:`_refresh_dam_stage_storage` already runs for the curve is the one that can
+        answer it, so its volume is taken as well rather than a second flood being started,
+        and :meth:`_sill_limited_capacity` cuts it back to the sill off the same curve.
         """
         if ew.type == "dam":
-            ew.terrain_capacity_m3 = float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None
             # A wall, and its recorded band is the drawn line rather than the wall's own
             # footprint, so there is no excavation this measurement could honestly claim.
             ew.excavation_m3 = None
-            self._refresh_dam_stage_storage(ew)
+            storage = self._refresh_dam_stage_storage(ew)
+            if storage is not None:
+                ew.capacity_m3 = round(
+                    self._sill_limited_capacity(ew, storage.volume_m3), 2)
+                ew.capacity_l = ew.capacity_m3 * 1000.0
+            ew.terrain_capacity_m3 = float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None
             return
         if not self._state.dem_path:
             ew.terrain_capacity_m3 = None
@@ -1202,7 +1273,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 ew, baseline_ponding=self._cached_baseline_ponding(
                     burner.shape, burner.transform),
             )
-            ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
+            self._apply_measured_levels(ew, storage)
+            ew.terrain_capacity_m3 = round(
+                self._sill_limited_capacity(ew, storage.volume_m3), 2) or None
             ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
             ew.retained_depth_m = round(storage.retained_depth_m, 2)
             # The earth this takes out, measured on the same isolated burn that measured
@@ -1210,7 +1283,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # order-independent. `or None` would erase a genuine zero, which a feature
             # drawn entirely on flat ground at sub-cell width really can be.
             ew.excavation_m3 = round(storage.excavation_m3, 2)
-            self._apply_measured_levels(ew, storage)
             if not quiet:
                 self._warn_impoundment(ew)
         except Exception as exc:
@@ -1221,25 +1293,69 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     @staticmethod
     def _apply_measured_levels(ew, storage):
-        """Carry the measured spill level and stage–storage curve onto *ew*.
+        """Carry the measured containment level, curve and brim volume onto *ew*.
 
-        Both are **derived and never serialised**, the same rule ``terrain_capacity_m3``
-        follows: a level measured off one terrain model, saved into a design file and
-        opened against another is a stale answer wearing an authoritative face.
+        All three are **derived and never serialised**, the same rule
+        ``terrain_capacity_m3`` follows: a level measured off one terrain model, saved
+        into a design file and opened against another is a stale answer wearing an
+        authoritative face.
 
-        ``level_m`` is where the finished pond was actually found to let go, and it is
-        the honest containment datum once anything has been built — the analytic ring
-        minimum is what the hillside offers before the spoil goes anywhere.
+        ``level_m`` is where the finished pond was found to let go, and it is the honest
+        containment datum once anything has been built — the analytic ring minimum is
+        what the hillside offers before the spoil goes anywhere.
+
+        **The flood behind it is deliberately brim-full: the spillway is not cut into
+        it.** That is a departure from the first draft of the notch plan, and Stage B is
+        what forced it. Once the notch is cut, the pond lets go *at the sill*, so a
+        measured level fed back in as the containment datum collapses onto the crest —
+        the crest band becomes ``sill − head − freeboard`` and every re-open ratchets the
+        crest down by that much, ``spillway_validity`` fails every spillwayed feature for
+        having no freeboard, and the "what this sill gives up" readout goes to zero
+        because the curve now tops out at the sill. A container's capacity is a fact
+        about the container; the spillway is a control on top of it.
+
+        Nothing is lost by measuring it this way. The volume held **to the sill** comes
+        off the same curve — ``volume_at(crest)`` — and it agrees with a notched flood to
+        within the rounding: measured on Dam 15 of the Quail Island design, a notched
+        ``dam_storage`` returns 1,276.6 m³ and the brim-full curve answers 1,276.6 m³ at
+        the same level. One flood, both numbers, and the datum stays a datum. The site
+        burn still cuts the notch, which is where the rasters, the routing and the
+        overtopping check see it.
         """
         level = getattr(storage, "level_m", None)
         ew.terrain_spill_level_m = None if level is None else float(level)
         ew.stage_storage = getattr(storage, "stage_storage", None)
+        volume = getattr(storage, "volume_m3", None)
+        ew.containment_capacity_m3 = None if volume is None else float(volume)
+
+    @staticmethod
+    def _sill_limited_capacity(ew, brim_m3):
+        """What *ew* holds **to its spillway crest**, off the brim-full curve.
+
+        The figure the balance, the cascade and the report size against, because once a
+        spillway is sited the sill is the control and everything above it is freeboard
+        the design has deliberately given away. Without a sited spillway, or without a
+        curve to read, the brim volume is the answer — which is what it always was.
+
+        ``min`` rather than the curve's word alone: a crest above the brim holds the
+        whole pond and nothing more, and the curve extrapolating past its own top would
+        be inventing storage.
+        """
+        brim = float(brim_m3 or 0.0)
+        spillway = getattr(ew, "spillway", None)
+        crest = None if spillway is None else spillway.crest_elevation
+        curve = getattr(ew, "stage_storage", None)
+        if crest is None or curve is None or not getattr(spillway, "point_wkt", None):
+            return brim
+        held = curve.volume_at(crest)
+        return brim if held is None else min(brim, float(held))
 
     @staticmethod
     def _clear_measured_levels(ew):
-        """Drop the measured level and curve, for when there is no measurement."""
+        """Drop the measured level, curve and brim volume, for when there is none."""
         ew.terrain_spill_level_m = None
         ew.stage_storage = None
+        ew.containment_capacity_m3 = None
 
     def _refresh_dam_stage_storage(self, ew):
         """Measure a dam's stage–storage curve, which its capacity figure throws away.
@@ -1249,13 +1365,25 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         is what the crest control reads. So the flood is repeated here, and only where
         it can pay for itself: a dam that carries a spillway. On one without, nothing
         would read the answer.
+
+        The flood is **brim-full** — the notch is deliberately not cut into it, for the
+        reason :meth:`_apply_measured_levels` gives — so the curve it returns is the one
+        that can be asked what the feature holds *to the sill* without losing its own
+        containment datum.
+
+        Returns the :class:`FeatureStorage` where one was measured, and ``None`` where
+        none was, because the caller needs the volume as well as the curve:
+        :meth:`_sill_limited_capacity` reads the crest off it and that becomes the dam's
+        capacity. ``None`` therefore means *keep what you had*, which is the right answer
+        both for a dam with no spillway and for one measured while the burn worker holds
+        the burner.
         """
         if getattr(ew, "spillway", None) is None or not self._state.dem_path:
             self._clear_measured_levels(ew)
-            return
+            return None
         if worker_is_running(self._state, "design_worker"):
             # Both this and the burn hold `state.burner`; see _refresh_terrain_capacity.
-            return
+            return None
         try:
             from terrainflow_assessment.modules.earthwork_design import DEMBurner
             burner = self._state.burner or DEMBurner(self._state.dem_path)
@@ -1265,9 +1393,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 key_into_banks=bool(getattr(ew, "key_into_banks", False)),
             )
             self._apply_measured_levels(ew, storage)
+            return storage
         except Exception as exc:
             print(f"TerrainFlow Assessment — dam stage storage error: {exc}")
             self._clear_measured_levels(ew)
+            return None
 
     def _refresh_all_terrain_capacities(self):
         """Measure every feature's pond in one pass — on design open, or a DEM change.
@@ -1352,24 +1482,32 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
     def _on_terrain_capacities_ready(self, measured):
         for ew, storage in measured:
             if ew.type == "dam":                    # capacity_m3 IS this figure
-                ew.terrain_capacity_m3 = (
-                    float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None)
                 ew.excavation_m3 = None             # a wall: see _refresh_terrain_capacity
                 if storage in (None, False):        # not asked for, or it failed
                     self._clear_measured_levels(ew)
                 else:
+                    # …unless a notch has been cut, in which case the figure saved with
+                    # the design was taken against an unbreached wall. This flood is the
+                    # one that saw the spillway, so it is the capacity.
+                    # See _refresh_terrain_capacity's dam branch.
                     self._apply_measured_levels(ew, storage)
+                    ew.capacity_m3 = round(
+                        self._sill_limited_capacity(ew, storage.volume_m3), 2)
+                    ew.capacity_l = ew.capacity_m3 * 1000.0
+                ew.terrain_capacity_m3 = (
+                    float(getattr(ew, "capacity_m3", 0.0) or 0.0) or None)
                 continue
             if storage is False:                    # measurement failed; say nothing new
                 ew.terrain_capacity_m3 = None
                 ew.excavation_m3 = None
                 self._clear_measured_levels(ew)
                 continue
-            ew.terrain_capacity_m3 = round(storage.volume_m3, 2) or None
+            self._apply_measured_levels(ew, storage)
+            ew.terrain_capacity_m3 = round(
+                self._sill_limited_capacity(ew, storage.volume_m3), 2) or None
             ew.impounded_above_ground_m3 = round(storage.above_ground_m3, 2)
             ew.retained_depth_m = round(storage.retained_depth_m, 2)
             ew.excavation_m3 = round(storage.excavation_m3, 2)
-            self._apply_measured_levels(ew, storage)
         for ew, _ in measured:
             self._warn_impoundment(ew)
         self._panel.set_earthworks_idle()
@@ -1514,8 +1652,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # Terrain capacities are measured before the assessment, not after: they are
             # the basis it scores on, and a first paint against the drawn figures would
             # show every keyed swale full and then quietly correct itself.
+            # An auto width is derived, not stored (see ``Spillway.to_dict``), so it
+            # has to be recomputed *before* the list, the map label and the sill bar are
+            # drawn — all three read ``width_m``, and the live assessment that would
+            # otherwise supply it runs after them, or on a worker's completion.
             for step in (
                 self._rebase_restored_spillways,
+                self._refresh_auto_spillway_widths,
                 lambda: self._panel.refresh_earthwork_list(manager.get_all()),
                 self._refresh_ew_layer,
                 self._refresh_spillway_layer,
@@ -2201,17 +2344,29 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         :meth:`_check_spillway_capacity` skips auto widths on the grounds that they
         track by definition, which was true of the intention and false of the object.
 
+        The width written is the **buildable** one: the requirement rounded up to whole
+        DEM cells, which is what the burn cuts. The raw requirement travels beside it on
+        ``width_required_m`` so the rounding can be explained rather than just applied,
+        and so the committed-width path's adequacy checks keep testing the requirement
+        rather than the rounded figure.
+
+        The requirement is recorded on **every** outflow, auto or not. On the committed
+        path it is the number the shortfall check and the rounding note both quote, and
+        recomputing it in each of them is how two surfaces come to disagree.
+
         Outflows only. An inlet is a protected entry, not a weir; giving it a width from
         the overflow formula would invent a design procedure that does not exist.
         """
+        from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
         from terrainflow_assessment.modules.earthwork_design import (
             calculate_spillway_width,
             spillway_policy,
         )
 
+        cell = self._dem_cell_size_m()
         for ew in self._state.earthwork_manager.get_all():
             spillway = getattr(ew, "spillway", None)
-            if spillway is None or not spillway.width_auto:
+            if spillway is None:
                 continue
             total, _upstream = self._peak_flow_for(ew)
             if not total or total <= 0:
@@ -2220,8 +2375,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             required = calculate_spillway_width(total, head)
             # 0.0 means "these inputs say nothing" — no intensity, no catchment — not a
             # spillway zero metres wide. Writing it through would persist that fiction.
-            if required > 0:
-                spillway.width_m = required
+            if required <= 0:
+                continue
+            spillway.width_required_m = required
+            if spillway.width_auto:
+                spillway.width_m = (spillway_burn_width(required, cell) if cell
+                                    else required)
 
     def _spillway_row(self, ew):
         """One review row for *ew*, or None if this type has nothing to spill.
@@ -2231,7 +2390,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         of whether the user has ticked a box, and showing it before they commit is the
         whole of "features auto-size their spillways as you add them".
         """
+        from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
         from terrainflow_assessment.modules.earthwork_design import (
+            # Private on purpose, and imported on purpose: it is the millimetre
+            # `spillway_validity` makes its own elevation comparisons at, and the gauge
+            # below has to fire on exactly the condition the freeboard warning does or
+            # the two contradict each other about one feature.
+            _ELEV_EPS,
             calculate_spillway_width,
             effective_freeboard_m,
             effective_head_m,
@@ -2288,6 +2453,22 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             "containment_storage_m3": None,
             "given_up_m3": None,
             "given_up_pct": None,
+            # Where the water stands while the design storm passes the weir: the sill
+            # plus the head the built width actually produces. Between the sill volume
+            # and the containment volume is the spillway doing its job; touching the
+            # containment level means it is not sufficient.
+            "surcharge_level_m": None,
+            "surcharge_storage_m3": None,
+            "spillway_insufficient": None,
+            # The other two of B6's three elevations, both measured off the last burn
+            # and both None until one has run. Designed is `crest_elevation` above.
+            "burned_sill_m": None,
+            "actual_spill_level_m": None,
+            # Where the event water actually reached, and whether it ever got to the
+            # sill. A spillway the design storm never touches is not *sized wrong* — it
+            # is untested, and that is a different thing to tell the user.
+            "event_level_m": None,
+            "passes_this_event": None,
             "problems": [],
             # A parallel channel to `problems`, and it has to be parallel: this row goes
             # to "fail" on any problem at all, so a crest standing legitimately above
@@ -2310,6 +2491,20 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return row
 
         row["required_width_m"] = calculate_spillway_width(total, target_head) or None
+        # An auto width is derived rather than stored, so the row derives it too — a row
+        # that trusted `width_m` would print 0.0 for every restored design between the
+        # load and the first live recompute.
+        #
+        # Only where a spillway actually exists. `width_auto` reads True for a feature
+        # that has none at all (there is no object to ask), so without this guard every
+        # undesigned feature reports a built width — and the report prints that straight
+        # into its "Width designed" column, beside a status of "No spillway designed".
+        # What such a feature has is a *requirement*, which `required_width_m` already
+        # carries and which is the whole point of giving it a row.
+        if spillway is not None and width_auto and row["required_width_m"]:
+            cell = self._dem_cell_size_m()
+            row["built_width_m"] = (spillway_burn_width(row["required_width_m"], cell)
+                                    if cell else row["required_width_m"])
         built = row["built_width_m"] if spillway is not None else row["required_width_m"]
         row["actual_head_m"] = effective_head_m(
             target_head, peak_flow_m3s=total, width_m=built, width_auto=width_auto)
@@ -2343,6 +2538,29 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 row["given_up_m3"] = round(max(0.0, full - held), 1)
                 row["given_up_pct"] = (
                     100.0 * max(0.0, full - held) / full if full > 0 else None)
+            # The surcharge mark: where the water stands while the storm passes the
+            # weir. `effective_head_m` already answers "what head does the built width
+            # actually produce at this peak", and the curve turns that into a volume —
+            # so the gauge's three marks all come off one measurement.
+            if row["crest_elevation"] is not None and row["actual_head_m"]:
+                level = row["crest_elevation"] + row["actual_head_m"]
+                row["surcharge_level_m"] = round(level, 2)
+                at = curve.volume_at(level)
+                if at is not None:
+                    row["surcharge_storage_m3"] = round(min(at, full or at), 1)
+                # The same condition `spillway_validity`'s freeboard check fires on, so
+                # the gauge and the warning cannot disagree about one feature.
+                row["spillway_insufficient"] = bool(
+                    level >= containment - _ELEV_EPS)
+
+        # Measured off the last burn, not derived from the design — see
+        # `_record_spillway_levels` for what each disagreement means.
+        row["burned_sill_m"] = getattr(ew, "burned_sill_elevation_m", None)
+        row["actual_spill_level_m"] = getattr(ew, "actual_spill_level_m", None)
+        event = self._event_water_level(ew)
+        row["event_level_m"] = event
+        if event is not None and row["crest_elevation"] is not None:
+            row["passes_this_event"] = bool(event > row["crest_elevation"] + _ELEV_EPS)
 
         row["problems"] = spillway_validity(
             row["crest_elevation"], containment, invert_elevation=invert,
@@ -2358,6 +2576,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             containment_elevation=containment,
             containment_source=containment_src,
             berm_crest_elevation=getattr(ew, "berm_crest_elevation", None),
+            built_width_m=built, required_width_m=row["required_width_m"],
         )
         if containment is None:
             row["state"] = "no_datum"
@@ -2368,6 +2587,32 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         elif not row["sited"]:
             row["state"] = "unsited"
         return row
+
+    def _event_water_level(self, ew):
+        """Where the design storm's water actually stands in *ew*, or ``None``.
+
+        Off the stage–storage curve and the balance, not off a raster: the balance is
+        recomputed on every design edit, and the curve inverts to a level exactly, so
+        this answers on the live tier rather than waiting for a burn.
+
+        The point of it is to separate *sized wrong* from *never tested*. A sill the
+        modelled event never reaches passes nothing in this run, and nothing else on the
+        review says so — the freeboard column reads fine, because the water it is
+        measuring against is water that is not there.
+        """
+        curve = getattr(ew, "stage_storage", None)
+        balance = self._state.balance
+        if curve is None or balance is None:
+            return None
+        key = getattr(ew, "id", None)
+        for f in (getattr(balance, "per_feature", None) or []):
+            if (f.get("id") or f.get("name")) == key:
+                stored = f.get("stored_m3")
+                if stored is None:
+                    return None
+                level = curve.level_at(float(stored))
+                return None if level is None else round(float(level), 2)
+        return None
 
     def _build_spillway_rows(self):
         """Refresh the Design-stage spillway review.
@@ -2858,6 +3103,28 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             "nodata": None,
             "cell_size_m": max(burner.cell_size, burner.cell_h),
         }
+
+    def _dem_cell_size_m(self):
+        """The DEM cell the spillway width has to be rounded to, or ``None``.
+
+        The **coarser** axis, matching ``spillway_burn_width``: the crest axis is not
+        known at this point and the coarser one is what can fail to resolve the sill.
+        Off the **transform**, not ``DEMInfo.cell_size_m`` — that field is the mean of
+        the two axes, which on a non-square grid is neither of them and rounds a sill to
+        a width no cell has. The burner is the fallback so the dialog still answers
+        before a baseline has run.
+        """
+        info = self._state.dem_info
+        t = getattr(info, "transform", None) if info is not None else None
+        if t is not None:
+            try:
+                return max(abs(t.a), abs(t.e)) or None
+            except (AttributeError, TypeError):
+                pass
+        burner = self._state.burner or getattr(self, "_datum_burner", None)
+        if burner is not None:
+            return max(burner.cell_size, burner.cell_h) or None
+        return None
 
     def _spillway_datums(self, geometry, ew_type, top_width_m=None, depth=None,
                          crest_elevation=None, ew=None, sill_point=None,
@@ -3966,12 +4233,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         burner = self._state.burner
         mod_path = os.path.join(self._state.output_dir, "modified_dem.tif")
         cell_area = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0
+        # Resolved here, on the GUI thread, because the snap goes through QGIS geometry
+        # and the worker may not touch it. This is also where the orphaned-sill warning
+        # belongs: a Verify run is the moment the user is asking what the terrain does.
+        sills = self._spillway_sills(enabled, warn=True)
 
         def work(report):
             from terrainflow_assessment.modules.earthwork_design import burn_quantities
 
             report(5, "Cutting the design into the terrain…")
-            modified_dem = burner.burn_earthworks(enabled)
+            modified_dem = burner.burn_earthworks(enabled, sills=sills)
             report(20, "Saving the burned surface…")
             burner.save(modified_dem, mod_path)
             # What the terrain model actually moved, measured here because both
@@ -4072,10 +4343,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         # Non-circular check: terrain-derived ponding vs analytic capacity (§4).
         self._state.verification = self._compute_verification()
-        # Both need what that pass read off disk, so they follow it rather than
+        # All three need what that pass read off disk, so they follow it rather than
         # standing on their own.
+        self._record_spillway_levels()
         self._build_event_pond_layers()
         self._build_overtopping_layer()
+        self._build_burned_spillway_layer()
         msg = "Earthworks analysis complete. Toggle 'Show: with earthworks' to compare."
         v = self._state.verification
         if v is not None:
@@ -4348,6 +4621,168 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         }
         return result
 
+    def _record_spillway_levels(self):
+        """Measure, off the finished burn, the two levels the design cannot state itself.
+
+        Three elevations describe a spillway and they are allowed to disagree — each
+        disagreement names a different fault, which is what turns *the model can now see
+        my spillway* from a claim into something the user can check:
+
+        * **designed sill** — ``Spillway.crest_elevation``, the absolute the burn cut to.
+        * **as-burned sill** (here) — the highest level water crossing the notch has to
+          clear, on the surface as it stands. Above the designed sill means the notch was
+          refused and the bank is still there; below it means the whole path was already
+          lower than the sill, so the cut did nothing.
+        * **actual spill level** (here) — where the finished pond, on the whole burned
+          site, was found to let go. Above the as-burned sill means the notch did not
+          daylight and the water is leaving somewhere else; below the designed sill means
+          a saddle elsewhere on the rim is lower and the spillway is not the control.
+
+        Both are derived and cleared with the DEM, the same rule ``terrain_capacity_m3``
+        follows. Measured on the **site** burn rather than a per-feature one, because the
+        question is what the finished design does, neighbours included.
+        """
+        import numpy as np
+        import rasterio
+        from scipy.ndimage import label as _label
+
+        from terrainflow_assessment.modules.earthwork_design import _POND_MIN_DEPTH_M
+
+        for ew in self._state.earthwork_manager.get_all():
+            ew.burned_sill_elevation_m = None
+            ew.actual_spill_level_m = None
+
+        burner = self._state.burner
+        if burner is None:
+            return
+
+        # The as-burned sill comes off the burn and needs nothing else, so it is
+        # recorded first and unconditionally. Gating it behind the verification pass
+        # would lose it on every design the verification skips — and it skips anything
+        # with no analytic capacity, which is exactly a feature drawn but not yet sized.
+        sills = getattr(burner, "burned_sills", None) or {}
+        by_ew = {getattr(ew, "id", None): ew
+                 for ew in self._state.earthwork_manager.get_enabled()}
+        for key, level in sills.items():
+            ew = by_ew.get(key)
+            if ew is not None:
+                ew.burned_sill_elevation_m = float(level)
+
+        # The measured spill level does need the pond, and the pond comes from the
+        # verification pass. No pond, no answer — which is different from "it lets go at
+        # the sill" and has to stay so.
+        ctx = self._state.pond_context
+        dem_path = self._state.modified_dem_path
+        if not ctx or not dem_path or not os.path.exists(dem_path):
+            return
+
+        try:
+            with rasterio.open(dem_path) as src:
+                ground = src.read(1).astype("float64")
+        except Exception:
+            return
+        if ground.shape != ctx["shape"]:
+            return
+
+        pond = np.asarray(ctx["full"], dtype="float64")
+        # The same floor `attribute_ponding_volume` and `feature_storage` use, so all
+        # three agree about what counts as a pond rather than each choosing a threshold.
+        labels, _n = _label(pond > _POND_MIN_DEPTH_M)
+        surface = ground + pond
+        by_id = dict(ctx.get("footprints") or [])
+        for key, ew in by_ew.items():
+            mask = by_id.get(key)
+            if mask is None or mask.shape != ground.shape:
+                continue
+            own = set(np.unique(labels[mask])) - {0}
+            if not own:
+                continue
+            region = np.isin(labels, list(own))
+            # A pool is level, so any wet cell answers it; the max is taken only to be
+            # immune to the ragged cells at its edge — the same reading
+            # ``overtopping_spill`` makes of the same rasters.
+            ew.actual_spill_level_m = float(surface[region].max())
+
+    def _build_burned_spillway_layer(self):
+        """Draw the notches the burn actually cut, so *did it work* is a map question.
+
+        "Did the model cut my spillway, and where?" has no answer on the map otherwise:
+        the sill bar on the Design stage is what was asked for, and the cut is what
+        happened. The mask is already in hand from the burn, so this is close to free,
+        and it is the visual partner to the three elevations :meth:`_record_spillway_levels`
+        records — a feature with a sill bar and no burned band is one whose notch was
+        refused.
+
+        Under **Verify**, through ``_groups``: it is a measurement off the burn, like the
+        ponding and overtopping layers it sits beside, not part of the drawn design.
+        """
+        from rasterio.features import shapes as _shapes
+
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        remove_layer(self._project, self._state.burned_spillway_layer_id)
+        self._state.burned_spillway_layer_id = None
+
+        burner = self._state.burner
+        notches = getattr(burner, "burned_notches", None) or {}
+        if not notches:
+            return
+        sills = getattr(burner, "burned_sills", None) or {}
+        by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+
+        try:
+            layer = QgsVectorLayer(f"Polygon?crs={dem_crs(self._state)}",
+                                   "Earthworks — Spillways (burned)", "memory")
+            pr = layer.dataProvider()
+            pr.addAttributes([
+                QgsField("name", QMetaType.QString),
+                QgsField("label", QMetaType.QString),
+                QgsField("sill_m", QMetaType.Double),
+                QgsField("cells", QMetaType.Int),
+            ])
+            layer.updateFields()
+
+            feats = []
+            for key, mask in notches.items():
+                ew = by_id.get(key)
+                if ew is None or mask is None or not mask.any():
+                    continue
+                sill = sills.get(key)
+                bits = [ew.name, "spillway cut"]
+                if sill is not None:
+                    bits.append(f"{float(sill):.2f} m")
+                parts = []
+                for geom, _v in _shapes(mask.astype("uint8"), mask=mask,
+                                        transform=burner.transform):
+                    rings = geom.get("coordinates", [])
+                    if not rings:
+                        continue
+                    poly = QgsGeometry.fromPolygonXY(
+                        [[QgsPointXY(float(x), float(y)) for x, y in ring]
+                         for ring in rings])
+                    if poly is not None and not poly.isEmpty():
+                        parts.append(poly)
+                if not parts:
+                    continue
+                merged = parts[0]
+                for extra in parts[1:]:
+                    merged = merged.combine(extra)
+                f = QgsFeature(layer.fields())
+                f.setGeometry(merged)
+                f.setAttributes([ew.name, " · ".join(bits),
+                                 None if sill is None else round(float(sill), 2),
+                                 int(mask.sum())])
+                feats.append(f)
+            if not feats:
+                return
+            pr.addFeatures(feats)
+            layer.updateExtents()
+            layer.renderer().setSymbol(S.burned_spillway_symbol())
+            self.place(layer, G.VERIFY, at_top=True)
+            self._state.burned_spillway_layer_id = layer.id()
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — burned spillway layer error: {exc}")
+
     def _build_event_pond_layers(self):
         """Draw where *this event's* water actually stands, over the full pond.
 
@@ -4533,6 +4968,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         original = getattr(burner, "original", None)
         masks = getattr(burner, "burned_masks", None) or {}
         built_by = getattr(burner, "burned_raised", None) or {}
+        notched = getattr(burner, "burned_notches", None) or {}
         if original is None or original.shape != ground.shape:
             return
         # The cells this feature *raised* — its crest — not its whole footprint. A cut
@@ -4552,6 +4988,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if mask is None or mask.shape != ground.shape:
                 continue
             crest = mask & raised
+            # The designed spillway is not part of the crest. A notch cut into raised
+            # ground is still raised — it is a lowered piece of a bank that was built —
+            # so without this subtraction a correctly spillwayed dam reports "leaves over
+            # its own crest" *at its own spillway*, which is the one place it is supposed
+            # to leave. Water going through the notch is the design working.
+            notch = notched.get(key)
+            if notch is not None and notch.shape == ground.shape:
+                crest = crest & ~notch
             if not crest.any():
                 continue
             try:

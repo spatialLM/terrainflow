@@ -99,6 +99,11 @@ class PluginState:
     throughflow_layer_id: str | None = None
     connections_layer_id: str | None = None
     spillway_layer_id: str | None = None
+    # The notches the burn actually cut, drawn under Verify. Separate from
+    # `spillway_layer_id`, which is the Design-stage bar: one is what was asked for and
+    # the other is what happened, and a feature with the first and not the second is a
+    # spillway the terrain refused.
+    burned_spillway_layer_id: str | None = None
     stress_points_layer_id: str | None = None   # where features overtop locally
 
     # ------------------------------------------------------------------ Contour analysis
