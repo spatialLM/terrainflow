@@ -32,7 +32,16 @@ from dataclasses import dataclass, field
 # The bump is for the *other* direction: an older build re-saving one of these designs
 # iterates its own shorter field tuple and drops the height silently, and the version is
 # what lets ``is_from_newer_build`` say so before that happens.
-SCHEMA_VERSION = 2
+#
+# 3 (2026-08-19): ``Earthwork.spillway_link_id`` — which spillway a diversion drain takes
+# its start level from. Same mechanics, and the bump matters more here: a height can be
+# re-derived from the crest, whereas a link is a *decision*, recoverable from nothing.
+# An older build re-saving the design would drop it, and the drain would go back to
+# grading from the ground under its own alignment — which is a plausible-looking level,
+# and so a change nobody would notice. (The Stage B round did **not** bump for the auto
+# width, and said why: that figure is derived either way, so nothing a user chose is
+# lost in either direction.)
+SCHEMA_VERSION = 3
 
 # Recognised DEM carriage modes. "embedded" means the archive holds a (buffered) clip of
 # the DEM; "reference" means it holds only a fingerprint and the DEM must be located.

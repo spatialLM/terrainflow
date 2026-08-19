@@ -373,6 +373,74 @@ class TestEarthworkDelegation:
         assert EarthworkManager().from_json(
             doc.earthworks_json(), geometry_factory=_factory) == 0
 
+    def test_a_spillway_link_survives_the_document_round_trip(self):
+        """The link is a *decision*, so unlike the rest of the derived family it is
+        stored — and it is what took ``SCHEMA_VERSION`` to 3. A height above floor can
+        be re-derived from the crest; which spillway a drain was linked to is
+        recoverable from nothing.
+        """
+        manager = _manager()
+        drain = Earthwork("diversion", _WktGeom("LINESTRING (0 0, 50 0)"), "Drain 3")
+        source_id = manager.get_all()[0].id
+        drain.spillway_link_id = f"{source_id}:outflow:end"
+        manager.add(drain)
+
+        reopened = DesignDocument.from_json(
+            DesignDocument.build({}, earthworks_json=manager.to_json()).to_json())
+        restored = EarthworkManager()
+        restored.from_json(reopened.earthworks_json(), geometry_factory=_factory)
+
+        back = [e for e in restored.get_all() if e.name == "Drain 3"][0]
+        assert back.spillway_link_id == f"{source_id}:outflow:end"
+
+    def test_the_level_a_link_resolves_to_is_not_stored(self):
+        """``invert_start_m`` is another feature's crest. A level cached in a project
+        file outlives the design that produced it, so it is re-derived on restore — the
+        same rule ``terrain_capacity_m3`` follows.
+        """
+        manager = _manager()
+        drain = Earthwork("diversion", _WktGeom("LINESTRING (0 0, 50 0)"), "Drain 3")
+        drain.spillway_link_id = f"{manager.get_all()[0].id}:outflow:start"
+        drain.invert_start_m = 55.52
+        manager.add(drain)
+
+        payload = json.loads(manager.to_json())
+        stored = [e for e in payload["earthworks"] if e["name"] == "Drain 3"][0]
+        assert "invert_start_m" not in stored
+
+        restored = EarthworkManager()
+        restored.from_json(manager.to_json(), geometry_factory=_factory)
+        back = [e for e in restored.get_all() if e.name == "Drain 3"][0]
+        assert back.invert_start_m is None
+
+    def test_a_link_to_a_feature_that_is_gone_still_opens_the_design(self):
+        """Dangling is tolerated at read time, not repaired at write time. Clearing the
+        link when the source is deleted would be a second and silently different
+        failure: the design would stop meaning what it said with nothing left to report.
+        """
+        manager = _manager()
+        drain = Earthwork("diversion", _WktGeom("LINESTRING (0 0, 50 0)"), "Drain 3")
+        drain.spillway_link_id = "a-feature-that-was-deleted:outflow:start"
+        manager.add(drain)
+
+        restored = EarthworkManager()
+        assert restored.from_json(manager.to_json(), geometry_factory=_factory) == 3
+        back = [e for e in restored.get_all() if e.name == "Drain 3"][0]
+        assert back.spillway_link_id == "a-feature-that-was-deleted:outflow:start"
+
+        from terrainflow_assessment.modules.earthwork_design import (
+            resolve_spillway_links,
+        )
+        inverts, dangling = resolve_spillway_links(restored.get_all())
+        assert inverts == {}
+        assert [name for name, _why in dangling] == ["Drain 3"]
+
+    def test_an_unlinked_drain_writes_no_link(self):
+        manager = EarthworkManager()
+        manager.add(Earthwork("diversion", _WktGeom("LINESTRING (0 0, 50 0)"), "Drain"))
+        stored = json.loads(manager.to_json())["earthworks"][0]
+        assert stored["spillway_link_id"] is None
+
     @pytest.mark.parametrize("bad", ["not json", "[1, 2, 3]", ""])
     def test_malformed_payload_degrades_to_empty(self, bad):
         assert DesignDocument.build({}, earthworks_json=bad).earthworks == {}

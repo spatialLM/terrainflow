@@ -10,6 +10,7 @@ Emits:
   draw_earthwork_requested(key)   — any non-swale registry key
   place_spillway_requested(kind)  — 'outflow' | 'inflow' spillway placement
   connect_earthworks_requested()  — route one feature's overflow into another
+  link_drain_to_spillway_requested() — grade a diversion drain from a spillway crest
 """
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -39,6 +40,10 @@ _CONNECTION_ROWS = (
     ("outflow", "▽", "#1273b5", "Outflow Spillway", H.TOOL_OUTFLOW_SPILLWAY),
     ("inflow", "▲", "#2e7d55", "Inflow Spillway", H.TOOL_INFLOW_SPILLWAY),
     ("connect", "⇢", "#5f7176", "Route Overflow", H.TOOL_ROUTE_OVERFLOW),
+    # The same grey as Route Overflow, deliberately: both rows link two features that
+    # already exist, as against the two above them, which place a structure. A fourth
+    # chip colour would say these are four unrelated things.
+    ("link_drain", "⇥", "#5f7176", "Drain from Spillway", H.TOOL_LINK_DRAIN),
 )
 
 
@@ -47,6 +52,7 @@ class EarthworkToolMenu(QWidget):
     draw_earthwork_requested = pyqtSignal(str)
     place_spillway_requested = pyqtSignal(str)   # 'outflow' | 'inflow'
     connect_earthworks_requested = pyqtSignal()
+    link_drain_to_spillway_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,7 +73,11 @@ class EarthworkToolMenu(QWidget):
         if other:
             lay.addWidget(self._tool_group(other, types))
 
-        lay.addWidget(self._group_label("CONNECTIONS — ROUTE OVERFLOW"))
+        # Not "ROUTE OVERFLOW" any more: the group holds two spillway placements, one
+        # overflow link and one drain link, and only the third of those routes an
+        # overflow. A group label that describes half its rows is worse than a general
+        # one, because it reads as a promise about what is in the box.
+        lay.addWidget(self._group_label("CONNECTIONS — SPILLWAYS AND ROUTING"))
         lay.addWidget(self._connection_group())
 
     # ------------------------------------------------------------------ build
@@ -144,6 +154,7 @@ class EarthworkToolMenu(QWidget):
             "outflow": lambda: self.place_spillway_requested.emit("outflow"),
             "inflow": lambda: self.place_spillway_requested.emit("inflow"),
             "connect": self.connect_earthworks_requested.emit,
+            "link_drain": self.link_drain_to_spillway_requested.emit,
         }
         for i, (key, glyph, colour, label, tip) in enumerate(_CONNECTION_ROWS):
             row = QFrame()

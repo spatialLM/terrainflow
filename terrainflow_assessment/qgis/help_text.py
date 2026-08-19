@@ -1198,6 +1198,14 @@ TOOL_ROUTE_OVERFLOW = (
     "inflow spillway where both are placed.\n"
     "A link that would close a loop is refused."
 )
+TOOL_LINK_DRAIN = (
+    "Click the END of a diversion drain, then the feature whose spillway\n"
+    "feeds it. The drain is then cut from that crest instead of from the\n"
+    "ground under its own line — which is a guess about where the water\n"
+    "arrives.\n"
+    "The end you click is the end it grades DOWN from.\n"
+    "Run it again on the same pair to unlink."
+)
 
 # --------------------------------------------------------------------- Flow network
 # Drawdown bands. Lancaster sizes earthworks so they "work, don't flood, and

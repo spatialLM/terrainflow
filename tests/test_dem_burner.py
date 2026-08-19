@@ -1,5 +1,7 @@
 """Tests for plugin/processing/dem_burner.py"""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import rasterio
@@ -56,6 +58,13 @@ def _mock_ew(ew_type, geom, **kwargs):
     ew.spillway = kwargs.get("spillway", None)
     ew.outflow_spillway = ew.spillway
     ew.inflow_spillway = kwargs.get("inflow_spillway", None)
+    # The spillway link and the level it resolves to, for `_burn_diversion`'s grade
+    # datum. Explicit for `batter_run_m`'s reason and then some: left unset, every mock
+    # drain would grade from a MagicMock that floats to 1.0 — a datum ~99 m under the
+    # test fixtures' ground, which cuts a trench that deep and reads as a burn fault
+    # rather than as a mock.
+    ew.spillway_link_id = kwargs.get("spillway_link_id", None)
+    ew.invert_start_m = kwargs.get("invert_start_m", None)
     ew.id = kwargs.get("id", ew.name)
     return ew
 
@@ -605,6 +614,201 @@ class TestDiversionBurnEquivalence:
         cut = got < b.original - 1e-9
         assert cut.any(), "a sub-cell drain burned nothing at all"
         assert cut.sum() >= 25, f"only {int(cut.sum())} cells — the path is broken"
+
+
+class TestSpillwayLinkedDiversion:
+    """A drain graded from a spillway crest instead of from the ground under its line.
+
+    Stage C of ``CLudeDocs/SPILLWAY_NOTCH_PLAN.md``. The burner never learns what a link
+    is: the controller resolves it and puts one absolute on the feature, exactly as it
+    resolves the crest bar and passes it as ``sills=``. So these tests set
+    ``invert_start_m`` directly, which is what the burner actually sees.
+
+    Why an absolute and not a level read off the surface: the notch is cut as a
+    **post-pass**, so when ``_burn_diversion`` runs the source's spillway is not in the
+    array yet. ``test_the_datum_does_not_wait_for_the_notch`` is that fact, pinned.
+    """
+
+    @staticmethod
+    def _slope(rows=40, cols=40, top=100.0, fall=0.0):
+        """Ground that falls along the drain's own axis, so a grade is measurable."""
+        data = np.full((rows, cols), top)
+        if fall:
+            data -= np.arange(cols) * (fall / max(1, cols - 1))
+        return data
+
+    def _drain(self, tmp_path, data, coords, **kwargs):
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        ew = _mock_ew("diversion", make_mock_line_geom(coords), depth=1.0, width=3.0,
+                      bottom_width_m=3.0, gradient_pct=0.0, **kwargs)
+        return b, b.burn_earthworks([ew]), ew
+
+    # A diversion is a conveyance, so it gets `enforce_monotonic_path` after the graded
+    # burn — which cuts a strict 1 mm per cell even at zero gradient. Mid-alignment that
+    # is ~1.5 cm below the graded invert, which is why these read to 2 cm rather than to
+    # the millimetre. It is existing behaviour and nothing here changes it.
+    _BREACH = 0.02
+
+    def test_an_unlinked_drain_still_grades_from_the_ground(self, tmp_path):
+        """The fallback, unchanged — and the baseline the linked cases move against."""
+        b, out, _ew = self._drain(
+            tmp_path, self._slope(), [(5.0, 20.0), (35.0, 20.0)])
+        assert float(out[20, 20]) == pytest.approx(99.0, abs=self._BREACH)
+        assert b.warnings == [] or all("grade from" not in w for w in b.warnings)
+
+    def test_a_linked_drain_is_cut_from_the_crest_and_not_from_the_ground(self, tmp_path):
+        """Ground at 100; the crest it takes from is at 96, four metres below.
+
+        The bed comes out one depth below the datum, exactly as it comes out one depth
+        below a ground sample — ``invert_start_m`` replaces the sample, it is not the
+        bed level itself.
+        """
+        _b, out, _ew = self._drain(
+            tmp_path, self._slope(), [(5.0, 20.0), (35.0, 20.0)],
+            invert_start_m=96.0, spillway_link_id="s1:outflow:start")
+        assert float(out[20, 20]) == pytest.approx(95.0, abs=self._BREACH)
+
+    def test_a_crest_above_the_ground_raises_nothing(self, tmp_path):
+        """``np.minimum``, so a datum standing over the terrain cannot fill.
+
+        Not *nothing at all*: the monotonic breach still carves its millimetre a cell,
+        because a diversion is a conveyance and that runs whatever the grade did. What
+        must not happen is the 40 m of fill a maximum would have put here.
+        """
+        b, out, _ew = self._drain(
+            tmp_path, self._slope(), [(5.0, 20.0), (35.0, 20.0)],
+            invert_start_m=140.0, spillway_link_id="s1:outflow:start")
+        assert out.max() <= b.original.max() + 1e-6
+        assert float(b.original[20, 20] - out[20, 20]) < self._BREACH
+
+    def test_the_grade_runs_down_from_the_linked_end(self, tmp_path):
+        """A 2% drain over 30 m: 0.6 m of fall, and which end it starts at decides
+        which end is deep.
+
+        This is the failure the link's third token exists to prevent, and it is
+        invisible from any single number: grading from the wrong end produces a drain
+        that runs uphill from an entirely plausible-looking level.
+        """
+        data = self._slope()
+        coords = [(5.0, 20.0), (35.0, 20.0)]
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+
+        def cut(end):
+            ew = _mock_ew("diversion", make_mock_line_geom(coords), depth=1.0,
+                          width=3.0, bottom_width_m=3.0, gradient_pct=2.0,
+                          invert_start_m=96.0, spillway_link_id=f"s1:outflow:{end}")
+            out = b.burn_earthworks([ew])
+            return float(out[20, 6]), float(out[20, 34])
+
+        west_start, east_start = cut("start")
+        west_end, east_end = cut("end")
+
+        # Linked at the first vertex (west): the west end is at the datum and the east
+        # end is 0.6 m lower. Linked at the last vertex (east): exactly reversed.
+        assert west_start == pytest.approx(95.0, abs=0.05)
+        assert east_start == pytest.approx(94.4, abs=0.05)
+        assert east_end == pytest.approx(95.0, abs=0.05)
+        assert west_end == pytest.approx(94.4, abs=0.05)
+
+    def test_linking_an_end_does_not_reverse_the_stored_alignment(self, tmp_path):
+        """The reversal is local to the burn; the geometry the user drew is untouched.
+
+        Reversing it on link would desynchronise ``source_contour_coords`` from the
+        vertices it describes and would survive an unlink, with no undo stack anywhere
+        in this plugin to put it back.
+        """
+        coords = [(5.0, 20.0), (35.0, 20.0)]
+        geom = make_mock_line_geom(coords)
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"),
+                                 self._slope().astype("float32")))
+        ew = _mock_ew("diversion", geom, depth=1.0, width=3.0, bottom_width_m=3.0,
+                      gradient_pct=2.0, invert_start_m=96.0,
+                      spillway_link_id="s1:outflow:end")
+        before = geom.asJson()
+        b.burn_earthworks([ew])
+        assert geom.asJson() == before
+
+    def test_a_datum_that_is_not_a_level_falls_back_to_the_ground(self, tmp_path):
+        """A link the controller could not resolve leaves the field None or unusable.
+
+        The drain then does what it did before it was linked; the controller reports
+        the fallback, and the burner does not guess at it.
+        """
+        for bad in (None, float("nan"), "not a level"):
+            _b, out, _ew = self._drain(
+                tmp_path, self._slope(), [(5.0, 20.0), (35.0, 20.0)],
+                invert_start_m=bad, spillway_link_id="s1:outflow:start")
+            assert float(out[20, 20]) == pytest.approx(99.0, abs=self._BREACH), bad
+
+    def test_the_datum_does_not_wait_for_the_notch(self, tmp_path):
+        """The source's spillway is cut **after** the type dispatch, so at the moment
+        the drain is burned the notch is not in the array. The drain is cut to the same
+        level either way, because the datum is an absolute off the design rather than
+        anything read from the running surface.
+        """
+        data = self._slope()
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        drain = _mock_ew("diversion", make_mock_line_geom([(5.0, 30.0), (35.0, 30.0)]),
+                         depth=1.0, width=3.0, bottom_width_m=3.0, gradient_pct=0.0,
+                         invert_start_m=96.0, spillway_link_id="dam:outflow:start",
+                         name="Drain", id="drain")
+        alone = b.burn_earthworks([drain])
+
+        dam = _mock_ew("dam", make_mock_line_geom([(20.0, 5.0), (20.0, 15.0)]),
+                       crest_elevation=98.0, name="Dam", id="dam",
+                       spillway=SimpleNamespace(crest_elevation=96.0, width_m=2.0,
+                                                point_wkt="POINT (20 10)"))
+        together = b.burn_earthworks(
+            [dam, drain], sills={"dam": "LINESTRING (19 10, 21 10)"})
+        assert float(together[30, 20]) == pytest.approx(float(alone[30, 20]), abs=1e-6)
+
+    def test_a_source_drawn_after_its_drain_is_burned_first(self, tmp_path):
+        """``burn_order``, through the burner rather than over the list.
+
+        The datum does not need it, but the drain's cut is an ``np.minimum`` against the
+        running array and its breach walks the surface as it stands — so the source has
+        to be finished ground by the time the drain reads it.
+        """
+        data = self._slope()
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        seen = []
+        real_diversion, real_swale = b._burn_diversion, b._burn_swale
+
+        def note(fn, label):
+            def wrapped(dem, geom, ew):
+                seen.append(label)
+                return fn(dem, geom, ew)
+            return wrapped
+
+        b._burn_diversion = note(real_diversion, "drain")
+        b._burn_swale = note(real_swale, "source")
+
+        drain = _mock_ew("diversion", make_mock_line_geom([(5.0, 30.0), (35.0, 30.0)]),
+                         depth=1.0, width=3.0, bottom_width_m=3.0, gradient_pct=0.0,
+                         invert_start_m=96.0, spillway_link_id="src:outflow:start",
+                         name="Drain", id="drain")
+        source = _mock_ew("swale", make_mock_line_geom([(20.0, 5.0), (20.0, 15.0)]),
+                          depth=0.5, width=2.0, name="Source", id="src")
+        b.burn_earthworks([drain, source])
+        assert seen == ["source", "drain"]
+
+    def test_an_unlinked_design_burns_in_the_order_it_was_given(self, tmp_path):
+        """The property that keeps the reorder from moving any existing number."""
+        data = self._slope()
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data.astype("float32")))
+        seen = []
+        real = b._burn_swale
+
+        def wrapped(dem, geom, ew):
+            seen.append(ew.name)
+            return real(dem, geom, ew)
+
+        b._burn_swale = wrapped
+        ews = [_mock_ew("swale", make_mock_line_geom([(5.0, y), (35.0, y)]),
+                        depth=0.5, width=2.0, name=f"S{i}", id=f"s{i}")
+               for i, y in enumerate((10.0, 20.0, 30.0))]
+        b.burn_earthworks(ews)
+        assert seen == ["S0", "S1", "S2"]
 
 
 class TestNonSquareCells:

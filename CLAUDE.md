@@ -213,6 +213,27 @@ Non-obvious invariants:
   bed **net of natural ponding**, so `volume_at(level_m)` reproduces `volume_m3` exactly.
   A dam's curve comes from `DEMBurner.dam_storage`, because `dam_stage_storage` returns
   only the volume.
+- **A diversion drain can start at a spillway crest, and the link carries which end.**
+  `Earthwork.spillway_link_id` is `"<source id>:<kind>:<end>"` — an id because a flag
+  cannot say *which* spillway and a feature carries two, and **serialised** because it is
+  a decision recoverable from nothing (`SCHEMA_VERSION` 3). `invert_start_m` is the level
+  it resolves to; it is derived and never serialised, and it replaces `_burn_diversion`'s
+  **ground sample**, so the bed comes out one depth below it and it is not the invert its
+  name suggests. It must be an absolute off the design: the notch is a post-pass, so when
+  `_burn_diversion` runs the source's spillway is not in the array yet, and reading the
+  surface would reintroduce the order dependence the link removes. **The end travels with
+  the link rather than the alignment being reversed on attachment** — reversing mutates a
+  geometry the user drew, desynchronises `source_contour_coords`, and survives an unlink;
+  `_burn_diversion` reverses its own working copy instead. Links resolve at **read time**
+  (`resolve_spillway_links`, mirroring `overflow_target_id` → `resolve_targets`): a
+  deleted, disabled or de-spillwayed source leaves the link dangling and the drain grades
+  from its own ground, reported at burn time — clearing links eagerly on delete is a
+  second and silently different failure. Cycles are refused via `topological_order`, and
+  self-links separately, because that function skips an edge to its own node. Only an
+  **outflow** is honoured: an inlet is where water arrives, so a drain on one is
+  delivering and its grade would run backwards, which under `np.minimum` cuts nothing at
+  all. `burn_order` puts a source ahead of its drains — stable and minimal, so a design
+  with no links burns in exactly the order it was given.
 
 ## The report (`Site Water Plan`, PDF)
 

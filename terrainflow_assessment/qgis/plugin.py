@@ -250,6 +250,7 @@ class TerrainFlowAssessmentPlugin:
         p.place_spillway_for_requested.connect(ew.place_spillway_for)
         p.edit_earthwork_requested.connect(ew.edit_earthwork_at)
         p.connect_earthworks_requested.connect(ew.activate_connect_earthworks)
+        p.link_drain_to_spillway_requested.connect(ew.activate_link_drain_to_spillway)
         p.choose_design_intensity_requested.connect(ew.choose_design_intensity)
         p.edit_rainfall_data_requested.connect(ew.edit_rainfall_data)
         p.earthwork_selected.connect(ew.highlight_selected_earthwork)

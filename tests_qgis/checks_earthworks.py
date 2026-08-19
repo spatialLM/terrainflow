@@ -1070,3 +1070,186 @@ def check_spillway_context_without_an_idf_table(dem_path):
         assert "intensity_mm_hr" in context, "the footer still needs an intensity"
         assert isinstance(context["intensity_is_default"], bool)
         h.assert_no_errors("spillway context with no IDF table")
+
+
+def check_linking_a_drain_to_a_spillway_grades_it_from_the_crest(dem_path):
+    """Stage C end to end: two clicks, and the drain is cut from the crest.
+
+    Driven with **real synthetic clicks** rather than by emitting the tool's signal,
+    because the novel thing about this tool is that its first click picks an *endpoint*
+    and that endpoint decides which way the drain falls. Grading from the wrong end
+    produces a drain running uphill from an entirely plausible-looking level — no
+    exception, no warning, no odd number — so the click-to-endpoint resolution is the
+    part worth exercising through the whole conversion chain.
+
+    Four things are asserted, and only the first is about the tool: the link records the
+    end that was clicked; the level it resolves to is the source's crest; the burn cuts
+    the drain from that level rather than from the ground under its own line; and
+    repeating the same gesture removes the link.
+    """
+    import numpy as np
+    import rasterio
+    from _mouse import click_map
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    from terrainflow_assessment.map_tools.link_spillway_tool import LinkSpillwayTool
+    from terrainflow_assessment.modules.earthwork_design import parse_spillway_link
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        h.prepare_canvas_for_input()
+
+        # The source: a swale across the valley with a sited outflow spillway, sized
+        # through the vertex-edit path so it has a capacity and a datum to work from.
+        source_geom = line_across_valley(row=60)
+        source = h.add_earthwork("swale", geometry=source_geom, name="Source swale")
+        controller._on_vertex_edit_finished(0, source_geom)
+        sill = source.geometry.interpolate(source.geometry.length() / 2.0).asPoint()
+        _lip, _invert, containment, _src = controller._spillway_datums(
+            source.geometry, source.type, top_width_m=source.top_width_m,
+            depth=source.depth, ew=source)
+        assert containment is not None, "no datum — the check cannot site a spillway"
+        controller._on_spillway_placed(source.id, sill, containment, kind="outflow")
+        crest = source.spillway.crest_elevation
+        assert crest is not None, "no crest to link to"
+
+        # The drain: drawn well clear of the source, so a click near one of its ends
+        # cannot be nearer to anything else.
+        west = (sill.x() - 90.0, sill.y() - 60.0)
+        east = (sill.x() + 90.0, sill.y() - 60.0)
+        drain = h.add_earthwork(
+            "diversion", name="Drain 9",
+            geometry=QgsGeometry.fromPolylineXY(
+                [QgsPointXY(*west), QgsPointXY(*east)]))
+
+        h.panel.link_drain_to_spillway_requested.emit()
+        h.assert_no_errors("activate the drain-link tool")
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, LinkSpillwayTool), (
+            f"expected LinkSpillwayTool on the canvas, got {type(tool).__name__}")
+
+        # Click the drain's EAST end, then the source. East is the drain's last vertex,
+        # so the link must record "end" — not "start", which is what a tool that only
+        # picked whole features would have had to assume.
+        click_map(h.canvas, *east)
+        click_map(h.canvas, sill.x(), sill.y())
+        h.assert_no_errors("linking the drain to the spillway")
+
+        link = parse_spillway_link(drain.spillway_link_id)
+        assert link is not None, f"no link was recorded — messages:\n{h.bar.render()}"
+        assert link[0] == source.id, "the link names the wrong feature"
+        assert link[2] == "end", (
+            f"clicked the drain's last vertex and the link recorded {link[2]!r} — "
+            f"the drain would be graded from the wrong end")
+        assert drain.invert_start_m == crest, (
+            f"the link resolved to {drain.invert_start_m!r} against a {crest!r} crest")
+
+        # And the burn uses it. The drain is well clear of the source's own cut, so
+        # anything that happens along it is the link's doing.
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("re-analysis with a linked drain")
+        with rasterio.open(h.state.modified_dem_path) as src:
+            burned = src.read(1).astype("float64")
+        band = h.state.burner.burned_masks.get(drain.id)
+        assert band is not None and band.any(), "the drain burned nothing at all"
+        deepest = float(np.nanmin(burned[band]))
+        assert deepest <= crest + 1e-6, (
+            f"the linked drain bottoms out at {deepest:.2f} m, which is above the "
+            f"{crest:.2f} m crest it was supposed to start from")
+
+        # Repeating the gesture unlinks — the only way back, since there is no undo
+        # stack anywhere in this plugin.
+        h.panel.link_drain_to_spillway_requested.emit()
+        click_map(h.canvas, *east)
+        click_map(h.canvas, sill.x(), sill.y())
+        h.assert_no_errors("unlinking the drain")
+        assert drain.spillway_link_id is None, (
+            "repeating the same link did not remove it")
+        assert drain.invert_start_m is None, (
+            "the link went but the level it resolved to stayed on the feature")
+
+
+def check_a_drain_link_survives_a_project_roundtrip(dem_path):
+    """The link is stored; the level it resolves to is derived on the way back in.
+
+    A link is a decision and is recoverable from nothing, which is what took
+    ``SCHEMA_VERSION`` to 3. The level is another feature's crest, so it is re-derived
+    by the restore path rather than trusted from the file — ``_refresh_spillway_link_
+    inverts`` runs in the same step list as ``_refresh_auto_spillway_widths``, and for
+    the same reason.
+    """
+    from terrainflow_assessment.modules.earthwork_design import format_spillway_link
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+
+        source_geom = line_across_valley(row=60)
+        source = h.add_earthwork("swale", geometry=source_geom, name="Source swale")
+        controller._on_vertex_edit_finished(0, source_geom)
+        sill = source.geometry.interpolate(source.geometry.length() / 2.0).asPoint()
+        _lip, _invert, containment, _src = controller._spillway_datums(
+            source.geometry, source.type, top_width_m=source.top_width_m,
+            depth=source.depth, ew=source)
+        controller._on_spillway_placed(source.id, sill, containment, kind="outflow")
+        crest = source.spillway.crest_elevation
+
+        drain = h.add_earthwork("diversion", name="Drain 9")
+        drain.spillway_link_id = format_spillway_link(source.id, "outflow", "end")
+
+        text = h.state.earthwork_manager.to_json()
+        restored = controller.restore_earthworks_from_json(text)
+        h.assert_no_errors("restoring a design with a linked drain")
+        assert restored == 2, f"restored {restored} features, expected 2"
+
+        back = [e for e in h.state.earthwork_manager.get_all()
+                if e.name == "Drain 9"][0]
+        assert back.spillway_link_id, "the link did not survive the round trip"
+        assert back.invert_start_m == crest, (
+            f"the restored drain resolved to {back.invert_start_m!r} against a "
+            f"{crest!r} crest — the restore path did not re-derive it")
+
+
+def check_removing_a_spillway_names_the_drains_that_lose_their_level(dem_path):
+    """The removal confirmation has to state the second thing it costs.
+
+    Removing a spillway does not clear the links pointing at it — those resolve at read
+    time and simply stop resolving, which is deliberate. So without this sentence the
+    user answers a smaller question than the one being asked: the drains go on looking
+    linked, and go back to grading from the ground under their own alignment.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+    from terrainflow_assessment.modules.earthwork_design import (
+        Spillway,
+        format_spillway_link,
+    )
+
+    original_exec = EarthworkPropertiesDialog.exec
+    original_get = EarthworkPropertiesDialog.get_spillway
+    EarthworkPropertiesDialog.exec = lambda self: 1
+    EarthworkPropertiesDialog.get_spillway = lambda self: None
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            source = h.add_earthwork("swale", geometry=line_across_valley(row=60),
+                                     name="Source swale")
+            source.spillway = Spillway(crest_elevation=41.5, width_m=3.0,
+                                       width_auto=False, point_wkt="POINT (100 100)")
+            drain = h.add_earthwork("diversion", name="Drain 9")
+            drain.spillway_link_id = format_spillway_link(source.id)
+
+            h.plugin._earthworks.edit_earthwork_at(0)
+            h.assert_no_errors("removing a spillway that feeds a drain")
+
+            asked = h.dialogs.of("question")
+            assert asked, "removing a sited spillway was accepted without asking"
+            text = asked[-1][2]
+            assert "Drain 9" in text, (
+                f"the question must name the drain that loses its level: {text!r}")
+            assert "41.50" in text, "the question still has to name the crest"
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        EarthworkPropertiesDialog.get_spillway = original_get

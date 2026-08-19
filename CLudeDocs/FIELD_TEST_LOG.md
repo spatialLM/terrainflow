@@ -1754,6 +1754,155 @@ and needs no pond, so `_record_spillway_levels` now records it first and uncondi
 only the measured spill level waits for the pond. A feature drawn but not yet sized would
 otherwise have had a notch in the terrain and nothing on the review saying so.
 
+## Round 21 — 2026-08-19 (Stage C: the drain that starts where something else spills)
+
+`SPILLWAY_NOTCH_PLAN.md` Stage C, the last of the three. Stage B made a designed
+spillway into terrain; this makes the crest available to the thing that carries the
+water away from it.
+
+**What was wrong.** `_burn_diversion` grades a drain down from the ground it samples
+under its own first vertex. Where the drain leads water off a spillway that is not a
+measurement of anything — it is a guess about where the water arrives, taken at a point
+chosen for drawing convenience, and it is wrong by however much the bank stands above
+the sill. The crest is already an absolute on the design. The link says to use it.
+
+No raster behaviour and no new measurement in this stage: the burn change is one datum.
+The risk was entirely in the link's lifecycle, and that is where the work went.
+
+### The question the plan left open, and the answer
+
+The plan says "snap this end to a spillway" without saying what happens when the user
+snaps the drain's **other** end. `_burn_diversion` always grades from `coords[0]`, so
+either the link records which end it attached to, or the tool reverses the alignment on
+link. Grading from the wrong end is not a visible failure — there is no exception, no
+warning and no odd number, just a drain running uphill from an entirely plausible-looking
+level — so this had to be decided rather than defaulted.
+
+**The link records the end**, as a third token: `"<source id>:<kind>:<end>"`. Reversing
+the alignment is the smaller change to the burn and much the larger change to everything
+else — it mutates a geometry the user drew, desynchronises `source_contour_coords` from
+the vertices it describes, and survives an unlink, silently, with no undo stack anywhere
+in this plugin to put it back. That is the same argument that won for Stage A's removal
+confirmation. So the link carries the end, and `_burn_diversion` reverses its own
+**working copy** of the coordinates — which leaves chainage, the path cells and the
+monotonic breach reading exactly the code they read before.
+
+### Why the datum is an absolute, and not read off the burn
+
+The notch is a post-pass (Round 20), so when `_burn_diversion` runs, the source's
+spillway is **not in the array yet**. That is fine, and it is only fine because
+`invert_start_m` is the stored crest rather than a level sampled from the running
+surface. Reading the surface would have put back precisely the order dependence the link
+removes. `test_the_datum_does_not_wait_for_the_notch` pins it: a drain burned alone and
+a drain burned beside its notched source come out at the same level to 1e-6.
+
+`invert_start_m` replaces the **ground sample**, so the drain's bed sits one depth below
+it — exactly as it sits one depth below sampled ground. It is not the bed level, despite
+the name, which is the plan's and is kept so the plan, this log and `CLAUDE.md` all say
+one thing. The docstring on the field says so in a sentence. The choice matters: a bed at
+the crest would leave the drain head level with the notch, and D8 needs a fall to route
+out of it.
+
+### The three lifecycle faults, and what each does
+
+| Fault | What happens | Why not the obvious thing |
+|---|---|---|
+| **The source is deleted, switched off, or has its spillway cleared** | The link stays on the drain and stops resolving. The drain grades from its own ground again, and the message bar says which drains did so, at burn time, beside the orphaned-sill warning. | Eagerly clearing links on delete is a second and silently different failure mode: the design quietly stops meaning what it said and there is nothing left to report. Read-time resolution is `overflow_target_id` → `resolve_targets`, and this mirrors it. |
+| **A cycle** | Refused when the link is made, naming the loop, in `on_connection_made`'s message shape. | Not assumed impossible. `SPILLWAY_TYPES` is a controller constant and is not enforced on the model, so nothing stops a diversion carrying a spillway of its own — drain A can be told to start at B's crest while B starts at A's. A drain carries at most one link, so `topological_order` is exactly the right tool. Self-links are refused separately, because `topological_order` skips an edge to its own node by construction. |
+| **A mis-clicked link** | Repeating the identical gesture removes it. | There is no undo stack anywhere in this plugin, and the alternative was a second piece of UI. Linking the same drain to a *different* spillway still just moves it, which is the common correction, so the toggle only fires on an exact repeat. |
+
+Every rejection carries its own reason rather than one message, because "deleted",
+"switched off", "spillway cleared" and "pointed at an inlet" are four different things
+for the user to do about it.
+
+### An inlet is not a source of water
+
+The link's kind token accepts `outflow` or `inflow` and only `outflow` is offered or
+honoured. A drain attached to an inlet is *delivering* rather than taking, so its start
+level would be at its far end and the grade would run backwards — and under `np.minimum`
+a backwards grade lifted above ground cuts nothing at all, silently. The token stays
+because the model really does carry two spillways per feature and a link that could not
+say which would be ambiguous the day that case is built; `resolve_spillway_links` reports
+an inlet link rather than inventing a level for it.
+
+### Burn order
+
+`burn_order` moves a source ahead of its linked drains. The datum does not need it — that
+is the point of the absolute — but the drain's cut is an `np.minimum` against the running
+array and its breach walks the surface as it stands, so the source has to be finished
+ground by the time the drain reads it. This also removes a draw-order dependence that has
+been latent since diversions existed.
+
+**Stable and minimal, and it is the drain that gives way.** Given `A, Drain, B, Source, C`
+there are two satisfying orders: pull Source up, displacing Source and B, or push Drain
+down, displacing only Drain. Kahn's with a smallest-index-first tie-break takes the
+second. A design with no links burns in exactly the order it was given — which is what
+keeps this from moving any published number, and is asserted as its own case. A cycle,
+refused at link time but still possible in a hand-edited file, leaves its members in the
+order they came in rather than raising.
+
+### Removing a spillway now costs two things, and the dialog says both
+
+Stage A's confirmation named the crest and the width. It now also names the drains that
+take their level from the crest, because removing it leaves their links dangling —
+correctly, by the read-time rule above — and they go back to grading from sampled ground.
+Without that sentence the user answers a smaller question than the one being asked.
+
+### Not done, and why
+
+**No inlet-linked drains** (above). **No column on the Spillways review** — which drains
+feed off a crest is one more thing that moves when the crest moves, which is a sentence
+rather than a column, so it travels as `linked_drains` and renders through the existing
+muted `notes` channel. A dangling link goes in `notes` too and never in `problems`, for
+Stage B's reason: `_spillway_row` fails a row on any problem at all.
+
+**`_burn_diversion` and `_burn_berm` still rasterise `all_touched=True`**, which
+`_rasterize`'s docstring measures at a near-constant +1.3 m wider than drawn, while
+swales, basins and dams moved to cell centres in Round 8. This round was inside
+`_burn_diversion` and deliberately left it alone: it moves published numbers on every
+existing design and deserves its own change.
+
+**Three stale docstring pointers in `burn_strategy.py` were fixed**, and they are
+docs-only: `DEMBurner.burned_storage` does not exist and the measured quantity is
+`feature_storage_m3`; `DEMBurner._datum_surface` does not exist and the choice it names
+is `_storage_invert`'s `spill`, taken with `pour_point` on `self.original`.
+
+### Verification
+
+`python -m pytest tests/` — **2,638 passed**, coverage **95.40%** against the 95% gate
+(up from 95.34%). `python -m ruff check terrainflow_assessment/ tests/ tests_qgis/` clean.
+
+New pure cases in `tests/test_spillway_link.py` (34) covering the stored form, all six
+resolution outcomes, the cycle refusal and the burn order; `tests/test_dem_burner.py`
+gains nine, including the two that matter most — the grade running down from whichever
+end was linked, and the datum not waiting for the notch. `tests/test_project_io.py` gains
+the link round trip, the rule that the level it resolves to is *not* stored, and a design
+whose source has been deleted still opening.
+
+One trap worth recording, because it cost the first run: `_mock_ew` builds a `MagicMock`,
+and `float(MagicMock())` is **1.0**. Left unset, `invert_start_m` made every mock drain
+grade from a datum ~99 m under the fixtures' ground and cut a trench that deep — eight
+existing diversion tests failed at once and read like a burn fault. The helper already
+carried the same note for `batter_run_m` and for `spillway`; it now carries it for these
+two.
+
+`.\run_qgis_tests.ps1` bare — **203 passed, 0 failed** (up from 200). `checks_earthworks`
+gains three: the two-click link driven by **real synthetic clicks**, because the novel
+thing about this tool is that its first click picks an *endpoint* and that endpoint
+decides which way the drain falls; the round trip, which asserts the restore path
+re-derives the level rather than trusting the file; and the removal confirmation naming
+the drain it costs.
+
+**Three screenshots moved and were accepted** — `panel_initial`, `panel_after_baseline`
+and `panel_with_design`, all by the same cause: the tool menu gains a **Drain from
+Spillway** row and everything below it reflows. Two copy decisions came out of looking at
+the image rather than the code. The group label was `CONNECTIONS — ROUTE OVERFLOW`, which
+described half its rows once a fourth was in it — a label that describes half a group
+reads as a promise about what is in the box, so it is now `CONNECTIONS — SPILLWAYS AND
+ROUTING`. And the new chip took the **same grey as Route Overflow** rather than a fourth
+colour: both rows link two features that already exist, as against the two above them,
+which place a structure.
+
 ## Never run
 
 **Manual QGIS smoke tests.** Everything above is verified by `pytest`, `ruff`, the CI

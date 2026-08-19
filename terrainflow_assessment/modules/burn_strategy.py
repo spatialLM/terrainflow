@@ -16,7 +16,7 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
     spillway_burn_width  — the built width rounded up to whole DEM cells
     tapered_invert       — excavate a footprint as its true battered section
     rasterisable_capacity — storage the grid can represent, modelled (see its docstring:
-                           prefer ``DEMBurner.burned_storage``, which measures it)
+                           prefer ``DEMBurner.feature_storage_m3``, which measures it)
     steep_ground_warning — advisory when a level floor over-excavates one end
     sub_cell_warning     — advisory when a feature is narrower than one cell
     ponding_resolution_warning — advisory when a DEM exceeds the ponding memory cap
@@ -164,7 +164,8 @@ def level_invert(dem, mask, depth: float, spill_elev: float):
     one neighbouring cell that has been cut lowers the whole floor by that cut's depth:
     Swale 27 on the Quail Island design shares exactly one rim cell with Swale 25, was
     floored 0.66 m too low because of it, and ponded 1.94 m for a 1.00 m design. The
-    caller owns that choice; see ``DEMBurner._datum_surface``.
+    caller owns that choice; see ``DEMBurner._storage_invert``, whose ``spill`` is taken
+    with ``pour_point`` on ``self.original`` rather than on the running array.
     """
     import numpy as np
 
@@ -546,7 +547,7 @@ def rasterisable_capacity(n_cells: int, cell_area: float, depth: float,
                           batter_run: float = 0.0):
     """Storage the burned raster can represent, in m³ — **the estimate, not the answer.**
 
-    Prefer ``DEMBurner.burned_storage``, which is this same quantity measured off the
+    Prefer ``DEMBurner.feature_storage_m3``, which is this same quantity measured off the
     hole that was actually cut. This function is the answer before any burn has run, and
     a model standing beside a burn is precisely the arrangement that has now gone wrong
     twice: Round 3, when it discounted for a batter the burner never cut and every swale

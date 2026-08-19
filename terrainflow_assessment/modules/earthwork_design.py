@@ -830,6 +830,239 @@ def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=No
 
 
 # ---------------------------------------------------------------------------
+# Spillway links - a diversion drain that starts where another feature spills
+# ---------------------------------------------------------------------------
+#
+# A diversion drain normally takes its grade datum from the ground under its own first
+# vertex, which is a guess about where the water it carries arrives. Where that water
+# comes over a designed spillway the level is not a guess at all: it is the crest, and
+# it is already on the design. The link says so.
+#
+# Stored on the **drain** as ``"<source id>:<kind>:<end>"``:
+#
+# * **source id** - the feature whose spillway supplies the level. An id and not a
+#   boolean, because a flag cannot say *which* spillway, and every feature carries two.
+# * **kind** - ``outflow`` or ``inflow``. Only an outflow is a source of water. An inlet
+#   is where water *arrives*, so a drain attached to one is delivering rather than
+#   taking and its start level would be at its far end, graded backwards; that case is
+#   not built, and :func:`resolve_spillway_links` reports it rather than inventing it.
+#   The token is here because the model really does carry two spillways per feature, and
+#   a link that could not name which would be ambiguous the day the second case lands.
+# * **end** - which end of *this drain* is attached: ``start`` (its first vertex) or
+#   ``end`` (its last).
+#
+# **Why the end is recorded rather than the alignment reversed.** ``_burn_diversion``
+# grades down from ``coords[0]``, so a drain linked at its far end has to be graded from
+# the other direction, and there are two ways to arrange that. Reversing the drawn
+# geometry on link is the smaller change to the burn and much the larger change to
+# everything else: it mutates a geometry the user drew, it desynchronises
+# ``source_contour_coords`` from the vertices it is supposed to describe, and unlinking
+# would leave the alignment reversed - silently, with no undo stack anywhere in this
+# plugin to put it back, which is the argument that already won for the spillway-removal
+# confirmation. So the link carries the end and the burn reverses its own *working copy*
+# of the coordinates, which leaves chainage, the path cells and the monotonic breach
+# reading exactly the code they read today. Grading from the wrong end is not a visible
+# failure: it produces a drain running uphill from an entirely plausible-looking level.
+
+SPILLWAY_LINK_KINDS = ("outflow", "inflow")
+SPILLWAY_LINK_ENDS = ("start", "end")
+
+
+def format_spillway_link(source_id, kind="outflow", end="start"):
+    """The stored form of a link, or ``None`` when there is nothing to store."""
+    if not source_id:
+        return None
+    if kind not in SPILLWAY_LINK_KINDS:
+        kind = "outflow"
+    if end not in SPILLWAY_LINK_ENDS:
+        end = "start"
+    return f"{source_id}:{kind}:{end}"
+
+
+def parse_spillway_link(value):
+    """``(source_id, kind, end)`` for a stored link, or ``None`` if it is not one.
+
+    A two-token value - the form a hand-edited file is most likely to hold - reads as
+    ``start``, which is the end ``_burn_diversion`` has always graded from. An
+    under-specified link therefore degrades to today's behaviour rather than to the
+    opposite end of the drain.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parts = value.split(":")
+    source_id = parts[0].strip()
+    if not source_id:
+        return None
+    kind = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "outflow"
+    end = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "start"
+    if kind not in SPILLWAY_LINK_KINDS:
+        return None
+    if end not in SPILLWAY_LINK_ENDS:
+        end = "start"
+    return source_id, kind, end
+
+
+def resolve_spillway_links(earthworks):
+    """``({drain id: start datum}, [(drain name, why)])`` over *earthworks*.
+
+    **Resolved at read time**, mirroring ``overflow_target_id`` -> ``resolve_targets``: a
+    link that no longer names a live spillway falls back to the drain's own ground
+    sample and is reported. Links are deliberately *not* cleared when the source is
+    deleted - that is a second and silently different failure mode, in which the design
+    quietly stops meaning what it said and there is nothing left to report.
+
+    The datum is the source spillway's ``crest_elevation``, an absolute already carried
+    on the design. That is what makes this independent of burn order, and it is the
+    reason the level is not read off the burned surface: the notch is cut as a
+    **post-pass** (see :meth:`DEMBurner.burn_earthworks`), so at the moment
+    ``_burn_diversion`` runs, the source's spillway is not in the array yet. Reading the
+    surface would put back exactly the order dependence this exists to remove.
+
+    Every rejection carries its own reason, because they are different faults: a source
+    that was deleted, one that is switched off, one whose spillway was cleared and one
+    whose link points at an inlet are four different things for the user to do.
+    """
+    by_id = {}
+    for ew in earthworks or []:
+        key = getattr(ew, "id", None)
+        if key is not None and key not in by_id:
+            by_id[key] = ew
+
+    inverts, dangling = {}, []
+    for ew in earthworks or []:
+        link = parse_spillway_link(getattr(ew, "spillway_link_id", None))
+        if link is None:
+            continue
+        name = getattr(ew, "name", "This drain")
+        source_id, kind, _end = link
+        source = by_id.get(source_id)
+        source_name = getattr(source, "name", "its source")
+        if source is ew:
+            dangling.append((name, "it is linked to itself"))
+            continue
+        if source is None:
+            dangling.append(
+                (name, "the feature it took its level from is no longer in the design"))
+            continue
+        if not getattr(source, "enabled", True):
+            dangling.append((name, f"{source_name} is switched off"))
+            continue
+        if kind != "outflow":
+            dangling.append(
+                (name, f"it is linked to {source_name}'s inlet, which is where water "
+                       f"arrives rather than where it leaves"))
+            continue
+        spillway = getattr(source, "outflow_spillway", None)
+        crest = None if spillway is None else getattr(spillway, "crest_elevation", None)
+        if crest is None:
+            dangling.append((name, f"{source_name} no longer has a spillway crest"))
+            continue
+        try:
+            inverts[getattr(ew, "id", None)] = float(crest)
+        except (TypeError, ValueError):
+            dangling.append((name, f"{source_name}'s crest is not a level"))
+    inverts.pop(None, None)
+    return inverts, dangling
+
+
+def spillway_link_cycle(earthworks, extra=None):
+    """Ids whose spillway links close a loop, or ``[]``.
+
+    *extra* is ``(drain_id, source_id)`` for a link the user is proposing but which is
+    not on the model yet, so the refusal can name the loop **before** it is made.
+
+    A drain carries at most one link, so this is a functional graph and
+    :func:`~terrainflow_assessment.modules.flow_graph.topological_order` is exactly the
+    right tool - the same one ``on_connection_made`` uses for the overflow graph, and for
+    the same reason: a loop is not merely unroutable, it is a drain that starts where it
+    ends. It is refused here rather than assumed impossible, because nothing on the model
+    stops a diversion from carrying a spillway of its own.
+
+    Self-links are **not** reported by this function - ``topological_order`` skips an
+    edge to its own node by construction. They are refused separately, at the point the
+    link is made.
+    """
+    from terrainflow_assessment.modules.flow_graph import topological_order
+
+    edges = {}
+    for ew in earthworks or []:
+        key = getattr(ew, "id", None)
+        if key is None:
+            continue
+        link = parse_spillway_link(getattr(ew, "spillway_link_id", None))
+        if link is not None:
+            edges[key] = link[0]
+    if extra:
+        drain_id, source_id = extra
+        if drain_id is not None:
+            edges[drain_id] = source_id
+    if not edges:
+        return []
+    _order, broken = topological_order(edges)
+    return broken
+
+
+def burn_order(earthworks):
+    """*earthworks*, reordered so a linked drain's source is burned before the drain.
+
+    The datum itself does not need this - it is an absolute off the design, not something
+    read from the running array - but the drain's *cut* is applied with ``np.minimum``
+    against whatever is already there, and its monotonic breach walks the surface as it
+    stands. Burning the source first makes that reading the finished one, and removes a
+    draw-order dependence that has been latent since diversions existed.
+
+    **Stable and minimal.** A source is moved ahead only where it currently sits behind
+    one of its drains; everything else keeps the order the user put it in. A design with
+    no links therefore burns in exactly the order it burned before, which is what stops
+    this from moving any published number. A cycle - refused when a link is made, but
+    still possible in a hand-edited file - leaves its members in their original order
+    rather than raising.
+    """
+    import heapq
+
+    items = list(earthworks or [])
+    position = {}
+    for i, ew in enumerate(items):
+        key = getattr(ew, "id", None)
+        if key is not None and key not in position:
+            position[key] = i
+
+    blockers = {}          # position -> positions that must burn first
+    unblocks = {}          # position -> positions waiting on it
+    for i, ew in enumerate(items):
+        link = parse_spillway_link(getattr(ew, "spillway_link_id", None))
+        if link is None:
+            continue
+        src = position.get(link[0])
+        if src is None or src == i:
+            continue
+        blockers.setdefault(i, set()).add(src)
+        unblocks.setdefault(src, set()).add(i)
+    if not blockers:
+        return items
+
+    remaining = {i: set(v) for i, v in blockers.items()}
+    ready = [i for i in range(len(items)) if not remaining.get(i)]
+    heapq.heapify(ready)
+    out, placed = [], set()
+    while ready:
+        i = heapq.heappop(ready)
+        out.append(items[i])
+        placed.add(i)
+        # ``j`` is in ``unblocks[i]`` only because ``i`` is in ``blockers[j]``, so it
+        # always has an entry here and is pushed exactly once — when its last blocker
+        # is discarded.
+        for j in sorted(unblocks.get(i, ())):
+            remaining[j].discard(i)
+            if not remaining[j]:
+                heapq.heappush(ready, j)
+    # Cycle members, in the order they were given. Nothing here can be satisfied, so
+    # holding the original order is the only answer that is not arbitrary.
+    out.extend(items[i] for i in range(len(items)) if i not in placed)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 
@@ -952,6 +1185,23 @@ class Earthwork:
         # whole site was burned. They disagree when the notch did not do what it claimed.
         self.burned_sill_elevation_m = None
         self.actual_spill_level_m = None
+        # Diversion only: the spillway this drain starts at, as
+        # "<source id>:<kind>:<end>" — see the Spillway links section above for why it
+        # is an id rather than a flag, and why the end of the drain travels with it
+        # instead of the alignment being reversed. A link is a decision the user made,
+        # so unlike everything else in this run of fields it *is* serialised.
+        self.spillway_link_id = None
+        # The level that link resolves to: the source spillway's crest. It is the datum
+        # `_burn_diversion` grades **down from**, standing in for the ground sample it
+        # would otherwise take at the drain's first vertex — so the drain's bed sits one
+        # depth below it, exactly as it sits one depth below sampled ground. Not the bed
+        # level itself, despite the name.
+        #
+        # Derived and never serialised, the same rule `terrain_capacity_m3` follows: it
+        # is a function of another feature's crest, and a level cached in a project file
+        # outlives the design that produced it. Re-derived by
+        # `_refresh_spillway_link_inverts` before anything reads it.
+        self.invert_start_m = None
 
     # ------------------------------------------------------------------
     # Derived geometry fields
@@ -1044,6 +1294,12 @@ class Earthwork:
         "batter_run_m", "companion_berm", "crest_elevation", "key_into_banks",
         "source_contour_coords", "gradient_pct", "overflow_target_id",
         "soil_name", "enabled", "capacity_m3", "capacity_l",
+        # A user decision, so it is stored. It is also the reason SCHEMA_VERSION went
+        # to 3: `from_dict` probes per field so an older document simply has none, but
+        # an older build re-saving one of these designs iterates its own shorter tuple
+        # and drops the link silently — and a drain that quietly goes back to guessing
+        # its start level looks exactly like a drain that was never linked.
+        "spillway_link_id",
     )
 
     def to_dict(self):
@@ -1833,6 +2089,14 @@ class DEMBurner:
         touch these cells* is true by construction — and it stays order-independent all
         the same, because the level cut to is an absolute carried on the design rather
         than anything read off the running array.
+
+        The type dispatch itself runs in :func:`burn_order`, so a diversion drain that
+        takes its start level from another feature's spillway is cut **after** that
+        feature. Its *datum* does not need that — it is an absolute too — but its cut is
+        an ``np.minimum`` against the running array and its breach walks the surface as
+        it stands, so burning the source first makes both read the finished ground. The
+        reorder is stable and minimal: a design with no links burns in exactly the order
+        it was given, which is what keeps this from moving any existing number.
         """
         modified = self.original.copy()
         self.warnings = []
@@ -1849,7 +2113,7 @@ class DEMBurner:
             "diversion": self._burn_diversion,
         }
         burned = []
-        for ew in earthworks:
+        for ew in burn_order(earthworks):
             if not ew.enabled:
                 continue
             shapely_geom = self._to_shapely(ew.geometry)
@@ -2670,25 +2934,62 @@ class DEMBurner:
         self._warn_sub_cell(ew.name, ew.width)
         return dem
 
+    @staticmethod
+    def _link_datum(ew):
+        """*ew*'s linked start level as a finite float, or ``None``.
+
+        ``invert_start_m`` is resolved out in the controller and put on the feature, so
+        the burner never has to know what a link is — it receives ``Earthwork`` objects
+        and reads one derived number, the same arrangement ``sills=`` uses for the snap.
+        A link that could not be resolved leaves the field ``None`` and the drain grades
+        from the ground under its own alignment, which is what it did before it was
+        linked; the controller reports that rather than this method guessing at it.
+        """
+        value = getattr(ew, "invert_start_m", None)
+        if value is None:
+            return None
+        try:
+            level = float(value)
+        except (TypeError, ValueError):
+            return None
+        return level if np.isfinite(level) else None
+
     def _burn_diversion(self, dem, line, ew):
         dem = dem.copy()
         coords = list(line.coords)
         if len(coords) < 2:
             return dem
 
-        # The grade datum, taken at the first vertex that sits on mapped ground rather
-        # than blindly at the first. A line starting in a nodata hole used to read the
-        # sentinel as an elevation and grade the entire channel away from about
-        # -10,000 m, burning a trench that deep along its whole length.
-        start_elev = None
-        for x0, y0 in coords:
-            r0, c0 = xy_to_rc(self.transform, x0, y0)
-            row0 = max(0, min(self.shape[0] - 1, r0))
-            col0 = max(0, min(self.shape[1] - 1, c0))
-            z0 = float(dem[row0, col0])
-            if np.isfinite(z0):
-                start_elev = z0
-                break
+        # **The grade datum.** Where this drain is linked to a spillway it is that
+        # spillway's crest — an absolute carried on the design, which is why it does not
+        # matter that the notch itself is cut as a post-pass and is not in this array
+        # yet. The drain's bed comes out one depth below it, exactly as it comes out one
+        # depth below sampled ground, so nothing else in this method changes.
+        #
+        # A drain linked at its **far** end is graded from that end, and the reversal is
+        # local to this method: the stored geometry keeps the vertex order the user drew
+        # (see the Spillway links section for why). Reversing the working copy rather
+        # than special-casing the grade means chainage, the path cells and the monotonic
+        # breach all go on reading a line whose first vertex is the graded start.
+        start_elev = self._link_datum(ew)
+        if start_elev is not None:
+            link = parse_spillway_link(getattr(ew, "spillway_link_id", None))
+            if link is not None and link[2] == "end":
+                coords = coords[::-1]
+                line = LineString(coords)
+        else:
+            # No link: the first vertex that sits on mapped ground rather than blindly
+            # the first. A line starting in a nodata hole used to read the sentinel as
+            # an elevation and grade the entire channel away from about -10,000 m,
+            # burning a trench that deep along its whole length.
+            for x0, y0 in coords:
+                r0, c0 = xy_to_rc(self.transform, x0, y0)
+                row0 = max(0, min(self.shape[0] - 1, r0))
+                col0 = max(0, min(self.shape[1] - 1, c0))
+                z0 = float(dem[row0, col0])
+                if np.isfinite(z0):
+                    start_elev = z0
+                    break
         if start_elev is None:
             self.warnings.append(
                 f"{ew.name}: no point along this drain has an elevation to grade from "

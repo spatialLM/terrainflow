@@ -33,7 +33,12 @@ Data contract — ``set_rows(rows, context)``:
      containment_source, sill_storage_m3, containment_storage_m3, given_up_m3,
      given_up_pct, surcharge_level_m, surcharge_storage_m3, spillway_insufficient,
      burned_sill_m, actual_spill_level_m, event_level_m, passes_this_event,
-     problems, notes, state}
+     linked_drains, problems, notes, state}
+
+  ``linked_drains`` names the diversion drains graded down from this crest. It travels
+  as data and renders through ``notes``, not as a column: it is one more thing that
+  moves when the crest moves, which is a sentence, and the row has no width for a
+  feature list.
 
   ``rim_elevation`` is the **containment** level — the level this feature's water is
   actually held to, which on a bermed swale is the berm crest as built. ``lip_elevation``

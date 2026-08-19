@@ -173,6 +173,9 @@ class AssessmentPanel(QDockWidget):
     place_spillway_for_requested = pyqtSignal(int, str)   # index, kind
     edit_earthwork_requested = pyqtSignal(int)            # index → properties dialog
     connect_earthworks_requested = pyqtSignal()   # route one feature's overflow to another
+    # Grade a diversion drain down from another feature's spillway crest, instead of
+    # from the ground under its own first vertex.
+    link_drain_to_spillway_requested = pyqtSignal()
     choose_design_intensity_requested = pyqtSignal()  # open the peak-intensity comparison
     edit_rainfall_data_requested = pyqtSignal()       # enter the site's HIRDS table
     earthwork_selected = pyqtSignal(object)          # index, or None — highlight it
@@ -1318,6 +1321,8 @@ class AssessmentPanel(QDockWidget):
         self._tool_menu.place_spillway_requested.connect(self.place_spillway_requested)
         self._tool_menu.connect_earthworks_requested.connect(
             self.connect_earthworks_requested)
+        self._tool_menu.link_drain_to_spillway_requested.connect(
+            self.link_drain_to_spillway_requested)
         lay.addWidget(self._tool_menu)
 
         ew_actions = QHBoxLayout()

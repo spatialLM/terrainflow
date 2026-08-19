@@ -660,6 +660,222 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             f"{src.name} now overflows into {tgt.name}.",
         )
 
+    # ------------------------------------------------------------------
+    # Spillway links — a diversion drain that starts where another feature spills
+    # ------------------------------------------------------------------
+
+    def _refresh_spillway_link_inverts(self):
+        """Re-derive every linked drain's ``invert_start_m``; return what dangled.
+
+        The link is stored, the level it resolves to is not — same rule
+        ``terrain_capacity_m3`` follows, and for a sharper reason: the datum is another
+        feature's crest, so a level frozen into a project file outlives the design that
+        produced it and would go on grading a drain from a crest that has since moved.
+
+        Returns ``[(drain name, why)]`` for the links that could not be resolved, so a
+        caller about to burn can say what fell back to a ground sample. The burner
+        cannot say it: a link is resolved out here, and it receives only ``Earthwork``
+        objects with one derived number on them.
+        """
+        manager = self._state.earthwork_manager
+        if manager is None:
+            return []
+        from terrainflow_assessment.modules.earthwork_design import (
+            resolve_spillway_links,
+        )
+
+        all_ews = manager.get_all()
+        inverts, dangling = resolve_spillway_links(all_ews)
+        for ew in all_ews:
+            ew.invert_start_m = inverts.get(getattr(ew, "id", None))
+        return dangling
+
+    def _warn_dangling_spillway_links(self):
+        """Refresh the link levels and say which drains fell back to a ground sample.
+
+        Pushed at burn time, beside the orphaned-sill warning and for the same reason: a
+        Verify run is the moment the user is asking what the terrain does, and a link
+        that has quietly stopped resolving changes the answer without changing anything
+        they can see. Not pushed from the live tier — a message bar that repaints on
+        every edit is not a warning.
+        """
+        dangling = self._refresh_spillway_link_inverts()
+        if not dangling:
+            return
+        detail = "; ".join(f"{name} — {why}" for name, why in dangling)
+        self._iface.messageBar().pushWarning(
+            "TerrainFlow Assessment",
+            f"{detail}. These drains were graded from the ground under their own "
+            f"alignment instead, which is what they did before they were linked. "
+            f"Link them again, or accept the sampled level.",
+        )
+
+    def _drains_linked_to(self, ew):
+        """Names of the diversion drains taking their start level from *ew*'s spillway.
+
+        Read from the drains rather than kept on the source, because the link lives on
+        the drain and one spillway can feed several. Used twice: as a note on the
+        Spillways review, and to name what a spillway removal costs before it happens.
+        """
+        from terrainflow_assessment.modules.earthwork_design import parse_spillway_link
+
+        manager = self._state.earthwork_manager
+        key = getattr(ew, "id", None)
+        if manager is None or key is None:
+            return []
+        names = []
+        for other in manager.get_all():
+            link = parse_spillway_link(getattr(other, "spillway_link_id", None))
+            if link is not None and link[0] == key and link[1] == "outflow":
+                names.append(other.name)
+        return names
+
+    def activate_link_drain_to_spillway(self):
+        """Give a diversion drain its start level from another feature's spillway.
+
+        Two clicks, the shape :meth:`activate_connect_earthworks` already uses: the end
+        of the drain that attaches, then the feature whose spillway supplies the level.
+        Clicking the **end** rather than the drain is what settles which way the drain
+        grades — ``_burn_diversion`` runs its grade down from the linked end, and a drain
+        graded from the wrong one runs uphill from an entirely plausible-looking level.
+
+        Only sited outflow spillways are offered. An inlet is where water arrives, so a
+        drain attached to one is delivering rather than taking and its start level is at
+        its far end; and an unsited spillway has no crest to start from.
+        """
+        from terrainflow_assessment.modules.earthwork_design import parse_spillway_link
+
+        drains, sources = [], []
+        for ew in self._state.earthwork_manager.get_all():
+            if not ew.enabled:
+                continue
+            if ew.type == "diversion":
+                link = parse_spillway_link(getattr(ew, "spillway_link_id", None))
+                drains.append((ew.id, ew.name, ew.geometry, link is not None))
+            spillway = getattr(ew, "spillway", None)
+            if (spillway is not None and spillway.point_wkt
+                    and spillway.crest_elevation is not None):
+                sources.append((ew.id, ew.name, ew.geometry))
+
+        if not drains:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "Draw a diversion drain first — this links one to a spillway so it "
+                "starts at that crest instead of at the ground under its own line.",
+            )
+            return
+        if not sources:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "No spillway is sited yet. Place one on the map — a drain takes its "
+                "start level from the crest, so there has to be a crest to take.",
+            )
+            return
+
+        from terrainflow_assessment.map_tools.link_spillway_tool import (
+            LinkSpillwayTool,
+        )
+
+        tool = LinkSpillwayTool(self._canvas, drains, sources)
+        tool.link_made.connect(self.on_spillway_link_made)
+        tool.drain_picked.connect(
+            lambda name, end: self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{name}'s {end} end starts at… click the feature whose spillway feeds "
+                f"it. Esc to undo.",
+            )
+        )
+        tool.cancelled.connect(self._on_draw_cancelled)
+        self.use_tool(tool)
+        self._iface.messageBar().pushInfo(
+            "TerrainFlow Assessment",
+            "Click the end of the drain that attaches, then the feature it takes its "
+            "level from.",
+        )
+
+    def on_spillway_link_made(self, drain_id, end, source_id):
+        """Accept a drain → spillway link unless it is a self-link or closes a loop.
+
+        **Repeating the same link removes it.** There is no undo stack anywhere in this
+        plugin, and a mis-clicked link is otherwise unrecoverable without a second piece
+        of UI; making the identical gesture the way back keeps the action to one menu row
+        and one rule. Linking the same drain to a *different* spillway still just moves
+        it, which is the common correction.
+
+        A cycle is refused rather than assumed impossible: nothing on the model stops a
+        diversion carrying a spillway of its own, so drain A can be told to start at
+        drain B's crest while B starts at A's. The refusal names the loop, in the shape
+        :meth:`on_connection_made` already uses.
+        """
+        from terrainflow_assessment.modules.earthwork_design import (
+            format_spillway_link,
+            spillway_link_cycle,
+        )
+
+        by_id = {ew.id: ew for ew in self._state.earthwork_manager.get_all()}
+        drain, source = by_id.get(drain_id), by_id.get(source_id)
+        if drain is None or source is None:
+            return
+
+        if drain_id == source_id:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"{drain.name} cannot start at its own spillway — a drain has to take "
+                f"its level from something upstream of it.",
+            )
+            return
+
+        # The tool only offers sources with a sited crest, but this is a signal handler
+        # and the check is one line: a link to a spillway with nothing to start from
+        # would resolve to nothing on every burn and say so every time.
+        spillway = getattr(source, "spillway", None)
+        crest = None if spillway is None else spillway.crest_elevation
+        if crest is None:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"{source.name} has no spillway crest to start from. Place its "
+                f"overflow first, then link the drain to it.",
+            )
+            return
+
+        wanted = format_spillway_link(source_id, "outflow", end)
+        if getattr(drain, "spillway_link_id", None) == wanted:
+            drain.spillway_link_id = None
+            self._after_spillway_link_change()
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{drain.name} is no longer linked to {source.name} — it goes back to "
+                f"grading from the ground under its own alignment.",
+            )
+            return
+
+        broken = spillway_link_cycle(
+            self._state.earthwork_manager.get_all(), extra=(drain_id, source_id))
+        if broken:
+            names = " → ".join(
+                by_id[i].name for i in broken if i in by_id) or "these features"
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"{drain.name} → {source.name} would create a loop ({names}). "
+                f"A drain cannot start where it ends.",
+            )
+            return
+
+        drain.spillway_link_id = wanted
+        self._after_spillway_link_change()
+        self._iface.messageBar().pushSuccess(
+            "TerrainFlow Assessment",
+            f"{drain.name}'s {end} end now starts at {source.name}'s spillway crest "
+            f"({crest:.2f} m). Run this on the same pair again to unlink it.",
+        )
+
+    def _after_spillway_link_change(self):
+        """One place for what a link change has to bring back into step."""
+        self._refresh_spillway_link_inverts()
+        self._build_spillway_rows()
+        self._recompute_live_assessment()
+        self._mark_design_edit()
+
     def on_usable_area_source_changed(self, source):
         import json
 
@@ -846,12 +1062,23 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if new is None and old is not None and getattr(old, "point_wkt", None):
             where = ("" if old.crest_elevation is None
                      else f" sited at {old.crest_elevation:.2f} m")
+            # Naming the drains, because removing the spillway does not remove their
+            # links — those resolve at read time and simply stop resolving. Without this
+            # sentence the user answers a smaller question than the one being asked: the
+            # drains go on looking linked and go back to grading from sampled ground.
+            drains = self._drains_linked_to(ew)
+            cost = ""
+            if drains:
+                verb = "takes its" if len(drains) == 1 else "take their"
+                cost = (f"\n\n{', '.join(drains)} {verb} start level from this crest. "
+                        f"Removing it leaves the link dangling, and the drain is cut "
+                        f"from the ground under its own line instead.")
             answer = QMessageBox.question(
                 self._iface.mainWindow(),
                 "Remove this spillway?",
                 f"{ew.name} has an overflow{where}, {old.width_m:.1f} m wide, placed on "
                 f"the map. Clearing the Spillway tick removes it — the location, the "
-                f"crest and the width all go.\n\nRemove it?",
+                f"crest and the width all go.{cost}\n\nRemove it?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1656,9 +1883,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # has to be recomputed *before* the list, the map label and the sill bar are
             # drawn — all three read ``width_m``, and the live assessment that would
             # otherwise supply it runs after them, or on a worker's completion.
+            # A drain's start level is derived from the crest its link names, so it has
+            # to be resolved before anything reads it — and after
+            # `_rebase_restored_spillways`, which is where a restored crest settles.
             for step in (
                 self._rebase_restored_spillways,
                 self._refresh_auto_spillway_widths,
+                self._refresh_spillway_link_inverts,
                 lambda: self._panel.refresh_earthwork_list(manager.get_all()),
                 self._refresh_ew_layer,
                 self._refresh_spillway_layer,
@@ -2469,10 +2700,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # is untested, and that is a different thing to tell the user.
             "event_level_m": None,
             "passes_this_event": None,
+            # Diversion drains that take their start level from this spillway's crest.
+            # Filled before the early returns below, because a disabled or flow-less
+            # feature can still be the thing a drain was graded from — and that is
+            # exactly when the user needs to know.
+            "linked_drains": self._drains_linked_to(ew),
             "problems": [],
             # A parallel channel to `problems`, and it has to be parallel: this row goes
             # to "fail" on any problem at all, so a crest standing legitimately above
             # natural ground would mark every bermed swale failed if it went in there.
+            # A link is in the same class — true, fine, and not a fault.
             "notes": [],
             "state": "ok",
         }
@@ -2578,6 +2815,17 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             berm_crest_elevation=getattr(ew, "berm_crest_elevation", None),
             built_width_m=built, required_width_m=row["required_width_m"],
         )
+        # Appended after `spillway_notes`, which returns a fresh list. A note and not a
+        # column: it says what else moves if this crest moves, which is the one thing
+        # about a linked drain that is invisible from the drain's own row.
+        linked = row["linked_drains"]
+        if linked:
+            takes = "takes its" if len(linked) == 1 else "take their"
+            them = "it" if len(linked) == 1 else "them"
+            row["notes"].append(
+                f"{', '.join(linked)} {takes} start level from this crest, so moving "
+                f"the crest re-cuts {them} with it."
+            )
         if containment is None:
             row["state"] = "no_datum"
         elif row["problems"]:
@@ -3501,6 +3749,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             from terrainflow_assessment.modules.water_balance import run_water_balance
 
             all_ews = self._state.earthwork_manager.get_all()
+            # A linked drain's start level is derived, never serialised, and it is a
+            # function of *another* feature's crest — so it goes stale on edits this
+            # drain knows nothing about. Re-derived here because this is the one method
+            # that runs after every design edit, and it is a pure loop over the model
+            # with no DEM read in it.
+            self._refresh_spillway_link_inverts()
             if not all_ews:
                 self._panel.set_network([], {}, 0.0)
                 self._panel.set_live_assessment("")
@@ -4237,6 +4491,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # and the worker may not touch it. This is also where the orphaned-sill warning
         # belongs: a Verify run is the moment the user is asking what the terrain does.
         sills = self._spillway_sills(enabled, warn=True)
+        # Resolved here for the same reason, and reported here for the same one: a link
+        # that has stopped resolving changes what the burn cuts without changing
+        # anything the user can see, and this is the moment they are asking what the
+        # terrain does. The worker is handed features that already carry the level.
+        self._warn_dangling_spillway_links()
 
         def work(report):
             from terrainflow_assessment.modules.earthwork_design import burn_quantities

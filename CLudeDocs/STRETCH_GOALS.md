@@ -241,7 +241,7 @@ swale, or the steep-ground warning starts firing routinely on real designs.
 
 ---
 
-## 5a. Cut the spillway into the terrain — STAGES A AND B DONE (2026-08-19)
+## 5a. Cut the spillway into the terrain — DONE (2026-08-19)
 
 **The approved plan is [SPILLWAY_NOTCH_PLAN.md](SPILLWAY_NOTCH_PLAN.md), and it supersedes
 this section.** Read it rather than the paragraphs below, which are kept only as the record
@@ -250,9 +250,9 @@ of what was known before it was written. Three stages, each shippable: **A** the
 give-up readout, the migration), **B** the notch itself (the cut, the keyed-dam path, width
 rounding, the three elevations, overtopping), **C** the spillway-linked diversion drain.
 
-**A and B both landed 2026-08-19. Only Stage C is open**, and it is a separate session.
-The measured before/after is Round 20 of `FIELD_TEST_LOG.md`; read it before touching any
-of this, because it settles two things this section got wrong.
+**All three stages landed 2026-08-19.** A and B are Round 20 of `FIELD_TEST_LOG.md`,
+which carries the measured before/after and settles two things this section got wrong;
+Stage C — the spillway-linked diversion drain — is Round 21. Nothing here is open.
 
 **The 1,832 m³ below is right, and it is the pool, not the dam's storage.** Measured: the
 pool behind Dam 15 truncates from 2,688.4 m³ at 56.12 m to **1,832.1 m³ at 55.52 m** once
@@ -286,6 +286,17 @@ directly. The plan kept the measured before/after (its B0, the gate on Stage B, 
 20) and dropped the §6 split as a prerequisite: once the notch is cut, capacity and
 threshold coincide correctly, so the lip-volume denominator was a cheap follow-on rather
 than a gate. It shipped with Stage B as `EarthworkStore.lip_capacity_m3`.
+
+**Stage C, for the record.** A diversion drain can now take its start level from another
+feature's spillway instead of from the ground under its own first vertex, which was a
+guess about where the water it carries arrives. `Earthwork.spillway_link_id` stores it as
+`"<source id>:<kind>:<end>"` and is serialised (a decision, recoverable from nothing —
+`SCHEMA_VERSION` 2 → 3); `invert_start_m` is the level it resolves to and is derived,
+never serialised. The plan left one question open and Round 21 answers it: the **end** of
+the drain travels with the link rather than the alignment being reversed on attachment.
+No raster behaviour and no new measurement — the burn change is one datum in
+`_burn_diversion` — so the risk was all in the link's lifecycle: dangling on delete,
+cycles, and which end grades.
 
 ---
 
