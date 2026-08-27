@@ -550,6 +550,57 @@ def check_properties_dialog_renders(dem_path):
     assert_rendered(captured["path"], "earthwork properties dialog", min_colours=12)
 
 
+def check_spillway_section_renders(dem_path):
+    """The overflow section with a sill designed on it — one input, four readouts.
+
+    Nothing drew this before: the only dialog shot in the suite has the Spillway group
+    unticked, so the whole section collapsed to its title row and every change to it went
+    unreviewed.
+
+    What to look at: the sill is set by 'Spillway depth', or on a cut feature from the
+    floor instead — those two carry spin arrows. The overflow elevation and the
+    freeboard beneath them sit on a grey field with no arrows, because they are
+    consequences rather than five ways of saying the same thing. Freeboard is coloured
+    by how much margin is left, and the storage line says what the sill costs in cubic
+    metres.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    captured = {}
+    original_exec = EarthworkPropertiesDialog.exec
+
+    def grab_instead_of_exec(dialog):
+        dialog.grp_spillway.setChecked(True)
+        dialog.spin_spillway_drop.setValue(0.45)
+        captured["depth_editable"] = not dialog.spin_spillway_drop.isReadOnly()
+        captured["crest_readonly"] = dialog.spin_spillway_crest.isReadOnly()
+        captured["freeboard"] = dialog.spin_spillway_freeboard.value()
+        captured["crest"] = dialog.spin_spillway_crest.value()
+        dialog.resize(560, 900)
+        captured["path"] = save_widget(dialog, "dialog_spillway_section")
+        return 0
+
+    EarthworkPropertiesDialog.exec = grab_instead_of_exec
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.plugin._earthworks._on_geometry_drawn("swale", line_across_valley())
+            h.assert_no_errors("spillway section")
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+
+    assert "path" in captured, "the properties dialog was never opened"
+    assert captured["depth_editable"], "the sill depth is not editable"
+    assert captured["crest_readonly"], "the overflow elevation is still typeable"
+    # Freeboard is the depth less the design head, so on a 0.45 m sill at the swale's
+    # policy head it is a real number that moves — not a constant the row could have
+    # printed without computing anything.
+    assert captured["freeboard"] < 0.45, (
+        f"freeboard came back as {captured['freeboard']:.2f} m on a 0.45 m sill — the "
+        f"design flow has to take some of that depth")
+    assert_rendered(captured["path"], "spillway section", min_colours=12)
+
+
 def check_companion_berm_readout_renders(dem_path):
     """What you are told about the berm while drawing, and after analysing.
 

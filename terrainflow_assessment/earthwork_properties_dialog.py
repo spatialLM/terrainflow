@@ -13,6 +13,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +34,6 @@ from .modules.earthwork_design import (
     calculate_capacity,
     calculate_diversion_discharge,
     calculate_spillway_width,
-    effective_freeboard_m,
     effective_head_m,
     spillway_datum,
     spillway_policy,
@@ -473,10 +473,13 @@ class EarthworkPropertiesDialog(QDialog):
 
         layout.addLayout(form)
 
-        # Capacity display
+        # Capacity display. Collapsible, because it is the tallest block on the dialog
+        # and it sits *above* the spillway: on a swale the fifteen capacity rows pushed
+        # "Spillway — designed overflow" past the bottom of the screen, so the section
+        # the user opened the dialog to reach could not be seen at all. It is a readout
+        # — nothing in it is an input — so hiding it costs no state.
         cap_group_title = "Discharge Capacity" if self.ew_type == "diversion" else "Calculated Capacity"
-        cap_group = QGroupBox(cap_group_title)
-        cap_layout = QFormLayout(cap_group)
+        cap_group, cap_layout = self._disclosure_group(cap_group_title)
 
         if self.ew_type == "diversion":
             # Diversion drain: show Manning's discharge + length
@@ -697,14 +700,25 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_crest.setSingleStep(0.05)
             self.spin_spillway_crest.setSuffix(" m")
             self.spin_spillway_crest.setToolTip(H.SPILLWAY_CREST)
+            # Derived, not chosen. The crest is now whatever the containment level, the
+            # spillway depth and this type's freeboard leave room for, so it is shown
+            # rather than typed — see `_as_readout`.
+            self._as_readout(self.spin_spillway_crest)
 
-            # Height above the floor — the primary control on a cut feature, and the
-            # only one of the three a builder can set out with a staff standing in the
-            # trench. It is offered first for that reason, and because it is the one
-            # that stays true on a swale that falls along its run: the containment
-            # level is a single global minimum over the whole footprint, usually at an
-            # end, so a notch sited mid-run and measured down from it is measured from
-            # ground a hundred metres away.
+            # Height above the floor — the second way into the same sill, and the
+            # carve-out from "depth and width are the only inputs". It is the one
+            # measurement a builder can take with a staff standing in the excavation,
+            # and it does not depend on ground somewhere else: the containment level is
+            # a single global minimum over the whole footprint, so a notch sited
+            # mid-feature and measured down from it is measured from ground that may be
+            # a hundred metres away and a different elevation.
+            #
+            # Offered on every **cut** feature, swale and basin alike. The argument is
+            # about having a floor to stand on rather than about the shape of the rim,
+            # and a basin has one for the same reason a swale does. Which of the two
+            # controls is the ordinary way in differs — depth below the rim for a basin,
+            # often the floor for a falling swale — but that is a preference, and
+            # `bind_crest` keeps both describing one sill either way.
             #
             # Not offered on a dam. There the invert is the lowest ground the wall
             # touches rather than a cut floor, so "height above the floor" would be the
@@ -718,18 +732,72 @@ class EarthworkPropertiesDialog(QDialog):
                 self.spin_spillway_height.setSuffix(" m")
                 self.spin_spillway_height.setEnabled(self._invert_elevation is not None)
                 self.spin_spillway_height.setToolTip(H.SPILLWAY_HEIGHT_ABOVE_FLOOR)
-                spill_layout.addRow("Height above floor:", self.spin_spillway_height)
 
-            spill_layout.addRow("Crest elevation:", self.spin_spillway_crest)
-
+            # The one figure the user sets: how deep the sill is cut below the ground
+            # that contains this feature. It leads the section because everything under
+            # it is a consequence of it — the overflow elevation, the freeboard left
+            # over the design flow, and the storage the sill gives away.
+            #
+            # It goes to 0.00 m. A sill flush with the containing ground is not a
+            # sensible design and `spillway_validity` says so in words, but it is a
+            # *drawable* one, and refusing to represent it left users unable to model a
+            # bank that simply overtops at its lowest point.
             self.spin_spillway_drop = QDoubleSpinBox()
             self.spin_spillway_drop.setRange(0.0, 50.0)
             self.spin_spillway_drop.setDecimals(2)
             self.spin_spillway_drop.setSingleStep(0.05)
             self.spin_spillway_drop.setSuffix(" m")
             self.spin_spillway_drop.setEnabled(self._containment_elevation is not None)
-            self.spin_spillway_drop.setToolTip(H.SPILLWAY_DROP)
-            spill_layout.addRow("Below spill level:", self.spin_spillway_drop)
+            self.spin_spillway_drop.setToolTip(H.SPILLWAY_DEPTH)
+            spill_layout.addRow("Spillway depth:", self.spin_spillway_drop)
+
+            spill_layout.addRow("Spillway overflow elevation:", self.spin_spillway_crest)
+
+            if self.spin_spillway_height is not None:
+                spill_layout.addRow("Height above floor:", self.spin_spillway_height)
+
+            # Design head. No longer a row: the head is a depth of *flow*, not a
+            # dimension of the structure, and with the sill depth now the input it is
+            # fully determined by it (see `_target_head`). The widget stays as the
+            # value store the band, the sizing and `get_spillway` all read, so the
+            # number still travels with the design — it is simply not typed any more.
+            #
+            # A fresh spillway takes its type's design head as the *cap* — a swale
+            # spills over a low sill in its own bank and wants far less than an
+            # embankment does — and a saved one keeps whatever head it was designed at,
+            # so reopening an old file does not re-size its weir.
+            self._head_cap = (existing.head_m if existing is not None
+                              else self._policy_head)
+            self.spin_spillway_head = QDoubleSpinBox(self._spillway_body)
+            self.spin_spillway_head.setRange(0.0, 2.0)
+            self.spin_spillway_head.setDecimals(2)
+            self.spin_spillway_head.setSingleStep(0.05)
+            self.spin_spillway_head.setSuffix(" m")
+            self.spin_spillway_head.setValue(self._head_cap)
+            self.spin_spillway_head.setToolTip(H.SPILLWAY_HEAD)
+            self.spin_spillway_head.setVisible(False)
+
+            # Freeboard — one row, and it now reports rather than demands. It is the
+            # clear height *left over*: the sill depth less the depth the design flow
+            # runs at. There were two candidates for this row and keeping both would
+            # have put two near-identically named figures on the dialog Log 3 already
+            # calls too tall, so the margin the type *requires* stays policy
+            # (`_current_freeboard`, still driving the band and every warning) and the
+            # margin the design *achieves* is what is shown.
+            #
+            # It can go negative, which is the whole point of showing it: a sill cut
+            # too shallow for its flow stands the water over the containing ground, and
+            # a control floored at zero would have drawn that as "0.00 m — fine".
+            self._freeboard_override = (
+                getattr(existing, "freeboard_m", None) if existing is not None else None)
+            self.spin_spillway_freeboard = QDoubleSpinBox()
+            self.spin_spillway_freeboard.setRange(-50.0, 50.0)
+            self.spin_spillway_freeboard.setDecimals(2)
+            self.spin_spillway_freeboard.setSingleStep(0.05)
+            self.spin_spillway_freeboard.setSuffix(" m")
+            self.spin_spillway_freeboard.setToolTip(H.SPILLWAY_FREEBOARD)
+            self._as_readout(self.spin_spillway_freeboard)
+            spill_layout.addRow("Freeboard:", self.spin_spillway_freeboard)
 
             # What this sill costs, in the units the decision is made in. Nothing in the
             # UI answered it before: the user chose a crest and was told the freeboard
@@ -738,36 +806,6 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_spillway_giveup.setWordWrap(True)
             self.lbl_spillway_giveup.setToolTip(H.SPILLWAY_GIVE_UP)
             spill_layout.addRow("Storage at this sill:", self.lbl_spillway_giveup)
-
-            self.spin_spillway_head = QDoubleSpinBox()
-            self.spin_spillway_head.setRange(0.05, 2.0)
-            self.spin_spillway_head.setDecimals(2)
-            self.spin_spillway_head.setSingleStep(0.05)
-            self.spin_spillway_head.setSuffix(" m")
-            # A fresh spillway takes its type's design head — a swale spills over a low
-            # sill in its own bank and wants far less than an embankment does.
-            self.spin_spillway_head.setValue(
-                existing.head_m if existing is not None else self._policy_head)
-            self.spin_spillway_head.setToolTip(H.SPILLWAY_HEAD)
-            spill_layout.addRow("Design head (target):", self.spin_spillway_head)
-
-            # Read-only counterpart, shown only once a width is committed: then the head
-            # is the consequence rather than the choice, and it is the number the
-            # freeboard is actually spent on.
-            self.lbl_actual_head = QLabel("")
-            self.lbl_actual_head.setToolTip(H.SPILLWAY_ACTUAL_HEAD)
-            self.row_actual_head = QLabel("Head at that width:")
-            spill_layout.addRow(self.row_actual_head, self.lbl_actual_head)
-
-            self.spin_spillway_freeboard = QDoubleSpinBox()
-            self.spin_spillway_freeboard.setRange(0.0, 1.0)
-            self.spin_spillway_freeboard.setDecimals(2)
-            self.spin_spillway_freeboard.setSingleStep(0.05)
-            self.spin_spillway_freeboard.setSuffix(" m")
-            self.spin_spillway_freeboard.setValue(
-                effective_freeboard_m(existing, self.ew_type))
-            self.spin_spillway_freeboard.setToolTip(H.SPILLWAY_FREEBOARD)
-            spill_layout.addRow("Freeboard (min):", self.spin_spillway_freeboard)
 
             # Peak flow, supplied by the controller from the rational method with the
             # upstream cascade already added. It was previously derived here as event
@@ -807,6 +845,14 @@ class EarthworkPropertiesDialog(QDialog):
             self.chk_width_auto.setToolTip(H.SPILLWAY_BUILT_WIDTH)
             width_row.addWidget(self.chk_width_auto)
             spill_layout.addRow("Built width:", width_row)
+
+            # The depth the flow actually runs at, shown only once a width is committed:
+            # then the head is the consequence rather than the design figure, and it is
+            # the number the freeboard above is really spent on.
+            self.lbl_actual_head = QLabel("")
+            self.lbl_actual_head.setToolTip(H.SPILLWAY_ACTUAL_HEAD)
+            self.row_actual_head = QLabel("Head at that width:")
+            spill_layout.addRow(self.row_actual_head, self.lbl_actual_head)
 
             if existing is not None and existing.width_m:
                 self.spin_built_width.setValue(float(existing.width_m))
@@ -856,11 +902,12 @@ class EarthworkPropertiesDialog(QDialog):
             if self.spin_spillway_height is not None:
                 self.spin_spillway_height.valueChanged.connect(
                     self._on_spillway_height_changed)
-            self.spin_spillway_head.valueChanged.connect(self._on_spillway_head_changed)
-            # Freeboard moves the ceiling of the crest band exactly as head does, so it
-            # has to re-bind the crest through the new band rather than only re-warn.
-            self.spin_spillway_freeboard.valueChanged.connect(
-                self._on_spillway_head_changed)
+            # Every control that can move the sill also retires `auto` — see
+            # `_note_spillway_edit`.
+            for spin in (self.spin_spillway_crest, self.spin_spillway_drop,
+                         self.spin_spillway_height):
+                if spin is not None:
+                    spin.valueChanged.connect(self._note_spillway_edit)
             self.grp_spillway.toggled.connect(self._update_spillway_sizing)
             self.grp_spillway.toggled.connect(self._set_spillway_expanded)
             self._update_spillway_sizing()
@@ -872,6 +919,8 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             self.grp_spillway = None
             self._spillway_body = None
+            self._head_cap = self._policy_head
+            self._freeboard_override = None
             self.spin_spillway_crest = None
             self.spin_spillway_drop = None
             self.spin_spillway_height = None
@@ -894,6 +943,82 @@ class EarthworkPropertiesDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _as_readout(spin):
+        """Turn a spin box into a read-only display without demoting it to a label.
+
+        The spillway's three level rows are one crest seen from three datums, bound
+        together by :func:`bind_crest`. Only one of them is now the user's to set, but
+        the other two still have to *hold* their derived value for `get_spillway` and
+        the validity check to read back — so they stay spin boxes and stop being
+        editable, rather than being replaced by labels that would mean rewriting every
+        reader.
+
+        Read-only rather than disabled: a disabled control greys its text out and reads
+        as "not available yet" (which is what an absent datum already uses this widget
+        to say), where these rows are available, current and worth reading.
+        """
+        if spin is None:
+            return None
+        spin.setReadOnly(True)
+        spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        spin.setStyleSheet(
+            f"QDoubleSpinBox {{ background: {_GROUND}; border: 1px solid {_HAIRLINE};"
+            f" color: {_INK}; }}")
+        return spin
+
+    def _disclosure_group(self, title, collapsed=False):
+        """A titled card whose body folds away behind a ▶/▼ header.
+
+        Returns ``(group, form_layout)`` so a caller keeps filling in rows exactly as it
+        did against a plain :class:`QGroupBox` — the fold is a wrapper, not a rewrite of
+        every ``addRow`` under it.
+
+        Deliberately **not** a checkable ``QGroupBox``. Qt's tick is what the spillway
+        group uses, and there it is the feature's data (``get_spillway()`` returns None
+        when it is clear). A tick here would look like the same gesture while meaning
+        nothing, so this borrows the panel's disclosure arrow instead — the same ▶/▼
+        language ``panel._section`` already uses for view state.
+
+        ``adjustSize`` on toggle so the dialog gives the height back, the way
+        :meth:`_set_spillway_expanded` does; without it Qt keeps the tall layout and the
+        fold does nothing visible on the one dialog that needed it.
+        """
+        group = QGroupBox()
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        header = QPushButton()
+        header.setObjectName("tfDisclosure")
+        header.setCheckable(True)
+        header.setChecked(not collapsed)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet(
+            "QPushButton#tfDisclosure { border: none; text-align: left;"
+            f" padding: 2px 2px 6px 2px; font-weight: 650; font-size: 11px;"
+            f" color: {_INK}; background: transparent; }}"
+            f" QPushButton#tfDisclosure:hover {{ color: {_ACCENT}; }}"
+        )
+
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(0, 0, 0, 0)
+        body.setVisible(not collapsed)
+
+        def _toggle(checked):
+            body.setVisible(checked)
+            header.setText(("▼  " if checked else "▶  ") + title)
+            self.adjustSize()
+
+        header.toggled.connect(_toggle)
+        header.setText(("▼  " if not collapsed else "▶  ") + title)
+
+        outer.addWidget(header)
+        outer.addWidget(body)
+        return group, form
 
     def _update_capacity(self):
         if self.ew_type == "dam":
@@ -1186,39 +1311,76 @@ class EarthworkPropertiesDialog(QDialog):
     # -- Spillway ------------------------------------------------------------
 
     def _current_freeboard(self):
-        """The freeboard in force — the live control, else this type's policy."""
-        if self.spin_spillway_freeboard is not None:
-            return self.spin_spillway_freeboard.value()
+        """The freeboard this design is *required* to keep — an override, else policy.
+
+        No longer read off a control. The Freeboard row now reports the margin the
+        design achieves (sill depth less the depth of flow), which is a different
+        quantity and would make a circular datum if the band were derived from it. The
+        requirement stays what the type registry says, and an override written by an
+        earlier build is still honoured and still saved back.
+        """
+        if self._freeboard_override is not None:
+            return max(0.0, float(self._freeboard_override))
         return self._policy_freeboard
 
-    def _crest_band(self):
-        """Crest elevations this feature can currently offer, at the chosen head.
+    def _target_head(self):
+        """The depth of flow this sill is designed to pass — no longer chosen here.
 
-        Both the head and the freeboard move the ceiling (``rim − head − freeboard``),
-        so both have to be read live or the band and the warnings disagree.
+        The type's design head, or the head a saved design was written at. A swale
+        spills over a low sill in its own bank and wants far less than an embankment
+        does, which is why this is per-type rather than one number.
+
+        Deliberately **not** reduced to fit a shallow notch. Trimming it to
+        ``depth − freeboard`` looks conservative and is the opposite: it would make the
+        freeboard come out at exactly the policy figure for every depth the user could
+        type, so the one readout that says whether the sill is deep enough would read
+        "0.30 m, fine" on a 0.30 m notch that cannot pass its storm at all. Holding the
+        head fixed is what lets the depth control be judged — shallower notch, less
+        freeboard, and the number goes amber and then red and then negative.
+
+        The width still moves with the depth in the case that matters: commit a width
+        and the head becomes what the flow makes it (:func:`effective_head_m`), and the
+        freeboard is spent against that.
         """
-        head = (self.spin_spillway_head.value() if self.spin_spillway_head
-                else self._policy_head)
+        return getattr(self, "_head_cap", None) or self._policy_head
+
+    def _crest_band(self):
+        """Crest elevations this feature can offer at its type's design head.
+
+        Used to *seed* a fresh sill at the depth the type is designed for — it is no
+        longer a clamp on what the user may then set, because a sill deliberately cut
+        shallower than the policy margin is a design this dialog now has to be able to
+        express (Log 1: the depth goes to 0 m). What used to be enforced silently by the
+        clamp is said out loud by :func:`spillway_validity` instead.
+        """
+        cap = getattr(self, "_head_cap", None) or self._policy_head
         return spillway_datum(self._containment_elevation, self._invert_elevation,
-                              head_m=head, min_freeboard_m=self._current_freeboard())
+                              head_m=cap, min_freeboard_m=self._current_freeboard())
 
     def _bind(self, **which):
         """Re-resolve all three crest controls from whichever one moved, and write them.
 
-        One entry point rather than one per control: :func:`bind_crest` clamps into the
-        band **before** deriving the partners, and doing that at three call sites is
-        exactly how a hand-written binding creeps apart.
+        One entry point rather than one per control: :func:`bind_crest` derives the two
+        partners from the one that moved, and doing that at three call sites is exactly
+        how a hand-written binding creeps apart.
+
+        No ``band=``. The crest is now a consequence of the sill depth the user typed,
+        and clamping it would put the depth control at odds with the depth shown one row
+        below it — type 0.10 m and read back 0.60 m.
         """
         crest, drop, height = bind_crest(
-            self._containment_elevation, band=self._crest_band(),
+            self._containment_elevation,
             invert_elevation=self._invert_elevation, **which)
         self._set_spillway_controls(crest, drop, height)
 
     def _seed_spillway(self, existing):
         """Initial crest/drop/height triple — the saved one, or the highest that fits.
 
-        A fresh spillway starts as high as the head and freeboard allow, because
-        that is the crest which stores the most water while still being a spillway.
+        A fresh spillway starts as high as the type's design head and freeboard allow,
+        because that is the crest which stores the most water while still being a
+        spillway — a sill depth of head + freeboard, which is what the depth control
+        opens on. It is a starting point, not a floor: the user may then cut it as
+        shallow as 0.00 m and be told what that costs.
 
         A **saved** one is seeded from its crest wherever it has one, never from its
         stored drop: the crest is the authoritative value and the drop is a measurement
@@ -1254,6 +1416,27 @@ class EarthworkPropertiesDialog(QDialog):
         finally:
             self._spillway_binding = False
 
+    def _note_spillway_edit(self):
+        """A level the user set by hand is the user's, not the tool's — retire ``auto``.
+
+        ``Spillway.auto`` is the flag ``_on_spillway_placed`` reads to decide whether
+        siting the point may re-seed the crest from the ground under the click. Nothing
+        in this dialog ever cleared it, so **every** crest configured here was still
+        marked auto and was overwritten the moment the spillway was placed: Dam 1's
+        71.79 m sill came back 70.16 m, 1.93 m below the spill level instead of 0.30 m,
+        and the feature gave up 100% of its storage without being asked.
+
+        All three level controls count, whichever one the user reached for: they are one
+        sill seen from three datums, and :meth:`_bind` writes the other two the moment
+        any of them moves. The sill depth is the ordinary way in.
+
+        Guarded on ``_spillway_binding`` so the derived writes in
+        :meth:`_set_spillway_controls` cannot mark the design edited by themselves.
+        """
+        if self._spillway_binding:
+            return
+        self._spillway_auto = False
+
     def _on_spillway_crest_changed(self):
         if self._spillway_binding:
             return
@@ -1272,13 +1455,37 @@ class EarthworkPropertiesDialog(QDialog):
         self._bind(height=self.spin_spillway_height.value())
         self._update_spillway_sizing()
 
-    def _on_spillway_head_changed(self):
-        # Head moves the ceiling of the valid band (containment − head − freeboard), so
-        # the crest may need to come down with it. Re-bind through the new band.
-        if self._spillway_binding:
+    def _update_freeboard_readout(self, head):
+        """Write the margin this design actually keeps: sill depth less depth of flow.
+
+        Amber under what the type asks for, red once it is gone. Red is not decoration:
+        at or below zero the design water surface stands at or over the containing
+        ground, so the water leaves there as well and the sill has stopped being the
+        control — the same thing :func:`spillway_validity` puts into a sentence
+        underneath. Showing it here as well is what makes the sill-depth control
+        legible, because the freeboard is the only reason not to set it to zero.
+        """
+        spin = getattr(self, "spin_spillway_freeboard", None)
+        if spin is None:
             return
-        self._bind(crest=self.spin_spillway_crest.value())
-        self._update_spillway_sizing()
+        if self.spin_spillway_drop is None or self._containment_elevation is None:
+            spin.setEnabled(False)
+            return
+        spin.setEnabled(True)
+        margin = self.spin_spillway_drop.value() - max(0.0, float(head or 0.0))
+        spin.blockSignals(True)
+        spin.setValue(margin)
+        spin.blockSignals(False)
+        required = self._current_freeboard()
+        if margin <= 0.0:
+            colour, weight = _BAD, "600"
+        elif margin < required - 0.005:
+            colour, weight = _WARN, "600"
+        else:
+            colour, weight = _INK, "400"
+        spin.setStyleSheet(
+            f"QDoubleSpinBox {{ background: {_GROUND}; border: 1px solid {_HAIRLINE};"
+            f" color: {colour}; font-weight: {weight}; }}")
 
     def _update_spillway_giveup(self):
         """Say what the sill costs, in m³ and as a share, while the crest moves.
@@ -1316,8 +1523,17 @@ class EarthworkPropertiesDialog(QDialog):
             f"color: {_WARN if pct >= 40 else _INK}; font-weight: 600;")
 
     def _required_width(self, head):
-        """The width the design flow needs at *head*, before any grid rounding."""
-        if self._peak_flow_m3s is None:
+        """The width the design flow needs at *head*, before any grid rounding.
+
+        ``None`` for a head of zero as well as for an unknown flow, and the difference
+        between those two is reported in words by the caller. A zero-head weir has no
+        width that passes anything — ``L = Q / (C·H^1.5)`` diverges — and
+        :func:`calculate_spillway_width` returns ``0.0`` there precisely so it cannot be
+        mistaken for a designed figure. Letting that 0.0 reach the label would print
+        "0.00 m" under "Min spillway width", which reads as a spillway that needs no
+        width at all.
+        """
+        if self._peak_flow_m3s is None or head is None or head <= 0:
             return None
         return calculate_spillway_width(self._peak_flow_m3s, head)
 
@@ -1375,17 +1591,30 @@ class EarthworkPropertiesDialog(QDialog):
         with it unticked the width is the commitment and the head is the consequence.
         Only the second case reports a head, because in the first the two are the same
         number by construction.
+
+        The target head itself is now derived from the sill depth (:meth:`_target_head`)
+        rather than typed, so this is also where it is written back into the widget that
+        carries it into :meth:`get_spillway`.
         """
         if self.lbl_spillway_width is None:
             return
         enabled = self.grp_spillway is None or self.grp_spillway.isChecked()
-        target_head = (self.spin_spillway_head.value() if self.spin_spillway_head
-                       else self._policy_head)
+        target_head = self._target_head()
+        if self.spin_spillway_head is not None:
+            self.spin_spillway_head.blockSignals(True)
+            self.spin_spillway_head.setValue(target_head)
+            self.spin_spillway_head.blockSignals(False)
         required = self._required_width(target_head)
 
         buildable = self._buildable_width(required)
         if required is not None:
             self.lbl_spillway_width.setText(f"{required:.2f} m")
+        elif target_head <= 0:
+            # Distinguished from the missing-flow case: here the storm is known and the
+            # notch is the problem, so pointing the user back at Baseline would send
+            # them to the wrong control.
+            self.lbl_spillway_width.setText(
+                "— no depth to spill through at this sill")
         else:
             self.lbl_spillway_width.setText("— set a peak intensity on Baseline")
 
@@ -1411,11 +1640,11 @@ class EarthworkPropertiesDialog(QDialog):
         head = effective_head_m(target_head, peak_flow_m3s=self._peak_flow_m3s,
                                 width_m=built, width_auto=auto)
 
-        # The head control is the target only while the width is free; once a width is
-        # committed it describes nothing, so it greys out and the achieved head takes
-        # over the row below it.
-        if self.spin_spillway_head is not None:
-            self.spin_spillway_head.setEnabled(auto)
+        # Freeboard is what the notch has left once the flow has run its depth. Written
+        # here rather than beside the crest because it depends on the *achieved* head,
+        # which is only known after the width has been settled above.
+        self._update_freeboard_readout(head)
+
         if self.lbl_actual_head is not None:
             show_actual = (not auto) and head is not None
             self.lbl_actual_head.setVisible(show_actual)
@@ -1508,21 +1737,35 @@ class EarthworkPropertiesDialog(QDialog):
         """
         if self.grp_spillway is None or not self.grp_spillway.isChecked():
             return None
-        head = self.spin_spillway_head.value()
-        # Store the freeboard only where it departs from the type's policy. Writing the
-        # policy value back would freeze today's figure into the design, so a later
-        # change to the standard would reach new features and silently skip saved ones.
-        freeboard = self.spin_spillway_freeboard.value()
-        override = (None if abs(freeboard - self._policy_freeboard) < 1e-9
-                    else freeboard)
+        # The head is derived from the sill depth now, and `_update_spillway_sizing`
+        # has already written the derived figure into the widget — but only while the
+        # group was ticked, so re-derive here rather than trusting a stale value that a
+        # tick-untick-retick cycle could have left behind.
+        head = self._target_head()
+        # The freeboard override is carried through untouched. It is no longer editable
+        # here, so this dialog can neither create one nor clear one; what it must not do
+        # is quietly drop a value an earlier build wrote. Writing the policy figure back
+        # instead would freeze today's standard into the design, so a later change to it
+        # would reach new features and silently skip saved ones.
+        override = self._freeboard_override
+        # Re-derive the pair from the crest on the way out rather than reading the two
+        # partner controls. All three are spin boxes rounded to the centimetre the
+        # design is expressed in, so a crest of 80.9310 m shows as 80.93 while the depth
+        # beside it still shows the 0.45 that produced it — and the *stored* triple then
+        # says the containing ground is 81.38 m in one field and 81.381 m in another.
+        # `bind_crest` makes them exact inverses, which is the same rule
+        # :func:`rebase_spillway` applies coming the other way: keep the crest, recompute
+        # what it measures against.
+        crest, drop, height = bind_crest(
+            self._containment_elevation,
+            crest=self.spin_spillway_crest.value(),
+            invert_elevation=self._invert_elevation)
         return Spillway(
-            crest_elevation=self.spin_spillway_crest.value(),
-            drop_below_rim_m=(self.spin_spillway_drop.value()
-                              if self._containment_elevation is not None else None),
+            crest_elevation=crest,
+            drop_below_rim_m=drop,
             height_above_floor_m=(
-                self.spin_spillway_height.value()
-                if (self.spin_spillway_height is not None
-                    and self._invert_elevation is not None) else None),
+                height if (self.spin_spillway_height is not None
+                           and self._invert_elevation is not None) else None),
             head_m=head,
             width_m=self.spin_built_width.value(),
             width_auto=self.chk_width_auto.isChecked(),

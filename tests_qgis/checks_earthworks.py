@@ -846,6 +846,235 @@ def check_a_map_placed_crest_is_held_inside_its_band(dem_path):
             f"records where water enters, not a weir crest")
 
 
+def _configure_spillway(controller, index, configure):
+    """Open the properties dialog on a feature, run *configure* on it, accept.
+
+    The dialog is modal, so ``exec`` is stubbed the way
+    ``check_properties_dialog_path`` stubs it — but here the stub also *uses* the
+    dialog before returning accepted, which is the only way to exercise a control the
+    user would have typed into. Everything else (construction against real terrain, the
+    bindings, ``get_spillway``, the controller's write-back) runs for real.
+
+    Returns the dialog, so a check can assert on what it was showing at the moment it
+    was accepted.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    seen = {}
+
+    def _exec(dlg):
+        seen["dlg"] = dlg
+        configure(dlg)
+        return 1
+
+    original = EarthworkPropertiesDialog.exec
+    EarthworkPropertiesDialog.exec = _exec
+    try:
+        controller.edit_earthwork_at(index)
+    finally:
+        EarthworkPropertiesDialog.exec = original
+    return seen.get("dlg")
+
+
+def check_the_sill_depth_is_the_control_and_the_elevation_follows(dem_path):
+    """Log 1: depth in, overflow elevation out — and the elevation is not typeable.
+
+    The dialog used to offer the crest, the drop and the height as three editable ways
+    into the same sill, plus a head and a freeboard that both moved the band the crest
+    was clamped into. Five controls for one decision. The depth below the containing
+    ground is now the decision, and everything else on those rows reports.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+
+        def configure(dlg):
+            assert dlg.spin_spillway_crest.isReadOnly(), (
+                "the overflow elevation is still typeable — it is derived from the "
+                "depth and cannot also be an input")
+            assert not dlg.spin_spillway_drop.isReadOnly(), (
+                "the sill depth is read-only; it is the one control the user has")
+            dlg.grp_spillway.setChecked(True)
+            dlg.spin_spillway_drop.setValue(0.45)
+
+        dlg = _configure_spillway(controller, 0, configure)
+        h.assert_no_errors("sill depth set through the dialog")
+
+        containment = dlg._containment_elevation
+        assert containment is not None, "no datum — the check cannot say anything"
+        sp = ew.spillway
+        assert sp is not None, "accepting a ticked spillway group stored nothing"
+        # To the centimetre the design is expressed in, not to the millimetre: every
+        # control on this dialog rounds to two decimals, so a crest derived from a
+        # datum with more precision than that lands within half a displayed step. What
+        # must be exact is the *relationship* — asserted below.
+        assert abs(sp.crest_elevation - (containment - 0.45)) < 0.005, (
+            f"overflow elevation {sp.crest_elevation:.3f} m does not sit 0.45 m under "
+            f"the {containment:.3f} m this feature is held to — the two rows disagree")
+        assert abs(sp.drop_below_rim_m
+                   - (containment - sp.crest_elevation)) < 1e-9, (
+            f"the stored depth ({sp.drop_below_rim_m:.4f} m) is not the stored crest "
+            f"measured against the stored datum — the two fields describe different "
+            f"containing ground")
+
+
+def check_a_sill_depth_of_zero_is_drawable_and_called_out(dem_path):
+    """Log 1: 0.00 m is allowed, and is not allowed to look fine.
+
+    The depth control was floored at the type's head plus freeboard by the band clamp,
+    so a bank that simply overtops at its lowest point could not be represented at all.
+    It can now be typed — and the freeboard readout goes negative and the warning block
+    fills, because it is a thing to draw and not a thing to build.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=54))
+
+        def configure(dlg):
+            assert dlg.spin_spillway_drop.minimum() == 0.0, (
+                f"the sill depth floors at {dlg.spin_spillway_drop.minimum()} m")
+            dlg.grp_spillway.setChecked(True)
+            dlg.spin_spillway_drop.setValue(0.0)
+
+        dlg = _configure_spillway(controller, 0, configure)
+        h.assert_no_errors("zero sill depth")
+
+        containment = dlg._containment_elevation
+        assert abs(ew.spillway.drop_below_rim_m) < 0.005, (
+            f"a depth of 0.00 m was clamped back up to "
+            f"{ew.spillway.drop_below_rim_m:.2f} m")
+        assert abs(ew.spillway.crest_elevation - containment) < 0.005, (
+            "a zero-depth sill must sit at the containing ground, not below it")
+        assert dlg.spin_spillway_freeboard.value() < 0, (
+            f"freeboard read {dlg.spin_spillway_freeboard.value():.2f} m on a sill with "
+            f"no depth at all — the one row that says the design is unsafe said it was "
+            f"fine")
+        assert dlg.lbl_spillway_warn.text(), (
+            "a sill level with the containing ground drew no warning")
+
+
+def check_a_cut_feature_sets_its_sill_out_from_its_floor(dem_path):
+    """Every feature with a floor may set the sill out from it — not swales only.
+
+    The carve-out from "depth and width are the only inputs" is about having a floor to
+    stand a staff on, so it belongs to the cut features: a basin has one for the same
+    reason a swale does. A dam does not — its invert is the ground the wall stands on,
+    and a height above that is the wall height, not a sill level — so it must not offer
+    the row at all rather than offer it greyed.
+
+    Also pins the binding both ways round: a height typed in has to move the depth and
+    the elevation with it, or the three rows are three separate numbers again.
+    """
+    from _harness import CELL_M, ORIGIN_Y, centreline_x
+    from qgis.core import QgsGeometry, QgsRectangle
+
+    cx = centreline_x()
+
+    def basin_at(row):
+        y = ORIGIN_Y - row * CELL_M
+        return QgsGeometry.fromRect(
+            QgsRectangle(cx - 25.0, y - 25.0, cx + 25.0, y + 25.0))
+
+    cases = (
+        ("swale", line_across_valley(row=58)),
+        ("basin", basin_at(72)),
+    )
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+
+        for i, (ew_type, geom) in enumerate(cases):
+            h.add_earthwork(ew_type, geometry=geom)
+            # `add_earthwork` bypasses the dialog, and the dialog is what sizes a
+            # feature; the controller's settle pass is what gives one a measured floor
+            # to set out from. Without it the invert is unknown and the row this check
+            # is about would be legitimately disabled.
+            controller._on_vertex_edit_finished(i, geom)
+
+            def configure(dlg, _t=ew_type):
+                assert dlg.spin_spillway_height is not None, (
+                    f"a {_t} has a cut floor but was offered no way to set out from it")
+                # Ticked first: Qt disables every child of an unchecked checkable group,
+                # so `isEnabled` before this reports the group's state and not the row's.
+                dlg.grp_spillway.setChecked(True)
+                assert not dlg.spin_spillway_height.isReadOnly(), (
+                    f"'Height above floor' is read-only on a {_t} — a cut feature must "
+                    f"be settable from its floor, which is the one measurement a "
+                    f"builder can take standing in it")
+                assert dlg.spin_spillway_height.isEnabled(), (
+                    f"a {_t} reached the dialog with no invert to measure against")
+                dlg.spin_spillway_height.setValue(0.30)
+
+            dlg = _configure_spillway(controller, i, configure)
+            h.assert_no_errors(f"{ew_type} sill set out from the floor")
+
+            ew = h.state.earthwork_manager.get(i)
+            sp = ew.spillway
+            assert sp is not None, f"the {ew_type}'s spillway was not stored"
+            # Typed into the height row, and the other two came with it — to the
+            # centimetre the dialog rounds every one of them to.
+            assert abs(sp.height_above_floor_m - 0.30) < 0.005, (
+                f"the {ew_type} stored {sp.height_above_floor_m} m above its floor, "
+                f"not the 0.30 m set")
+            assert abs(sp.crest_elevation
+                       - (dlg._invert_elevation + 0.30)) < 0.005, (
+                f"the {ew_type}'s overflow elevation did not follow the height typed "
+                f"into the row above it")
+            assert abs(sp.drop_below_rim_m
+                       - (dlg._containment_elevation - sp.crest_elevation)) < 1e-9, (
+                f"the {ew_type}'s depth and elevation describe different sills")
+
+        # And a dam, which has no cut floor, must not carry the row at all.
+        h.add_earthwork("dam", geometry=line_across_valley(row=86))
+        dam_dlg = _configure_spillway(
+            controller, len(cases), lambda dlg: dlg.grp_spillway.setChecked(True))
+        h.assert_no_errors("dam sill")
+        assert dam_dlg.spin_spillway_height is None, (
+            "a dam was offered 'Height above floor' — its invert is the ground under "
+            "the wall, so that row would read the wall height, not a sill level")
+
+
+def check_a_configured_sill_is_not_reset_when_it_is_placed(dem_path):
+    """Log 2: siting a spillway records *where*, never *how deep*.
+
+    ``_on_spillway_placed`` re-seeds the crest from the ground under the click while
+    ``Spillway.auto`` is set, and nothing in the dialog ever cleared it — so every sill
+    configured there was overwritten the moment it was placed. On Dam 1 of the reported
+    design a 71.79 m sill came back at 70.16 m, 1.93 m below the spill level instead of
+    0.30 m, and the feature went from full to holding nothing.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=56))
+
+        def configure(dlg):
+            dlg.grp_spillway.setChecked(True)
+            dlg.spin_spillway_drop.setValue(0.40)
+
+        _configure_spillway(controller, 0, configure)
+        h.assert_no_errors("sill configured")
+        assert ew.spillway.auto is False, (
+            "a sill the user set is still flagged auto, so placing it will re-read the "
+            "crest off the ground — this is the defect itself")
+
+        chosen = ew.spillway.crest_elevation
+        point = ew.geometry.interpolate(ew.geometry.length() / 2.0).asPoint()
+        # A click on ground a clear metre below the sill that was configured: under the
+        # old behaviour this is exactly what replaced it.
+        controller._on_spillway_placed(ew.id, point, chosen - 1.0, kind="outflow")
+        h.assert_no_errors("configured spillway placed")
+
+        assert ew.spillway.point_wkt, "placing the sill did not record its location"
+        assert abs(ew.spillway.crest_elevation - chosen) < 1e-6, (
+            f"placing the sill moved it from {chosen:.2f} m to "
+            f"{ew.spillway.crest_elevation:.2f} m — the user's value was reset")
+        assert abs(ew.spillway.drop_below_rim_m - 0.40) < 0.005, (
+            "the crest survived but its depth did not — the two now disagree")
+
+
 def check_the_review_says_what_each_sill_gives_up(dem_path):
     """The Spillways review carries the storage figures, or says nothing at all.
 
