@@ -497,14 +497,37 @@ def _fdir_nodata(fdir_path, routing):
     them is the right answer by construction. The routing-derived fallback covers a
     raster written before that, where the alternative is pysheds' own default of 0
     — the value that means "due east" under D-infinity.
+
+    Returned as a scalar **of the raster's own dtype**, never as the bare Python float
+    ``rasterio`` hands back, and that typing is load-bearing under NumPy 2. pysheds
+    validates the value with ``(nodata == casted) or np.can_cast(nodata, dtype,
+    casting='safe')``, and NEP 50 dropped the value-based casting that used to make the
+    second half true: a Python float is float64, float64 to float32 is not a safe cast,
+    and NaN fails the first half because it is not equal to itself. So a NaN sentinel
+    that read back fine under NumPy 1 raises ``TypeError: `nodata` value not
+    representable in dtype of array`` under NumPy 2 — and NaN is exactly what
+    D-infinity has to use, since 0.0 there means "flows due east" rather than "nothing
+    here". Every simulation on a numpy-2 QGIS (3.44 ships 2.4) died in
+    ``grid.read_raster`` for that reason; D8 was untouched because its 0 casts cleanly.
+
+    A dtype-typed scalar satisfies the check on NumPy 1 and 2 alike, so this is not a
+    version shim — there is no branch here, and the older stack takes the same value.
+
+    float32 is the fallback dtype because that is what ``FlowAnalysis.save_result``
+    writes; it is only reached when the file cannot be opened at all, in which case
+    there is no dtype to read and the caller is about to fail on the missing raster
+    anyway.
     """
+    dtype = np.dtype("float32")
     try:
         with rasterio.open(fdir_path) as src:
+            if src.dtypes:
+                dtype = np.dtype(src.dtypes[0])
             if src.nodata is not None:
-                return src.nodata
+                return dtype.type(src.nodata)
     except Exception:
         pass
-    return fdir_nodata(routing)
+    return dtype.type(fdir_nodata(routing))
 
 
 def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,

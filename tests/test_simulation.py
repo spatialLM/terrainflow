@@ -548,6 +548,75 @@ class TestFdirNodata:
         assert np.isnan(_fdir_nodata(missing, "dinf"))
         assert _fdir_nodata(missing, "d8") == 0
 
+    @staticmethod
+    def _pysheds_would_accept(nodata, dtype):
+        """pysheds' own ``Raster._validate_nodata``, verbatim.
+
+        Copied rather than imported because it is a private static method on a class
+        whose construction needs a ViewFinder; what matters is the predicate, and
+        reproducing it here is what makes the failure legible when it fires.
+        """
+        nodata = np.array(nodata)
+        casted = nodata.astype(dtype, casting="unsafe")
+        return bool((nodata == casted)
+                    or np.can_cast(nodata, dtype, casting="safe"))
+
+    def test_the_sentinel_is_typed_to_the_raster_it_will_be_read_with(self, tmp_path):
+        """NumPy 2 rejects a bare Python NaN as a float32 raster's no-data.
+
+        pysheds checks ``(nodata == casted) or np.can_cast(nodata, dtype, 'safe')``.
+        NaN fails the first half by never equalling itself, and NEP 50 dropped the
+        value-based casting that carried the second: a Python float is float64, and
+        float64 to float32 is not a safe cast. So the D-infinity sentinel — which has
+        to be NaN, because 0.0 there means "flows due east" — stopped being readable,
+        and every simulation on QGIS 3.44 (NumPy 2.4) died in ``grid.read_raster``
+        with "`nodata` value not representable in dtype of array".
+
+        Pinned on the predicate rather than on the dtype alone, because the dtype is
+        only the mechanism; what must stay true is that pysheds accepts the value.
+        """
+        from terrainflow_assessment.modules.simulation import _fdir_nodata
+
+        path = str(tmp_path / "dinf.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=4, width=4, count=1,
+            dtype="float32", crs="EPSG:32632",
+            transform=from_bounds(0, 0, 4, 4, 4, 4), nodata=np.nan,
+        ) as dst:
+            dst.write(np.zeros((4, 4), dtype="float32"), 1)
+
+        # The bare float this used to return, and still the thing rasterio hands back.
+        assert not self._pysheds_would_accept(float("nan"), np.dtype("float32")), (
+            "a Python NaN is accepted here, so this NumPy no longer reproduces the "
+            "fault and the assertion below has stopped proving anything")
+
+        sentinel = _fdir_nodata(path, "dinf")
+        assert np.isnan(sentinel)
+        assert np.dtype(type(sentinel)) == np.dtype("float32"), (
+            f"sentinel came back as {type(sentinel).__name__}, not the raster's dtype")
+        assert self._pysheds_would_accept(sentinel, np.dtype("float32"))
+
+    def test_the_routing_fallback_is_typed_too(self, tmp_path):
+        """The untagged-file path returns the same kind of value as the tagged one.
+
+        It is the older branch and the easier one to leave behind: a file written
+        before the writer tagged its no-data still reaches ``read_raster``, and a bare
+        NaN from here fails exactly as one from ``src.nodata`` does.
+        """
+        from terrainflow_assessment.modules.simulation import _fdir_nodata
+
+        path = str(tmp_path / "untagged.tif")
+        with rasterio.open(
+            path, "w", driver="GTiff", height=4, width=4, count=1,
+            dtype="float32", crs="EPSG:32632",
+            transform=from_bounds(0, 0, 4, 4, 4, 4),
+        ) as dst:
+            dst.write(np.zeros((4, 4), dtype="float32"), 1)
+
+        for routing in ("dinf", "d8"):
+            sentinel = _fdir_nodata(path, routing)
+            assert self._pysheds_would_accept(sentinel, np.dtype("float32")), routing
+
 
 class TestRunSimulationBranches:
     def test_rainfall_too_short_raises_value_error(self, tmp_path):
