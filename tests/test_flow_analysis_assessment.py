@@ -691,6 +691,98 @@ class TestOutletCellCentres:
 # get_fdir_description / get_profile / save_result
 # ---------------------------------------------------------------------------
 
+class TestSeedIsNeverOnTheRim:
+    """pysheds must never be handed a pour point on the edge of the array it walks.
+
+    ``_dinf_catchment_iter_numba`` walks the flattened flow-direction array and
+    reads all eight neighbours of a cell — ``parent ± {1, ncols, ncols ± 1}`` —
+    before asking whether they exist, with numba's bounds checking off. Seeded on
+    row 0 the northern neighbours are negative flat indices; on the last row the
+    southern ones are past the end. On a 25-cell fixture that reads adjacent heap
+    and returns; on a real DEM it leaves the mapped page and QGIS dies with an
+    access violation, which is what a 3,000-cell-square raster did while these
+    checks stayed green.
+
+    Every boundary outlet is a rim cell by construction, so the fix cannot be a
+    bounds test on the seed — the seeds are on the grid, just on its edge. It is
+    ``pad_for_seeded_walk``: the walk runs one cell in from the edge of a padded
+    copy. What this asserts is the property that matters, whatever the mechanism:
+    the cell pysheds resolves the seed to is interior to the array it is given.
+    """
+
+    @staticmethod
+    def _seed_cell(fdir, x, y, snap):
+        from pysheds.sview import View
+        col, row = View.nearest_cell(x, y, affine=fdir.viewfinder.affine, snap=snap)
+        return int(row), int(col)
+
+    def test_boundary_outlets_are_walked_one_cell_in(self, sloped_dem, monkeypatch):
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run(routing="dinf")
+
+        seen = []
+        original = fa.grid.catchment
+
+        def _recording(*args, **kwargs):
+            fdir = kwargs["fdir"]
+            seen.append((
+                self._seed_cell(fdir, kwargs["x"], kwargs["y"],
+                                kwargs.get("snap", "corner")),
+                np.asarray(fdir).shape,
+            ))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(fa.grid, "catchment", _recording)
+        fa.get_catchment_polygons(stream_threshold=30)
+
+        assert seen, "no outlet was delineated — the fixture is not draining"
+        for (row, col), (rows, cols) in seen:
+            assert 0 < row < rows - 1 and 0 < col < cols - 1, (
+                f"pysheds was seeded at ({row}, {col}) of a {(rows, cols)} array — "
+                "on the rim, where its kernel reads outside the allocation"
+            )
+
+    def test_padding_leaves_an_interior_catchment_untouched(self, sloped_dem):
+        """The margin is for the kernel to read into, not a change of answer."""
+        from terrainflow_assessment.modules.flow_analysis import (
+            FlowAnalysis, catchment_from_seed,
+        )
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run(routing="dinf")
+
+        x = fa.transform.c + 12.5 * fa.transform.a
+        y = fa.transform.f + 12.5 * fa.transform.e
+
+        direct = np.asarray(fa.grid.catchment(
+            x=x, y=y, fdir=fa.fdir, xytype="coordinate",
+            routing=fa.routing, snap="center",
+        )).astype(bool)
+        padded = catchment_from_seed(
+            fa.grid, fa.fdir, x, y, routing=fa.routing, snap="center",
+        ).astype(bool)
+
+        assert padded.shape == direct.shape
+        assert np.array_equal(padded, direct)
+
+    def test_a_seed_off_the_raster_is_still_refused(self, sloped_dem):
+        """Padding is a margin for the kernel, not licence to seed off the grid."""
+        from terrainflow_assessment.modules.flow_analysis import (
+            FlowAnalysis, catchment_from_seed,
+        )
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run(routing="dinf")
+
+        off = fa.transform.c + 40.0 * fa.transform.a
+        y = fa.transform.f + 12.5 * fa.transform.e
+        with pytest.raises(ValueError, match="outside a raster"):
+            catchment_from_seed(fa.grid, fa.fdir, off, y,
+                                routing=fa.routing, snap="center")
+
+
 class TestFdirDescription:
     def test_dinf_label(self):
         from terrainflow_assessment.modules.flow_analysis import FlowAnalysis

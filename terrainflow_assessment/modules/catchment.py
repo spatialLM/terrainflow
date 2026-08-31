@@ -238,11 +238,13 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
         py = work_transform.f + (pour_r + 0.5) * work_transform.e  # e is negative
 
         _p(65, "Delineating catchment via reverse traversal...")
+        # Through `catchment_from_seed`, because this pour point is the highest-
+        # accumulation cell on the *boundary* line: when the site runs to the edge
+        # of the DEM that is a rim cell, and pysheds' kernel reads its neighbours
+        # off the end of the array. See that function for what the padding buys.
+        from terrainflow_assessment.modules.flow_analysis import catchment_from_seed
         try:
-            catch_mask = grid.catchment(
-                x=px, y=py, fdir=fdir,
-                xytype="coordinate", routing=_routing,
-            ) if _routing else grid.catchment(x=px, y=py, fdir=fdir, xytype="coordinate")
+            catch_mask = catchment_from_seed(grid, fdir, px, py, routing=_routing)
         except (TypeError, AttributeError):
             catch_mask = grid.catchment(x=px, y=py, fdir=fdir, xytype="coordinate")
 

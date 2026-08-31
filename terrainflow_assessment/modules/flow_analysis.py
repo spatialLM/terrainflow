@@ -298,6 +298,95 @@ def crest_spread_warning(unplaced_cells, domain_cells, threshold=UNROUTED_WARN_F
 # Core flow analysis
 # ---------------------------------------------------------------------------
 
+def pad_for_seeded_walk(fdir):
+    """A one-cell-padded copy of *fdir*, and the viewfinder that addresses it.
+
+    Split out from :func:`catchment_from_seed` so a caller delineating many
+    outlets off one flow-direction raster pays for the copy once. Under D-infinity
+    that copy is a float64 array the size of the DEM.
+    """
+    from affine import Affine
+    from pysheds.sview import Raster, ViewFinder
+
+    view = fdir.viewfinder
+    padded = np.pad(np.asarray(fdir), 1, mode="constant", constant_values=0)
+    aff = view.affine
+    # One cell up and one cell left in *pixel* space. Written out via the full
+    # affine rather than as ``c - a`` / ``f - e`` so a rotated or sheared raster
+    # steps along its own axes instead of along north and east.
+    shifted = Affine(aff.a, aff.b, aff.c - aff.a - aff.b,
+                     aff.d, aff.e, aff.f - aff.d - aff.e)
+    padded_view = ViewFinder(affine=shifted, shape=padded.shape,
+                             nodata=view.nodata, crs=view.crs,
+                             mask=np.ones(padded.shape, dtype=bool))
+    return Raster(padded, viewfinder=padded_view), padded_view
+
+
+def catchment_from_seed(grid, fdir, x, y, routing=None, snap=None, padded=None):
+    """``grid.catchment``, safe to seed with a cell on the edge of the grid.
+
+    pysheds' catchment kernels are numba ``nopython`` code with bounds checking
+    off, and they walk the *flattened* array: the eight neighbours of a cell are
+    ``parent ± {1, ncols, ncols ± 1}``, read straight out of ``fdir.flat`` before
+    anything asks whether they exist. For a seed on row 0 the three northern
+    neighbours are negative flat indices; on the last row the three southern ones
+    are past the end. Neither is an ``IndexError`` to catch — each is a read
+    outside the allocation, and the process dies with an access violation the
+    moment the array is large enough for that read to leave the mapped page. A
+    3,000-cell-square DEM is large enough. The 25-cell fixtures in the checks are
+    not, and neither is the synthetic DEM the QGIS suite runs on, which is why
+    208 green checks sat on top of a crash that killed QGIS on real terrain.
+
+    A bounds test on the seed cannot help here. Every boundary outlet is a rim
+    cell *by construction* — :meth:`FlowAnalysis._find_boundary_outlets` only ever
+    considers row 0, row -1, column 0 and column -1 — so these seeds are not off
+    the grid, they are legitimately on its edge, and the kernel still reads past
+    it.
+
+    So the walk runs on a one-cell-padded copy, where every real cell is interior,
+    and the mask is cropped back. Padding rather than nudging the seed inland is
+    what keeps the answer exact: a rim cell can be fed by three interior
+    neighbours at once, and a nudge would keep only the branch it stepped into.
+    The padding's own values never matter — ``_pop_rim`` zeroes the outermost ring
+    before the walk, which is exactly why the ring has to be there to spare.
+
+    Raises ``ValueError`` for a seed whose cell falls outside *fdir*, which is
+    what pysheds already does for a point outside the bounding box; the padding
+    is a margin for the kernel to read into, not licence to seed off the raster.
+    """
+    from pysheds.sview import View
+
+    if padded is None:
+        padded = pad_for_seeded_walk(fdir)
+    padded_fdir, padded_view = padded
+
+    rows, cols = np.asarray(fdir).shape
+    seed_col, seed_row = View.nearest_cell(x, y, affine=fdir.viewfinder.affine,
+                                           snap=(snap or "corner"))
+    if not (0 <= seed_row < rows and 0 <= seed_col < cols):
+        raise ValueError(
+            f"Pour point ({x}, {y}) resolves to cell ({seed_row}, {seed_col}), "
+            f"outside a raster of shape {(rows, cols)}."
+        )
+
+    kwargs = {"x": x, "y": y, "fdir": padded_fdir, "xytype": "coordinate"}
+    if snap is not None:
+        kwargs["snap"] = snap
+
+    original_view = grid.viewfinder
+    grid.viewfinder = padded_view
+    try:
+        try:
+            catch = grid.catchment(routing=routing, **kwargs) if routing \
+                else grid.catchment(**kwargs)
+        except TypeError:
+            catch = grid.catchment(**kwargs)
+    finally:
+        grid.viewfinder = original_view
+
+    return np.asarray(catch)[1:-1, 1:-1]
+
+
 class FlowAnalysis:
     """
     Pysheds-based flow direction, accumulation, and catchment delineation.
@@ -846,13 +935,7 @@ class FlowAnalysis:
         """Return boolean mask for the catchment draining to (x, y)."""
         if self.fdir is None:
             raise RuntimeError("Run flow analysis first.")
-        try:
-            catch = self.grid.catchment(
-                x=x, y=y, fdir=self.fdir, xytype="coordinate", routing=self.routing
-            )
-        except TypeError:
-            catch = self.grid.catchment(x=x, y=y, fdir=self.fdir, xytype="coordinate")
-        return catch
+        return catchment_from_seed(self.grid, self.fdir, x, y, routing=self.routing)
 
     def get_stream_network(self, accumulation_threshold=1000):
         """Boolean mask where accumulation > threshold."""
@@ -1128,6 +1211,8 @@ class FlowAnalysis:
         outlet_points_sorted = sorted(outlet_points, key=lambda pt: _acc_at(*pt))
         fdir_array = np.array(self.fdir)
         claimed = np.zeros(acc_array.shape, dtype=bool)
+        # One padded copy for every outlet, not one per outlet.
+        padded = pad_for_seeded_walk(self.fdir)
 
         results = []
         for i, (x, y) in enumerate(outlet_points_sorted):
@@ -1139,29 +1224,23 @@ class FlowAnalysis:
             # rounds up to 152 — the wrong cell — and the bottom row, 299.5, rounds to
             # 300 and off the raster, returning no catchment at all. np.floor, which
             # "center" uses, is the only resolution that means what we asked.
-            # The seed has to be inside the grid before pysheds sees it. Its
-            # catchment kernels are numba `nopython` code with bounds checking
-            # off, so a row or column one past the edge is not an IndexError to
-            # catch below — it is a read outside the array and the process dies
-            # with an access violation. Every one of these points is an *exit*
-            # point, which is to say it sits on the boundary by definition, so
-            # whether `floor` lands on the last row or one past it comes down to
-            # the last bit of a float. That is the intermittency.
+            # Every one of these points is an *exit* point, which is to say it
+            # sits on the rim of the grid by definition — and pysheds' catchment
+            # kernel reads the neighbours of its seed with bounds checking off, so
+            # a rim seed reads outside the array and kills the process. That is
+            # what `catchment_from_seed` pads against; see its docstring. The
+            # check here stays for the seed that is off the raster altogether,
+            # which is a point to skip rather than an error to raise.
             seed_row, seed_col = xy_to_rc(self.transform, x, y)
             if not (0 <= seed_row < acc_array.shape[0]
                     and 0 <= seed_col < acc_array.shape[1]):
                 continue
 
             try:
-                try:
-                    catch_mask = self.grid.catchment(
-                        x=x, y=y, fdir=self.fdir, xytype="coordinate",
-                        routing=self.routing, snap="center"
-                    )
-                except TypeError:
-                    catch_mask = self.grid.catchment(
-                        x=x, y=y, fdir=self.fdir, xytype="coordinate", snap="center"
-                    )
+                catch_mask = catchment_from_seed(
+                    self.grid, self.fdir, x, y, routing=self.routing,
+                    snap="center", padded=padded,
+                )
             except Exception:
                 continue
 
