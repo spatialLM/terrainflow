@@ -1,0 +1,73 @@
+# TerrainFlow outreach configuration.
+# Paths resolve relative to outreach/ unless stated. Read by tools/check.py and
+# tools/queue.py, and by every email-* skill.
+
+project:
+  root: "C:/Users/liamm/Documents/TerrainFlow"
+  product: "TerrainFlow"
+  repo: "https://github.com/spatialLM/terrainflow"
+  # Fills the [linkedin] marker in the signature.
+  linkedin: "TODO - paste the LinkedIn profile URL"
+  # Drafts write [video] rather than a URL, so a whole batch can be written and
+  # proofread before the video exists. Set this once when it does; --render
+  # fills every draft from here and refuses while it still says TODO. Never
+  # paste a URL into a draft - that is a hundred files to find-and-replace and
+  # one of them gets missed.
+  video: "TODO - paste the intro video URL here before the first send"
+
+sender:
+  # Used by the signoff check. The signature must contain the name and the repo
+  # link, or the draft is blocked.
+  name: "Liam Murphy"
+  role: "Civil & Environmental Engineer"
+  # The README publishes this one. Change if you would rather send from another.
+  # A new address is being created for this outreach. Until it is set, --render
+  # refuses, the same way it does for the video. Do not send from a personal
+  # address just to get moving.
+  email: "TODO - the new outreach address, once it exists"
+  # A brand-new mailbox has no sending reputation. Send a few ordinary emails
+  # from it first, then spread the 18 direct sends over two or three days.
+  location: "Christchurch, New Zealand"
+
+send:
+  # 100+ cold emails from one Gmail in a day lands the lot in Promotions.
+  # queue.py refuses to build a batch larger than this.
+  batch_size: 18
+  # If 10% accept a 30-minute call, a 100-person send is 10 calls. Spread it.
+  working_days_between_batches: 1
+
+# Grouped from the Category column of TerrainFlow_Outreach_Tracker.xlsx, not
+# invented. The tracker had 39 categories across 51 contacts; these are the
+# families they fall into.
+brackets:
+  1: "Permaculture and water-harvesting practice"
+  2: "Restoration and watershed NGOs"
+  3: "NZ land and freshwater bodies"
+  4: "NbS, SuDS and flood engineering"
+  5: "Swale and NFM academics"
+  6: "Open-source geospatial"
+
+classify:
+  # The tracker already carries a Category and a "Why It's a Fit" per contact,
+  # written by hand. /email-research confirms that judgement rather than
+  # re-deriving it, so these thresholds now apply only to a contact added
+  # later with no category of its own.
+  primary_margin: 0.15
+  # Three near-equal weights is a weak classification, never a three-way blend.
+  max_brackets: 2
+
+# How each contact is actually reached. Replaces the old A/B/C depth tiers -
+# every contact now gets the full researched email, because the tracker already
+# has a fit written for all 51.
+routes:
+  direct: "Address known. Render, paste into the mail client, send."
+  form: "No address. Same email pasted into a web form or general enquiry."
+  lookup: "Address to be resolved from a published faculty page, then direct."
+  warm: "An existing contact route you already have."
+
+check:
+  body_words_warn: 520        # the base email is ~456; this is a structural format, not a note
+  subject_words_warn: 9       # gmail truncates a long subject on a phone
+  cta_families_hard: 3        # more than two distinct asks and it earns none
+  sameness_warn: 0.25         # shared 5-gram fraction between two templates
+  ngram: 5
