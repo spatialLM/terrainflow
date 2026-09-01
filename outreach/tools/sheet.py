@@ -68,6 +68,15 @@ margin-bottom:1.5rem;border-radius:0 4px 4px 0;font-size:.9rem}
 h2{font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);
 margin:2.5rem 0 .35rem;font-weight:600}
 h2 .note{text-transform:none;letter-spacing:0;font-weight:400;display:block;margin-top:.2rem}
+.brief{margin-top:.75rem;border-top:1px solid var(--line);padding-top:.5rem}
+.brief summary{cursor:pointer;color:var(--accent);font-size:.85rem;user-select:none}
+.briefbody{font-size:.85rem;line-height:1.5;margin-top:.5rem}
+.briefbody h4{margin:.9rem 0 .2rem;font-size:.8rem;letter-spacing:.02em;
+text-transform:uppercase;color:var(--mut)}
+.briefbody h4.danger{color:var(--hard)}
+.briefbody ul{margin:.2rem 0 .2rem 1.1rem;padding:0}
+.briefbody li{margin:.2rem 0}
+.briefbody p{margin:.2rem 0;color:var(--mut)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;
 padding:1.1rem 1.25rem;margin-bottom:1rem}
 .hd{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap}
@@ -105,6 +114,74 @@ document.addEventListener('click', async e => {
   setTimeout(() => { b.textContent = 'Copy'; }, 1800);
 });
 """
+
+
+BRIEF_CSS_MARK = None
+
+
+def brief_html(slug: str) -> str:
+    """brief.md as collapsed HTML. Empty string when there is no card.
+
+    A deliberately small markdown subset - headings, bullets, bold, italics -
+    because the file is written by build_briefs.py and nothing else, so the
+    shapes are known. Anything unrecognised is escaped and shown as a paragraph
+    rather than dropped, since silently losing a DO NOT USE line would be the
+    one failure that matters here.
+    """
+    src = ROOT / "recipients" / slug / "brief.md"
+    if not src.exists():
+        return ""
+
+    out, in_list, para = [], False, []
+
+    def close():
+        nonlocal in_list
+        # A wrapped paragraph is one paragraph. Emitting each source line as its
+        # own <p> split every **bold** span across two elements and left the
+        # markers showing, which is how the header of every card was rendering.
+        if para:
+            out.append("<p>" + inline(" ".join(para)) + "</p>")
+            para.clear()
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for raw in src.read_text(encoding="utf-8").split("\n")[1:]:
+        line = raw.rstrip()
+        if not line.strip():
+            close()
+            continue
+        if line.startswith("## "):
+            close()
+            title = line[3:].strip()
+            cls = "danger" if title.startswith("DO NOT USE") else ""
+            out.append('<h4 class="{}">{}</h4>'.format(cls, html.escape(title)))
+            continue
+        if line.startswith("- "):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append("<li>" + inline(line[2:].strip()) + "</li>")
+            continue
+        if in_list:
+            close()
+        para.append(line.strip())
+    close()
+
+    return ('<details class="brief"><summary>Facts about this recipient '
+            '&mdash; verified, and what not to use</summary>'
+            '<div class="briefbody">' + "".join(out) + "</div></details>")
+
+
+def inline(s: str) -> str:
+    """**bold**, *italic* and nothing else. Escaped first, so no markup leaks."""
+    s = html.escape(s)
+    parts = s.split("**")
+    s = "".join(x if i % 2 == 0 else "<b>" + x + "</b>" for i, x in enumerate(parts))
+    parts = s.split("*")
+    if len(parts) % 2:
+        s = "".join(x if i % 2 == 0 else "<i>" + x + "</i>" for i, x in enumerate(parts))
+    return s
 
 
 def build(batch: str) -> Path:
@@ -181,12 +258,13 @@ def build(batch: str) -> Path:
                 '<div class="to"><span class="route">{route}</span> {to}</div>'
                 '<div class="note">{rnote}</div></div>{btn}</div>'
                 '<div class="subj">Subject &nbsp;<b>{subj}</b></div>'
-                '<pre id="{eid}">{text}</pre>{findings}</div>'.format(
+                '<pre id="{eid}">{text}</pre>{findings}{brief}</div>'.format(
                     org=html.escape(str(front.get("org", path.stem))),
                     route=html.escape(route or "?"), to=shown,
                     rnote=html.escape(ROUTE_NOTE.get(route, "")),
                     subj=html.escape(subject_of(sections)),
-                    eid=eid, text=html.escape(text), findings=findings, btn=btn))
+                    eid=eid, text=html.escape(text), findings=findings, btn=btn,
+                    brief=brief_html(path.stem)))
 
     banner = ""
     if not video_ready:
