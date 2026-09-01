@@ -41,3 +41,24 @@ tests_qgis/_shots_baseline/
 # QGIS writes a style database beside whatever profile it boots with; the check
 # runner boots one per module, so these appear wherever the tests were run from.
 symbology-style.db
+
+# ---------------------------------------------------------------------------
+# outreach/ — PERSONAL DATA. This repo is public.
+#
+# Everything below names a real person or organisation: contact lists, research
+# notes about them, drafted mail, replies. None of it belongs in a public repo,
+# and a push cannot be taken back.
+#
+# This block is a request. outreach/tools/check.py turns it into a test: it runs
+# git ls-files over these paths and hard-fails if anything is tracked. Do not
+# rely on the list below alone.
+#
+# The machinery is tracked on purpose — rules, brackets, facts, tools. Only the
+# people are ignored.
+# ---------------------------------------------------------------------------
+outreach/recipients.csv
+outreach/recipients/
+outreach/outbox/
+outreach/replies/
+outreach/corpus/
+outreach/suppression.txt
