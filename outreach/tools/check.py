@@ -667,6 +667,44 @@ def check_facts(sections: dict, rep: Report, facts: Path) -> None:
                     'claim with no [f:TF-nn]: "{}"'.format(" ".join(sent.split())[:70]))
 
 
+# Concrete, checkable claims about Liam himself. Deliberately narrow: vague
+# gestures like "my professional experience" are covered by TF-60/61 and
+# flagging them would be noise. These are the ones a stranger could disprove.
+BIO = re.compile(
+    r"\bI(?:'ve| have)?\s+(?:been\s+)?"
+    r"(?:completed|studied|graduated|trained|qualified|volunteered|"
+    r"following|followed|watched|read|taught|lectured|published)\b"
+    r"|\bmy\s+(?:master'?s?|degree|thesis|background|career|training|course)\b"
+    r"|\bMaster'?s\s+in\b"
+    r"|\bI\s+have\s+spent\s+\w+\s+years\b",
+    re.I)
+
+
+def check_bio(sections: dict, rep: Report, facts: Path) -> None:
+    """A biographical claim about Liam cites a TF-6x, or it does not go in.
+
+    This is the one class the rest of the gate cannot see. check_facts covers
+    what the software does; check_evidence covers what the recipient does.
+    Nothing covered what *he* has done, and that is exactly where two fabricated
+    sentences got through - fluent, plausible, false, and pointed at a reader who
+    would have taken them at face value.
+
+    HARD rather than WARN because the fix is to add six characters, and because
+    a warning on the one uncatchable failure is not a gate.
+    """
+    body = sections.get("BODY", "")
+    bio_ids = set()
+    if facts.exists():
+        bio_ids = set(re.findall(r"^\s*(TF-6\d)", facts.read_text(encoding="utf-8"), re.M))
+    for sent in re.split(r"(?<=[.?!])\s+", dedent(body)):
+        if not BIO.search(MARKER.sub("", sent)):
+            continue
+        if not set(F_REF.findall(sent)) & bio_ids:
+            rep.add("HARD", "bio",
+                    'biographical claim with no TF-6x: "{}"'
+                    .format(" ".join(sent.split())[:70]))
+
+
 def check_signoff(sections: dict, rep: Report, cfg: dict, lex: dict) -> None:
     body = render_body(sections)
     low = body.lower()
@@ -828,6 +866,7 @@ def run(path: Path, recipients_dir: Path = None, supp: Path = None,
     check_placeholder(sections, rep)
     check_signoff(sections, rep, cfg, lex)
     check_facts(sections, rep, facts)
+    check_bio(sections, rep, facts)
     check_blend(front, sections, rep, cfg, lex)
 
     # A template has no recipient, so the recipient-shaped checks would only
@@ -900,7 +939,8 @@ def _fixture_tree(tmp: Path) -> None:
     (tmp / "facts.md").write_text(
         "TF-04  Earthworks are burned into a copy of the DEM and the analysis re-runs.\n"
         "TF-30  Tested against CAMELS-NZ.\n"
-        "TF-33  One catchment so far, more to be tested before release.\n",
+        "TF-33  One catchment so far, more to be tested before release.\n"
+        "TF-60  Liam Murphy, civil and environmental engineer.\n",
         encoding="utf-8")
 
 
@@ -1010,6 +1050,19 @@ def selftest() -> int:
                       tmp, lex)
         case("facts warns on uncited number",
              any(c == "facts" and lv == "WARN" for lv, c, _ in r.items))
+
+        # The class no other check can see. Both of the real fabrications were
+        # first person and about him, not about the tool or the recipient.
+        BIO_BAD = CLEAN.replace(
+            "I have built a QGIS plugin",
+            "I completed a permaculture design course, and I have built a QGIS plugin")
+        r = _run_text(BIO_BAD, tmp, lex)
+        case("bio catches an uncited claim about Liam", r.hard_in("bio"))
+
+        r = _run_text(BIO_BAD.replace("I completed a permaculture design course",
+                                      "I completed a permaculture design course [f:TF-60]"),
+                      tmp, lex)
+        case("bio quiet once cited", not r.hard_in("bio"))
 
         r = _run_text(CLEAN.replace("If not, just say and I will leave you alone.", ""),
                       tmp, lex)

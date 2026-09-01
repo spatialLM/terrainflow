@@ -145,6 +145,28 @@ TF-62  `shipped`  He started building it after volunteering on a rewilding
 TF-63  `shipped`  One person, not a company. No team, no funding, and no users
        to point at yet.
 
+TF-64  `shipped`  He completed Geoff Lawton's permaculture design course.
+       *(Stated by Liam, 2026-09-01.)*
+
+TF-65  `shipped`  He has followed Andrew Millison's videos for some time, and
+       they were a large part of what led him to do that course. *(Stated by
+       Liam, 2026-09-01. Millison only — do not generalise this to any other
+       educator on the list.)*
+
+### Biography is not free text
+
+TF-60 to TF-65 are the **only** permitted claims about Liam. The gate can check
+what is said about the software and about a recipient; it cannot check what is
+said about him, so this is the one place where an invented sentence would reach a
+real reader unchallenged. It has already happened twice — *"I have spent two
+years building software"* and a claim about how long another site had been
+documented — both fluent, both false, neither catchable.
+
+So any first-person sentence about his history, study, practice or habits cites
+an ID here or does not go in. If a draft needs a biographical fact that is not
+listed, the answer is to ask him and add it with the date he said it, not to
+write it and hope.
+
 ---
 
 ## The limits — cite these, do not hide them

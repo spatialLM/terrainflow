@@ -51,6 +51,87 @@ TerrainFlow runs a complete hydrological terrain analysis." No "simply", no
 
 **en-NZ throughout**: licence, artefacts, modelling, metres, realised.
 
+## Observed from your own writing to a person — 2026-09-01
+
+**This section outranks everything above it.** The rest of this file is inferred
+from documentation; this is one paragraph you actually wrote to a named human,
+supplied after two rounds of drafts were rejected. One real sample beats every
+hypothesis it contradicts.
+
+The opener, verbatim:
+
+> *"I've been following your videos for a while now along with other permaculture
+> educators (thank you for the great work you do). Your videos were a big part of
+> what inspired me to complete Geoff Lawtons permaculture course. Using my
+> professional and academic experience I've been developing a tool that I hope
+> can really improve the accuracy and speed which permaculture and water
+> harvesting projects can be planned, designed and developed."*
+
+### The rule this settles
+
+**Write what their work did to you, not what their work is.**
+
+Every rejected opener described the recipient: their layer ordering, their lot
+size, their demonstration site. All accurate, all sourced, all rejected — because
+a description of someone's own work, returned to them, carries no information
+they do not have. What they cannot know is its effect on a stranger.
+
+This is why it passes the deletion test where the others failed. Delete
+*"your videos were a big part of what inspired me to complete the PDC"* and the
+email loses its reason to be addressed to Millison rather than to anyone. It is
+also a credential — it says *I am not a random engineer emailing about permaculture*
+— without a sentence spent claiming one.
+
+The mechanical difference: the rejected openers had the recipient as the subject.
+This one has **I** as the subject and their work as the object. When the personal
+sentence starts with *"You"* or *"Your work"*, it is about to fail.
+
+### Where it does not reach
+
+It requires having actually consumed their work. That is true for the educators
+and authors on the list and false for most of the organisations. **Do not
+manufacture it** — an invented *"your work inspired me"* is worse than every
+rejected draft, because it is both decorative and false.
+
+Where it is not true, there is no opener. Open with the rewilding site
+(`TF-62`) and say plainly why this organisation. That was already the approach
+for those, and it stands.
+
+### Sentence-level, observed
+
+- **Contractions throughout.** "I've", not "I have". The guess above was right;
+  it is now evidence.
+- **Warmth in a parenthesis**, not in a clause. *"(thank you for the great work
+  you do)"* — asides carry the feeling, the main clause stays flat.
+- **No pivot.** Three sentences: what their work did, what it led to, what he is
+  building. The third does not double back to justify the first. Nothing in this
+  paragraph exists to set anything else up, which is precisely why it does not
+  read as constructed.
+- **Everything specific is checkable and his**: the videos, the course, the
+  developing. Nothing asserted about the recipient at all.
+- **He does not name the tool in the opener.** "a tool that I hope can..." —
+  hedged, unnamed, deferred to the paragraph that follows.
+- **"a tool that I hope can really improve"** — he hedges his own work. Do not
+  strip that into a claim; "which improves" is a different person writing.
+- 3 sentences, 22/16/33 words. Longer than the 18-word rule above. That rule was
+  a guess from the README and is now downgraded: the first sentence is 22 words
+  and it works.
+
+### Two edits worth making, and why they are only suggestions
+
+- *"along with other permaculture educators"* dilutes the one sentence doing the
+  work — it says *you are one of several I follow*. Cutting four words makes it
+  land harder and costs nothing true.
+- *"Using my professional and academic experience"* restates the paragraph
+  immediately below it, which opens *"I'm a civil and environmental engineer…"*.
+  The opener can hand straight over.
+
+Neither is a voice correction. Do not touch the grammar of
+*"the accuracy and speed which … can be planned"* or the missing apostrophe in
+*"Geoff Lawtons"* on any pass that is not proofreading — flag them once at proof
+time and let him decide. Smoothing a person's sentences into standard register is
+how the last two rounds ended up sounding like nobody.
+
 ## Carried over as email rules
 
 - **Short first sentence.** Under 18 words. It is read in a preview pane.

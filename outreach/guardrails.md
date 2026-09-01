@@ -28,6 +28,46 @@ referrals are gone.
 get that specific, hold this email for a warmer contact."* Honour it. A general
 email that is true beats a specific one that is invented.
 
+## 1a. The deletion test — the rule that matters most
+
+**Delete the personalised sentence. If the email still works, it was decoration.**
+
+A sentence written in order to be personal reads as a sentence written in order
+to be personal. The reader sees the seam: mention their project, pivot, "which is
+why I am writing to you". Naming a real project does not save it. Liam's own
+words on the first attempt at this:
+
+> *"It reads as not being genuine - rather just a throwaway sentence that is
+> attempting to make it sound personal."*
+
+That was said about openers that cited real, verified, specific facts. Accuracy
+is not the issue. **Function is.** The reference has to be load-bearing:
+
+- it changes what is being asked, or
+- it is the actual reason this email exists rather than a generic one, or
+- it is a question only that person can answer.
+
+If none of those is true, cut it and open with something honest instead. A plain
+email with no personalisation beats a plain email with a decorative sentence
+stapled to the front, because the second one tells the reader you were trying to
+manage them.
+
+Two things that always fail the test: quoting an organisation's own About-page
+description back at them, and any sentence whose second half is a pivot to the
+tool.
+
+**The test that predicts it before you write it: check the subject of the
+sentence.** If it is *you* or *your work*, it is a description of the recipient
+and they already have it. If it is *I*, it is what their work did to a stranger,
+which is the only thing in the email they cannot get anywhere else. See the
+observed sample in [voice.md](voice.md) — that rule came from Liam's own opener,
+not from theory.
+
+This only applies where it is true. Where he has not read, watched or used their
+work, there is no such sentence, and inventing one is worse than every failure
+above because it is decorative *and* false. `TF-64` and `TF-65` are the only two
+of these on record; anything beyond them has to be asked for and added.
+
 ## 2. Never claim capability the software does not have
 
 Every factual sentence cites a `facts.md` ID. If nothing fits, the sentence does
