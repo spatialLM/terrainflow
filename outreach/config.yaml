@@ -67,7 +67,7 @@ routes:
 
 check:
   body_words_warn: 520        # the base email is ~456; this is a structural format, not a note
-  subject_words_warn: 9       # gmail truncates a long subject on a phone
+  subject_words_warn: 11       # his own subject is 10 words and is the best part of it
   cta_families_hard: 3        # more than two distinct asks and it earns none
   sameness_warn: 0.25         # shared 5-gram fraction between two templates
   ngram: 5

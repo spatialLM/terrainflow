@@ -162,7 +162,14 @@ def leaves(node) -> list:
 # ---------------------------------------------------------------- text utils
 
 WORD = re.compile(r"[a-z0-9']+")
-MARKER = re.compile(r"\[(?:e:\d+|f:TF-\d+|video|repo|linkedin)\]")
+# Working notes. Always stripped - they are for the gate, not the reader.
+MARKER = re.compile(r"\[(?:e:\d+|f:TF-\d+)\]")
+# Content placeholders. Substituted when a URL is supplied and otherwise left
+# VISIBLE, so a preview shows "overview is here: [video]" rather than a sentence
+# that trails off into nothing and reads as a bug.
+LINK_MARKER = re.compile(r"\[(?:video|repo|linkedin)\]")
+# An unset config value is empty or still says TODO.
+VIDEO_UNSET = re.compile(r"^\s*$|todo", re.I)
 # Filled from config at render time. Never pasted into a draft: 51 drafts is 51
 # find-and-replaces, and one of them gets missed.
 LINK_MARKERS = ("video", "repo", "linkedin")
@@ -227,7 +234,7 @@ def render_body(sections: dict, links: dict = None, wrap: bool = False) -> str:
     """
     raw = dedent(sections.get("BODY", sections.get("", "")))
     for name, url in (links or {}).items():
-        if url:
+        if url and not VIDEO_UNSET.search(url):
             raw = raw.replace("[{}]".format(name), url)
     text = MARKER.sub("", raw)
     text = re.sub(r"[ \t]*\n[ \t]*([.,;:?!])", r"\1", text)   # pulled onto its own line
@@ -679,9 +686,6 @@ def check_signoff(sections: dict, rep: Report, cfg: dict, lex: dict) -> None:
             rep.add("HARD", "signoff", "tracking or shortened link: {}".format(host))
 
 
-VIDEO_UNSET = re.compile(r"^\s*$|todo", re.I)
-
-
 def links_from_cfg(cfg: dict) -> dict:
     """The three config-filled link markers, by marker name."""
     proj = cfg.get("project") or {}
@@ -731,8 +735,14 @@ def check_lexicon(sections: dict, rep: Report, lex: dict, cfg: dict) -> None:
         if re.search(r"\b" + re.escape(str(bad).lower()) + r"\b", low):
             rep.add("WARN", "lexicon", '"{}" -> {}'.format(bad, good))
 
-    for m in re.finditer(r"\b\w+(?:ize|ized|izing|ization)\b", low):
-        rep.add("WARN", "locale", '"{}" - en-NZ uses -ise'.format(m.group()))
+    # "sized", "prized" and friends end in -ized without being -ize verbs, and
+    # flagged on every draft. Only words with a real stem before the suffix are
+    # candidates, and the short false friends are named.
+    NOT_IZE = {"sized", "sizes", "sizing", "prized", "prizes", "prizing",
+               "seized", "seizing", "capsized"}
+    for m in re.finditer(r"\b(\w{4,})(?:ize|ized|izing|ization)\b", low):
+        if m.group() not in NOT_IZE:
+            rep.add("WARN", "locale", '"{}" - en-NZ uses -ise'.format(m.group()))
 
     chk = cfg.get("check") or {}
     words = len(normalise(body))
@@ -1067,6 +1077,9 @@ def selftest() -> int:
         filled = render_body(sec, links={"video": "https://youtu.be/abc123"})
         case("render fills the video link",
              "https://youtu.be/abc123" in filled and "[video]" not in filled)
+        # A stripped link marker leaves a sentence trailing into nothing, which
+        # reads as a bug when proofreading. Unfilled markers stay visible.
+        case("preview keeps unfilled link markers", "[video]" in rendered)
         case("render strips markers", "[e:1]" not in rendered and "[f:" not in rendered)
         case("render keeps the words", "streambanks" in rendered and "Liam Murphy" in rendered)
         case("render leaves no orphan space",
