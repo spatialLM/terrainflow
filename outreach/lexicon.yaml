@@ -134,6 +134,10 @@ tracking_hosts:
   - "utm_campaign"
 
 # Prose rhythm. A cold email is read in a preview pane by someone standing up.
+# Measured from base/2026-09-01-intro-video.md, not chosen. That email runs to
+# 20 sentences, mean 19.4 words, longest 33, and its own opening sentence is 23.
+# The previous values (mean 10-20, opening 18) flagged his own writing, which
+# made the check an argument with the author rather than a gate.
 rhythm:
-  mean_sentence_words: [10, 20]
-  opening_sentence_max_words: 18
+  mean_sentence_words: [10, 22]
+  opening_sentence_max_words: 26

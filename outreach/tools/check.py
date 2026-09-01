@@ -219,6 +219,9 @@ def dedent(text: str) -> str:
     return "\n".join(ln[pad:] if len(ln) >= pad else ln for ln in body).strip("\n")
 
 
+LIST_LINE = re.compile(r"^[ \t]*(?:\d+[.)]|[-*\u2022])\s+\S", re.M)
+
+
 def render_body(sections: dict, links: dict = None, wrap: bool = False) -> str:
     """The text as the recipient will see it - markers stripped, indent removed.
 
@@ -239,7 +242,9 @@ def render_body(sections: dict, links: dict = None, wrap: bool = False) -> str:
     text = MARKER.sub("", raw)
     text = re.sub(r"[ \t]*\n[ \t]*([.,;:?!])", r"\1", text)   # pulled onto its own line
     text = re.sub(r"[ \t]+([.,;:?!])", r"\1", text)           # left dangling before punctuation
-    text = re.sub(r"[ \t]{2,}", " ", text)
+    # Anchored behind a non-space so it closes gaps inside a sentence but
+    # never touches the indent that makes a numbered list a numbered list.
+    text = re.sub(r"(?<=\S)[ \t]{2,}", " ", text)
     text = re.sub(r"[ \t]+\n", "\n", text).rstrip()
 
     # Each prose paragraph becomes ONE line, because this text is pasted into a
@@ -259,13 +264,28 @@ def render_body(sections: dict, links: dict = None, wrap: bool = False) -> str:
         # ordinary prose and joins like any other. Testing for "http" anywhere
         # in the paragraph conflated the two and left the video sentence broken
         # across lines.
-        if any(ln.strip().startswith(("http://", "https://")) for ln in lines) \
+        # A numbered or bulleted block is structure the writer put there.
+        # Joining five numbered steps into one line destroys the clearest
+        # part of the email. Any list marker preserves the whole block,
+        # heading line included.
+        if LIST_LINE.search(para) \
+                or any(ln.strip().startswith(("http://", "https://")) for ln in lines) \
                 or not any(len(ln) > 50 for ln in lines):
             out.append(para)
             continue
+        # A short line with no sentence-ending punctuation, sitting above the
+        # prose, is a heading - "Validation", "Demonstration". Joining it onto
+        # the paragraph below turns his section markers into stray words at the
+        # front of a sentence.
+        head = ""
+        if len(lines) > 1 and len(lines[0].strip()) <= 40 \
+                and not lines[0].strip().endswith((".", ":", "?", "!", ",", ";")):
+            head, lines = lines[0].rstrip(), lines[1:]
+
         joined = " ".join(ln.strip() for ln in lines)
-        out.append(textwrap.fill(joined, width=78, break_long_words=False,
-                                 break_on_hyphens=False) if wrap else joined)
+        body = (textwrap.fill(joined, width=78, break_long_words=False,
+                              break_on_hyphens=False) if wrap else joined)
+        out.append(head + "\n" + body if head else body)
     return "\n\n".join(out)
 
 
@@ -1135,6 +1155,38 @@ def selftest() -> int:
         case("preview keeps unfilled link markers", "[video]" in rendered)
         case("render strips markers", "[e:1]" not in rendered and "[f:" not in rendered)
         case("render keeps the words", "streambanks" in rendered and "Liam Murphy" in rendered)
+        # The base email's "The Tool" is five numbered steps. Joining them
+        # would be correct for prose and destroys a list.
+        LISTED = CLEAN.replace(
+            "  There is a short video",
+            "  End to end, it lets you:\n"
+            "    1. Run a rainfall flow analysis on the topography, from LiDAR or open data\n"
+            "    2. Identify earthwork locations, then draw them in to real depths\n"
+            "\n"
+            "  There is a short video")
+        body = render_body(split_doc(LISTED)[1])
+        case("render keeps a numbered list on separate lines",
+             "\n  1. Run a rainfall" in body and "\n  2. Identify" in body,
+             repr(body[body.find("End to end"):][:90]))
+        case("render still joins ordinary prose",
+             "\n" not in body[body.find("There is a short video"):].split("\n\n")[0])
+
+        # His base email has three of these - The Tool, Validation,
+        # Demonstration - each a short line directly above its prose.
+        HEADED = CLEAN.replace(
+            "  There is a short video",
+            "    Validation\n"
+            "  I have tested this against a published dataset of measured flows [f:TF-30], "
+            "on one catchment so far [f:TF-33].\n"
+            "\n"
+            "  There is a short video")
+        body = render_body(split_doc(HEADED)[1])
+        case("render keeps a section heading on its own line",
+             "Validation\nI have tested" in body,
+             repr(body[body.find("Validation"):][:60]))
+        case("render still joins a paragraph that opens with prose",
+             "\n" not in body[body.find("There is a short video"):].split("\n\n")[0])
+
         case("render leaves no orphan space",
              not re.search(r"[ \t]+[.,;:?!]|^[.,;:?!]", rendered, re.M),
              repr(next((ln for ln in rendered.splitlines()
