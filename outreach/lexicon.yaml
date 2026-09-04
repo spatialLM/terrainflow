@@ -1,0 +1,143 @@
+# The mechanical half of the rule pack. guardrails.md stays the prose authority;
+# only what a regex can honestly catch lives here.
+#
+# Every entry should be traceable to something you actually changed in a draft.
+# /email-learn proposes additions with the diff that evidences them - it does not
+# write here unasked.
+
+# Hard fail. These are the phrases that make an email read as generated, or as
+# sales. A cold email to an engineer survives exactly one of them: none.
+banned_hard:
+  ai_tells:
+    - "I hope this email finds you well"
+    - "I hope this finds you well"
+    - "I wanted to reach out"
+    - "reaching out"
+    - "reach out to you"
+    - "circle back"
+    - "touch base"
+    - "in today's fast-paced"
+    - "delve into"
+    - "it is worth noting that"
+    - "I trust this message finds you"
+  marketing:
+    - "game-changer"
+    - "game changer"
+    - "revolutionary"
+    - "cutting-edge"
+    - "state-of-the-art"
+    - "best-in-class"
+    - "seamlessly"
+    - "synergy"
+    - "leverage our"
+    - "unlock the power"
+    - "take your workflow to the next level"
+    - "I'd love to pick your brain"
+  overclaim:
+    - "replaces HEC-HMS"
+    - "replaces TUFLOW"
+    - "as accurate as"
+    - "industry standard"
+    - "fully validated"
+    - "production ready"
+  punctuation:
+    - "!"
+
+# Soft. Warned, not blocked - the better word is usually right but not always.
+prefer:
+  "utilise": "use"
+  "utilize": "use"
+  "in order to": "to"
+  "at this point in time": "now"
+  "prior to": "before"
+  "commence": "start"
+  "assist you with": "help with"
+  "solution": "tool"
+  "innovative": "say what it does instead"
+  "passionate about": "say what you did instead"
+  "I am writing to inform you": "I'm writing because"
+  "please do not hesitate to": "just"
+  "kindly": "please"
+  "a number of": "say how many"
+  "very unique": "unique"
+
+# Detected as distinct asks. Three or more families in one email is a hard fail:
+# an email asking for four things earns none of them. Two is the intended shape
+# here - react to the video, and talk for half an hour.
+cta_families:
+  call:
+    - "30 minutes"
+    - "half an hour"
+    - "thirty minutes"
+    - "a call"
+    - "a chat"
+    - "a korero"
+    - "meet"
+    - "catch up"
+  react:
+    - "let me know"
+    - "tell me what you think"
+    - "what you make of it"
+    - "your thoughts"
+    - "any feedback"
+    - "worth anything"
+  install:
+    - "try it"
+    - "give it a go"
+    - "install"
+    - "download"
+    - "clone the repo"
+  contribute:
+    - "open an issue"
+    - "pull request"
+    - "star the repo"
+    - "contribute"
+  follow:
+    - "follow"
+    - "subscribe"
+    - "sign up"
+    - "mailing list"
+    - "newsletter"
+
+# At least one of these must appear. Not a legal notice - a line that makes the
+# mail read as a person writing to a person rather than a list being worked.
+# The base email satisfies this with its own sentence - "Happy to just take
+# written feedback if a call doesn't suit." That is the low-pressure signal in
+# Liam's own words, so it counts. The rule encodes what he wrote rather than
+# imposing a line he did not.
+easy_out:
+  - "if a call does not suit"
+  - "if a call doesn't suit"
+  - "written feedback"
+  - "no reply needed"
+  - "no need to reply"
+  - "just say"
+  - "tell me to stop"
+  - "say the word"
+  - "won't chase"
+  - "will not chase"
+  - "leave you alone"
+  - "no hard feelings"
+  - "happy to hear nothing"
+
+# A tracking pixel or a wrapped redirect turns a note from a person into
+# marketing from a company, and technical readers spot both. Hard fail.
+tracking_hosts:
+  - "list-manage.com"
+  - "mailchi.mp"
+  - "hubspotlinks.com"
+  - "sendgrid.net"
+  - "mailtrack.io"
+  - "bit.ly"
+  - "tinyurl.com"
+  - "utm_source"
+  - "utm_campaign"
+
+# Prose rhythm. A cold email is read in a preview pane by someone standing up.
+# Measured from base/2026-09-01-intro-video.md, not chosen. That email runs to
+# 20 sentences, mean 19.4 words, longest 33, and its own opening sentence is 23.
+# The previous values (mean 10-20, opening 18) flagged his own writing, which
+# made the check an argument with the author rather than a gate.
+rhythm:
+  mean_sentence_words: [10, 22]
+  opening_sentence_max_words: 26
