@@ -117,6 +117,12 @@ class PluginState:
     # The SwaleSegments "Find Best Swale Segments" last produced — kept so the
     # peak-inflow overlay can be toggled on without re-running the search.
     segment_features: list = field(default_factory=list)
+    # Shapely, and **always in the DEM's CRS** — that is the invariant, not a habit.
+    # It is intersected against contours and keyline runs which carry DEM grid
+    # coordinates, and it used to be built straight out of the area layer in whatever
+    # CRS that layer happened to be in. On a mismatch the two never touch, every
+    # intersection comes back empty, and the analysis returns nothing at all without a
+    # word. Build it through ``adapters.geom.polygons_in_dem_crs`` and nowhere else.
     usable_polygon: Any | None = None
     contour_layer_id: str | None = None
     top5_layer_id: str | None = None

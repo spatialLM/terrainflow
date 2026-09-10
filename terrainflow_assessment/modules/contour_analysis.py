@@ -12,10 +12,11 @@ Provides:
 
 import logging
 import math
+import os
 
 import numpy as np
 
-from terrainflow_assessment.modules.footprint import xy_to_rc
+from terrainflow_assessment.modules.footprint import sample_along_line, xy_to_rc
 
 _log = logging.getLogger(__name__)
 
@@ -67,6 +68,42 @@ INFLOW_RAMP_HEX = ("#6fd8ef", "#1f9ed4", "#1b58b8", "#101a63")
 # Same shape as INFLOW_RAMP_HEX — four classes, light to dark with volume — so it is
 # the same grammar read on a different ground, not a second scheme to learn.
 SEGMENT_INFLOW_RAMP_HEX = ("#f5c2ff", "#d458ed", "#a01ab8", "#5e076b")
+
+
+def _sample_line(geom, transform, array, distances, fill=np.nan, nodata=None):
+    """Raster values along *geom* at *distances* — vectorised where that is safe.
+
+    Five call sites in this module walked a line a point at a time, each doing a
+    ``geom.interpolate`` and a single-element raster index per cell-width. On a 1 m DEM
+    with two hundred 2 km contours that is of the order of 400,000 Python-level shapely
+    calls per pass, and two passes run. A single ``LineString`` now goes through
+    ``footprint.sample_along_line`` in one vectorised pass instead.
+
+    A ``MultiLineString`` deliberately keeps the old path. Shapely's chainage runs
+    across its parts *without* the gaps between them; concatenating the parts'
+    coordinates would turn each gap into a real segment and resample the whole line on a
+    different chainage. Rare, and not worth answering a different question quickly.
+
+    ``fill`` is what an off-grid point contributes — zero for an accumulation profile
+    indexed by position, NaN for a mean that must exclude it. ``nodata`` maps a declared
+    sentinel to NaN.
+    """
+    distances = np.asarray(distances, dtype="float64")
+    if getattr(geom, "geom_type", None) == "LineString":
+        return sample_along_line(list(geom.coords), transform, array, distances,
+                                 nodata=nodata, fill=fill)
+
+    out = np.full(distances.shape, float(fill), dtype="float64")
+    rows, cols = array.shape
+    for i, dist in enumerate(distances):
+        pt = geom.interpolate(float(dist))
+        row, col = xy_to_rc(transform, pt.x, pt.y)
+        if 0 <= row < rows and 0 <= col < cols:
+            value = float(array[row, col])
+            if nodata is not None and np.isfinite(nodata) and value == nodata:
+                value = float("nan")
+            out[i] = value
+    return out
 
 
 class ContourFeature:
@@ -160,7 +197,14 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
     import rasterio
 
     if output_path is None:
-        output_path = tempfile.mktemp(suffix="_contours.gpkg")
+        # A private directory, not mktemp's bare name: mktemp leaves the window between
+        # returning a name and gdal_contour creating it open to anyone. mkstemp is the
+        # usual answer and is wrong here — it *creates* the file, and gdal_contour
+        # refuses to write to a path that already exists ("A file system object called
+        # ... already exists"). Creating the directory instead reserves the name safely
+        # and still hands gdal_contour a path it can create.
+        output_path = os.path.join(tempfile.mkdtemp(prefix="tfa_contours_"),
+                                   "contours.gpkg")
 
     # gdal_contour picks the range of levels it will emit from the band statistics,
     # and it accepts *approximate* ones. QGIS writes exactly those into a PAM
@@ -191,6 +235,16 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
             raise RuntimeError(f"gdal_contour failed: {result.stderr}")
     except FileNotFoundError:
         # gdal_contour not on PATH — fall back to rasterio + shapely marching squares
+        return _extract_contours_scipy(dem_path, interval_m)
+    except subprocess.TimeoutExpired:
+        # A large DEM at a fine interval can outrun the 120 s budget. That used to
+        # propagate as an unhandled exception through TaskWorker and surface as
+        # "Contour analysis failed — see the Python console". The marching-squares path
+        # is slower but bounded, so take it and say why: the fallback has different
+        # edge behaviour (CTA-07) and a silent switch would hide that.
+        _log.warning("gdal_contour exceeded its 120 s budget on %s — falling back to "
+                     "the marching-squares path, which handles the data boundary "
+                     "differently.", dem_path)
         return _extract_contours_scipy(dem_path, interval_m)
 
     try:
@@ -332,18 +386,12 @@ def filter_by_slope(contours, dem_path, max_slope_deg=18.0, n_samples=20):
         if total_len == 0:
             return 0.0
         steps = np.linspace(0, total_len, min(n_samples, max(2, int(total_len / cell_w))))
-        values = []
-        for dist in steps:
-            pt = geom.interpolate(dist)
-            row, col = xy_to_rc(transform, pt.x, pt.y)
-            if 0 <= row < slope_deg.shape[0] and 0 <= col < slope_deg.shape[1]:
-                val = float(slope_deg[row, col])
-                if not np.isnan(val):
-                    values.append(val)
+        values = _sample_line(geom, transform, slope_deg, steps, fill=np.nan)
+        values = values[np.isfinite(values)]
         # No valid sample anywhere along the line → NaN, not 0°. Reporting 0° made a
         # contour lying entirely over nodata the *flattest* line on the site and it
         # sailed through a filter whose purpose is to reject unsuitable ground.
-        return float(np.mean(values)) if values else float("nan")
+        return float(values.mean()) if values.size else float("nan")
 
     valid = []
     for feat in contours:
@@ -396,15 +444,11 @@ def rank_by_flow_crossing(contours, acc_path, n_samples=50):
             continue
 
         steps = np.linspace(0, total_len, min(n_samples, max(2, int(total_len / cell_w))))
-        peak = 0.0
-        for dist in steps:
-            pt = geom.interpolate(dist)
-            row, col = xy_to_rc(transform, pt.x, pt.y)
-            if 0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]:
-                v = float(acc[row, col])
-                if v > peak:
-                    peak = v
-        feat.peak_acc = peak
+        values = _sample_line(geom, transform, acc, steps, fill=np.nan)
+        values = values[np.isfinite(values)]
+        # Floored at zero because the old running maximum started there: an off-grid or
+        # negative sample never lowered the peak, and must not start doing so now.
+        feat.peak_acc = max(float(values.max()), 0.0) if values.size else 0.0
 
     contours.sort(key=lambda f: f.peak_acc, reverse=True)
     for i, feat in enumerate(contours):
@@ -586,12 +630,33 @@ def classify_by_breaks(value, breaks):
 # Usable area clipping
 # ---------------------------------------------------------------------------
 
+class UsableAreaDisjoint(ValueError):
+    """The usable area and the contours do not overlap at all.
+
+    Almost always a CRS mismatch rather than a drawing mistake: NZTM eastings are around
+    1.5e6 and WGS84 longitudes around 172, so a polygon that never went through the
+    reprojection lands an entire hemisphere away. Carries both bounding boxes, because
+    the numbers themselves are what say which CRS each side is in.
+    """
+
+    def __init__(self, contour_bounds, polygon_bounds):
+        self.contour_bounds = contour_bounds
+        self.polygon_bounds = polygon_bounds
+        super().__init__(
+            "The usable area does not overlap the contours at all — check that the "
+            "area layer and the DEM share a CRS. "
+            f"Contours span {contour_bounds}; the usable area spans {polygon_bounds}."
+        )
+
+
 def clip_to_usable_area(contours, usable_polygon):
     """
     Clip contour lines to a user-defined usable area polygon.
 
     Contours entirely outside the polygon are dropped.  Contours that cross
-    the boundary are trimmed to the interior portion(s).
+    the boundary are trimmed to the interior portion(s) — **all** of them: a contour
+    crossing a concave area in two places is two real alignments, and keeping only the
+    longer one silently discarded ground the user had selected.
 
     Parameters
     ----------
@@ -600,45 +665,74 @@ def clip_to_usable_area(contours, usable_polygon):
 
     Returns
     -------
-    list of ContourFeature — trimmed, geometry replaced with clipped version.
-    Rank order is preserved.
+    (list of ContourFeature, dropped_count) — trimmed, geometry replaced with the
+    clipped version, rank order preserved. ``dropped_count`` is how many input contours
+    fell away entirely, so the caller can say so instead of returning a quiet nothing.
+
+    Raises
+    ------
+    UsableAreaDisjoint
+        When the two do not overlap at all. Every contour clipping away used to be a
+        silent ``continue`` per contour, which is correct for one contour outside the
+        area and catastrophic for all of them; the distinction is *how many*, so that is
+        what is measured.
     """
     from shapely.geometry import LineString, MultiLineString
 
+    if not contours:
+        return [], 0
+
+    # Cheap bounds test first: it costs one pass over the features and catches the CRS
+    # class outright, before any per-contour intersection work.
+    minx = min(f.geometry.bounds[0] for f in contours)
+    miny = min(f.geometry.bounds[1] for f in contours)
+    maxx = max(f.geometry.bounds[2] for f in contours)
+    maxy = max(f.geometry.bounds[3] for f in contours)
+    pminx, pminy, pmaxx, pmaxy = usable_polygon.bounds
+    if pmaxx < minx or pminx > maxx or pmaxy < miny or pminy > maxy:
+        raise UsableAreaDisjoint((minx, miny, maxx, maxy),
+                                 (pminx, pminy, pmaxx, pmaxy))
+
     clipped = []
+    dropped = 0
     for feat in contours:
         try:
             intersection = feat.geometry.intersection(usable_polygon)
         except Exception:
+            dropped += 1
             continue
 
         if intersection.is_empty:
+            dropped += 1
             continue
 
-        # Normalise to a single LineString (longest segment if MultiLineString)
         if isinstance(intersection, LineString):
-            clipped_geom = intersection
+            parts = [intersection]
         elif isinstance(intersection, MultiLineString):
-            geoms = list(intersection.geoms)
-            clipped_geom = max(geoms, key=lambda g: g.length)
+            parts = list(intersection.geoms)
         else:
-            # GeometryCollection or other — skip
-            continue
+            # A GeometryCollection can still carry usable lines — a contour that grazes
+            # the boundary comes back as lines plus the touching points. Take the lines.
+            parts = [g for g in getattr(intersection, "geoms", [])
+                     if isinstance(g, LineString)]
 
-        if clipped_geom.length < 0.5:  # ignore tiny slivers
-            continue
+        kept_any = False
+        for part in parts:
+            if part.length < 0.5:  # ignore tiny slivers
+                continue
+            clipped.append(ContourFeature(
+                geometry=part,
+                elevation=feat.elevation,
+                rank=feat.rank,
+                peak_acc=feat.peak_acc,
+                mean_slope_deg=feat.mean_slope_deg,
+                length_m=part.length,
+            ))
+            kept_any = True
+        if not kept_any:
+            dropped += 1
 
-        new_feat = ContourFeature(
-            geometry=clipped_geom,
-            elevation=feat.elevation,
-            rank=feat.rank,
-            peak_acc=feat.peak_acc,
-            mean_slope_deg=feat.mean_slope_deg,
-            length_m=clipped_geom.length,
-        )
-        clipped.append(new_feat)
-
-    return clipped
+    return clipped, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +741,8 @@ def clip_to_usable_area(contours, usable_polygon):
 
 def analyse_contours(dem_path, acc_path, interval_m=1.0, max_slope_deg=18.0,
                      usable_polygon=None, progress_callback=None,
-                     cell_area_m2=None, runoff_mm=None, min_length_m=0.0):
+                     cell_area_m2=None, runoff_mm=None, min_length_m=0.0,
+                     on_warning=None):
     """
     Run the full contour analysis pipeline:
       1. Extract contours from DEM
@@ -665,14 +760,28 @@ def analyse_contours(dem_path, acc_path, interval_m=1.0, max_slope_deg=18.0,
     progress_callback : callable(int, str) or None
     cell_area_m2 : float or None — DEM cell area for ha/m³ labels
     runoff_mm : float or None — event runoff depth for m³ inflow labels
+    on_warning : callable(str) or None — non-fatal notices the caller should show.
+        The usable-area clip reports through this rather than returning a shorter list
+        in silence; a clip that takes everything is a different event from a clip that
+        takes some, and both used to look identical from outside.
 
     Returns
     -------
     list of ContourFeature ranked by flow crossing
+
+    Raises
+    ------
+    UsableAreaDisjoint
+        When a usable area was supplied that does not overlap the contours at all.
     """
     def _p(pct, msg):
         if progress_callback:
             progress_callback(pct, msg)
+
+    def _warn(msg):
+        _log.warning(msg)
+        if on_warning:
+            on_warning(msg)
 
     _p(5, "Extracting contours...")
     contours = extract_contours(dem_path, interval_m)
@@ -693,8 +802,15 @@ def analyse_contours(dem_path, acc_path, interval_m=1.0, max_slope_deg=18.0,
 
     if usable_polygon is not None:
         _p(85, "Clipping to usable area...")
-        contours = clip_to_usable_area(contours, usable_polygon)
+        before = len(contours)
+        contours, dropped = clip_to_usable_area(contours, usable_polygon)
         _log.info(f"{len(contours)} contours after usable area clip.")
+        if before and not contours:
+            _warn("The usable area removed every contour. It overlaps the DEM but "
+                  "no contour falls inside it — check the area layer covers the "
+                  "ground you meant.")
+        elif dropped:
+            _warn(f"The usable area dropped {dropped} of {before} contours.")
 
     # Stamp cell size / runoff onto every feature so labels can show ha and m³
     if cell_area_m2 is not None or runoff_mm is not None:
@@ -740,7 +856,11 @@ class SwaleSegment:
         self.length_m = length_m
         # Length required to manage inflow (may exceed the available contour length)
         self.required_length_m = required_length_m if required_length_m is not None else length_m
-        # True when the contour was too short to fit required_length_m.
+        # True when the contour was too short to fit required_length_m, False when it
+        # fits — and **None** when no required length was ever asked for. The
+        # landscape-walk branch (no runoff depth) defines its own extent, so there is
+        # nothing for it to fall short of; False there would be a claim about a
+        # question never put, the same distinction overtopping draws.
         self.capped = capped
         # Mean ground slope sampled along the segment (deg), or None if not computed.
         self.segment_slope_deg = segment_slope_deg
@@ -850,24 +970,38 @@ def find_swale_segments(contours, acc_path,
     # Optional per-segment slope filter (F7): sample a slope raster along each
     # candidate segment and drop segments whose mean slope exceeds the limit.
     slope_arr = None
+    slope_nodata = None
     if slope_path and seg_max_slope_deg is not None:
         try:
             with rasterio.open(slope_path) as ss:
                 slope_arr = ss.read(1).astype("float32")
+                slope_nodata = ss.nodata
         except Exception:
             slope_arr = None
+            slope_nodata = None
 
     def _mean_segment_slope(seg_geom):
+        """Mean slope under *seg_geom* — NaN where the ground is unknown.
+
+        ``None`` and NaN mean different things here and the filter reads both: ``None``
+        is "no slope raster was supplied, do not filter", NaN is "this segment lies over
+        ground we have no slope for, reject it".
+
+        The nodata read is the whole point. ``compute_slope_raster`` declares ``-9999``
+        *and writes it*, so sampling raw averaged a segment over a hole toward minus ten
+        thousand degrees — not merely passing the steepness filter but sorting as the
+        flattest ground on the site. This is CTA-13 (``filter_by_slope`` above, which
+        returns NaN for exactly this case) re-created five hundred lines further down;
+        the two must not diverge a third time.
+        """
         if slope_arr is None:
             return None
-        vals = []
         n_s = max(2, int(seg_geom.length / max(cell_w, 1.0)))
-        for d in np.linspace(0, seg_geom.length, n_s):
-            p = seg_geom.interpolate(d)
-            r, c = xy_to_rc(transform, p.x, p.y)
-            if 0 <= r < slope_arr.shape[0] and 0 <= c < slope_arr.shape[1]:
-                vals.append(float(slope_arr[r, c]))
-        return float(np.mean(vals)) if vals else None
+        dists = np.linspace(0, seg_geom.length, n_s)
+        vals = _sample_line(seg_geom, transform, slope_arr, dists,
+                            fill=np.nan, nodata=slope_nodata)
+        vals = vals[np.isfinite(vals)]
+        return float(vals.mean()) if vals.size else float("nan")
 
     all_segments = []
     n = len(contours)
@@ -884,14 +1018,10 @@ def find_swale_segments(contours, acc_path,
         n_steps = max(2, int(total_len / step))
         dists = np.linspace(0, total_len, n_steps)
 
-        profile = []  # (distance_along_contour, acc_value)
-        for d in dists:
-            pt = geom.interpolate(d)
-            row, col = xy_to_rc(transform, pt.x, pt.y)
-            v = float(acc[row, col]) if (
-                0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]
-            ) else 0.0
-            profile.append((float(d), v))
+        # Off-grid reads as zero accumulation, not NaN: this profile is indexed by
+        # position, so every sample has to keep its slot.
+        values = _sample_line(geom, transform, acc, dists, fill=0.0)
+        profile = [(float(d), float(v)) for d, v in zip(dists, values)]
 
         if not profile:
             continue
@@ -970,6 +1100,12 @@ def find_swale_segments(contours, acc_path,
                 seg_start = profile[left][0]
                 seg_end = profile[right][0]
                 required_length = seg_end - seg_start
+                # "Not capped" would be a claim about a question never asked. This
+                # branch has no *required* length to fall short of — the walk defines
+                # its own extent, so required_length is the extent by construction.
+                # None is "not asked", the same distinction overtopping draws between
+                # False and None; the label prints nothing for it.
+                capped = None
 
             if seg_end - seg_start < 1.0:
                 continue  # degenerate — skip
@@ -981,11 +1117,15 @@ def find_swale_segments(contours, acc_path,
             if seg_geom is None or seg_geom.is_empty:
                 continue
 
-            # F7 — drop segments crossing ground steeper than the segment limit.
+            # F7 — drop segments crossing ground steeper than the segment limit, and
+            # segments over ground whose slope is unknown. The rejection is written
+            # out rather than left to comparison polarity: NaN > limit is False, so
+            # "unknown" would otherwise sail through a filter built to reject
+            # unsuitable ground. Same decision as filter_by_slope's.
             seg_slope = _mean_segment_slope(seg_geom)
-            if (seg_max_slope_deg is not None and seg_slope is not None
-                    and seg_slope > seg_max_slope_deg):
-                continue
+            if seg_max_slope_deg is not None and seg_slope is not None:
+                if not np.isfinite(seg_slope) or seg_slope > seg_max_slope_deg:
+                    continue
 
             seg_len = seg_geom.length
 
@@ -1085,16 +1225,11 @@ def classify_contour_inflow(contours, acc_path, cell_area_m2, runoff_mm=None,
         n_steps = max(3, int(total_len / step))
         dists = np.linspace(0.0, total_len, n_steps)
 
-        vals = []
-        for d in dists:
-            pt = geom.interpolate(float(d))
-            row, col = xy_to_rc(transform, pt.x, pt.y)
-            v = float(acc[row, col]) if (
-                0 <= row < acc.shape[0] and 0 <= col < acc.shape[1]
-            ) else 0.0
-            vals.append(v)
+        # Off-grid reads as zero accumulation, not NaN: the window means below are
+        # taken by slice, so every sample has to keep its slot.
+        vals = _sample_line(geom, transform, acc, dists, fill=0.0)
 
-        if max(vals) <= 0:
+        if vals.max() <= 0:
             continue
 
         # Emit a stretch every `window` samples with that window's mean flow.

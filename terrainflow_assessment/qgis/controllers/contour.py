@@ -165,6 +165,11 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         runoff_mm = (self._state.baseline_result or {}).get("runoff_mm")
         min_length_m = self._panel.min_contour_length_m
 
+        # Collected on the worker thread, pushed on the GUI thread in _on_contours_ready.
+        # A clip that quietly took every contour used to be indistinguishable from an
+        # analysis that legitimately found none.
+        self._contour_warnings = []
+
         def work(report):
             return analyse_contours(
                 dem_path=dem_path,
@@ -176,6 +181,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                 cell_area_m2=cell_area_m2,
                 runoff_mm=runoff_mm,
                 min_length_m=min_length_m,
+                on_warning=self._contour_warnings.append,
             )
 
         self._start_task(work, "contours",
@@ -186,6 +192,9 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
     def _on_contours_ready(self, contours):
         """Back on the GUI thread — every layer below belongs to it."""
+        for message in getattr(self, "_contour_warnings", []):
+            self._iface.messageBar().pushWarning("TerrainFlow Assessment", message)
+        self._contour_warnings = []
         # Number them as they arrive. Everything downstream that has to say
         # *which* contour it means — the tick filter, the inflow gradient's
         # scope — needs a name for one, and position in this list is the only
@@ -1081,14 +1090,13 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                 crs_wkt = src.crs.to_wkt() if src.crs else None
 
             if layer is not None:
-                import geopandas as gpd
-                gdf = gpd.GeoDataFrame.from_features(
-                    [f.__geo_interface__ for f in layer.getFeatures()],
-                    crs=layer.crs().toWkt(),
+                # Same conversion as the usable area's, through the same adapter —
+                # this path was the one that had it right, and keeping two of them is
+                # how the other one came to be missing its reprojection.
+                from terrainflow_assessment.qgis.adapters.geom import (
+                    polygons_in_dem_crs,
                 )
-                if crs_wkt:
-                    gdf = gdf.to_crs(crs_wkt)
-                polys = list(gdf.geometry)
+                polys = polygons_in_dem_crs(layer, crs_wkt)
             else:
                 import geopandas as gpd
                 gdf = gpd.read_file(self._state.boundary_path)

@@ -444,3 +444,76 @@ def check_locating_the_wrong_dem_is_refused(dem_path):
         assert len(h.state.earthwork_manager) == surviving_count, (
             "a refused open modified the earthworks"
         )
+
+
+def check_panel_defaults_match_the_persisted_defaults(dem_path):
+    """A fresh panel and ``project_io.INPUT_FIELDS`` must agree, key for key.
+
+    ``normalise_inputs`` fills every absent key from ``INPUT_FIELDS``, so any default
+    there that disagrees with the spin box it restores silently re-answers the analysis
+    when an older design file is reopened. That has now been found twice — the swale
+    trio (comment at ``project_io.py:100``), then ``simple_contour_interval_m`` (5.0 vs
+    1.0) and ``max_slope_deg`` (15.0 vs 18.0). Two instances of one bug class is the
+    point at which the class gets a test rather than the instances getting a patch.
+
+    This has to live here rather than in ``pytest tests/``: the panel needs a real Qt
+    runtime to build its widgets, and the whole point is to read what the user actually
+    sees on a freshly opened plugin.
+    """
+    from terrainflow_assessment.modules import project_io
+
+    # Exempt, and each for a stated reason — not a list to grow when something fails.
+    #
+    # The swale trio: `seed_swale_criteria` starts those boxes at the user's *saved
+    # standard* where one exists (precedence is document > standard > shipped), so on a
+    # machine that has one they are supposed to differ from the shipped default.
+    #
+    # The sentinel group: their persisted default is deliberately "unset" — an empty
+    # string or a zero — rather than a duplicate of the panel's opening value. A file
+    # that carries no soil name should come back as *no soil name*, not as whichever
+    # soil the combo happens to open on.
+    exempt = {
+        "swale_depth_m", "swale_width_m", "swale_bottom_width_m",
+        "soil_name", "earthwork_soil_name", "moisture",
+        "exit_flow_ls", "peak_intensity_mm_hr",
+    }
+
+    # Real divergences of exactly the class this check exists for, found by it, and
+    # deliberately NOT changed here: both alter what every assessment computes, so they
+    # are a decision to take on their own rather than a side effect of a contour fix.
+    #
+    #   rainfall_mm  panel 65.0 vs persisted 120.0 — the design storm itself
+    #   routing      panel 'dinf' vs persisted 'd8' — reopening an old file would
+    #                switch flow routing, and dinf is the shipped default
+    #
+    # Asserted as an *exact* set, so a new divergence fails here and so does fixing one
+    # of these without removing it from the list. An allowlist that only ever grows is
+    # how a characterisation test stops characterising anything.
+    known_divergences = {"rainfall_mm", "routing"}
+
+    with PluginHarness(dem_path) as h:
+        defaults = project_io.default_inputs()
+        actual = h.panel.collect_inputs()
+
+        diverged = set()
+        detail = []
+        for key, expected in sorted(defaults.items()):
+            if key in exempt:
+                continue
+            got = actual.get(key)
+            if isinstance(expected, float) and isinstance(got, (int, float)):
+                same = abs(float(got) - expected) <= 1e-9
+            else:
+                same = got == expected
+            if not same:
+                diverged.add(key)
+                detail.append(f"{key}: panel {got!r} vs persisted {expected!r}")
+
+        assert diverged == known_divergences, (
+            "the panel and the design-file defaults disagree in a way this check did "
+            "not already know about, so reopening a file saved before those keys "
+            "existed would answer a different question than the one on screen.\n"
+            f"  expected divergences: {sorted(known_divergences)}\n"
+            f"  actual divergences:   {sorted(diverged)}\n"
+            "  detail:\n    " + "\n    ".join(detail)
+        )

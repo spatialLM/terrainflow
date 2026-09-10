@@ -1,6 +1,7 @@
 """Tests for modules/footprint — footprint rasterisation and terrain datums."""
 
 import numpy as np
+import pytest
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, Polygon, box
 
@@ -12,12 +13,15 @@ from terrainflow_assessment.modules.footprint import (
     domain_fallback_warning,
     domain_mask,
     internal_relief,
+    line_points,
     min_dimension,
     outer_ring,
     outlet_cell,
     pour_point,
     rasterize_footprint,
+    sample_along_line,
     xy_to_rc,
+    xy_to_rc_array,
 )
 
 CELL = 1.0
@@ -244,6 +248,135 @@ class TestXyToRc:
     def test_bounds_checking_is_left_to_the_caller(self):
         """Out of range comes back as out of range, not clamped and not raised."""
         assert xy_to_rc(TRANSFORM, -40.0, 60.0) == (-48, -40)
+
+
+class TestXyToRcArray:
+    """The array form must be the scalar form, exactly — including the sharp edges.
+
+    It replaces ``xy_to_rc`` inside the vectorised samplers, so any divergence would
+    move every sample they take rather than failing loudly.
+    """
+
+    def test_matches_the_scalar_form_cell_for_cell(self):
+        rng = np.random.default_rng(20260910)
+        # Deliberately over-range on both axes: the north/west band is where the
+        # floor-vs-truncate distinction bites, so it has to be in the sample.
+        xs = rng.uniform(-5.0, 17.0, 500)
+        ys = rng.uniform(-5.0, 17.0, 500)
+
+        rows, cols = xy_to_rc_array(TRANSFORM, xs, ys)
+        for i, (x, y) in enumerate(zip(xs, ys)):
+            assert (int(rows[i]), int(cols[i])) == xy_to_rc(TRANSFORM, x, y)
+
+    def test_out_of_range_is_returned_not_clamped(self):
+        rows, cols = xy_to_rc_array(TRANSFORM, [-0.5, 5.0], [5.0, 12.5])
+        assert cols[0] == -1
+        assert rows[1] == -1
+
+    def test_shape_is_preserved(self):
+        rows, cols = xy_to_rc_array(TRANSFORM, [1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+        assert rows.shape == (3,) and cols.shape == (3,)
+
+
+class TestLinePoints:
+    """``line_points`` must agree with ``geom.interpolate`` — that is its whole claim."""
+
+    def test_matches_shapely_interpolate_on_a_polyline(self):
+        line = LineString([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+        dists = np.linspace(0.0, line.length, 37)
+
+        xs, ys = line_points(list(line.coords), dists)
+        for i, d in enumerate(dists):
+            pt = line.interpolate(float(d))
+            assert xs[i] == pytest.approx(pt.x, abs=1e-9)
+            assert ys[i] == pytest.approx(pt.y, abs=1e-9)
+
+    def test_duplicate_vertices_do_not_break_the_chainage(self):
+        """A repeated vertex is a zero-length segment, and np.interp needs increasing xp."""
+        coords = [(0.0, 0.0), (5.0, 0.0), (5.0, 0.0), (10.0, 0.0)]
+        line = LineString(coords)
+        dists = np.linspace(0.0, line.length, 11)
+
+        xs, ys = line_points(coords, dists)
+        for i, d in enumerate(dists):
+            pt = line.interpolate(float(d))
+            assert xs[i] == pytest.approx(pt.x, abs=1e-9)
+            assert ys[i] == pytest.approx(pt.y, abs=1e-9)
+
+    def test_distances_past_the_ends_clamp_as_interpolate_does(self):
+        coords = [(0.0, 0.0), (10.0, 0.0)]
+        xs, ys = line_points(coords, [-5.0, 15.0])
+        assert (xs[0], ys[0]) == (0.0, 0.0)
+        assert (xs[1], ys[1]) == (10.0, 0.0)
+
+    def test_a_degenerate_line_returns_its_only_point(self):
+        xs, ys = line_points([(3.0, 4.0), (3.0, 4.0)], [0.0, 1.0])
+        assert list(xs) == [3.0, 3.0]
+        assert list(ys) == [4.0, 4.0]
+
+
+class TestSampleAlongLine:
+    """The vectorised sampler against the point-at-a-time loop it replaces."""
+
+    @staticmethod
+    def _scalar_loop(line, array, dists, fill, nodata=None):
+        out = []
+        rows, cols = array.shape
+        for d in dists:
+            pt = line.interpolate(float(d))
+            r, c = xy_to_rc(TRANSFORM, pt.x, pt.y)
+            if 0 <= r < rows and 0 <= c < cols:
+                v = float(array[r, c])
+                if nodata is not None and v == nodata:
+                    v = float("nan")
+                out.append(v)
+            else:
+                out.append(fill)
+        return np.asarray(out, dtype="float64")
+
+    def test_equals_the_scalar_loop_it_replaces(self):
+        array = _tilted()
+        line = LineString([(0.5, 11.5), (11.5, 11.5), (11.5, 0.5)])
+        dists = np.linspace(0.0, line.length, 61)
+
+        got = sample_along_line(list(line.coords), TRANSFORM, array, dists, fill=0.0)
+        want = self._scalar_loop(line, array, dists, fill=0.0)
+        np.testing.assert_allclose(got, want)
+
+    def test_off_grid_points_take_the_fill_and_keep_their_slot(self):
+        """A profile indexed by position cannot drop samples, so length is fixed."""
+        array = _tilted()
+        # Runs off the west edge and back on.
+        line = LineString([(-6.0, 6.0), (6.0, 6.0)])
+        dists = np.linspace(0.0, line.length, 13)
+
+        got = sample_along_line(list(line.coords), TRANSFORM, array, dists, fill=0.0)
+        assert got.shape == dists.shape
+        assert got[0] == 0.0                       # off-grid → fill
+        assert got[-1] == array[6, 5]              # on-grid → the real value
+
+    def test_declared_nodata_becomes_nan_rather_than_a_number(self):
+        """The defect this exists for: -9999 averaged as a slope, not excluded."""
+        array = np.full((ROWS, COLS), 12.0)
+        array[6, :] = -9999.0
+        line = LineString([(0.5, 5.5), (11.5, 5.5)])   # runs along the nodata row
+        dists = np.linspace(0.0, line.length, 12)
+
+        got = sample_along_line(list(line.coords), TRANSFORM, array, dists,
+                                nodata=-9999.0, fill=np.nan)
+        assert np.isnan(got).all()
+
+        raw = sample_along_line(list(line.coords), TRANSFORM, array, dists, fill=np.nan)
+        assert raw.mean() == pytest.approx(-9999.0), (
+            "without the nodata argument the sentinel is averaged as a real value — "
+            "which is how a hole became the flattest ground on the site")
+
+    def test_a_whole_line_off_the_grid_is_all_fill(self):
+        array = _tilted()
+        line = LineString([(-50.0, -50.0), (-40.0, -50.0)])
+        got = sample_along_line(list(line.coords), TRANSFORM, array,
+                                np.linspace(0.0, 10.0, 5), fill=np.nan)
+        assert np.isnan(got).all()
 
 
 class TestDomainSource:

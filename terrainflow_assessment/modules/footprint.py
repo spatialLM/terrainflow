@@ -7,6 +7,9 @@ Previously each caller rasterised footprints on its own terms — the burner wit
 different set of cells depending on which stage was asking. Everything shares these:
 
     rasterize_footprint — shapely geometry → boolean cell mask
+    xy_to_rc_array      — array form of xy_to_rc, same floor/no-clamp semantics
+    line_points         — (x, y) at given chainages along a polyline
+    sample_along_line   — raster values along a polyline, in one vectorised pass
     outer_ring          — the cells immediately surrounding a mask (its rim)
     pour_point          — lowest rim cell: the elevation the feature spills at
     outlet_cell         — lowest cell *inside* the mask: where its overflow starts
@@ -52,6 +55,97 @@ def xy_to_rc(transform, x, y):
     col = math.floor((x - transform.c) / transform.a)
     row = math.floor((y - transform.f) / transform.e)
     return int(row), int(col)
+
+
+def xy_to_rc_array(transform, xs, ys):
+    """Array form of :func:`xy_to_rc` — same cell for every point, in one pass.
+
+    Identical semantics, deliberately: ``np.floor`` rather than a cast (a cast
+    truncates toward zero, which is how points just north or west of the grid used to
+    land in row 0), and out-of-range indices are returned rather than clamped, because
+    "which cell is this in" and "is that cell on the grid" are still different
+    questions. Callers mask; this does not.
+
+    Returns ``(rows, cols)`` as int64 arrays shaped like the inputs.
+    """
+    xs = np.asarray(xs, dtype="float64")
+    ys = np.asarray(ys, dtype="float64")
+    cols = np.floor((xs - transform.c) / transform.a).astype("int64")
+    rows = np.floor((ys - transform.f) / transform.e).astype("int64")
+    return rows, cols
+
+
+def line_points(coords, distances):
+    """``(xs, ys)`` at *distances* along the polyline *coords*.
+
+    The vectorised stand-in for ``geom.interpolate(d)`` in a loop. For a polyline the
+    two agree exactly — both walk the same cumulative chainage and interpolate linearly
+    within the segment the distance lands in — but this does the whole set in two
+    ``np.interp`` calls instead of one Python-level shapely call per point.
+
+    Deliberately numpy rather than ``shapely.line_interpolate_point``: that is a
+    shapely 2.0 API, ``metadata.txt`` declares ``qgisMinimumVersion=3.22``, and
+    ``keypoint_analysis._offset_line`` already hedges ``offset_curve`` against shapely
+    1.x. Reaching for the vectorised shapely call would quietly raise the plugin's
+    floor to buy nothing this does not already do.
+
+    Distances outside ``[0, length]`` clamp to the ends, as ``interpolate`` does.
+    """
+    pts = np.asarray(coords, dtype="float64")
+    if pts.ndim != 2 or pts.shape[0] == 0:
+        raise ValueError("line_points needs a sequence of (x, y) coordinates")
+    pts = pts[:, :2]
+    d = np.asarray(distances, dtype="float64")
+    if pts.shape[0] == 1:
+        return np.full(d.shape, pts[0, 0]), np.full(d.shape, pts[0, 1])
+
+    seg = np.diff(pts, axis=0)
+    seg_len = np.hypot(seg[:, 0], seg[:, 1])
+    # Duplicate vertices give zero-length segments, and ``np.interp`` needs an
+    # increasing xp. Drop them: the first vertex always stays, and every later one
+    # survives only if it actually advanced the chainage.
+    keep = np.concatenate(([True], seg_len > 0.0))
+    cum = np.concatenate(([0.0], np.cumsum(seg_len)))[keep]
+    kept = pts[keep]
+    if kept.shape[0] == 1:
+        return np.full(d.shape, kept[0, 0]), np.full(d.shape, kept[0, 1])
+
+    return np.interp(d, cum, kept[:, 0]), np.interp(d, cum, kept[:, 1])
+
+
+def sample_along_line(coords, transform, array, distances,
+                      nodata=None, fill=np.nan):
+    """Values of *array* at *distances* along the polyline *coords*.
+
+    One home for "walk this line and ask the raster", which five call sites were doing
+    a point at a time — ``geom.interpolate`` plus a single-element index, per
+    cell-width, per contour. On a 1 m DEM with two hundred 2 km contours that is of the
+    order of 400,000 Python-level shapely calls per pass, and two passes run.
+
+    ``fill`` is what an off-grid point contributes, and it is **not** always NaN: a
+    profile indexed by position (``find_swale_segments``) needs a fixed-length result
+    with off-grid reading as zero accumulation, while a mean over valid ground
+    (``filter_by_slope``) needs NaN so it can be excluded. Pass what the caller means.
+
+    ``nodata`` maps the raster's declared sentinel to NaN. Slope rasters declare
+    ``-9999`` and write it, so a caller that omits this averages a hole toward minus
+    ten thousand degrees and calls it the flattest ground on the site.
+
+    Always returns a float64 array as long as *distances*.
+    """
+    xs, ys = line_points(coords, distances)
+    rows, cols = xy_to_rc_array(transform, xs, ys)
+
+    h, w = array.shape
+    inside = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
+
+    out = np.full(rows.shape, float(fill), dtype="float64")
+    if inside.any():
+        vals = array[rows[inside], cols[inside]].astype("float64")
+        if nodata is not None and np.isfinite(nodata):
+            vals = np.where(vals == nodata, np.nan, vals)
+        out[inside] = vals
+    return out
 
 
 def rasterize_footprint(shapely_geom, shape, transform,

@@ -1073,10 +1073,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         self._mark_design_edit()
 
     def on_usable_area_source_changed(self, source):
-        import json
-
-        from shapely.geometry import shape as shapely_shape
         from shapely.ops import unary_union
+
+        from terrainflow_assessment.qgis.adapters.geom import polygons_in_dem_crs
 
         if source == "none":
             self._state.usable_polygon = None
@@ -1097,11 +1096,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return
 
         try:
-            polys = []
-            for feat in layer.getFeatures():
-                geom = feat.geometry()
-                if geom and not geom.isEmpty():
-                    polys.append(shapely_shape(json.loads(geom.asJson())))
+            # ``_state.usable_polygon`` is always in the DEM's CRS — see its comment on
+            # PluginState. Reading the layer's own coordinates and handing them to the
+            # raster tier is how every contour came to be silently discarded.
+            polys = polygons_in_dem_crs(layer, dem_crs(self._state))
             if not polys:
                 raise ValueError("Layer has no valid polygon features.")
             self._state.usable_polygon = unary_union(polys)

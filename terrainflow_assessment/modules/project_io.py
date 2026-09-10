@@ -92,9 +92,19 @@ INPUT_FIELDS = {
     # Analysis tuning — not needed to rebuild the design (earthworks carry their own
     # dimensions), but restoring it is what makes a reopened file feel like the session
     # you left rather than a fresh one.
+    # Every default here must equal the panel spin box it restores. Two of them did
+    # not — ``simple_contour_interval_m`` was 5.0 against the panel's 1.0 and
+    # ``max_slope_deg`` was 15.0 against the panel's 18.0 — and because
+    # ``normalise_inputs`` fills every absent key from this table, reopening a file
+    # saved before those keys existed silently re-answered the contour analysis at a
+    # different interval and a different slope cutoff from the one on screen. This is
+    # the same fault recorded for the swale trio below, found twice; the parity check
+    # in ``tests_qgis/checks_design_file`` now walks ``panel._FIELD_WIDGETS`` and
+    # asserts the whole table, so a third occurrence fails the suite instead of
+    # shipping.
     "contour_interval_m": (float, 1.0),
-    "simple_contour_interval_m": (float, 5.0),
-    "max_slope_deg": (float, 15.0),
+    "simple_contour_interval_m": (float, 1.0),
+    "max_slope_deg": (float, 18.0),
     "min_contour_length_m": (float, 50.0),
     "min_catchment_ha": (float, 0.5),
     # These three must match the panel spin boxes they restore, and they did not: the

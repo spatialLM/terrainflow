@@ -9,6 +9,7 @@ from shapely.geometry import LineString, box
 
 from terrainflow_assessment.modules.contour_analysis import (
     ContourFeature,
+    UsableAreaDisjoint,
     _extract_contours_scipy,
     analyse_contours,
     clip_to_usable_area,
@@ -281,25 +282,47 @@ class TestClipToUsableArea:
         polygon = box(0, 0, 200, 200)
         feat = _make_feature(elevation=50.0, length_m=100.0)
         feat.geometry = LineString([(10, 10), (90, 10)])
-        result = clip_to_usable_area([feat], polygon)
+        result, dropped = clip_to_usable_area([feat], polygon)
         assert len(result) == 1
+        assert dropped == 0
 
-    def test_feature_outside_dropped(self):
+    def test_feature_wholly_outside_but_overlapping_bounds_is_dropped(self):
+        """One contour outside the area is a drop, and it is counted."""
+        polygon = box(0, 0, 40, 5)
+        inside = _make_feature(elevation=10.0)
+        inside.geometry = LineString([(5, 2), (35, 2)])
+        outside = _make_feature(elevation=20.0)
+        outside.geometry = LineString([(5, 50), (35, 50)])   # north of the polygon
+        result, dropped = clip_to_usable_area([inside, outside], polygon)
+        assert len(result) == 1
+        assert dropped == 1
+
+    def test_disjoint_bounds_raise_rather_than_returning_nothing(self):
+        """Total loss is a different event from a partial clip, and says so.
+
+        This is the CRS mismatch: the polygon never reached the DEM's CRS, so it lands
+        an entire hemisphere away. Returning an empty list made that indistinguishable
+        from an analysis that legitimately found nothing.
+        """
         polygon = box(0, 0, 5, 5)
         feat = _make_feature()
         feat.geometry = LineString([(50, 10), (100, 10)])
-        result = clip_to_usable_area([feat], polygon)
-        assert len(result) == 0
+        with pytest.raises(UsableAreaDisjoint) as excinfo:
+            clip_to_usable_area([feat], polygon)
+        # Both bounding boxes are carried, because the numbers are what identify
+        # which CRS each side is in.
+        assert excinfo.value.contour_bounds == (50.0, 10.0, 100.0, 10.0)
+        assert excinfo.value.polygon_bounds == (0.0, 0.0, 5.0, 5.0)
 
     def test_empty_list(self):
         polygon = box(0, 0, 100, 100)
-        assert clip_to_usable_area([], polygon) == []
+        assert clip_to_usable_area([], polygon) == ([], 0)
 
     def test_clipped_feature_keeps_elevation(self):
         polygon = box(0, 0, 50, 50)
         feat = _make_feature(elevation=42.0)
         feat.geometry = LineString([(10, 10), (80, 10)])  # extends beyond polygon
-        result = clip_to_usable_area([feat], polygon)
+        result, _dropped = clip_to_usable_area([feat], polygon)
         if result:
             assert result[0].elevation == pytest.approx(42.0)
 
@@ -308,7 +331,7 @@ class TestClipToUsableArea:
         polygon = box(0, 0, 0.3, 100)  # very narrow — intersection < 0.5 m
         feat = _make_feature()
         feat.geometry = LineString([(0.1, 10), (100, 10)])
-        result = clip_to_usable_area([feat], polygon)
+        result, _dropped = clip_to_usable_area([feat], polygon)
         # Either dropped or a very short segment is returned
         for r in result:
             assert r.geometry.length >= 0.5
@@ -535,8 +558,12 @@ class TestExtractContoursWithMockedGdal:
 # ---------------------------------------------------------------------------
 
 class TestClipToUsableAreaBranches:
-    def test_multilinestring_keeps_longest_segment(self):
-        """Polygon with a hole forces intersection to be MultiLineString."""
+    def test_multilinestring_keeps_every_segment(self):
+        """A contour crossing a concave area in two places is two real alignments.
+
+        Keeping only the longer one silently discarded ground the user had selected —
+        and the discard was invisible, because the feature still came back.
+        """
         from shapely.geometry import Polygon
 
         from terrainflow_assessment.modules.contour_analysis import clip_to_usable_area
@@ -549,24 +576,32 @@ class TestClipToUsableAreaBranches:
         feat = _make_feature(elevation=50.0, length_m=120.0)
         # Horizontal line crossing the hole, producing two segments
         feat.geometry = LineString([(-10, 50), (110, 50)])
-        result = clip_to_usable_area([feat], ring)
-        # Result should contain one feature (the longer segment kept)
-        assert len(result) == 1
-        assert result[0].geometry.length > 0
+        result, dropped = clip_to_usable_area([feat], ring)
+        assert len(result) == 2
+        assert dropped == 0
+        assert all(r.geometry.length > 0 for r in result)
+        # Both carry the parent's attributes.
+        assert {r.elevation for r in result} == {50.0}
 
     def test_exception_in_intersection_swallowed(self):
-        """If geometry.intersection raises, the feature is skipped."""
+        """If geometry.intersection raises, the feature is skipped and counted."""
         from terrainflow_assessment.modules.contour_analysis import clip_to_usable_area
 
         feat = _make_feature(elevation=50.0, length_m=10.0)
-        # Replace geometry with a mock whose .intersection raises
+
+        # Replace geometry with a mock whose .intersection raises. It still needs
+        # bounds: the disjoint precheck reads them before any intersection is tried.
         class _RaisingGeom:
+            bounds = (0.0, 0.0, 10.0, 10.0)
+
             def intersection(self, other):
                 raise ValueError("boom")
+
         feat.geometry = _RaisingGeom()
         polygon = box(0, 0, 100, 100)
-        result = clip_to_usable_area([feat], polygon)
+        result, dropped = clip_to_usable_area([feat], polygon)
         assert result == []
+        assert dropped == 1
 
     def test_non_line_intersection_skipped(self):
         """If intersection is a Point/GeometryCollection, skip the feature."""
@@ -577,9 +612,10 @@ class TestClipToUsableAreaBranches:
         feat.geometry = LineString([(10, 50), (20, 50)])
         # Polygon whose edge touches the line at a single point (0-length overlap)
         polygon = box(20, 40, 30, 60)
-        result = clip_to_usable_area([feat], polygon)
+        result, dropped = clip_to_usable_area([feat], polygon)
         # Intersection is a Point (tangent) — feature is skipped
         assert result == []
+        assert dropped == 1
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +867,50 @@ class TestSegmentRankModeAndSlope:
             slope_path=gentle_path, seg_max_slope_deg=10.0)
         assert len(result) >= 1
         assert result[0].segment_slope_deg == 3.0
+
+    def test_a_segment_over_declared_nodata_is_rejected_not_ranked_flattest(self, tmp_path):
+        """CTA-20, and the instance that actually fires.
+
+        ``compute_slope_raster`` declares -9999 *and writes it*. Sampled raw, a segment
+        over a hole averages toward minus ten thousand degrees — so it does not merely
+        pass a steepness filter, it sorts as the flattest ground on the site. NaN is the
+        honest answer and NaN must be rejected, exactly as ``filter_by_slope`` decided
+        for whole contours.
+        """
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        hole = np.full((40, 40), -9999.0, dtype="float32")
+        hole_path = _write_raster(str(tmp_path / "nodata_slope.tif"), hole,
+                                  nodata=-9999.0)
+        result = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0, min_acc_ha=0.1,
+            slope_path=hole_path, seg_max_slope_deg=10.0)
+        assert result == []
+
+    def test_unknown_slope_is_rejected_while_no_raster_at_all_is_not(self, tmp_path):
+        """None and NaN mean different things, and the filter reads both."""
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        # No slope raster supplied → no filtering, segments survive.
+        unfiltered = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=25.0, min_acc_ha=0.1,
+            slope_path=None, seg_max_slope_deg=10.0)
+        assert len(unfiltered) >= 1
+
+
+class TestSwaleSegmentCapped:
+    def test_the_landscape_walk_branch_reports_capped_as_not_asked(self, tmp_path):
+        """No runoff depth means no required length, so there is nothing to fall short of.
+
+        False would be a claim about a question never put — the same distinction the
+        overtopping check draws between False and None.
+        """
+        from terrainflow_assessment.modules.contour_analysis import find_swale_segments
+        feat, acc_path = _make_contour_and_acc(tmp_path)
+        result = find_swale_segments(
+            [feat], acc_path, cell_area_m2=1.0, runoff_mm=None, min_acc_ha=0.1)
+        assert len(result) >= 1
+        assert all(seg.capped is None for seg in result)
 
 
 class TestClassifyContourInflow:

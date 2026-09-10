@@ -564,3 +564,98 @@ def check_contour_pick_prefers_analysed_candidate(dem_path):
             "a click on a candidate contour returned a feature without 'cid' — it "
             f"came from the plain layer instead (fields: {picked.fields().names()})"
         )
+
+
+def _area_layer_in(crs_auth_id, inset_m=20.0):
+    """An analysis-area polygon covering the site, declared in *crs_auth_id*.
+
+    Built as an NZTM rectangle over the fixture grid and then transformed into the
+    requested CRS, so the shape is the same ground either way and the *only* thing that
+    differs between two runs is the CRS the layer declares it in.
+    """
+    from _harness import CELL_M, NCOLS, NROWS, ORIGIN_X, ORIGIN_Y
+    from qgis.core import (
+        QgsCoordinateReferenceSystem,
+        QgsCoordinateTransform,
+        QgsFeature,
+        QgsGeometry,
+        QgsProject,
+        QgsRectangle,
+        QgsVectorLayer,
+    )
+
+    rect = QgsRectangle(
+        ORIGIN_X + inset_m,
+        ORIGIN_Y - NROWS * CELL_M + inset_m,
+        ORIGIN_X + NCOLS * CELL_M - inset_m,
+        ORIGIN_Y - inset_m,
+    )
+    geom = QgsGeometry.fromRect(rect)
+
+    nztm = QgsCoordinateReferenceSystem("EPSG:2193")
+    target = QgsCoordinateReferenceSystem(crs_auth_id)
+    if target != nztm:
+        geom.transform(QgsCoordinateTransform(nztm, target, QgsProject.instance()))
+
+    layer = QgsVectorLayer(f"Polygon?crs={crs_auth_id}", f"Area {crs_auth_id}", "memory")
+    feat = QgsFeature()
+    feat.setGeometry(geom)
+    layer.dataProvider().addFeatures([feat])
+    layer.updateExtents()
+    return layer
+
+
+def check_usable_area_in_a_different_crs_still_clips(dem_path):
+    """A usable area declared in a different CRS from the DEM must still work.
+
+    The polygon used to be read straight out of the layer in *its own* coordinates and
+    then intersected against DEM-CRS contours. NZTM eastings are around 1.5e6 and WGS84
+    longitudes around 172, so the two never touch: every intersection came back empty,
+    every contour was dropped, and the run reported nothing at all without a word about
+    why. This is the regression that cannot be written in ``pytest tests/`` — it needs a
+    real ``QgsVectorLayer`` that actually carries a CRS.
+
+    The assertion is equality with the matched-CRS run, not merely "not empty": a fix
+    that reprojected badly would still clear a non-empty bar.
+    """
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        nztm_layer = _area_layer_in("EPSG:2193")
+        QgsProject.instance().addMapLayer(nztm_layer, False)
+        h.panel._analysis_area_combo.setLayer(nztm_layer)
+        h.panel.usable_area_source_changed.emit("analysis")
+        h.assert_no_errors("usable area from a matched-CRS layer")
+
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis with a matched-CRS usable area")
+        matched = len(h.state.contour_features)
+        assert matched > 0, (
+            "the matched-CRS control run found no contours, so the comparison below "
+            "would pass for the wrong reason"
+        )
+
+        wgs_layer = _area_layer_in("EPSG:4326")
+        QgsProject.instance().addMapLayer(wgs_layer, False)
+        h.panel._analysis_area_combo.setLayer(wgs_layer)
+        h.panel.usable_area_source_changed.emit("analysis")
+        h.assert_no_errors("usable area from a WGS84 layer")
+
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis with a WGS84 usable area")
+        reprojected = len(h.state.contour_features)
+
+        assert reprojected > 0, (
+            "a usable area in a different CRS dropped every contour — the polygon "
+            "never reached the DEM's coordinate system"
+        )
+        # Same ground, so the same contours: allow a hair of slack for the reprojection
+        # round trip moving a vertex across a sliver threshold.
+        assert abs(reprojected - matched) <= max(2, matched // 20), (
+            f"the WGS84 usable area kept {reprojected} contours against {matched} for "
+            f"the identical area in the DEM's own CRS — the reprojection is wrong, not "
+            f"merely present"
+        )
