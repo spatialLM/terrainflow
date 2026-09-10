@@ -135,7 +135,35 @@ ORIGIN_X = 1_750_000.0   # NZTM2000 — the plugin's target projection
 ORIGIN_Y = 5_900_000.0
 
 
-def build_synthetic_dem(path, pond=False):
+NODATA = -9999.0
+
+
+def _box_blur(arr, passes):
+    """Cheap separable 3x3 mean filter, `passes` times. No scipy needed.
+
+    Turns white noise into *spatially correlated* roughness, and that
+    distinction is the whole point. White noise at a realistic LiDAR vertical
+    accuracy (~0.1 m) on a 2 m cell produces local gradients around 0.05-0.10 —
+    the same order as this fixture's 15 % valley slope. Flow routing then
+    dissolves into thousands of one-cell sinks and every check fails for a
+    reason that has nothing to do with the plugin. Real terrain is rough but
+    correlated between neighbours; blurring reproduces that.
+    """
+    import numpy as np
+
+    out = arr
+    for _ in range(passes):
+        padded = np.pad(out, 1, mode="edge")
+        out = (
+            padded[:-2, 1:-1] + padded[2:, 1:-1]
+            + padded[1:-1, :-2] + padded[1:-1, 2:]
+            + padded[1:-1, 1:-1]
+        ) / 5.0
+    return out
+
+
+def build_synthetic_dem(path, pond=False, rough=False, pits=0, voids=0,
+                        seed=42, roughness_m=0.10):
     """Write a deterministic 300x300 @ 2 m DEM (36 ha) in EPSG:2193.
 
     Shape: a valley draining south, with a concave long profile (~15 % at the top
@@ -154,6 +182,24 @@ def build_synthetic_dem(path, pond=False):
     the crest split — no pond, no contraction, nothing for Pond Capacity to draw — and a
     green run over it says nothing about them. The basin is 30 rows x 13 columns at 4 m deep, well
     over ``crest_routing.MIN_POND_CELLS``, and it fills and spills over its downstream lip.
+
+    **The nasty variant.** ``rough``/``pits``/``voids`` deliberately spoil the surface.
+    The default is pathologically *kind* — smooth, depression-free and hole-free — so
+    pit filling, nodata propagation and anything that has to cope with a jagged contour
+    are never exercised by the 259 checks that run over it. Those are exactly the
+    failure modes real farm LiDAR would find::
+
+        build_synthetic_dem(p)                              # smooth: 0 sinks
+        build_synthetic_dem(p, rough=True, pits=6, voids=2) # 18 sinks, 180 nodata cells
+
+    Synthesised rather than a committed real DEM so ground truth survives: you know
+    how many pits you punched and where. Everything random comes from
+    ``np.random.default_rng(seed)`` with a fixed default, so two builds are
+    byte-identical and the screenshot baseline still holds.
+
+    **The default is unchanged on purpose.** Every existing check and all 49 baseline
+    images are calibrated against the smooth surface; these are opt-in and off unless
+    asked for. See ``checks_robustness.py``.
     """
     import numpy as np
     import rasterio
@@ -174,20 +220,64 @@ def build_synthetic_dem(path, pond=False):
     # renderer then has nothing to draw. Real terrain has a channel; so does this.
     z = z - 4.0 * np.exp(-((across / 5.0) ** 2))
 
+    # Materialise once: every modifier below writes into z in place. .copy()
+    # rather than np.ascontiguousarray() — the latter returns the input untouched
+    # when it is already contiguous, so the read-only broadcast view stays
+    # read-only and the first `z +=` raises "output array is read-only".
+    z = np.broadcast_to(z, (NROWS, NCOLS)).copy()
+
     if pond:
-        z = np.broadcast_to(z, (NROWS, NCOLS)).copy()
         basin = ((rows >= 120) & (rows < 150)
                  & (np.abs(cols - (NCOLS - 1) / 2.0) <= 6))
         z[np.broadcast_to(basin, (NROWS, NCOLS))] -= 4.0
+
+    rng = np.random.default_rng(seed)
+    nodata_mask = np.zeros((NROWS, NCOLS), dtype=bool)
+
+    if rough:
+        # Normalise AFTER blurring: each pass shrinks the standard deviation, so
+        # scaling first would leave the amplitude at the mercy of the pass count.
+        noise = _box_blur(rng.normal(0.0, 1.0, (NROWS, NCOLS)), passes=4)
+        noise *= roughness_m / noise.std()
+        z += noise
+
+    if pits:
+        # Genuine closed depressions, which the smooth surface has none of. Kept
+        # off the bottom rows so the outlet stays open, and off the very edge so
+        # each is fully enclosed rather than draining off-grid.
+        for _ in range(int(pits)):
+            r = int(rng.integers(20, NROWS - 60))
+            c = int(rng.integers(20, NCOLS - 20))
+            radius = float(rng.uniform(3.0, 6.0))          # cells
+            depth = float(rng.uniform(1.0, 2.5))           # metres
+            z -= depth * np.exp(
+                -(((rows - r) ** 2 + (cols - c) ** 2) / (2.0 * radius**2)))
+
+    if voids:
+        # Nodata holes, as left by water bodies or removed structures. Kept off
+        # the centreline: a void straight through the channel severs the flow
+        # path, so every downstream result would be legitimately empty and the
+        # fixture would test nothing rather than test robustness.
+        for _ in range(int(voids)):
+            r = int(rng.integers(20, NROWS - 40))
+            c = int(rng.integers(15, NCOLS - 15))
+            if abs(c - (NCOLS - 1) / 2.0) < 15:
+                c = int((NCOLS - 1) / 2.0) + int(rng.choice([-1, 1])) * 30
+            half = int(rng.integers(3, 7))
+            nodata_mask[max(0, r - half):r + half,
+                        max(0, c - half):c + half] = True
+
+    grid = z.astype("float32")
+    grid[nodata_mask] = NODATA
 
     transform = from_origin(ORIGIN_X, ORIGIN_Y, CELL_M, CELL_M)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(
         path, "w", driver="GTiff",
         height=NROWS, width=NCOLS, count=1, dtype="float32",
-        crs="EPSG:2193", transform=transform, nodata=-9999.0,
+        crs="EPSG:2193", transform=transform, nodata=NODATA,
     ) as dst:
-        dst.write(np.broadcast_to(z, (NROWS, NCOLS)).astype("float32"), 1)
+        dst.write(grid, 1)
 
     return str(path)
 

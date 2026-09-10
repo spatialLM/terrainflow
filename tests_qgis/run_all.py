@@ -258,9 +258,12 @@ def main(argv):
     snapshot = False
     patterns = []
     skip = []
+    fixture_override = None
     for arg in argv:
         if arg.startswith("--timeout="):
             timeout_s = int(arg.split("=", 1)[1])
+        elif arg.startswith("--fixture="):
+            fixture_override = arg.split("=", 1)[1]
         elif arg.startswith("--skip="):
             skip.extend(s for s in arg.split("=", 1)[1].split(",") if s)
         elif arg == "--snapshot":
@@ -321,12 +324,34 @@ def main(argv):
         print("No checks matched.")
         return 1
 
-    # One DEM for the whole run, shared with every worker.
+    # One DEM for the whole run, shared with every worker. An explicit
+    # --fixture= (or a pre-set TFA_CHECK_DEM) wins, so the suite can be pointed
+    # at a real survey for a spot check without that file entering the repo:
+    #
+    #     .\run_qgis_tests.ps1 --fixture=D:\surveys\farm.tif checks_baseline
+    #
+    # Checked BEFORE building the synthetic one: this used to build
+    # unconditionally and then overwrite TFA_CHECK_DEM on the way to each
+    # worker, so an externally supplied DEM was silently discarded.
     import _harness
 
-    workdir = Path(tempfile.mkdtemp(prefix="tfa_qgis_checks_"))
-    dem_path = _harness.build_synthetic_dem(workdir / "synthetic_dem.tif")
-    print(f"Synthetic DEM: {dem_path}")
+    dem_path = fixture_override or os.environ.get("TFA_CHECK_DEM") or None
+
+    if dem_path:
+        source = "--fixture=" if fixture_override else "TFA_CHECK_DEM"
+        if not os.path.exists(dem_path):
+            # Hard error, not a fallback. Quietly substituting the synthetic DEM
+            # for the real one you asked for would mean reading a green run as
+            # evidence about terrain it never touched.
+            print(f"Fixture given via {source} does not exist: {dem_path}")
+            return 1
+        print(f"DEM: {dem_path} (from {source})")
+        print("Checks calibrated to the synthetic fixture may legitimately fail "
+              "on other terrain.")
+    else:
+        workdir = Path(tempfile.mkdtemp(prefix="tfa_qgis_checks_"))
+        dem_path = _harness.build_synthetic_dem(workdir / "synthetic_dem.tif")
+        print(f"Synthetic DEM: {dem_path}")
     print(f"Per-module timeout: {timeout_s}s")
 
     total_passed = total_failed = 0

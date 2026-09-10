@@ -386,6 +386,7 @@ run now prints which modules it chose and what matched them, so check that line.
 | `qgis/workers/*` | `checks_threading checks_threading_restart checks_threading_tasks` |
 | `qgis/plugin.py`, teardown paths | `checks_lifecycle` |
 | sizing or hydrology numbers | `checks_fixture_regression` |
+| pit filling, nodata handling, anything reading raw DEM cells | `checks_robustness` |
 | `controllers/_groups.py`, `_layers.py` | `checks_layer_tree`, then the full suite |
 
 **Some files have no scope.** `panel.py`, `_state.py`, `_groups.py`, `_layers.py`,
