@@ -67,8 +67,11 @@ GROUND_CONDITION_VALUES = ("good", "fair", "poor")
 INPUT_FIELDS = {
     # Site identity
     "site_name": (str, "Unnamed Site"),
-    # Storm / baseline
-    "rainfall_mm": (float, 120.0),
+    # Storm / baseline. 65 mm is what the spin box has opened on since the initial
+    # commit; this table read 120.0 — the same fault recorded below, found a third time
+    # and the widest of the three, because the design storm scales every runoff depth,
+    # every feature's inflow and every spillway in the report.
+    "rainfall_mm": (float, 65.0),
     "duration_hr": (float, 24.0),
     "soil_name": (str, ""),
     # Pasture hydrologic condition. Defaults to "good", which is what every design
@@ -77,7 +80,11 @@ INPUT_FIELDS = {
     "ground_condition": (str, "good"),
     "cn": (int, 61),
     "moisture": (str, ""),
-    "routing": (str, "d8"),
+    # "dinf" is the combo's opening entry and the one it labels recommended. This read
+    # "d8", which is not merely a different answer: pysheds' d8 accumulation calls
+    # ``np.in1d``, which NumPy 2 removed, so a file restoring as d8 can raise outright
+    # rather than quietly route the water differently.
+    "routing": (str, "dinf"),
     "stream_threshold_ha": (float, 5.0),
     "exit_flow_ls": (float, 0.0),
     # Sizing basis (see STRETCH_GOALS "runoff basis and infiltration policy")

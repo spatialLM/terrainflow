@@ -50,7 +50,9 @@ def _filled_inputs():
         "ground_condition": "poor",
         "cn": 78,
         "moisture": "Wet",
-        "routing": "dinf",
+        # "d8" because the default is now "dinf": this fixture's whole job is to
+        # differ from every default, and ROUTING_VALUES holds only the two.
+        "routing": "d8",
         "stream_threshold_ha": 2.5,
         "exit_flow_ls": 12.0,
         "sizing_basis": "runoff",
@@ -134,6 +136,24 @@ class TestInputCoercion:
         assert INPUT_FIELDS["swale_width_m"][1] == 2.0
         assert INPUT_FIELDS["swale_depth_m"][1] == 0.5
         assert INPUT_FIELDS["swale_bottom_width_m"][1] == 1.0
+
+    def test_the_storm_and_routing_defaults_match_the_panel(self):
+        """The same rule as the swale trio, on the two widest-reaching inputs.
+
+        Both disagreed: 120.0 mm here against a spin box that has read 65 since the
+        initial commit, and "d8" against a combo that opens on "D-infinity
+        (recommended)". A file saved before either key existed therefore reopened on a
+        storm that nearly doubles every volume in the report, and on a flow algorithm
+        whose pysheds path calls ``np.in1d`` — removed in NumPy 2, so it can raise
+        rather than merely answer differently.
+
+        The QGIS parity check in ``tests_qgis/checks_design_file`` walks the whole
+        table against the live widgets, but it needs a QGIS runtime and it is also the
+        check that carried these two on an allowlist. Restating the two values here
+        costs nothing and holds them in the suite that always runs.
+        """
+        assert INPUT_FIELDS["rainfall_mm"][1] == 65.0
+        assert INPUT_FIELDS["routing"][1] == "dinf"
 
     def test_the_batter_is_derived_and_therefore_not_stored(self):
         """Three dimensions are entered; the side slope is what they come out as.

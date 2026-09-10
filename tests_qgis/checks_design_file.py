@@ -478,18 +478,17 @@ def check_panel_defaults_match_the_persisted_defaults(dem_path):
         "exit_flow_ls", "peak_intensity_mm_hr",
     }
 
-    # Real divergences of exactly the class this check exists for, found by it, and
-    # deliberately NOT changed here: both alter what every assessment computes, so they
-    # are a decision to take on their own rather than a side effect of a contour fix.
-    #
-    #   rainfall_mm  panel 65.0 vs persisted 120.0 — the design storm itself
-    #   routing      panel 'dinf' vs persisted 'd8' — reopening an old file would
-    #                switch flow routing, and dinf is the shipped default
+    # Empty, and meant to stay that way. The two this check found and once held open —
+    # rainfall_mm (persisted 120.0 against the panel's 65.0, the design storm itself)
+    # and routing (persisted 'd8' against the panel's 'dinf') — were taken as their own
+    # decision and fixed at the table in ``project_io``, which is where the fix belongs:
+    # exempting them would have left every older file reopening on a storm and a flow
+    # algorithm nobody chose.
     #
     # Asserted as an *exact* set, so a new divergence fails here and so does fixing one
-    # of these without removing it from the list. An allowlist that only ever grows is
-    # how a characterisation test stops characterising anything.
-    known_divergences = {"rainfall_mm", "routing"}
+    # without removing it from the list. An allowlist that only ever grows is how a
+    # characterisation test stops characterising anything.
+    known_divergences = set()
 
     with PluginHarness(dem_path) as h:
         defaults = project_io.default_inputs()
