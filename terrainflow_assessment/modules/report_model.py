@@ -724,17 +724,25 @@ def _managed_catchment(data):
     bal, b = data.balance, data.baseline
     if bal is None or b is None or not bal.per_feature:
         return None
+    from terrainflow_assessment.modules.water_balance import catchment_coverage
+
     catchment_m2 = float(getattr(b, "catchment_area_ha", 0.0) or 0.0) * 10000.0
     managed_m2 = sum(float(f.get("direct_catchment_m2") or 0.0)
                      for f in bal.per_feature)
     runoff_m3 = sum(float(f.get("direct_inflow_m3") or 0.0)
                     for f in bal.per_feature)
-    if catchment_m2 <= 0 or managed_m2 <= 0:
+    # One formula, shared with the panel's readout beside the catchment toggle, so the
+    # card and the screen cannot quote two different figures for one quantity. The
+    # `managed_m2 <= 0` guard stays *here* rather than moving into the shared function:
+    # a 0% card in a run of summary cards is noise, while the panel legitimately shows
+    # 0%, because "nothing you have drawn intercepts any ground" is the diagnosis.
+    cov = catchment_coverage(managed_m2, catchment_m2)
+    if cov is None or managed_m2 <= 0:
         return None
     return {
-        "managed_m2": managed_m2,
-        "catchment_m2": catchment_m2,
-        "managed_pct": 100.0 * managed_m2 / catchment_m2,
+        "managed_m2": cov["managed_m2"],
+        "catchment_m2": cov["catchment_m2"],
+        "managed_pct": cov["managed_pct"],
         "runoff_m3": runoff_m3,
         "capture_pct": (100.0 * bal.total_captured_m3 / runoff_m3
                         if runoff_m3 > 0 else None),

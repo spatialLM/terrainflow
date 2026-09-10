@@ -172,6 +172,10 @@ class AssessmentPanel(QDockWidget):
     # should not have to reach through the flow network's selection to say which.
     place_spillway_for_requested = pyqtSignal(int, str)   # index, kind
     edit_earthwork_requested = pyqtSignal(int)            # index → properties dialog
+    # The one figure the Spillways list writes rather than reports. Carries the depth
+    # below the containment level, which is what the properties dialog's Spillway depth
+    # control sets, and the same index the two signals above use.
+    set_spillway_depth_requested = pyqtSignal(int, float)  # index, sill depth (m)
     connect_earthworks_requested = pyqtSignal()   # route one feature's overflow to another
     # Grade a diversion drain down from another feature's spillway crest, instead of
     # from the ground under its own first vertex.
@@ -1354,6 +1358,20 @@ class AssessmentPanel(QDockWidget):
         self._catchment_layer_check.setToolTip(H.CATCHMENT_LAYER)
         lay.addWidget(self._catchment_layer_check)
 
+        # The map answers "where"; this answers "how much". It sits under the
+        # toggle because it is the same labelling read as a number, and it is not
+        # gated on the checkbox: it is a fact about the design, and a figure you
+        # have to switch a raster on to read is a figure nobody compares against
+        # the scorecard. Note that one is a share of VOLUME and this is AREA.
+        self._catchment_coverage_lbl = QLabel("")
+        self._catchment_coverage_lbl.setWordWrap(True)
+        self._catchment_coverage_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._catchment_coverage_lbl.setStyleSheet("font-size: 10.5px;")
+        self._catchment_coverage_lbl.setContentsMargins(18, 0, 0, 4)
+        self._catchment_coverage_lbl.setToolTip(H.CATCHMENT_COVERAGE)
+        self._catchment_coverage_lbl.setVisible(False)
+        lay.addWidget(self._catchment_coverage_lbl)
+
         # Connections
         self._run_ew_btn.clicked.connect(self.run_earthworks_requested)
         self._ew_reshape_btn.clicked.connect(self.reshape_earthworks_requested)
@@ -1456,6 +1474,7 @@ class AssessmentPanel(QDockWidget):
         self._spillway_table.feature_selected.connect(self._on_spillway_row_selected)
         self._spillway_table.place_requested.connect(self.place_spillway_for_requested)
         self._spillway_table.edit_requested.connect(self.edit_earthwork_requested)
+        self._spillway_table.depth_edited.connect(self.set_spillway_depth_requested)
         lay.addWidget(self._spillway_table)
 
     def _on_spillway_row_selected(self, index):
@@ -2127,6 +2146,61 @@ class AssessmentPanel(QDockWidget):
         self._area_subtotals_lbl.setText("".join(lines))
         self._area_subtotals_lbl.setVisible(True)
 
+    def set_catchment_coverage(self, coverage, site_is_guessed=False):
+        """Share of the site draining into a feature, by area — under the toggle.
+
+        Read against the scorecard's capture percentage, which is a share of storm
+        volume. "of site area" carries that distinction on the same line as the
+        number, because it is the only thing separating the two figures.
+
+        "Catchment worked" is the report's own card title, and "analysed" is the word
+        the Baseline summary uses for this same denominator — one name per number,
+        rather than a third way of saying site.
+        """
+        from .modules.reporting import fmt_pct
+
+        if not coverage:
+            self._catchment_coverage_lbl.setVisible(False)
+            self._catchment_coverage_lbl.setText("")
+            return
+
+        # One unit for the whole line, chosen from the site total. Deciding per figure
+        # instead puts "9,408 m²" beside "32.7 ha" in one sentence, and two units on
+        # one line is an invitation to compare the numbers rather than the areas.
+        # Hectares only once the block is big enough for them: fmt_area_ha renders a
+        # real 0.4 ha catchment as "0.0 ha", which reads as nothing at all.
+        in_ha = coverage["catchment_m2"] >= 10_000.0
+
+        def _area(m2):
+            return f"{m2 / 10_000.0:,.1f} ha" if in_ha else f"{m2:,.0f} m²"
+
+        pct = coverage["managed_pct"]
+        # The same ladder set_area_subtotals uses: two percentages in one panel must
+        # not be graded on two different scales.
+        colour = "#c0392b" if pct < 20 else "#b9770e" if pct < 50 else "#1e8449"
+        note = ""
+        if pct > 100.0:
+            # Never clamped — an impossible share is a labelling fault, and hiding it
+            # behind min(100, ...) is what this codebase refuses to do elsewhere.
+            note = ' <span style="color:#c0392b;">— labelling did not close</span>'
+
+        lines = [
+            '<div style="color:#5f7176;">'
+            '<span style="font-weight:600;">Catchment worked</span> — '
+            f'<span style="color:{colour}; font-weight:600;">{fmt_pct(pct)}</span>'
+            f' of site area{note}</div>',
+            f'<div style="color:#5f7176;">{_area(coverage["managed_m2"])} drains into'
+            f' a feature · {_area(coverage["unmanaged_m2"])} does not'
+            f' · {_area(coverage["catchment_m2"])} analysed</div>',
+        ]
+        if site_is_guessed:
+            # The full explanation already went to the message bar once, at baseline
+            # time. Repeating it per edit is how a warning gets dismissed by habit.
+            lines.append('<div style="color:#b9770e;">No site boundary set — that area'
+                         ' is ground the analysis guessed at.</div>')
+        self._catchment_coverage_lbl.setText("".join(lines))
+        self._catchment_coverage_lbl.setVisible(True)
+
     def _on_network_mode(self, mode):
         for key, btn in self._network_mode_btns.items():
             btn.setChecked(key == mode)
@@ -2624,6 +2698,31 @@ class AssessmentPanel(QDockWidget):
         an analysis run actually receives.
         """
         return {name: getattr(self, name) for name in INPUT_FIELDS}
+
+    def seed_swale_criteria(self, depth_m, top_width_m, bottom_width_m):
+        """Start the Find Best Swale Segments criteria at the user's standard section.
+
+        A seed, deliberately, not a wire. These boxes answer "what size of swale should
+        these contour segments be ranked for", which is a different question from "what
+        size do I dig" — but it is the same swale, so starting them anywhere else means
+        ranking segments for a swale the user will never build, and asking them to type
+        their dimensions twice.
+
+        Precedence is document > standard > shipped: this runs at start-up, and a design
+        file loaded afterwards overwrites it through :meth:`apply_inputs`, which is what
+        keeps a saved design reproducible on someone else's machine.
+        """
+        rows = ((self._swale_depth_spin, depth_m),
+                (self._swale_width_spin, top_width_m),
+                (self._swale_bottom_width_spin, bottom_width_m))
+        try:
+            for widget, value in rows:
+                widget.blockSignals(True)
+                widget.setValue(value)
+        finally:
+            for widget, _value in rows:
+                widget.blockSignals(False)
+        self.analysis_inputs_changed.emit()
 
     def apply_inputs(self, values):
         """Push a restored input set back into the widgets.

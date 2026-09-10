@@ -21,6 +21,7 @@ from qgis.core import (
     QgsProperty,
     QgsRasterLayer,
     QgsRasterShader,
+    QgsSettings,
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
@@ -33,6 +34,16 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QMetaType, Qt
 from qgis.PyQt.QtGui import QColor
 
+from terrainflow_assessment.core.registry.earthwork_defaults import (
+    decode as decode_earthwork_defaults,
+)
+from terrainflow_assessment.core.registry.earthwork_defaults import (
+    encode as encode_earthwork_defaults,
+)
+from terrainflow_assessment.core.registry.earthwork_defaults import (
+    resolve_dimensions,
+    shipped_dims,
+)
 from terrainflow_assessment.core.registry.earthwork_types import all_types, get_type
 from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
 from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
@@ -73,6 +84,18 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # results through the same helper the baseline does, and the exit-marker ids
         # have to land on the controller that owns the `scaleChanged` connection.
         self.baseline = None
+        # Which features `_check_spillway_capacity` has already named. It runs on every
+        # settled recompute, so without this the same warning is re-pushed on every
+        # subsequent edit and stops reading as news. None until the first check, which is
+        # distinct from "checked, and nothing was short".
+        self._short_spillways_reported = None
+        # The user's standard earthwork dimensions, per type. Per user rather than per
+        # project: "the trough on my tractor" follows the person to every site, and a
+        # project-scoped standard would be empty in a project not yet saved — which is
+        # exactly when the first swale gets drawn. Loaded once here; refreshed when the
+        # properties dialog saves one.
+        self._earthwork_defaults = {}
+        self.load_earthwork_defaults()
 
     def _watch_visibility(self, layer_id):
         """Clear the highlight when this layer is unticked.
@@ -126,15 +149,34 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     # ---------------------------------------------------------------- Drawing tools
 
-    def activate_draw_swale(self, mode):
+    def _contour_pick_layers(self):
+        """Every contour layer a swale may be drawn on, analysed candidates first.
+
+        Both layers are offered because a contour does not have to be a ranked
+        candidate to be worth a swale. The analysis only promotes contours that
+        pass the slope cutoff, the minimum length and the usable-area clip, and
+        for a while those were the only lines the two picking tools could see —
+        so a contour the user was looking at, on a layer the plugin had drawn,
+        could be un-clickable for reasons nothing on screen explained.
+
+        Candidates come first because ties go to the earlier layer: at a shared
+        elevation the two layers draw the same line, and the candidate is the one
+        carrying rank and inflow.
+        """
         from terrainflow_assessment.qgis.controllers._layers import resolve_layer
-        contour_layer = resolve_layer(self._project, self._state.contour_layer_id)
+        layers = [resolve_layer(self._project, layer_id)
+                  for layer_id in (self._state.contour_layer_id,
+                                   getattr(self._state, "simple_contour_layer_id", None))]
+        return [layer for layer in layers if layer is not None]
+
+    def activate_draw_swale(self, mode):
+        contour_layers = self._contour_pick_layers()
         if mode == "contour":
-            if contour_layer is None:
+            if not contour_layers:
                 self._iface.messageBar().pushWarning(
                     "TerrainFlow Assessment", self._no_contour_layer_message("segment"))
                 return
-            tool = ContourSegmentTool(self._canvas, contour_layer)
+            tool = ContourSegmentTool(self._canvas, contour_layers)
             tool.segment_selected.connect(
                 lambda geom, elev, coords: self._on_contour_selected_for_swale(
                     geom, elev, coords
@@ -143,11 +185,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             tool.cancelled.connect(self._on_draw_cancelled)
             self.use_tool(tool)
         elif mode == "full_contour":
-            if contour_layer is None:
+            if not contour_layers:
                 self._iface.messageBar().pushWarning(
                     "TerrainFlow Assessment", self._no_contour_layer_message("contour"))
                 return
-            tool = SelectContourTool(self._canvas, contour_layer)
+            tool = SelectContourTool(self._canvas, contour_layers)
             tool.contour_selected.connect(
                 lambda geom, elev, coords: self._on_contour_selected_for_swale(
                     geom, elev, coords
@@ -170,12 +212,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         *baseline* analysis — they are different buttons on different stages, and a
         deleted layer looks identical from here unless the two cases are separated.
         """
-        if getattr(self._state, "contour_layer_id", None):
-            return (f"The contour layer has been removed from the project, so there "
-                    f"is nothing to pick a {what} from. Re-run Contour Analysis on "
-                    f"the Analysis stage.")
-        return (f"Run Contour Analysis on the Analysis stage first, then pick a "
-                f"{what}. The Baseline run does not generate contours on its own.")
+        if (getattr(self._state, "contour_layer_id", None)
+                or getattr(self._state, "simple_contour_layer_id", None)):
+            return (f"The contour layers have been removed from the project, so there "
+                    f"is nothing to pick a {what} from. Generate Contours, or re-run "
+                    f"Contour Analysis, on the Analysis stage.")
+        return (f"Generate Contours or run Contour Analysis on the Analysis stage "
+                f"first, then pick a {what}. Either layer can be drawn on; the "
+                f"Baseline run does not produce contours on its own.")
 
     def _on_contour_selected_for_swale(self, geom, elevation, contour_coords=None):
         swale_geom = contour_to_swale_geometry(geom)
@@ -430,6 +474,138 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """Slot for the Spillways list, which names the feature by row."""
         self.activate_place_spillway(kind=kind, index=index)
 
+    def set_spillway_depth(self, index, depth_m):
+        """Set a feature's sill depth from the review table, designing one if it has none.
+
+        The second write path to a crest, after the properties dialog, and it holds the
+        same rules: the depth is bound through :func:`bind_crest` so the stored triple
+        cannot describe two containing-ground levels; no band, so the depth typed is the
+        depth stored; and ``auto`` is retired, because a level the user set by hand is the
+        user's and the placement path is entitled to re-seed one that is still the tool's.
+
+        The datums are measured here rather than read off the cached review row. A
+        controller reading its own UI cache to make a design decision is a loop that is
+        eventually wrong, and a row can predate a burn; measuring means the display and
+        the write share one rule, which is what makes typing back the figure already on
+        screen a no-op rather than a nudge.
+        """
+        from terrainflow_assessment.modules.earthwork_design import (
+            Spillway,
+            bind_crest,
+            spillway_policy,
+        )
+
+        earthworks = self._state.earthwork_manager.get_all()
+        # Bounds only. Deliberately not a cross-check against
+        # `state.spillway_rows[index]`: that list is filtered to the types that can
+        # spill and *then* stamped with the manager index, so a berm sitting before a
+        # swale makes position and index disagree.
+        if not (0 <= index < len(earthworks)):
+            return
+        ew = earthworks[index]
+        if ew.type not in self.SPILLWAY_TYPES:
+            return
+
+        spillway = getattr(ew, "spillway", None)
+        _lip, invert, containment, _src = self._spillway_datums(
+            ew.geometry, ew.type,
+            top_width_m=getattr(ew, "top_width_m", None),
+            depth=getattr(ew, "depth", None),
+            crest_elevation=getattr(ew, "crest_elevation", None),
+            ew=ew, sill_point=self._sill_point(ew),
+            sill_width_m=None if spillway is None else spillway.width_m,
+        )
+        if containment is None:
+            # The cell should not have been editable, so this is defence rather than a
+            # path. Said out loud all the same: `_build_spillway_rows` swallows its
+            # exceptions to a console print, and a typed value that disappears without a
+            # word is the worst thing this column can do.
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                f"No ground level for {ew.name} yet, so there is nothing to measure a "
+                f"sill depth against. Run Baseline, or set the depth in the feature's "
+                f"properties.",
+            )
+            return
+
+        created = spillway is None
+        if created:
+            # The type's head, not the constructor's 0.30 - a swale's is 0.15, and a sill
+            # created here carrying twice the head the dialog gives it would be a second
+            # design for one gesture. `freeboard_m` stays None *because* the requirement
+            # is the type's policy: None is what means "take the type's", and writing
+            # today's figure in freezes it into the design, so a later change to the
+            # standard would reach new features and silently skip saved ones.
+            spillway = Spillway(
+                head_m=spillway_policy(ew.type)[1],
+                width_m=0.0, width_auto=True,     # _refresh_auto_spillway_widths fills it
+                freeboard_m=None,
+                point_wkt=None,                   # designing one is not siting one
+                auto=False,
+            )
+            ew.spillway = spillway
+
+        # No band. Clamping would put the column at odds with the number typed into it -
+        # type 0.10 and read back 0.60 - which is worse in a cell than in a dialog,
+        # because the corrected figure appears where the user's just was. The placement
+        # path clamps because a map click lands on arbitrary ground; a typed depth does
+        # not, and `spillway_validity` is what says a shallow sill is a bad one.
+        #
+        # A dam is given no invert: its floor is the ground under the wall rather than a
+        # cut, and a height set out from it is a figure the dialog refuses to offer.
+        crest, drop, height = bind_crest(
+            containment, drop=max(0.0, float(depth_m)),
+            invert_elevation=None if ew.type == "dam" else invert)
+        # Stored unrounded. Every control shows the crest to the centimetre and the
+        # review re-derives the depth from it, so rounding here is what would make the
+        # figure on screen drift off the figure typed.
+        spillway.crest_elevation = crest
+        spillway.drop_below_rim_m = drop
+        spillway.height_above_floor_m = None if ew.type == "dam" else height
+        spillway.auto = False
+
+        self._reapply_sill_capacity(ew, created=created)
+        self._panel.update_earthwork_in_list(index, ew.summary())
+        # Recompute before the layer, not after: a spillway created here has no width
+        # until `_refresh_auto_spillway_widths` derives one, and the map label draws it.
+        self._recompute_live_assessment()
+        self._refresh_spillway_layer()
+        self._mark_design_edit()
+
+    def _reapply_sill_capacity(self, ew, created=False):
+        """Re-read what *ew* holds to its crest, off the curve already measured.
+
+        A crest move cannot change the stage-storage curve, the measured spill level or
+        the brim volume: the flood behind all three is deliberately brim-full with the
+        notch not cut, for the reason :meth:`_apply_measured_levels` gives. The only
+        thing that reads the crest is :meth:`_sill_limited_capacity`, an interpolation on
+        the cached curve.
+
+        So this is not an optimisation to be tidied back into a
+        :meth:`_refresh_terrain_capacity` call. That would spend a depression fill per
+        typed depth to arrive at the same two numbers - and worse, it returns *silently*
+        while a burn holds the burner, so mid-burn it would leave the capacity stale with
+        nothing said.
+
+        The one case that must flood is a dam getting its first spillway:
+        :meth:`_refresh_dam_stage_storage` clears the measured levels and returns for a
+        dam that has none, so until this moment there was no curve to read.
+        """
+        if created and ew.type == "dam":
+            self._refresh_terrain_capacity(ew)
+            return
+        brim = getattr(ew, "containment_capacity_m3", None)
+        if brim is None or getattr(ew, "stage_storage", None) is None:
+            # Never measured. Nothing to re-read, and flooding here would put a
+            # depression fill behind every edit on a design nothing has analysed.
+            return
+        held = round(self._sill_limited_capacity(ew, brim), 2)
+        if ew.type == "dam":
+            ew.capacity_m3, ew.capacity_l = held, held * 1000.0
+            ew.terrain_capacity_m3 = float(held or 0.0) or None
+        else:
+            ew.terrain_capacity_m3 = held or None
+
     def _on_spillway_placed(self, ew_id, point, elevation, kind="outflow"):
         """Record the placed location, and seed the crest from the ground there."""
         from qgis.core import QgsGeometry
@@ -446,9 +622,20 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         spillway = getattr(ew, attr, None) or Spillway()
         spillway.point_wkt = QgsGeometry.fromPointXY(point).asWkt()
 
-        # A crest already chosen by hand is left alone — placing the point tells us
-        # where, not how deep. Only an auto crest follows the ground it landed on.
-        if elevation is not None and (spillway.crest_elevation is None or spillway.auto):
+        # A crest this design already carries is left alone — placing the point tells us
+        # where, not how deep. Only a spillway that has never had a crest takes one from
+        # the ground it landed on, which is the sill created by this click itself.
+        #
+        # ``spillway.auto`` used to be a second way in here, and it was the hole the
+        # dialog's `_note_spillway_edit` could not close. That flag is only retired when
+        # the user *moves* one of the three level controls, so a sill configured any other
+        # way — opening the group and accepting the depth it seeds, or setting a built
+        # width and nothing else — was still marked auto and was overwritten the moment it
+        # was placed. The user's crest came back as whatever ground was under the cursor,
+        # clamped to the top of the band, and every figure derived from it (depth,
+        # freeboard, storage given up) came back with it. A crest that exists is a crest
+        # somebody accepted; where it came from does not change that.
+        if elevation is not None and spillway.crest_elevation is None:
             # Datums taken round the point that was just placed, so the lip is the lip
             # of the excavation *there* rather than at whichever end of the feature is
             # lowest.
@@ -936,9 +1123,17 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if ew_type == "diversion":
             geometry = self._orient_downhill(geometry)
 
+        # The size this feature will be seeded at, resolved once and used twice. The
+        # catchment below is labelled against the feature's footprint width, and it runs
+        # before the Earthwork exists — so reading the width separately in each place is
+        # how the number on screen comes to describe a different swale than the one being
+        # built. One resolve makes them agree by construction.
+        dims = self._resolved_dims(ew_type)
+
         # Direct contributing catchment for the not-yet-added feature: label the site
         # as if it were already there, so the dialog opens with real numbers.
-        peak_inflow, catchment_m2 = self._provisional_catchment(ew_type, geometry)
+        peak_inflow, catchment_m2 = self._provisional_catchment(
+            ew_type, geometry, top_width_m=dims.top_width_m)
 
         crest_elev = None
         if ew_type == "dam" and self._state.dem_path:
@@ -946,15 +1141,21 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         n = len(self._state.earthwork_manager) + 1
         ew_name = f"{ew_type.capitalize()} {n}"
-        # Seeded from `core/registry`, deliberately, and NOT from the panel's swale
-        # cross-section boxes. Those live in the Find Best Swale Segments criteria and
-        # answer a different question — "what size of swale should these contour
-        # segments be sized for" — and at their defaults they describe a 0.6 m drainage
-        # swale, which is sub-cell on a 1 m DEM and cannot be burned or verified. The
-        # registry's 2.0 m is the width a drawn feature should start at. Wiring the two
-        # together was tried and reverted: it silently replaced a representable default
-        # with one the terrain model cannot hold.
-        ew = Earthwork(ew_type, geometry, ew_name)
+        # Seeded from `core/registry` overlaid by the user's own standard, and still
+        # NOT wired live to the panel's swale cross-section boxes. Those live in the Find
+        # Best Swale Segments criteria and answer a different question — "what size of
+        # swale should these contour segments be sized for".
+        #
+        # The original reason for keeping them apart no longer holds and should not be
+        # quoted back: it was that the criteria defaults described a 0.6 m drainage swale,
+        # sub-cell on a 1 m DEM and impossible to burn or verify, so wiring them replaced
+        # a representable default with one the terrain model cannot hold. Those defaults
+        # have since been realigned to the registry's floored trench (see the comment on
+        # `_swale_width_spin` in panel.py), so both now describe the same swale. What
+        # remains is a question of *meaning*, not of magnitude — a ranking input is not a
+        # build dimension — so the criteria grid is seeded from the same standard rather
+        # than driven by it, and a user who edits one has not silently edited the other.
+        ew = Earthwork(ew_type, geometry, ew_name, dims=dims)
         ew.source_contour_coords = source_contour  # reshape stays contour-locked
 
         lip, invert, containment, containment_src = self._spillway_datums(
@@ -989,6 +1190,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             peak_flow_m3s=self._provisional_peak_flow(catchment_m2),
             harvesting_coefficient=self._using_harvesting_coefficient(),
             cell_size_m=self._dem_cell_size_m(),
+            # Only a feature being drawn may offer to set the standard. Note this
+            # cannot be left to the dialog's own `_editing`, which is True here too —
+            # the create path passes a constructed Earthwork, so the dialog cannot
+            # tell a fresh feature from an old one on its own.
+            is_new=True,
+            standard_dims=self._earthwork_defaults.get(ew_type),
         )
 
         if dlg.exec():
@@ -1022,6 +1229,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if bw is not None:
                 ew.bottom_width_m = bw
 
+            # Every dimension is final by here, so this is the moment the feature can
+            # be offered as the standard for its type. Create path only — editing a
+            # feature drawn months ago must not rewrite what new ones start at.
+            if getattr(dlg, "get_save_as_standard", lambda: False)():
+                self._remember_standard_dims(ew)
+
             if ew_type == "dam":
                 # Key into the banks first: capacity must be flooded against the wall
                 # that will actually be built, not the shorter line as drawn.
@@ -1043,9 +1256,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 len(self._state.earthwork_manager) - 1, ew.summary()
             )
             self._refresh_ew_layer()
-            self._refresh_spillway_layer()
             self.recompute_catchments()
+            # Before the sill bar is drawn, not after. An auto width is settled by
+            # `_build_spillway_rows`, at the sill depth this recompute measures — so a
+            # layer built first carries the width the previous, uncapped pass guessed,
+            # and the label disagrees with the Spillways list until some unrelated later
+            # edit repaints it.
             self._recompute_live_assessment()
+            self._refresh_spillway_layer()
             self._mark_design_edit()
         self._canvas.unsetMapTool(self._canvas.mapTool())
 
@@ -1094,6 +1312,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         ew.spillway = new
+        # A whole new object, so the crest it carries is not the one the cached depth was
+        # measured against. Cleared rather than recomputed: the settled recompute that
+        # follows this call measures it again, and a stale value in between would cap the
+        # auto width against a sill that no longer exists.
+        ew.measured_sill_depth_m = None
 
     def _on_draw_cancelled(self):
         self._canvas.unsetMapTool(self._canvas.mapTool())
@@ -1204,8 +1427,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._refresh_terrain_capacity(ew)
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
-            self._refresh_spillway_layer()
+            # See the draw path: the recompute is what settles an auto width against the
+            # measured sill depth, so the bar is drawn from it rather than before it.
             self._recompute_live_assessment()
+            self._refresh_spillway_layer()
             self._mark_design_edit()
 
     def _overflow_options(self, exclude_id=None):
@@ -1588,10 +1813,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     @staticmethod
     def _clear_measured_levels(ew):
-        """Drop the measured level, curve and brim volume, for when there is none."""
+        """Drop the measured level, curve, brim volume and sill depth, for when there
+        is none."""
         ew.terrain_spill_level_m = None
         ew.stage_storage = None
         ew.containment_capacity_m3 = None
+        # A fourth member of the same family: measured off the terrain, never serialised,
+        # and read by the two width solves that cannot measure for themselves.
+        ew.measured_sill_depth_m = None
 
     def _refresh_dam_stage_storage(self, ew):
         """Measure a dam's stage–storage curve, which its capacity figure throws away.
@@ -2015,7 +2244,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if dom_path and os.path.exists(dom_path):
                 with rasterio.open(dom_path) as src:
                     domain = src.read(1) > 0.5
-            if domain is None or domain.shape != dem.shape:
+            domain_is_fallback = domain is None or domain.shape != dem.shape
+            if domain_is_fallback:
+                # No usable site mask, so "the site" becomes the whole tile. This was
+                # silent, and it is the denominator of every percentage on the panel:
+                # on the Quail Island tile it stands 222 ha of DEM in for a 29 ha
+                # block. Carried on the meta so a readout can say so out loud.
                 domain = np.ones(dem.shape, dtype=bool)
 
             self._state.flow_next = next_flat
@@ -2028,6 +2262,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 "cell_area_m2": cell_w * cell_h,
                 "cell_size_m": (cell_w + cell_h) / 2.0,
                 "nodata": nodata,
+                # Cached rather than re-summed. _recompute_live_assessment runs on the
+                # vertex-drag tier, and one reduce over a multi-million-cell bool array
+                # per frame was already enough without the coverage readout adding a
+                # second. Lives here so invalidate_flow_cache clears it with the rest.
+                "domain_cells": int(domain.sum()),
+                "domain_is_fallback": domain_is_fallback,
             }
             return True
         except Exception as exc:
@@ -2540,6 +2780,86 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             print(f"TerrainFlow Assessment — could not restore rainfall data: {exc}")
             self._state.idf_table = IDFTable()
 
+    # ---- The user's standard earthwork dimensions
+
+    # Per user, per QGIS profile — not per project. "The trough on my tractor" follows
+    # the person to every site, and QgsProject.readEntry returns nothing for a project
+    # that has never been saved, which is precisely when the first swale is drawn.
+    _EARTHWORK_DEFAULTS_KEY = "TerrainFlow/earthwork_defaults"
+
+    def _resolved_dims(self, ew_type):
+        """The cross-section a fresh feature of *ew_type* should start at."""
+        return resolve_dimensions(ew_type, self._earthwork_defaults)
+
+    def _remember_standard_dims(self, ew):
+        """Adopt this feature's cross-section as the standard for its type.
+
+        Storage is sparse at the type level: a feature drawn at the shipped size stores
+        nothing, so ticking the toggle on one is how a standard is *cleared* rather than
+        a way to pin the user to a number a later release may ship differently.
+        """
+        from terrainflow_assessment.core.registry.earthwork_defaults import (
+            DimensionDefaults,
+        )
+        prefs = dict(self._earthwork_defaults)
+        prefs[ew.type] = DimensionDefaults(
+            depth=ew.depth,
+            top_width_m=ew.top_width_m,
+            bottom_width_m=ew.bottom_width_m,
+        )
+        # decode(encode(...)) rather than assigning straight through: the sanitising
+        # gate is what drops a triple that merely matches the shipped one, so the
+        # stored state and what a later session reads back are the same object.
+        self._earthwork_defaults = decode_earthwork_defaults(
+            encode_earthwork_defaults(prefs))
+        self.save_earthwork_defaults()
+
+        stored = self._earthwork_defaults.get(ew.type)
+        shipped = shipped_dims(ew.type)
+        if stored is None:
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{ew.type_label()} dimensions are back to the standard "
+                f"{shipped.depth:.2f} m deep by {shipped.top_width_m:.2f} m wide.",
+            )
+        else:
+            self._iface.messageBar().pushSuccess(
+                "TerrainFlow Assessment",
+                f"Saved {ew.depth:.2f} m deep by {ew.top_width_m:.2f} m wide as your "
+                f"standard {ew.type_label().lower()}. Ones already drawn are unchanged.",
+            )
+
+    def save_earthwork_defaults(self):
+        try:
+            QgsSettings().setValue(
+                self._EARTHWORK_DEFAULTS_KEY,
+                encode_earthwork_defaults(self._earthwork_defaults))
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not save standard dimensions: {exc}")
+
+    def load_earthwork_defaults(self):
+        try:
+            text = QgsSettings().value(self._EARTHWORK_DEFAULTS_KEY, "")
+            self._earthwork_defaults = decode_earthwork_defaults(text)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not load standard dimensions: {exc}")
+            self._earthwork_defaults = {}
+
+    def seed_swale_criteria_from_standard(self):
+        """Start the panel's swale-segment criteria at the user's standard section.
+
+        Only when a standard exists: with none set, the criteria keep the shipped
+        values they have always had, so a user who never touches this sees no change.
+        """
+        if self._earthwork_defaults.get("swale") is None:
+            return
+        dims = self._resolved_dims("swale")
+        try:
+            self._panel.seed_swale_criteria(
+                dims.depth, dims.top_width_m, dims.bottom_width_m)
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — could not seed swale criteria: {exc}")
+
     def _provisional_peak_flow(self, catchment_m2):
         """Peak flow for a feature being drawn but not yet in the network.
 
@@ -2596,10 +2916,20 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         Outflows only. An inlet is a protected entry, not a weir; giving it a width from
         the overflow formula would invent a design procedure that does not exist.
+
+        The width is solved at the head the **sill** can pass, not at the type's design
+        head — see :func:`sill_limited_head_m`, and see :meth:`_spillway_row`, which shows
+        the same figure. This tier does no DEM work by design, so it reads the depth off
+        ``ew.measured_sill_depth_m``, which the last settled review measured. Where that
+        is ``None`` — never measured, no DEM, a feature toggled off — nothing is capped,
+        which is exactly what the review row does with the same absent datum. The settled
+        tier corrects whatever this leaves behind (:meth:`_build_spillway_rows`), so a
+        depth that moved since the last release costs one release, not a wrong figure.
         """
-        from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
         from terrainflow_assessment.modules.earthwork_design import (
+            adoptable_spillway_width,
             calculate_spillway_width,
+            sill_limited_head_m,
             spillway_policy,
         )
 
@@ -2612,15 +2942,24 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if not total or total <= 0:
                 continue
             head = spillway.head_m or spillway_policy(ew.type)[1]
-            required = calculate_spillway_width(total, head)
-            # 0.0 means "these inputs say nothing" — no intensity, no catchment — not a
-            # spillway zero metres wide. Writing it through would persist that fiction.
+            required = calculate_spillway_width(
+                total, sill_limited_head_m(head, getattr(ew, "measured_sill_depth_m", None)))
+            # 0.0 means "these inputs say nothing" — no intensity, no catchment, or a sill
+            # with no depth to spill through — not a spillway zero metres wide. Writing it
+            # through would persist that fiction, so the last good width is kept instead
+            # and `spillway_validity` is what says the sill is unusable.
             if required <= 0:
                 continue
             spillway.width_required_m = required
             if spillway.width_auto:
-                spillway.width_m = (spillway_burn_width(required, cell) if cell
-                                    else required)
+                # `None` where the requirement is wider than the feature: keep the last
+                # width that could actually be built rather than committing to one the
+                # burn would cut through the ground holding the water in.
+                built = adoptable_spillway_width(
+                    required, cell_size=cell,
+                    feature_length_m=getattr(ew, "length_m", None))
+                if built is not None:
+                    spillway.width_m = built
 
     def _spillway_row(self, ew):
         """One review row for *ew*, or None if this type has nothing to spill.
@@ -2630,16 +2969,18 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         of whether the user has ticked a box, and showing it before they commit is the
         whole of "features auto-size their spillways as you add them".
         """
-        from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
         from terrainflow_assessment.modules.earthwork_design import (
             # Private on purpose, and imported on purpose: it is the millimetre
             # `spillway_validity` makes its own elevation comparisons at, and the gauge
             # below has to fire on exactly the condition the freeboard warning does or
             # the two contradict each other about one feature.
             _ELEV_EPS,
+            adoptable_spillway_width,
             calculate_spillway_width,
+            default_sill_depth_m,
             effective_freeboard_m,
             effective_head_m,
+            sill_limited_head_m,
             spillway_notes,
             spillway_policy,
             spillway_validity,
@@ -2673,6 +3014,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             "peak_flow_m3s": None,
             "upstream_m3s": 0.0,
             "required_width_m": None,
+            # The head the required width was actually solved at: the design head, or the
+            # sill depth where that is shallower. Carried so every surface that shows a
+            # width can say which — a capped width beside an uncapped `actual_head_m` does
+            # not reconcile through the weir equation, and the two answer different
+            # questions ("how wide to pass this through *this* notch" against "how deep
+            # the design wants to run"). The properties dialog has always said so inline;
+            # the review table and the message bar had no way to.
+            "sizing_head_m": None,
             "built_width_m": None if spillway is None else (spillway.width_m or 0.0),
             "actual_head_m": None,
             "freeboard_m": None,
@@ -2687,6 +3036,18 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             "rim_elevation": None,
             "lip_elevation": None,
             "containment_source": None,
+            # The sill's drop below containment, measured against the containment level
+            # *this build* found — deliberately not `spillway.drop_below_rim_m`. The
+            # stored partner is only re-based on restore, while this datum is recomputed
+            # every build, so after a re-analysis the two can describe different rims.
+            # Anything editable has to render the live one, or typing back the number on
+            # screen would move the crest.
+            "sill_depth_m": None,
+            # What a feature with no spillway would open at, so the review can offer a
+            # starting depth without re-deriving policy. Type policy only: it knows
+            # nothing about a per-feature freeboard override, which is correct where it
+            # is used — a feature that has no spillway has none to carry.
+            "seed_depth_m": default_sill_depth_m(ew.type),
             # What this sill holds, what it would hold with no spillway, and the
             # difference. All None until the feature has been flooded.
             "sill_storage_m3": None,
@@ -2726,35 +3087,27 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # A disabled feature is out of the catchment labelling entirely, so it has no
         # flow and no meaningful sizing — say so rather than render a row of zeros that
         # reads as a failure.
+        #
+        # Both early returns clear the measured-depth cache on the way past. It is read
+        # by the two tiers that cannot measure for themselves, and a feature toggled off
+        # would otherwise keep capping them against a depth nothing computes any more.
         if not ew.enabled:
+            ew.measured_sill_depth_m = None
             row["state"] = "disabled"
             return row
 
         total, upstream = self._peak_flow_for(ew)
         row["peak_flow_m3s"], row["upstream_m3s"] = total, upstream
         if not total or total <= 0:
+            ew.measured_sill_depth_m = None
             row["state"] = "no_flow"
             return row
 
-        row["required_width_m"] = calculate_spillway_width(total, target_head) or None
-        # An auto width is derived rather than stored, so the row derives it too — a row
-        # that trusted `width_m` would print 0.0 for every restored design between the
-        # load and the first live recompute.
-        #
-        # Only where a spillway actually exists. `width_auto` reads True for a feature
-        # that has none at all (there is no object to ask), so without this guard every
-        # undesigned feature reports a built width — and the report prints that straight
-        # into its "Width designed" column, beside a status of "No spillway designed".
-        # What such a feature has is a *requirement*, which `required_width_m` already
-        # carries and which is the whole point of giving it a row.
-        if spillway is not None and width_auto and row["required_width_m"]:
-            cell = self._dem_cell_size_m()
-            row["built_width_m"] = (spillway_burn_width(row["required_width_m"], cell)
-                                    if cell else row["required_width_m"])
-        built = row["built_width_m"] if spillway is not None else row["required_width_m"]
-        row["actual_head_m"] = effective_head_m(
-            target_head, peak_flow_m3s=total, width_m=built, width_auto=width_auto)
-
+        # The datums come first, and that ordering is the whole of this block. The width
+        # is solved at the head this sill can actually pass (`sill_limited_head_m`), which
+        # is not knowable until the containment level has been measured — and until it
+        # was, this row sized its weir at the design head while the properties dialog
+        # sized the same weir at the sill depth, and the two disagreed on screen.
         lip, invert, containment, containment_src = self._spillway_datums(
             ew.geometry, ew.type,
             top_width_m=getattr(ew, "top_width_m", None),
@@ -2767,8 +3120,43 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         row["lip_elevation"] = lip
         row["containment_source"] = containment_src
         if containment is not None and row["crest_elevation"] is not None:
+            row["sill_depth_m"] = containment - row["crest_elevation"]
+        # Derived and never serialised, exactly as `terrain_spill_level_m` and
+        # `stage_storage` are: `_refresh_auto_spillway_widths` runs on the drag tier and
+        # `_check_spillway_capacity` runs without a footprint mask, so neither can call
+        # `_spillway_datums` for itself, and this is the measurement they read. `None` is
+        # a meaningful value here — it means no cap, which is what this row does too.
+        ew.measured_sill_depth_m = row["sill_depth_m"]
+
+        row["sizing_head_m"] = sill_limited_head_m(target_head, row["sill_depth_m"])
+        row["required_width_m"] = (
+            calculate_spillway_width(total, row["sizing_head_m"]) or None)
+        # An auto width is derived rather than stored, so the row derives it too — a row
+        # that trusted `width_m` would print 0.0 for every restored design between the
+        # load and the first live recompute.
+        #
+        # Only where a spillway actually exists. `width_auto` reads True for a feature
+        # that has none at all (there is no object to ask), so without this guard every
+        # undesigned feature reports a built width — and the report prints that straight
+        # into its "Width designed" column, beside a status of "No spillway designed".
+        # What such a feature has is a *requirement*, which `required_width_m` already
+        # carries and which is the whole point of giving it a row.
+        if spillway is not None and width_auto and row["required_width_m"]:
+            row["built_width_m"] = adoptable_spillway_width(
+                row["required_width_m"], cell_size=self._dem_cell_size_m(),
+                feature_length_m=getattr(ew, "length_m", None),
+            ) or row["built_width_m"]
+        built = row["built_width_m"] if spillway is not None else row["required_width_m"]
+        # Deliberately `target_head`, not the sizing head. This is the "is the committed
+        # width adequate at the head this type designs for" test, and answering it at the
+        # sill depth instead would improve the freeboard on exactly the sills that are too
+        # shallow — redefining a bad design into compliance, which is the one thing the
+        # sill cap must not be allowed to do.
+        row["actual_head_m"] = effective_head_m(
+            target_head, peak_flow_m3s=total, width_m=built, width_auto=width_auto)
+        if row["sill_depth_m"] is not None:
             row["freeboard_m"] = (
-                containment - row["crest_elevation"] - (row["actual_head_m"] or 0.0))
+                row["sill_depth_m"] - (row["actual_head_m"] or 0.0))
 
         # What the sill costs, per row, so the whole design can be read at once instead
         # of one dialog at a time. Straight off the curve the last flood already
@@ -2881,12 +3269,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         work belongs on the discrete edits, where the geometry has actually settled.
         """
         try:
+            manager = self._state.earthwork_manager
             rows = []
-            for i, ew in enumerate(self._state.earthwork_manager.get_all()):
+            for i, ew in enumerate(manager.get_all()):
                 row = self._spillway_row(ew)
                 if row is not None:
                     row["index"] = i
                     rows.append(row)
+            self._adopt_reviewed_widths(manager, rows)
             context = self._spillway_context()
             # Retained for the report, which has no handle on this controller.
             self._state.spillway_rows = rows
@@ -2896,6 +3286,39 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             import traceback
             print(f"TerrainFlow Assessment — spillway review error: {exc}")
             traceback.print_exc()
+
+    def _adopt_reviewed_widths(self, manager, rows):
+        """Write the widths this build solved back onto the spillways that own them.
+
+        :meth:`_refresh_auto_spillway_widths` runs earlier in the same recompute and does
+        no DEM work, so it caps against whatever depth the *previous* settled build
+        measured. This tier has just measured it again. Without this the stored width lags
+        the displayed one by a recompute — the Width column right, and the map label, the
+        feature summary and the burn wrong — which is the divergence this whole change
+        exists to remove, relocated rather than fixed.
+
+        **A second pass, deliberately.** :meth:`_build_spillway_rows` swallows to a console
+        print, so a throw inside the row loop would leave the first *k* features carrying
+        new widths and the rest their old ones, *and* discard the rows — model and display
+        disagreeing in exactly the way this is meant to prevent. Building first and
+        writing after means a failure leaves the model untouched.
+
+        Only an **auto** width is written. A committed one is a decision the user made and
+        the only one of the two that is serialised (``Spillway.to_dict``), so nothing here
+        can change a saved design. A row that returned before it solved a requirement —
+        disabled, no flow — writes nothing at all.
+        """
+        for row in rows:
+            index = row.get("index")
+            if index is None or not row.get("required_width_m"):
+                continue
+            ew = manager.get_all()[index]
+            spillway = getattr(ew, "spillway", None)
+            if spillway is None:
+                continue
+            spillway.width_required_m = row["required_width_m"]
+            if spillway.width_auto and row.get("built_width_m"):
+                spillway.width_m = row["built_width_m"]
 
     def _spillway_context(self):
         """Facts the review footer needs that are not per-row."""
@@ -2926,10 +3349,23 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         is not looking — so it only fires on the discrete edits, never per drag frame.
         Auto widths are skipped, and now genuinely do track (see
         :meth:`_refresh_auto_spillway_widths`), so the skip is finally true.
+
+        The requirement is the one the Spillways list shows, which means it is solved at
+        the head the **sill** can pass (:func:`sill_limited_head_m`) off the depth the
+        last review measured. Sizing it here at the design head instead put "needs 1.40 m"
+        in the message bar in the same frame the list said "needs 2.60 m", for the same
+        sill — the divergence this channel exists to report, appearing inside it.
+
+        It fires **only when the shortfall is news.** This runs on every settled
+        recompute, so re-pushing the same set of features on every subsequent edit turns a
+        change-notification into a permanent nag, and a message bar that repaints on every
+        edit is not a warning. The set is remembered and a repeat is dropped; a feature
+        joining or leaving it is a change, and says so again.
         """
         from terrainflow_assessment.modules.earthwork_design import (
             calculate_spillway_width,
             head_for_width,
+            sill_limited_head_m,
             spillway_policy,
         )
 
@@ -2942,16 +3378,29 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if total is None or total <= 0:
                 continue
             head = spillway.head_m or spillway_policy(ew.type)[1]
-            required = calculate_spillway_width(total, head)
+            sizing = sill_limited_head_m(
+                head, getattr(ew, "measured_sill_depth_m", None))
+            required = calculate_spillway_width(total, sizing)
             built = spillway.width_m or 0.0
             if required > built + 0.01:
-                short.append((ew, built, required, head,
-                              head_for_width(total, built), upstream))
+                # The achieved depth is bounded by the sill for the same reason the width
+                # is: water standing deeper than the notch is over the bank, not over the
+                # weir. Unbounded, the sentence contradicted itself — "the water runs
+                # 0.18 m deep" over a sill 0.02 m deep is not a state the design describes.
+                actual = head_for_width(total, built)
+                if actual is not None and sizing is not None:
+                    actual = min(actual, max(0.0, float(sizing)))
+                short.append((ew, built, required, head, sizing, actual, upstream))
 
+        seen = frozenset(ew.id for ew, *_rest in short)
         if not short:
+            self._short_spillways_reported = seen
             return
+        if seen == getattr(self, "_short_spillways_reported", None):
+            return          # already said, and nothing about the set has changed
+        self._short_spillways_reported = seen
         parts = []
-        for ew, built, required, head, actual, upstream in short[:3]:
+        for ew, built, required, head, sizing, actual, upstream in short[:3]:
             # Lead with what the water does, not with the shortfall in metres: "two
             # metres short" is hard to act on, "it will run 18 cm deeper than you
             # designed for" is the same fact in the units that decide the outcome.
@@ -2960,6 +3409,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                         f"deep, not {head:.2f} m — needs {required:.2f} m")
             else:
                 note = f"{ew.name}: built {built:.2f} m, now needs {required:.2f} m"
+            # Said out loud when the sill rather than the type's design head is what the
+            # width was solved against — the same sentence the properties dialog puts
+            # under its Min-width row, because the figure is otherwise unreconcilable
+            # with the head named beside it.
+            if sizing is not None and sizing < head - 0.005:
+                note += f" at the {sizing:.2f} m this sill can pass"
             if upstream > 0:
                 note += f" ({upstream * 1000:,.0f} L/s of that arrives from upslope)"
             parts.append(note)
@@ -3068,6 +3523,64 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         except Exception as exc:
             print(f"TerrainFlow Assessment — area subtotals error: {exc}")
             return []
+
+    def _site_is_guessed(self):
+        """True when "the site" was not drawn, so the denominator is a stand-in.
+
+        Two independent fallbacks, and they fail at different layers: the worker's
+        own (no analysis area and no boundary, reported as ``domain_source``) and
+        ``_ensure_flow_graph``'s, which quietly substitutes the whole tile when the
+        mask raster is missing or the wrong shape.
+        """
+        from terrainflow_assessment.modules.footprint import DOMAIN_FROM_POLYGON
+
+        meta = self._state.flow_grid_meta or {}
+        if meta.get("domain_is_fallback"):
+            return True
+        baseline = self._state.baseline_result or {}
+        source = baseline.get("domain_source")
+        return source is not None and source != DOMAIN_FROM_POLYGON
+
+    def compute_catchment_coverage(self):
+        """How much of the site drains into an enabled feature — by **area**.
+
+        The number behind the "which earthwork catches what" layer. Read against the
+        scorecard's capture percentage, which is a share of storm *volume*: a design
+        can score badly because its features are too small or because most of the
+        block drains straight past them, and those call for opposite work.
+
+        Deliberately **not** gated on the live assessment's ``have_flow``
+        (``bool(counts) and meta is not None``). With every feature disabled the
+        counts are empty and that flag goes False — but the honest answer is then
+        "0% of the site", not a blank, and disabling a feature to see what it was
+        doing is exactly when the figure is wanted.
+
+        The denominator is ``flow_domain_mask``: the same mask the analysis worker
+        measured "Analysed: X ha" over, and the same one ``capture_pct`` divides by.
+        Never the DEM extent, and never ``baseline_report.catchment_area_ha`` — a
+        second site size in one panel is a second answer to one question.
+        """
+        from terrainflow_assessment.modules.water_balance import catchment_coverage
+
+        meta = self._state.flow_grid_meta
+        domain = self._state.flow_domain_mask
+        if meta is None or domain is None:
+            return None
+        try:
+            cell_area = meta["cell_area_m2"]
+            domain_cells = meta.get("domain_cells")
+            if domain_cells is None:  # meta built before the key existed
+                domain_cells = int(domain.sum())
+            counts = self._state.catchment_counts or {}
+            return catchment_coverage(
+                sum(counts.values()) * cell_area,
+                domain_cells * cell_area,
+                exit_m2=self._state.catchment_exit_cells * cell_area,
+                sink_m2=self._state.catchment_sink_cells * cell_area,
+            )
+        except Exception as exc:
+            print(f"TerrainFlow Assessment — catchment coverage error: {exc}")
+            return None
 
     def _shapely_of_polygon(self, poly):
         """Shapely geometry from a sub-catchment entry (WKT, mapping, or geometry)."""
@@ -3767,6 +4280,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if not all_ews:
                 self._panel.set_network([], {}, 0.0)
                 self._panel.set_live_assessment("")
+                self._panel.set_catchment_coverage(None)
                 self._panel.scorecard_empty()
                 return
 
@@ -3838,6 +4352,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._panel.set_live_assessment(self._network_footer(result))
             self._refresh_connections_layer(result, routing)
             self._panel.set_area_subtotals(self.compute_area_subtotals())
+            self._panel.set_catchment_coverage(
+                self.compute_catchment_coverage(),
+                site_is_guessed=self._site_is_guessed())
             # The Report stage's on-screen headline, from the same BalanceResult the
             # report itself prints. It used to come only from a ComparisonResult,
             # which only a fill simulation produces — so the summary was blank for a

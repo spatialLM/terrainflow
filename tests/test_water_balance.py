@@ -373,3 +373,110 @@ class TestAreaSubtotalsArePartition:
         cycled = self._rows([[0, 0], [LABEL_UNRESOLVED, LABEL_UNRESOLVED]])[0]
         assert clean["capture_pct"] == 100.0
         assert cycled["capture_pct"] == 50.0
+
+
+class TestCatchmentCoverage:
+    """The area counterpart to ``capture_pct``: how much *ground* drains into a
+    feature, as opposed to how much *water* is held. One figure cannot tell a design
+    whose features are too small from one most of the block drains straight past."""
+
+    def _cov(self, managed, site, **kw):
+        from terrainflow_assessment.modules.water_balance import catchment_coverage
+
+        return catchment_coverage(managed, site, **kw)
+
+    def test_basic_share(self):
+        c = self._cov(184000.0, 292000.0)
+        assert c["managed_pct"] == pytest.approx(63.0137, rel=1e-4)
+        assert c["unmanaged_m2"] == pytest.approx(108000.0)
+        assert c["catchment_m2"] == pytest.approx(292000.0)
+
+    def test_no_site_is_none_not_zero(self):
+        """An absent figure, never a 0% that reads as a measurement."""
+        assert self._cov(100.0, 0.0) is None
+        assert self._cov(100.0, -5.0) is None
+        assert self._cov(100.0, None) is None
+
+    def test_nothing_managed_is_zero_not_none(self):
+        """Every feature disabled is a real answer, and the one the panel most needs
+        to show. Only the report suppresses it, and it does so at its own call site."""
+        c = self._cov(0.0, 292000.0)
+        assert c is not None
+        assert c["managed_pct"] == 0.0
+        assert c["unmanaged_m2"] == pytest.approx(292000.0)
+
+    def test_omitted_buckets_stay_none_rather_than_zero(self):
+        """The report cannot supply exit/sink and must not be handed a fabricated 0."""
+        c = self._cov(100.0, 1000.0)
+        assert c["exit_m2"] is None and c["sink_m2"] is None and c["other_m2"] is None
+
+    def test_the_buckets_are_a_partition(self):
+        c = self._cov(600.0, 1000.0, exit_m2=250.0, sink_m2=50.0)
+        total = c["managed_m2"] + c["exit_m2"] + c["sink_m2"] + c["other_m2"]
+        assert total == pytest.approx(c["catchment_m2"])
+        assert c["other_m2"] == pytest.approx(100.0)
+
+    def test_the_remainder_catches_what_exit_and_sink_miss(self):
+        """`other_m2` is the remainder, not a measured quantity, so unresolved and
+        LABEL_NONE cells land in a named bucket instead of an unexplained gap."""
+        c = self._cov(600.0, 1000.0, exit_m2=0.0, sink_m2=0.0)
+        assert c["other_m2"] == pytest.approx(400.0)
+
+    def test_over_one_hundred_is_reported_not_clamped(self):
+        """A share over 100% is a labelling bug and has to be visible."""
+        c = self._cov(1200.0, 1000.0)
+        assert c["managed_pct"] == pytest.approx(120.0)
+
+
+class TestAreaAndVolumeSharesReconcile:
+    """The gap between the area share and the capture share is not a coincidence to
+    be eyeballed -- it is ``routed_exit_m3``, water that reached a feature and ran
+    past the last one. The panel puts the two figures side by side, so the identity
+    is pinned here. It holds only while runoff is one site-wide depth times a cell
+    count (see ``feature_inflow_m3``); it is meant to fail the day CN zones land."""
+
+    def test_the_gap_is_exactly_the_overflow(self):
+        # 1000 m2 of site at 1 m of runoff = 1000 m3. 600 m2 drains into one swale
+        # that can only hold 500, so 100 m3 overflows off site.
+        r = run_water_balance([_store("S1", 500.0, 10.0, 600.0)], 1.0,
+                              total_runoff_m3=1000.0, uncaptured_m3=400.0)
+        c = self._cov(600.0, 1000.0)
+        assert r.routed_exit_m3 == pytest.approx(100.0)
+        assert c["managed_pct"] - r.capture_pct == pytest.approx(
+            r.routed_exit_m3 / 1000.0 * 100.0)
+
+    def test_held_can_never_exceed_caught(self):
+        r = run_water_balance([_store("S1", 500.0, 10.0, 600.0)], 1.0,
+                              total_runoff_m3=1000.0, uncaptured_m3=400.0)
+        assert r.capture_pct <= self._cov(600.0, 1000.0)["managed_pct"] + 1e-9
+
+    def test_the_gap_is_still_the_overflow_when_soakage_is_not_credited(self):
+        """Turning soakage off makes features overflow more, so the gap widens -- but
+        it is still exactly the overflow. This is what stops the gap later being
+        explained away as infiltration."""
+        stores = [_store("S1", 500.0, 10.0, 600.0, area=100.0, infil=20.0)]
+        r = run_water_balance(stores, 2.0, total_runoff_m3=1000.0,
+                              uncaptured_m3=400.0, count_infiltration=False)
+        c = self._cov(600.0, 1000.0)
+        assert c["managed_pct"] - r.capture_pct == pytest.approx(
+            r.routed_exit_m3 / 1000.0 * 100.0)
+
+    def test_unresolved_ground_narrows_the_gap_by_its_own_share(self):
+        """The identity is exact only where every cell resolved. Here 100 m2 of the
+        site reached no bucket at all, and `mass_balance_ok`'s 1% tolerance would let
+        a small share of this pass unremarked -- so the shortfall is documented rather
+        than assumed away."""
+        # uncaptured covers only 300 m2; the missing 100 m2 is unresolved ground.
+        r = run_water_balance([_store("S1", 500.0, 10.0, 600.0)], 1.0,
+                              total_runoff_m3=1000.0, uncaptured_m3=300.0)
+        c = self._cov(600.0, 1000.0)
+        gap = c["managed_pct"] - r.capture_pct
+        unresolved_share = 100.0 / 1000.0 * 100.0
+        assert gap == pytest.approx(
+            r.routed_exit_m3 / 1000.0 * 100.0 - unresolved_share)
+        assert gap == pytest.approx(0.0)
+
+    def _cov(self, managed, site, **kw):
+        from terrainflow_assessment.modules.water_balance import catchment_coverage
+
+        return catchment_coverage(managed, site, **kw)

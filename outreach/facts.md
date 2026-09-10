@@ -153,9 +153,29 @@ TF-65  `shipped`  He has followed Andrew Millison's videos for some time, and
        Liam, 2026-09-01. Millison only — do not generalise this to any other
        educator on the list.)*
 
+TF-66  `shipped`  His experience with mapping software is both professional and
+       academic. *(Stated by Liam, 2026-09-07, in the four emails he sent to
+       Andrew Millison, Zaytuna Farm, Sam and Ben Missmer. Widens TF-61, which
+       covers professional QGIS use only.)*
+
+TF-67  `shipped`  He first wanted an easy way to design earthworks for land in
+       Ireland while living abroad, and the scope expanded as soon as he started
+       working on it. *(Stated by Liam, 2026-09-07, in the same four emails.
+       This is the earlier motivation and TF-62's rewilding project is what
+       widened it — the two are sequential, not alternatives.)*
+
+TF-68  `shipped`  He completed that course in 2025. *(Written as "last year" by
+       Liam, 2026-09-07, in the same four emails; recorded here as the absolute
+       year so it does not rot. Dates TF-64 — cite the two together.)*
+
+TF-69  `shipped`  He has followed Andrew Millison's videos for a few years.
+       *(Stated by Liam, 2026-09-07, in the email he sent to Andrew Millison.
+       Sharpens the "for some time" of TF-65; prefer this wording. Millison
+       only, and the caution on TF-65 still applies.)*
+
 ### Biography is not free text
 
-TF-60 to TF-65 are the **only** permitted claims about Liam. The gate can check
+TF-60 to TF-69 are the **only** permitted claims about Liam. The gate can check
 what is said about the software and about a recipient; it cannot check what is
 said about him, so this is the one place where an invented sentence would reach a
 real reader unchallenged. It has already happened twice — *"I have spent two

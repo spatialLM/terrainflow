@@ -536,6 +536,122 @@ What made this worth closing now rather than leaving self-healing: the rewrite o
 silent while the figure was unrounded, and rounding to whole DEM cells would have made it a
 *visible* unexplained change to a saved design.
 
+
+## 11. The catchment-area readout's two unbuilt halves (2026-09-02)
+
+Shipped: the area share beside the "which earthwork catches what" toggle
+(`water_balance.catchment_coverage`, shared with `report_model._managed_catchment` so
+the card and the screen cannot quote one quantity two ways). Two halves were designed
+and deliberately not built.
+
+### 11a. The scorecard bar
+
+Make `_BudgetBand` a **four**-part partition of storm volume - stored, soaked,
+*overflowed* (`routed_exit_m3`), never-reached (`uncaptured_m3`) - so the area figure
+appears as the *boundary* of the overflow segment rather than as a second axis on the
+same bar. That is legitimate where the area share and the volume share have one
+denominator, which they do while runoff is a single site-wide depth.
+
+Three traps found while planning it, all of which cost more than the paint:
+
+- **`set_parts` must take an explicit `total`.** It normalises by the sum of its own
+  arguments today. With four segments that is wrong: `captured + routed_exit +
+  uncaptured` is `total_runoff_m3` *minus the unresolved-cell share*, so normalising
+  by the segment sum silently rescales every segment, moves the stored/soaked boundary
+  off the headline percentage, and paints out the very gap `mass_balance_ok` exists to
+  surface.
+- **`leaves_m3` becomes `uncaptured_m3`, and the legend must keep the total.**
+  `site_exit_m3 = uncaptured_m3 + routed_exit_m3`; passing it unchanged double-counts.
+  But splitting it naively drops the visible "14,188 m3 leaves site" to "9,798 m3 never
+  reached", which reads as a 31% improvement that did not happen - overflow leaves the
+  site too.
+- **`capture_within_pct` (= `capture_pct / worked_pct`) needs a worked-area floor.** It
+  is the direct answer to "are my earthworks holding everything that reaches them", and
+  100% means nothing overflows - but as a ratio of two small percentages it swings
+  wildly between edits on a design commanding little ground.
+
+`qgis/widgets/scorecard.py` has **zero** test coverage, and `assert_rendered(...,
+min_colours=N)` cannot tell a correct segment width from a wrong one. Extract the
+normalisation into a pure helper (`band_fractions`) beside `capture_colour` and test it
+headless *before* touching `paintEvent`.
+
+### 11b. The verified tier - and why to measure before building
+
+**There is no post-burn catchment labelling anywhere in the plugin.**
+`run_with_earthworks` calls the analysis worker with `run_catchments=False`, and
+`_ensure_flow_graph` reads `conditioned_dem` / `domain_mask` from `baseline_result`
+only. So every area and capture figure on screen - the scorecard, the network, the area
+subtotals, the new readout - is computed on the **unburned** DEM and does not move when
+Re-analyse with Earthworks runs. The earthworks run writes
+`conditioned_dem_earthworks.tif` and `domain_earthworks.tif` and then never reads them;
+that is where a verified tier would come from.
+
+**Revisit trigger - spike it first, and be ready to abandon it.** The conditioned burned
+DEM is depression-filled (that is how the ponding raster is derived), so a closed
+contour swale is filled and routes exactly as it did before the burn. Only features that
+move water laterally or block it - diversion drains that daylight, dams, berms, cut
+notches - change the routing at all, and **the direction is not predictable**: a drain
+can route water away from a swale and off site as easily as into one. Build the flow
+graph from those two discarded rasters in a scratch script, re-label with the same
+footprints, and print `worked_pct` against the design tier's on the Quail Island design.
+If they agree within a point or two, this is an expensive way to draw one number twice.
+
+Two constraints if it is built: extract `_ensure_flow_graph`'s reader rather than
+duplicating it (the float64 read carries `resolve_flats`' 1e-5 m gradient, and a `None`
+nodata is inherited from the session DEM - a second copy of that is a bug factory), and
+store the result on **new** `_state` fields, never on `flow_*`, or the design tier
+silently moves onto the burned surface. A "verified" balance must also take capacities
+from `verification.per_feature[].terrain_m3`, not design values, or it is a
+measured/drawn hybrid of exactly the kind this file's hydrology notes warn about.
+
+---
+
+## 12. `from_dict` reloads an old payload at the wrong batter (2026-09-10)
+
+**A bug, not a deferral — found while building the standard-dimensions feature and left
+alone deliberately, because the fix changes how existing projects load.**
+
+**What.** `Earthwork.from_dict` restores `bottom_width_m` independently of `depth` and
+`top_width_m`, and nothing re-derives it afterwards:
+
+```python
+ew = cls(data.get("type", "swale"), geometry, data.get("name", "Earthwork"))
+for field in cls._SERIAL_FIELDS:
+    if field in ("type", "name") or field not in data:
+        continue
+    ...
+```
+
+A payload written before `bottom_width_m` existed — or one where it serialised as `None`
+— keeps the value the constructor derived from the *shipped* defaults, while `depth` and
+`top_width_m` are overwritten from the payload. The three then describe a section nobody
+drew. A v1 file carrying `depth 1.2, top_width_m 3.0` loads with the seeded `1.0` bottom,
+i.e. **0.83:1 where it was drawn at 1:1**, and `side_slope` (a derived property) silently
+reports the wrong batter from then on. Capacity, the burn footprint and
+`channel_batter_run` all read it.
+
+**The fix**, once someone is ready to own the change:
+
+```python
+if "bottom_width_m" not in data and ("depth" in data or "top_width_m" in data):
+    ew.bottom_width_m = _derive_bottom_width(
+        ew.top_width_m, ew.depth, shipped_side_slope(ew.type))
+```
+
+**Only when absent.** A present value is a decision and must never be recomputed — that
+would be the silent rewrite `core/sizing/advisories.py` forbids.
+
+**Why deferred.** The standard-dimensions work promised one thing above all: *a preference
+can never retroactively resize a stored design*, and every test at both tiers pins it. A
+change that alters what an existing project loads as — even correctly — does not belong in
+the same commit as that promise. It needs its own before/after on a real saved design.
+
+**Revisit trigger.** Take it on its own, soon. It is a live correctness bug on any project
+saved before the bottom-width field landed, it is silent, and the longer it stands the more
+saved designs carry a batter their author never drew. `core/registry/earthwork_defaults.py`
+already has `_derive_bottom_width` and the shipped side-slope lookup, so the fix is a few
+lines plus a fixture built from a real pre-field payload.
+
 ---
 
 _Last updated alongside the Design-tab correctness rework (2026-07-28): direct-catchment

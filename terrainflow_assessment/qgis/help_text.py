@@ -539,6 +539,23 @@ CATCHMENT_LAYER = (
     "Which earthwork catches the runoff from each part of the site, one colour\n"
     "per feature. Grey is ground that drains off site without meeting anything."
 )
+CATCHMENT_COVERAGE = (
+    "How much of the analysed site drains into one of your features, measured\n"
+    "as AREA - the same labelling the layer above colours in, totalled up.\n\n"
+    "Read it against the capture percentage at the top of the panel, which is\n"
+    "a share of storm VOLUME. Two different faults look identical in that one\n"
+    "figure, and they call for opposite work:\n\n"
+    "  Low area, but nearly all of it held - the features work their ground\n"
+    "  well; they just do not command enough of it. Draw more, or higher up.\n"
+    "  High area, little held - the ground is intercepted and the water is\n"
+    "  running past. Make what you have deeper.\n\n"
+    "The gap between the two figures is runoff that reached a feature and\n"
+    "overflowed past the last one.\n\n"
+    "This figure does not move when you change the storm - area is area. Only\n"
+    "the capture percentage does. Disabled features catch nothing, and ground\n"
+    "is never counted twice where footprints overlap: each cell goes to\n"
+    "whichever feature intercepts it first."
+)
 CONNECTIONS_LAYER = (
     "Arrows showing where each feature's overflow goes. Solid lines are links\n"
     "you set yourself; dashed lines were resolved by following the terrain.\n"
@@ -887,6 +904,22 @@ SPILLWAY_DEPTH = (
     "to draw, not a thing to build, and it is flagged as such.\n\n"
     "Needs a DEM to be meaningful, so it is disabled until one is loaded."
 )
+SPILLWAY_DEPTH_COLUMN = (
+    "The one column on this list you type in. Everything else here reports.\n\n"
+    "The depth of the sill below the level this feature is held to — the same figure\n"
+    "the properties dialog calls Spillway depth, and the same rules apply to it. The\n"
+    "Sill column beside it is the overflow elevation that follows from it, and the\n"
+    "Freeboard and Storage columns either side are what the depth buys and what it\n"
+    "costs. Hold over a Sill cell for the rest.\n\n"
+    "On a feature with no spillway yet, typing a depth creates one: the head and the\n"
+    "freeboard come from the feature type, and the width stays on auto until you commit\n"
+    "to a built one. That designs it, it does not place it — use the markers to site it.\n\n"
+    "0.00 m is allowed, and means the same here as it does in the dialog. It does not\n"
+    "remove the spillway: a sill can only be deleted in the feature's own properties,\n"
+    "where the deletion is confirmed and says what else it takes with it.\n\n"
+    "A feature with no design flow yet cannot be set here — nothing has measured the\n"
+    "ground level to hang a depth from until Baseline has run. Its dialog still can."
+)
 SPILLWAY_CONTAINMENT = (
     "The level this feature's water is actually held to — where it would spill if you\n"
     "built no spillway at all. Everything on this page is measured against it.\n\n"
@@ -1006,6 +1039,14 @@ SPILLWAY_REVIEW_TABLE = (
     "A feature with no spillway designed yet is still sized here, so you can see what\n"
     "it would need before deciding to build one. Use the arrows to site the outflow\n"
     "and the inlet on the ground.\n\n"
+    "Sill depth is the one column you type in, and typing one on a feature that has no\n"
+    "spillway designs it there and then. Everything else on this list reports.\n\n"
+    "Width is the crest width the arriving flow needs. On a sill shallower than the\n"
+    "depth its type designs for, it is solved at what the sill can actually pass —\n"
+    "water standing deeper than the notch is over the bank, not over the weir — so a\n"
+    "shallower sill needs a wider one. Hover the figure where that applies and it\n"
+    "says which depth it was sized at. It is the same number the properties dialog\n"
+    "quotes for the same sill.\n\n"
     "This list is the live one. The properties dialog freezes its figures when it\n"
     "opens, and for a feature you are still drawing it shows only that feature's own\n"
     "catchment, before any routing. Where they disagree, this is current."
@@ -1021,6 +1062,29 @@ SPILLWAY_WIDTH = (
     "A minimum, not a recommendation. Standard practice adds 20-30% and protects\n"
     "the outlet against erosion — an under-armoured spillway scours, deepens, and\n"
     "drains the feature it was meant to protect."
+)
+SPILLWAY_WIDTH_SILL_LIMITED = (
+    "This width was sized against the sill, not against the depth this type designs\n"
+    "for.\n\n"
+    "The design head is what the type wants to pass, and it is held fixed so the\n"
+    "freeboard reading can go negative and tell you the notch is too shallow. It is\n"
+    "not a depth this sill can run at: water standing deeper than the notch is over\n"
+    "the containing ground, not over the weir. So the width is solved at whichever of\n"
+    "the two is smaller, and a shallower sill needs a wider one.\n\n"
+    "Only the width is sized this way. Head, Freeboard and the warnings all stay on\n"
+    "the design head, so a sill too shallow for its storm still reads as one instead\n"
+    "of quietly redefining its way into compliance. That is why this figure and the\n"
+    "head beside it do not reconcile through the weir formula — they answer different\n"
+    "questions.\n\n"
+    "Deepen the sill and this comes back down."
+)
+SPILLWAY_WIDTH_SILL_LIMITED_NONE = (
+    "There is no depth left to spill through at this sill, so there is no width that\n"
+    "passes anything — L = Q / (C x H^1.5) has no answer at zero head.\n\n"
+    "The crest is at or above the level this feature is held to, so water reaches the\n"
+    "bank before it reaches the notch. Deepen the sill in the Sill depth column.\n\n"
+    "The two width warnings are silent here for the same reason: there is no\n"
+    "requirement for them to test against."
 )
 SPILLWAY_LOCATION = (
     "Where the spillway sits on the ground. Place it from the map so its elevation\n"
@@ -1099,6 +1163,19 @@ BOTTOM_WIDTH = (
 SIDE_SLOPE = (
     "Side batter angle from horizontal, derived from top/bottom width and\n"
     "depth. 45° = 1:1; a smaller angle is flatter/more stable; 90° = vertical."
+)
+SAVE_AS_STANDARD = (
+    "Make this the size every new earthwork of this type starts at.\n\n"
+    "Most people build to whatever their machine cuts — the same trough, the\n"
+    "same bucket, every time. Tick this on the first one and the plugin stops\n"
+    "asking: later features open at these dimensions, and you can still change\n"
+    "any of them individually.\n\n"
+    "It stays ticked while the numbers match your saved standard and clears\n"
+    "itself when you change them, so updating the standard is a choice you\n"
+    "make rather than something that happens to you.\n\n"
+    "Saved for you, not for this project — it follows you to every site.\n"
+    "Features already drawn are never resized. To go back to the shipped\n"
+    "default, draw one at that size with this ticked."
 )
 CHANNEL_GRADIENT = (
     "Channel gradient — the fall in elevation per 100 m of drain length.\n\n"

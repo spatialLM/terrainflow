@@ -15,6 +15,8 @@ calculate_diversion_discharge — Manning's discharge for diversion drains
 calculate_spillway_width      — broad-crested weir sizing (head chosen → width)
 head_for_width                — the same weir equation inverted (width built → head)
 effective_head_m              — which of those two applies, decided in one place
+sill_limited_head_m           — the head the *width* is solved at: capped by the sill
+adoptable_spillway_width      — that requirement made buildable, or refused
 Spillway             — designed overflow point (crest, head, width, location)
 spillway_datum       — crest elevations a feature can physically offer
 spillway_policy      — per-type freeboard / head / head band, from the registry
@@ -397,6 +399,102 @@ def spillway_policy(ew_type):
         getattr(cfg, "spillway_head_m", 0.30),
         getattr(cfg, "spillway_head_band", SPILLWAY_TYPICAL_HEAD_M),
     )
+
+
+def default_sill_depth_m(ew_type):
+    """The depth a fresh sill on *ew_type* opens at — its head plus its freeboard.
+
+    The same number the properties dialog seeds, expressed as a depth rather than as an
+    elevation. ``_seed_spillway`` takes the top of :func:`spillway_datum`'s band, which is
+    ``containment − head − freeboard``, so the drop below containment is ``head +
+    freeboard`` — 0.30 m on a swale, 0.60 m on a dam or basin.
+
+    It exists so the review table can seed its depth editor without re-deriving policy: a
+    second expression of the same rule is a second place for it to drift, and the two
+    surfaces disagreeing about what depth a feature starts at is exactly the class of
+    quiet divergence :func:`bind_crest` exists to prevent.
+
+    Type policy only, so it knows nothing about a per-feature ``freeboard_m`` override —
+    which is correct where it is used, on a feature that has no spillway to carry one.
+    """
+    freeboard, head, _band = spillway_policy(ew_type)
+    return max(0.0, float(head)) + max(0.0, float(freeboard))
+
+
+def sill_limited_head_m(head_m, sill_depth_m):
+    """The depth of flow the **width** is solved at: the design head, capped by the sill.
+
+    The design head is what a type wants to pass, and it is deliberately held fixed so the
+    freeboard readout can go negative and say the notch is too shallow. It is not, however,
+    a depth this sill can run at. Water standing deeper than the notch is over the
+    containing ground, not over the weir -- so ``min(design head, sill depth)`` is the most
+    nappe the sill can actually offer, and it is the H that belongs in ``L = Q / (C*H^1.5)``.
+
+    Sizing the width off the design head instead left the requirement frozen: 0.39 m at a
+    1.00 m sill and 0.39 m at a 0.20 m one, when the shallow notch has barely half the depth
+    to pass the same 92 L/s through and needs the best part of twice the width. The one
+    control the user has could not move the one number it should move.
+
+    **Only the width is sized this way.** The freeboard readout, the validity sentences,
+    the stored ``head_m`` and :func:`effective_head_m`'s adequacy test all stay on the
+    design head, so a sill too shallow for its storm still reads as one rather than quietly
+    redefining its way into compliance.
+
+    A *sill_depth_m* of ``None`` returns the head unchanged -- no datum, no cap. That is
+    what every caller wants where the containment level is unknown, and it is what keeps
+    the two tiers of :class:`EarthworksController` from disagreeing about whether the cap
+    applies at all. A negative depth (a crest standing above its containment, which
+    :func:`spillway_validity` reports as a fault) floors at zero rather than being fed into
+    ``H^1.5``.
+    """
+    if head_m is None:
+        return None
+    if sill_depth_m is None:
+        return head_m
+    return min(float(head_m), max(0.0, float(sill_depth_m)))
+
+
+def adoptable_spillway_width(required_m, cell_size=None, feature_length_m=None):
+    """The width an auto sill is actually built at, or ``None`` where it cannot be built.
+
+    Two constraints on a requirement before it becomes a number the terrain is cut to.
+    The first is rasterisability, and it is :func:`spillway_burn_width`'s: a weir is burned
+    to whole DEM cells. The second is the feature -- once the width is solved at the sill
+    depth
+    (:func:`sill_limited_head_m`) rather than at the design head, a very shallow notch
+    asks for a very wide weir, and it asks without bound: 2.01 m at a 0.10 m sill, 22.43 m
+    at 0.02 m, 63.45 m at 0.01 m. Nothing downstream clamps it. ``_scaled_bar`` re-cuts the
+    sill bar to whatever width it is handed, so a requirement wider than the feature would
+    burn a notch through the ground that is holding the water in.
+
+    **Refused rather than clamped, and the distinction matters.** A clamped width would sit
+    permanently and silently short of its own requirement, firing
+    :func:`spillway_validity`'s shortfall sentence and its does-it-fit sentence together
+    for the same feature forever. Returning ``None`` instead leaves the caller holding the
+    last width that could actually be built, while the *requirement* is still reported in
+    full and the fit check still says in words that the feature cannot carry it. It is the
+    same idiom as the zero-head guard: a figure that says nothing is not written through.
+
+    This is a sanity bound and not a construction ceiling. Shapely reports a polygon's
+    perimeter as its length, so a basin's bound is generous, and a long swale's is the
+    whole alignment -- and the bar is grown about the sill point, so one of exactly feature
+    length still runs off the ends unless the sill sits at the midpoint. It catches the
+    nonsense case. Where the notch can honestly be cut is a burn-tier question.
+
+    *feature_length_m* is ``None`` from the dialog and ``0.0`` from ``Earthwork.length_m``
+    on empty geometry; both mean "no bound".
+    """
+    from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
+
+    if required_m is None or float(required_m) <= 0:
+        return None
+    built = (spillway_burn_width(required_m, cell_size) if cell_size
+             else float(required_m))
+    if feature_length_m and float(feature_length_m) > 0:
+        if float(required_m) > float(feature_length_m):
+            return None
+    return built
+
 
 # Elevation comparisons are made to the millimetre. Without this a crest clamped
 # to exactly the highest value spillway_datum offers reports as *insufficient*,
@@ -1075,7 +1173,7 @@ class Earthwork:
     TYPE_DAM = "dam"
     TYPE_DIVERSION = "diversion"
 
-    def __init__(self, ew_type, geometry, name):
+    def __init__(self, ew_type, geometry, name, *, dims=None):
         self.type = ew_type          # 'swale' | 'berm' | 'basin' | 'dam' | 'diversion'
         self.geometry = geometry     # QgsGeometry
         self.name = name
@@ -1085,16 +1183,27 @@ class Earthwork:
         # Bottom width is the canonical stored cross-section field; side_slope is derived
         # from it (see the side_slope property). Seeded from the type's default batter so a
         # fresh feature reproduces its historical slope (channels default 1:1 → bottom = 1.0 m).
-        try:
-            cfg = get_type(ew_type)
-            self.depth = cfg.default_depth
-            self.top_width_m = cfg.default_top_width
-            default_slope = cfg.default_side_slope
-        except KeyError:
-            self.depth = 0.5         # metres cut/raised (not used for dam)
-            self.top_width_m = 2.0   # declared top width of cross-section (metres)
-            default_slope = 1.0
-        self.bottom_width_m = max(0.1, self.top_width_m - 2 * default_slope * self.depth)
+        #
+        # ``dims`` is the user's standard cross-section (core.registry.earthwork_defaults),
+        # resolved by the controller and passed in rather than read from here: this module
+        # cannot see QgsSettings, and a parameter is what keeps ``from_dict`` out of it.
+        # A restored feature passes nothing, so a saved design never reloads at whatever
+        # the person opening it happens to prefer.
+        if dims is not None:
+            self.depth = dims.depth
+            self.top_width_m = dims.top_width_m
+            self.bottom_width_m = dims.bottom_width_m
+        else:
+            try:
+                cfg = get_type(ew_type)
+                self.depth = cfg.default_depth
+                self.top_width_m = cfg.default_top_width
+                default_slope = cfg.default_side_slope
+            except KeyError:
+                self.depth = 0.5         # metres cut/raised (not used for dam)
+                self.top_width_m = 2.0   # declared top width of cross-section (metres)
+                default_slope = 1.0
+            self.bottom_width_m = max(0.1, self.top_width_m - 2 * default_slope * self.depth)
         self.batter_run_m = 0.0      # basin only: horizontal inset to full depth (0 = vertical)
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
@@ -1168,6 +1277,14 @@ class Earthwork:
         # anywhere, and on a bermed swale that is 0.72 m and 656 m³ out. None before any
         # measurement, and not serialised for the reason above it.
         self.terrain_spill_level_m = None
+        # How far this feature's sill sits below that containment level, measured on the
+        # last build of the spillway review. The width a sill needs is solved at the head
+        # the sill can pass rather than at the design head (`sill_limited_head_m`), and
+        # the two places that solve it — the drag-tier auto-width pass and the undersized
+        # -spillway warning — deliberately do no DEM work, so this is the measurement they
+        # read. `None` means "not measured", which correctly means "do not cap".
+        # Derived; never serialised, for the reason above it.
+        self.measured_sill_depth_m = None
         # What this feature holds at any level below that one — a StageStorage, off the
         # same flood. It costs one sort and a running sum on a pond already flooded, and
         # it is the only thing that can answer "what does a sill here give up" without

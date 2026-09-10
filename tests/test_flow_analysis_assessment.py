@@ -747,7 +747,8 @@ class TestSeedIsNeverOnTheRim:
     def test_padding_leaves_an_interior_catchment_untouched(self, sloped_dem):
         """The margin is for the kernel to read into, not a change of answer."""
         from terrainflow_assessment.modules.flow_analysis import (
-            FlowAnalysis, catchment_from_seed,
+            FlowAnalysis,
+            catchment_from_seed,
         )
         fa = FlowAnalysis()
         fa.load_dem(sloped_dem)
@@ -770,7 +771,8 @@ class TestSeedIsNeverOnTheRim:
     def test_a_seed_off_the_raster_is_still_refused(self, sloped_dem):
         """Padding is a margin for the kernel, not licence to seed off the grid."""
         from terrainflow_assessment.modules.flow_analysis import (
-            FlowAnalysis, catchment_from_seed,
+            FlowAnalysis,
+            catchment_from_seed,
         )
         fa = FlowAnalysis()
         fa.load_dem(sloped_dem)

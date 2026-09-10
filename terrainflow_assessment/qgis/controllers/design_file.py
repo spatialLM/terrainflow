@@ -456,6 +456,9 @@ class DesignFileController(LayerTreeMixin, QObject):
         try:
             self._panel.set_report_ready(False)
             self._panel.clear_report_summary()
+            # Same stale claim, one readout further down: a share of a site that is
+            # no longer loaded looks exactly like a measurement of the one that is.
+            self._panel.set_catchment_coverage(None)
         except Exception:
             pass
 

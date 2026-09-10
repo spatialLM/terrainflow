@@ -8,7 +8,7 @@ dock that collapses to zero width — all pass Tier 1 and fail here.
 """
 
 from _harness import PluginHarness, build_synthetic_dem, line_across_valley
-from _shots import assert_rendered, describe, save_canvas, save_widget
+from _shots import _settle, assert_rendered, describe, save_canvas, save_widget
 from qgis.PyQt.QtWidgets import QPushButton
 
 PANEL_SIZE = (460, 1400)
@@ -88,9 +88,123 @@ def check_spillway_review_renders(dem_path):
         for header in h.panel.findChildren(QPushButton, "tfSectionHeader"):
             header.setChecked(True)
 
-        path = save_widget(h.panel._spillway_table, "panel_spillway_review",
-                           size=(460, 320))
+        # Wide enough for all nine columns. Narrower and the table falls back on a
+        # horizontal scrollbar with the Feature column squeezed to an ellipsis, which
+        # renders perfectly and shows nothing about the layout under review.
+        #
+        # Sized and settled before the grab, not only by save_widget: the table sits in
+        # the panel's layout, which pulls it back to the dock width on the first settle
+        # after a bare resize.
+        table = h.panel._spillway_table
+        table.window().show()
+        table.show()
+        table.resize(660, 320)
+        _settle()
+        path = save_widget(table, "panel_spillway_review", size=(660, 320))
         assert_rendered(path, "spillway review table", min_colours=6)
+
+
+def check_a_sill_limited_width_renders(dem_path):
+    """The Width column on sills too shallow to pass their design head.
+
+    The only shot that can see this at all. Every other spillway fixture is built with
+    `add_earthwork`, which makes a bare feature with no `Spillway` -- so its crest is
+    None, no depth is ever measured, nothing is capped, and the Width column renders
+    exactly as it did before this change. The sills here are designed and deliberately
+    shallow.
+
+    Three rows, three states the column has to tell apart at a glance: a sill deep enough
+    to be sized at its design head, one shallow enough that the width is solved against
+    the notch instead, and one with no depth left to spill through at all -- which is the
+    most undersized sill it is possible to draw and used to render as the same faint dash
+    as a feature with no flow. What this catches is the widened figures overflowing a
+    column laid out for "0.45 m", and the third state disappearing into the second.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        for row in (40, 65, 90):
+            h.add_earthwork("swale", geometry=line_across_valley(row=row))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("sill-limited width render")
+
+        table = h.panel._spillway_table
+        assert table._rows, "nothing to render - no rows were built"
+        for depth, data in zip((0.40, 0.05, 0.0), list(table._rows)):
+            h.panel.set_spillway_depth_requested.emit(data["index"], depth)
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("sill depths applied")
+
+        heads = [(r.get("sizing_head_m"), r.get("target_head_m")) for r in table._rows]
+        assert any(s is not None and t is not None and s < t for s, t in heads), (
+            f"no row in the fixture is sill-limited, so the shot shows nothing new: "
+            f"{heads}")
+
+        h.panel._show_stage("design")
+        for header in h.panel.findChildren(QPushButton, "tfSectionHeader"):
+            header.setChecked(True)
+        table.window().show()
+        table.show()
+        table.resize(660, 320)
+        _settle()
+        path = save_widget(table, "panel_spillway_sill_limited_width", size=(660, 320))
+        assert_rendered(path, "sill-limited spillway widths", min_colours=6)
+
+
+def check_spillway_depth_editor_renders(dem_path):
+    """The Sill depth column with an editor open in it.
+
+    The only check that can see the two ways a spin box in a cell goes wrong: overflowing
+    a column sized to "0.45 m", and — being framed, and so taller than a text row —
+    growing its row inside a table whose height is fixed to eight of them, pushing the
+    rest out of view mid-edit. Both render perfectly and pass every assertion elsewhere.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        for row in (40, 65, 90):
+            h.add_earthwork("swale", geometry=line_across_valley(row=row))
+        h.add_earthwork("basin", geometry=line_across_valley(row=110, half_width_m=15.0))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("spillway depth editor render")
+
+        table = h.panel._spillway_table
+        assert table._rows, "nothing to render — no rows were built"
+        editable = [i for i, row in enumerate(table._rows)
+                    if table._depth_editable(row)]
+        assert editable, "no row in the fixture can be typed in, so there is no editor"
+        r = editable[0]
+
+        h.panel._show_stage("design")
+        for header in h.panel.findChildren(QPushButton, "tfSectionHeader"):
+            header.setChecked(True)
+
+        # Sized before the editor is placed, because save_widget resizes on the way in
+        # and the column the editor was measured against would have moved out from under
+        # it -- which is exactly the wrong-cell shot this check exists to notice.
+        table.window().show()
+        table.show()
+        table.resize(660, 320)
+        _settle()
+
+        # Placed by hand rather than through the view: an offscreen table will not open
+        # an editor for a synthetic edit(), and what is being photographed is the
+        # editor's geometry inside the cell.
+        index = table.table.model().index(r, _COL_DEPTH)
+        delegate = table.table.itemDelegateForColumn(_COL_DEPTH)
+        editor = delegate.createEditor(table.table.viewport(), None, index)
+        delegate.setEditorData(editor, index)
+        rect = table.table.visualRect(index)
+        assert rect.isValid() and rect.width() > 0, (
+            "the sill depth cell has no visible rectangle, so the editor cannot be "
+            "photographed where it would actually appear")
+        editor.setGeometry(rect)
+        editor.show()
+        try:
+            path = save_widget(table, "panel_spillway_depth_editor", size=(660, 320))
+            assert_rendered(path, "spillway depth editor", min_colours=6)
+        finally:
+            editor.deleteLater()
 
 
 def check_verification_table_renders(dem_path):
@@ -664,3 +778,39 @@ def check_companion_berm_readout_renders(dem_path):
         f"the predicted height and the built bank's mean must agree — predicted line "
         f"reads {height!r} against a built {crest!r}")
     assert_rendered(captured["path"], "companion berm readout", min_colours=12)
+
+
+def check_catchment_coverage_readout(dem_path):
+    """The area readout under the catchment toggle, shot on its own.
+
+    Rendered separately for the same reason the water-leaving box is: inside a
+    460x1400 panel image a two-line block asserts nothing but a colour count, and
+    the thing worth seeing here is whether the indent still reads as belonging to
+    the checkbox above it and whether the second line has wrapped to three.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        for row, ew_type in ((40, "swale"), (60, "dam")):
+            h.add_earthwork(ew_type, geometry=line_across_valley(row=row))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("live assessment")
+
+        lbl = h.panel._catchment_coverage_lbl
+        assert not lbl.isHidden(), "coverage readout stayed hidden after a design"
+        text = lbl.text()
+        assert "Catchment worked" in text, text
+        assert "of site area" in text, (
+            f"the area/volume distinction must sit on the number's own line: {text}")
+        assert "analysed" in text, (
+            f"the denominator has to be printed so the share is checkable: {text}")
+
+        # assert_rendered treats anything under 50px tall as "never laid out" — a
+        # sound guard for an empty widget, but this readout is a legitimately short
+        # two-line block that grabs at ~46px. Give it headroom for the shot only, so
+        # the image shows the text with whitespace rather than tripping the heuristic.
+        lbl.setMinimumHeight(110)
+        try:
+            path = save_widget(lbl, "panel_catchment_coverage", size=(520, 120))
+            assert_rendered(path, "catchment coverage readout", min_colours=3)
+        finally:
+            lbl.setMinimumHeight(0)

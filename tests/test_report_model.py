@@ -1377,6 +1377,30 @@ class TestWorkedCatchment:
         r = build_report(_data(baseline=_baseline(catchment_area_ha=0.0)))
         assert "Catchment worked" not in self._cards(r)
 
+    def test_the_card_and_the_panel_readout_agree(self):
+        """The report and the Design-panel readout share one formula but not one set
+        of inputs: the card divides summed per-feature m2 by
+        ``BaselineReport.catchment_area_ha``, while the panel divides raw cell counts
+        by ``flow_domain_mask``. Sharing ``catchment_coverage`` removes the formula
+        divergence; only this pins the inputs, which is the half that can still drift."""
+        from terrainflow_assessment.modules.report_model import _managed_catchment
+        from terrainflow_assessment.modules.water_balance import catchment_coverage
+
+        # What the panel sees: cell counts over domain cells, at 1 m cells.
+        counts = {"a": 150000, "b": 50000}
+        cell_area_m2 = 1.0
+        domain_cells = 362000
+        panel = catchment_coverage(sum(counts.values()) * cell_area_m2,
+                                   domain_cells * cell_area_m2)
+
+        # What the report sees: the same ground, reached by the other route.
+        card = _managed_catchment(_data(balance=_balance(per_feature=[
+            _feature(fid="a", direct_catchment_m2=150000.0, direct_inflow_m3=7500.0),
+            _feature(fid="b", direct_catchment_m2=50000.0, direct_inflow_m3=2500.0),
+        ])))
+
+        assert round(panel["managed_pct"]) == round(card["managed_pct"])
+
 
 class TestAppendixNamesTheMethodItRan:
     """The settings table printed every field it was handed, alphabetically — so a

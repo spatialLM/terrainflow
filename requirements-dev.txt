@@ -3,7 +3,14 @@
 
 pytest==9.0.3
 pytest-cov==7.1.0
-pytest-qt>=4.2.0          # requires PyQt5/PyQt6 from QGIS install — install QGIS first
+# pytest-qt is deliberately NOT listed. Nothing under tests/ takes a `qtbot` fixture —
+# conftest mocks the whole Qt/QGIS runtime instead — and tests_qgis/ runs on its own
+# harness rather than under pytest, so it was never buying anything. What it cost was the
+# suite: installed without PyQt it aborts *collection* ("pytest-qt requires either
+# PySide6, PyQt5 or PyQt6 installed") before a single test runs, and `-p no:qt` does not
+# call it off. That is invisible on CI, where the qgis/qgis:ltr image supplies PyQt, and
+# fatal on any machine running the pure suite against a standalone interpreter — which is
+# the whole point of mocking QGIS out. Add it back only alongside a test that needs it.
 
 # Geospatial analysis (match QGIS 3.22 bundled where possible)
 rasterio==1.5.0
@@ -19,6 +26,14 @@ geopandas>=0.14           # used by several tests for vector fixtures/assertions
 # QGIS image already ships. 0.18 is the floor: from there find_contours excludes NaN
 # natively, which is what stops fabricated contours along a clip boundary.
 scikit-image>=0.18
+# Report charts — the same undeclared-dependency trap scikit-image fell into, and it went
+# unnoticed for the same reason: the QGIS image ships matplotlib, so CI was green while a
+# clean local install failed 22 tests across test_report_charts and test_reporting on
+# `ModuleNotFoundError: No module named 'matplotlib'`. report_charts and reporting import
+# it unguarded to render the flow network, the hydrograph and the fill timeline, so it is
+# a production dependency here too. No upper bound, for the reason above — pyplot and the
+# Agg backend are stable, and pinning risks fighting the image's own copy.
+matplotlib>=3.5
 
 # Linting / formatting
 ruff>=0.4.0

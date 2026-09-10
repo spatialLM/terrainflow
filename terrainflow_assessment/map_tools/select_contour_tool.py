@@ -1,7 +1,12 @@
-from qgis.core import QgsFeatureRequest, QgsGeometry, QgsRectangle
 from qgis.gui import QgsMapTool
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QCursor
+
+from terrainflow_assessment.map_tools._contour_pick import (
+    as_layers,
+    elevation_of,
+    nearest_contour,
+)
 
 
 class SelectContourTool(QgsMapTool):
@@ -12,15 +17,18 @@ class SelectContourTool(QgsMapTool):
     reshape provenance. Picks the geometrically nearest feature within the
     search radius so it works correctly on flat single-layer ranked contour
     outputs.
+
+    Takes one contour layer or a list of them, so a contour is pickable whether
+    or not the analysis ranked it. A single layer is still accepted.
     """
 
     contour_selected = pyqtSignal(object, float, object)   # QgsGeometry, elevation, coords
     cancelled = pyqtSignal()
 
-    def __init__(self, canvas, contour_layer):
+    def __init__(self, canvas, contour_layers):
         super().__init__(canvas)
         self._canvas = canvas
-        self._layer = contour_layer
+        self._layers = as_layers(contour_layers)
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
     def canvasPressEvent(self, event):
@@ -31,39 +39,16 @@ class SelectContourTool(QgsMapTool):
         point = self.toMapCoordinates(event.pos())
         # Search radius: 12 pixels in map units
         radius = self._canvas.mapUnitsPerPixel() * 12
-        rect = QgsRectangle(
-            point.x() - radius, point.y() - radius,
-            point.x() + radius, point.y() + radius,
-        )
-        click_geom = QgsGeometry.fromPointXY(point)
-        request = QgsFeatureRequest().setFilterRect(rect)
-
-        best_feature = None
-        best_dist = float("inf")
-        try:
-            features = list(self._layer.getFeatures(request))
-        except RuntimeError:
-            # The contour layer was deleted/swapped while this tool was active.
+        best_feature, alive = nearest_contour(self._layers, point, radius)
+        if not alive:
+            # Every contour layer was deleted/swapped while this tool was active.
             self.cancelled.emit()
             return
-        for feature in features:
-            dist = feature.geometry().distance(click_geom)
-            if dist < best_dist:
-                best_dist = dist
-                best_feature = feature
-
         if best_feature is None:
             return
 
         geom = best_feature.geometry()
-        elev = 0.0
-        for fname in ("ELEV", "elev", "elevation", "Elevation", "HEIGHT", "height"):
-            if fname in best_feature.fields().names():
-                try:
-                    elev = float(best_feature[fname])
-                except (ValueError, TypeError):
-                    pass
-                break
+        elev = elevation_of(best_feature)
         contour_coords = self._geometry_coords(geom)
         self.contour_selected.emit(geom, elev, contour_coords)
 

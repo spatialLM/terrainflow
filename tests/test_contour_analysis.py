@@ -408,6 +408,63 @@ class TestExtractContoursWithMockedGdal:
         assert len(features) == 2
         assert any(abs(f.elevation - 70.0) < 0.01 for f in features)
 
+    def test_command_ignores_cached_band_statistics(self, tmp_path, monkeypatch):
+        """
+        gdal_contour takes the range of levels it emits from the band statistics,
+        and it accepts approximate ones. QGIS caches exactly those in a PAM sidecar
+        when it first renders a DEM, and an approximate maximum computed from a
+        decimated sample under-reads a summit — every level above it went missing.
+        The command must switch PAM off so the real min/max is read from the pixels.
+        """
+        import subprocess
+
+        from terrainflow_assessment.modules import contour_analysis as ca
+
+        dem_path = _make_dem(tmp_path)
+        seen = {}
+
+        def _fake_run(cmd, *args, **kwargs):
+            seen["cmd"] = cmd
+            raise FileNotFoundError  # fall through to the scipy path
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        ca.extract_contours(dem_path, interval_m=5.0)
+
+        cmd = seen["cmd"]
+        assert "--config" in cmd
+        assert cmd[cmd.index("--config") + 1:cmd.index("--config") + 3] ==             ["GDAL_PAM_ENABLED", "NO"]
+        # The DEM path and the output still come last, in that order.
+        assert cmd[-2] == dem_path
+
+    def test_command_passes_declared_nodata_explicitly(self, tmp_path, monkeypatch):
+        """
+        Switching PAM off also hides a nodata value declared only in the sidecar,
+        so the value is read here — with PAM still on — and passed on the command
+        line. A DEM with no nodata declared must not grow a -snodata argument.
+        """
+        import subprocess
+
+        from terrainflow_assessment.modules import contour_analysis as ca
+
+        data = np.full((20, 20), 50.0, dtype="float32")
+        with_nodata = _write_raster(str(tmp_path / "nd.tif"), data, nodata=-9999.0)
+        without = _make_dem(tmp_path)
+        seen = {}
+
+        def _fake_run(cmd, *args, **kwargs):
+            seen["cmd"] = cmd
+            raise FileNotFoundError
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+        ca.extract_contours(with_nodata, interval_m=5.0)
+        cmd = seen["cmd"]
+        assert "-snodata" in cmd
+        assert float(cmd[cmd.index("-snodata") + 1]) == -9999.0
+
+        ca.extract_contours(without, interval_m=5.0)
+        assert "-snodata" not in seen["cmd"]
+
     def test_subprocess_nonzero_returncode(self, tmp_path, monkeypatch):
         """gdal_contour returning non-zero → RuntimeError."""
         import subprocess

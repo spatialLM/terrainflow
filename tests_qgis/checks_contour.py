@@ -1,6 +1,7 @@
 """Contour analysis, Processing integration, and the keypoint/keyline paths."""
 
 from _harness import PluginHarness
+from _mouse import click_map
 from qgis.PyQt.QtCore import Qt
 
 
@@ -440,3 +441,126 @@ def check_keyline_analysis(dem_path):
         h.panel.run_keypoint_analysis_requested.emit()
         h.panel.run_keyline_requested.emit()
         h.assert_no_errors("keyline analysis")
+
+
+def _contour_midpoint_in_view(canvas, layer):
+    """A point exactly on the longest contour that is inside the canvas extent.
+
+    Interpolated to the middle of the line rather than taken from its vertices, so
+    the click lands on the contour itself and not merely near it.
+    """
+    extent = canvas.extent()
+    best = None
+    for feature in layer.getFeatures():
+        geom = feature.geometry()
+        if geom is None or geom.isEmpty() or geom.length() <= 0:
+            continue
+        mid = geom.interpolate(geom.length() / 2.0)
+        if mid is None or mid.isEmpty():
+            continue
+        point = mid.asPoint()
+        if not extent.contains(point):
+            continue
+        if best is None or geom.length() > best[0]:
+            best = (geom.length(), point.x(), point.y())
+    assert best is not None, (
+        "no contour midpoint fell inside the canvas extent — the check cannot "
+        "click on a contour it cannot see"
+    )
+    return best[1], best[2]
+
+
+def check_swale_drawn_on_plain_contour(dem_path):
+    """A swale can be cut from a plain generated contour, with no analysis behind it.
+
+    Both contour-picking tools used to search only the analysed "Candidate Contour
+    Swales" layer, so any contour the slope cutoff, the minimum length or the
+    usable-area clip had passed over was un-clickable — while looking on screen
+    exactly like one that had not. This drives the real click path over the plain
+    gdal:contour layer with no baseline and no contour analysis run at all, which
+    is the case that had nothing to offer the tool before.
+    """
+    from checks_maptools import _accept_properties_dialog
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.map_tools.select_contour_tool import SelectContourTool
+
+    with PluginHarness(dem_path) as h:
+        h.panel.generate_simple_contours_requested.emit()
+        h.assert_no_errors("gdal:contour")
+
+        layer = QgsProject.instance().mapLayer(h.state.simple_contour_layer_id)
+        assert layer is not None and layer.featureCount() > 0, "no plain contours"
+
+        h.prepare_canvas_for_input()
+        h.plugin._earthworks.activate_draw_swale("full_contour")
+        h.assert_no_errors("activate contour swale tool")
+
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, SelectContourTool), (
+            f"expected SelectContourTool on the canvas, got {type(tool).__name__}"
+        )
+        assert layer in tool._layers, (
+            "the plain contour layer was not offered to the picking tool — only the "
+            "analysed candidates were, which is the lock this check exists to catch"
+        )
+
+        x, y = _contour_midpoint_in_view(h.canvas, layer)
+        before = len(h.state.earthwork_manager)
+        restore = _accept_properties_dialog()
+        try:
+            click_map(h.canvas, x, y)
+        finally:
+            restore()
+        h.assert_no_errors("click a plain contour")
+
+        after = len(h.state.earthwork_manager)
+        assert after == before + 1, (
+            f"clicking a plain contour at ({x:.1f}, {y:.1f}) created "
+            f"{after - before} earthworks, expected 1 — the tool did not pick it up"
+        )
+        assert h.state.earthwork_manager.get_all()[-1].type == "swale", (
+            "the earthwork created from a contour should be a swale"
+        )
+
+
+def check_contour_pick_prefers_analysed_candidate(dem_path):
+    """With both contour layers up, a click on a candidate still picks the candidate.
+
+    The two layers draw the same lines at the same elevations, so opening the tools
+    up to the plain contours could have quietly cost the analysed ones their rank
+    and inflow attributes on every click. Ordering is the whole defence: candidates
+    are searched first and an exact tie keeps the earlier layer.
+    """
+    from qgis.core import QgsPointXY, QgsProject
+
+    from terrainflow_assessment.map_tools._contour_pick import nearest_contour
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+        h.panel.generate_simple_contours_requested.emit()
+        h.assert_no_errors("gdal:contour")
+
+        candidates = QgsProject.instance().mapLayer(h.state.contour_layer_id)
+        plain = QgsProject.instance().mapLayer(h.state.simple_contour_layer_id)
+        assert candidates is not None and plain is not None, "expected both layers"
+
+        h.prepare_canvas_for_input()
+        h.plugin._earthworks.activate_draw_swale("contour")
+        tool = h.canvas.mapTool()
+        assert tool._layers[0] is candidates, (
+            "the analysed candidates must be searched first, or a tie with the plain "
+            "contour layer would drop rank and inflow"
+        )
+        assert plain in tool._layers, "the plain contour layer must be searched too"
+
+        x, y = _contour_midpoint_in_view(h.canvas, candidates)
+        radius = h.canvas.mapUnitsPerPixel() * 12
+        picked, alive = nearest_contour(tool._layers, QgsPointXY(x, y), radius)
+        assert alive and picked is not None, "nothing picked on a candidate contour"
+        assert "cid" in picked.fields().names(), (
+            "a click on a candidate contour returned a feature without 'cid' — it "
+            f"came from the plain layer instead (fields: {picked.fields().names()})"
+        )

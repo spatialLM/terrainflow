@@ -18,6 +18,13 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from .core.registry.earthwork_defaults import (
+    ResolvedDims,
+    dims_match,
+    resolve_dimensions,
+    settable_dims,
+    shipped_dims,
+)
 from .core.registry.earthwork_types import get_type
 from .core.sizing import (
     basin_volume_battered,
@@ -25,9 +32,9 @@ from .core.sizing import (
     grade_advisory,
     trapezoid_section,
 )
-from .modules.burn_strategy import spillway_burn_width
 from .modules.earthwork_design import (
     Spillway,
+    adoptable_spillway_width,
     berm_height_estimate,
     berm_spoil_per_metre,
     bind_crest,
@@ -35,6 +42,7 @@ from .modules.earthwork_design import (
     calculate_diversion_discharge,
     calculate_spillway_width,
     effective_head_m,
+    sill_limited_head_m,
     spillway_datum,
     spillway_policy,
     spillway_validity,
@@ -188,7 +196,8 @@ class EarthworkPropertiesDialog(QDialog):
                  lip_elevation=None, containment_source=None, stage_storage=None,
                  peak_flow_m3s=None, upstream_flow_m3s=0.0,
                  harvesting_coefficient=False, cell_size_m=None,
-                 inflow_profile=None, overtop_station=None, overtop_surplus=0.0):
+                 inflow_profile=None, overtop_station=None, overtop_surplus=0.0,
+                 is_new=False, standard_dims=None):
         super().__init__(parent)
         self.ew_type = ew_type
         self.geometry = geometry
@@ -242,6 +251,16 @@ class EarthworkPropertiesDialog(QDialog):
         self._inflow_profile = inflow_profile
         self._overtop_station = overtop_station
         self._overtop_surplus = float(overtop_surplus or 0.0)
+        # A feature being drawn, as opposed to one being edited. Distinct from
+        # ``_editing``: the create path passes an already-constructed Earthwork, so
+        # ``_editing`` is True on both and cannot tell them apart.
+        self._is_new = bool(is_new)
+        # The user's stored standard for this type (DimensionDefaults), or None if they
+        # have never set one. Drives the "save as standard" toggle's initial state.
+        self._standard_dims = standard_dims
+        # Whether the user has clicked the toggle themselves. Until they do, it tracks
+        # the dimensions; after, it stays where they put it.
+        self._save_standard_touched = False
         # Registry sizing policy for this type; None for unregistered types → the
         # historical hardcoded ranges/defaults apply as fallbacks throughout.
         try:
@@ -308,7 +327,14 @@ class EarthworkPropertiesDialog(QDialog):
             depth_lo, depth_hi = self._cfg.depth_range if self._cfg else (0.1, 10.0)
             depth_seed = ew.depth if ew else (self._cfg.default_depth if self._cfg else 0.5)
             self.spin_depth = QDoubleSpinBox()
-            self.spin_depth.setRange(depth_lo, depth_hi)
+            # Envelope the seed. The registry range is advisory (see
+            # core/sizing/advisories), and setRange before setValue silently clamps —
+            # so a machine that digs outside the ordinary envelope, or a feature saved
+            # before a range was tightened, would be rewritten on OK without a word.
+            # The advisory below still says the value is unusual; it just no longer
+            # changes it.
+            self.spin_depth.setRange(min(depth_lo, depth_seed),
+                                     max(depth_hi, depth_seed))
             self.spin_depth.setValue(depth_seed)
             self.spin_depth.setDecimals(2)
             self.spin_depth.setSuffix(" m")
@@ -324,7 +350,8 @@ class EarthworkPropertiesDialog(QDialog):
                 else (2.0 if self.ew_type == "dam" else 1.0)
             )
             self.spin_width = QDoubleSpinBox()
-            self.spin_width.setRange(width_lo, width_hi)
+            self.spin_width.setRange(min(width_lo, width_seed),
+                                     max(width_hi, width_seed))
             self.spin_width.setValue(width_seed)
             self.spin_width.setDecimals(2)
             self.spin_width.setSuffix(" m")
@@ -340,7 +367,9 @@ class EarthworkPropertiesDialog(QDialog):
         # Registry-driven: any type whose bottom_width is a derived dimension.
         if self._cfg is not None and "bottom_width" in self._cfg.derived_dims:
             self.spin_bottom_width = QDoubleSpinBox()
-            self.spin_bottom_width.setRange(0.05, 100.0)
+            _bw_seed = ew.bottom_width_m if ew else 0.05
+            self.spin_bottom_width.setRange(min(0.05, _bw_seed),
+                                            max(100.0, _bw_seed))
             self.spin_bottom_width.setDecimals(2)
             self.spin_bottom_width.setSingleStep(0.1)
             self.spin_bottom_width.setSuffix(" m")
@@ -396,6 +425,25 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_basin_converge = None
 
         # Companion berm (swales only)
+        # "Save as my standard size" — the whole UI of the standard-dimensions
+        # feature. It sits here rather than behind a settings screen because this is
+        # the moment the user is deciding the size, and because the plugin can then
+        # learn the standard from use instead of asking for it up front.
+        if self._is_new:
+            self.chk_save_standard = QCheckBox("Save as my standard size")
+            self.chk_save_standard.setToolTip(H.SAVE_AS_STANDARD)
+            # `clicked` fires for the user only, never for setChecked — so an opinion
+            # the user has expressed is not overwritten by the next keystroke in a
+            # spin box.
+            self.chk_save_standard.clicked.connect(self._on_save_standard_clicked)
+            for _spin in (self.spin_depth, self.spin_width, self.spin_bottom_width):
+                if _spin is not None:
+                    _spin.valueChanged.connect(self._sync_save_standard)
+            self._sync_save_standard()
+            form.addRow("", self.chk_save_standard)
+        else:
+            self.chk_save_standard = None
+
         self.chk_companion = QCheckBox("Build companion berm on downhill side")
         self.chk_companion.setChecked(ew.companion_berm if ew else False)
         self.chk_companion.setVisible(self.ew_type == "swale")
@@ -1344,6 +1392,23 @@ class EarthworkPropertiesDialog(QDialog):
         """
         return getattr(self, "_head_cap", None) or self._policy_head
 
+    def _sizing_head(self, target_head):
+        """The depth of flow the **width** is solved at, from :func:`sill_limited_head_m`.
+
+        The rule and the reasoning live on that function, because this dialog is no longer
+        the only surface that sizes a weir: the Spillways review table sets sill depths
+        too, and the auto-width pass and the undersized-spillway warning both quote a
+        required width. Four surfaces solving ``min(head, depth)`` four times is four
+        places for them to come apart, which is what they had done.
+
+        The guard stays here rather than moving into the helper: with no containment
+        elevation there is no depth control to read, and that is a fact about this dialog
+        rather than about the sizing rule.
+        """
+        if self.spin_spillway_drop is None or self._containment_elevation is None:
+            return target_head
+        return sill_limited_head_m(target_head, self.spin_spillway_drop.value())
+
     def _crest_band(self):
         """Crest elevations this feature can offer at its type's design head.
 
@@ -1538,17 +1603,23 @@ class EarthworkPropertiesDialog(QDialog):
         return calculate_spillway_width(self._peak_flow_m3s, head)
 
     def _buildable_width(self, required):
-        """*required* rounded up to a whole number of DEM cells, or unchanged with no DEM.
+        """*required* made buildable — rounded up to whole DEM cells, or refused.
 
-        The width the auto path commits to, and the one the burn cuts. Rounding here
+        The width the auto path commits to, and the one the burn cuts. Deciding it here
         rather than only inside the burn is what stops the dialog, the map label, the
-        review row and the terrain disagreeing about how wide the weir is.
+        review row and the terrain disagreeing about how wide the weir is — and it is
+        :func:`adoptable_spillway_width` rather than a local rounding for the same reason
+        the sizing head is now a function: this is no longer the only surface that sizes a
+        weir, and a second expression of the rule is a second place for it to drift.
+
+        ``None`` also comes back where the requirement is wider than the feature can
+        carry, which the sill cap makes reachable: a very shallow notch asks for a very
+        wide weir and asks without bound. The caller keeps the last width that could be
+        built, and the requirement is still reported in full beside it.
         """
-        if required is None:
-            return None
-        if not self._cell_size_m:
-            return required
-        return spillway_burn_width(required, self._cell_size_m)
+        return adoptable_spillway_width(
+            required, cell_size=self._cell_size_m,
+            feature_length_m=self._feature_length_m())
 
     def _feature_length_m(self):
         """Characteristic length of the drawn feature, for the does-the-weir-fit check.
@@ -1604,12 +1675,18 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_spillway_head.blockSignals(True)
             self.spin_spillway_head.setValue(target_head)
             self.spin_spillway_head.blockSignals(False)
-        required = self._required_width(target_head)
+        sizing_head = self._sizing_head(target_head)
+        required = self._required_width(sizing_head)
 
         buildable = self._buildable_width(required)
         if required is not None:
-            self.lbl_spillway_width.setText(f"{required:.2f} m")
-        elif target_head <= 0:
+            # Said out loud when the sill rather than the type's design head is what the
+            # width was solved against: the figure jumps as the depth comes down, and the
+            # reason for it is a row above rather than anything typed on this one.
+            note = ("" if sizing_head >= target_head - 0.005
+                    else f"  — at the {sizing_head:.2f} m this sill can pass")
+            self.lbl_spillway_width.setText(f"{required:.2f} m{note}")
+        elif sizing_head <= 0:
             # Distinguished from the missing-flow case: here the storm is known and the
             # notch is the problem, so pointing the user back at Baseline would send
             # them to the wrong control.
@@ -1778,6 +1855,77 @@ class EarthworkPropertiesDialog(QDialog):
         """Bottom width (m) from the control, or None when the type has no channel section."""
         return self._current_bottom_width(self.spin_width.value()) \
             if self.spin_bottom_width is not None else None
+
+    # ---- "Save as my standard size"
+
+    def get_save_as_standard(self):
+        """Whether this feature's cross-section should become the type's standard."""
+        return bool(self.chk_save_standard is not None
+                    and self.chk_save_standard.isChecked())
+
+    def _on_save_standard_clicked(self, _checked):
+        self._save_standard_touched = True
+
+    def _current_dims(self):
+        """The cross-section the dialog currently describes.
+
+        Starts from the feature's own values so a type without a given row still
+        reports one — a dam has no depth spin box, a basin no width — then overrides
+        with whatever the user can actually see and change.
+        """
+        ew = self._earthwork
+        base = shipped_dims(self.ew_type)
+        depth = getattr(ew, "depth", base.depth)
+        top_width = getattr(ew, "top_width_m", base.top_width_m)
+        bottom_width = getattr(ew, "bottom_width_m", base.bottom_width_m)
+        if self.spin_depth is not None:
+            depth = self.spin_depth.value()
+        if self.spin_width is not None:
+            top_width = self.spin_width.value()
+        if self.spin_bottom_width is not None:
+            bottom_width = self.spin_bottom_width.value()
+        return ResolvedDims(depth=depth, top_width_m=top_width,
+                            bottom_width_m=bottom_width)
+
+    def _standard_target(self):
+        """The stored standard as a full cross-section, or None if none is set."""
+        if self._standard_dims is None:
+            return None
+        return resolve_dimensions(self.ew_type,
+                                  {self.ew_type: self._standard_dims})
+
+    def _save_standard_label(self, target):
+        """Carry the current standard in the label, since there is no settings screen."""
+        if target is None:
+            return "Save as my standard size"
+        dims = settable_dims(self.ew_type)
+        parts = []
+        if "top_width_m" in dims:
+            word = "thick" if self.ew_type == "dam" else "wide"
+            parts.append(f"{target.top_width_m:.2f} m {word}")
+        if "depth" in dims:
+            parts.append(f"{target.depth:.2f} m deep")
+        if not parts:
+            return "Save as my standard size"
+        return "Save as my standard size (now " + " × ".join(parts) + ")"
+
+    def _sync_save_standard(self):
+        """Track the dimensions until the user has an opinion of their own.
+
+        On by default while no standard exists, so the first feature drawn sets it
+        without the user having to find anything. Once one exists it stays on only
+        while the dialog still describes it, and drops off the moment the user departs
+        — which is what turns "save this" into a decision they make in the moment
+        rather than a silent overwrite of the size they built to last week.
+        """
+        if self.chk_save_standard is None:
+            return
+        target = self._standard_target()
+        self.chk_save_standard.setText(self._save_standard_label(target))
+        if self._save_standard_touched:
+            return
+        self.chk_save_standard.setChecked(
+            True if target is None else dims_match(self._current_dims(), target))
 
     def _calc_dam_wall_metrics(self, crest_elev, wall_thickness):
         """

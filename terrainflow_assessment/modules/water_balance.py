@@ -259,3 +259,61 @@ def area_subtotals(labels, domain_mask, area_masks, cell_area_m2, runoff_mm):
             "capture_pct": (intercepted_cells / n * 100.0) if n else 0.0,
         })
     return rows
+
+
+def catchment_coverage(managed_m2, site_m2, exit_m2=None, sink_m2=None):
+    """How much of the site drains into an earthwork, by **area**.
+
+    The counterpart to :func:`run_water_balance`'s ``capture_pct``, which is a share of
+    storm **volume**. A design can score badly two ways, and they call for opposite
+    work: its features are too small to hold what reaches them, or most of the block
+    drains straight past them. The one volume figure cannot tell those apart.
+
+    *managed_m2* is the ground draining into some feature -- the sum of the direct
+    catchments, which ``flow_graph.label_direct_catchments`` makes mutually exclusive
+    by labelling each cell with the feature that intercepts it **first**. Summing them
+    therefore never double-counts a hillside, however the footprints overlap.
+    *site_m2* is the analysis domain, the same denominator ``capture_pct`` divides by.
+
+    Takes and returns m2 rather than cell counts because two callers with differently
+    shaped data feed it: the panel has cell counts and a cell area, the report has
+    per-feature m2 already summed.
+
+    ``other_m2`` is the **remainder**, not a measured fourth quantity -- the same rule
+    :func:`area_subtotals` takes for its fourth bucket, and for the same two reasons:
+    the buckets are then a partition by construction, and it catches ``LABEL_UNRESOLVED``
+    *and* any ``LABEL_NONE`` gap without either being counted separately. Without it a
+    reader totalling the parts finds a shortfall with no name on it.
+
+    ``exit_m2`` and ``sink_m2`` are optional, and when either is missing all three of
+    ``exit_m2`` / ``sink_m2`` / ``other_m2`` come back ``None``. The report cannot
+    supply them and must not be handed a fabricated zero.
+
+    ``managed_pct`` is **not clamped**, for the reason ``capture_pct`` is not: a share
+    over 100% is a labelling or denominator bug and has to be visible rather than
+    rounded away.
+
+    Returns ``None`` when there is no site to divide by -- an absent figure, never a
+    0% that reads as a measurement.
+    """
+    site = float(site_m2 or 0.0)
+    if site <= 0:
+        return None
+    managed = float(managed_m2 or 0.0)
+
+    if exit_m2 is None or sink_m2 is None:
+        exit_area = sink_area = other_area = None
+    else:
+        exit_area = float(exit_m2)
+        sink_area = float(sink_m2)
+        other_area = site - managed - exit_area - sink_area
+
+    return {
+        "catchment_m2": site,
+        "managed_m2": managed,
+        "unmanaged_m2": site - managed,
+        "managed_pct": 100.0 * managed / site,
+        "exit_m2": exit_area,
+        "sink_m2": sink_area,
+        "other_m2": other_area,
+    }

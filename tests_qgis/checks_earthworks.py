@@ -362,6 +362,55 @@ def check_catchment_and_assessment_recompute(dem_path):
         h.assert_no_errors("catchment layer off")
         assert not h.state.catchment_labels_layer_id, "toggling off left the layer behind"
 
+        # The area readout is deliberately NOT gated on the checkbox: it describes
+        # the design, not the layer. Asserted with the layer OFF so a later change
+        # that ties the two together fails here rather than in someone's field run.
+        lbl = h.panel._catchment_coverage_lbl
+        # isHidden(), not isVisible(): the dock window is never shown in this harness.
+        assert not lbl.isHidden(), "coverage readout hid when the layer went off"
+        text = lbl.text()
+        for want in ("Catchment worked", "of site area", "drains into a feature"):
+            assert want in text, f"expected {want!r} in the readout, got: {text}"
+
+        cov = h.plugin._earthworks.compute_catchment_coverage()
+        assert cov is not None, "no coverage computed with a labelled design"
+        # It must reconcile with the labelling the map draws, not merely look sane.
+        expected = (sum(h.state.catchment_counts.values())
+                    / int(h.state.flow_domain_mask.sum()) * 100.0)
+        assert abs(cov["managed_pct"] - expected) < 1e-6, (
+            f"readout {cov['managed_pct']} vs labelling {expected}")
+        # And with the same denominator the capture score uses.
+        assert abs(cov["catchment_m2"]
+                   - int(h.state.flow_domain_mask.sum()) * h.state.flow_grid_meta[
+                       "cell_area_m2"]) < 1e-6
+        parts = (cov["managed_m2"] + cov["exit_m2"] + cov["sink_m2"] + cov["other_m2"])
+        assert abs(parts - cov["catchment_m2"]) < 1e-6, "buckets are not a partition"
+
+
+def check_catchment_coverage_survives_disabling_everything(dem_path):
+    """Every feature disabled is 0%, not a blank.
+
+    The live assessment's `have_flow` goes False here (no counts), so a readout wired
+    to that flag would vanish at exactly the moment the user is asking what the
+    feature was doing. Deleting the last feature *is* different, and does clear it.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale")
+        h.panel.analysis_inputs_changed.emit()
+        assert not h.panel._catchment_coverage_lbl.isHidden()
+
+        for ew in h.state.earthwork_manager.get_all():
+            ew.enabled = False
+        h.plugin._earthworks.recompute_catchments()
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("recompute with everything disabled")
+
+        cov = h.plugin._earthworks.compute_catchment_coverage()
+        assert cov is not None, "coverage went blank when features were disabled"
+        assert cov["managed_pct"] == 0.0, f"expected 0%, got {cov['managed_pct']}"
+        assert not h.panel._catchment_coverage_lbl.isHidden(), "readout hid at 0%"
+
 
 def check_properties_dialog_path(dem_path):
     """Exercise _on_geometry_drawn, including the properties dialog it opens.
@@ -1493,3 +1542,1235 @@ def check_removing_a_spillway_names_the_drains_that_lose_their_level(dem_path):
     finally:
         EarthworkPropertiesDialog.exec = original_exec
         EarthworkPropertiesDialog.get_spillway = original_get
+
+
+# ---------------------------------------------------------------------------
+# Setting the sill depth from the review table
+# ---------------------------------------------------------------------------
+
+def _review_row(h, ew):
+    """The review row for *ew*, rebuilt fresh.
+
+    The recompute first, because a row with no peak flow returns before it reads any
+    datums -- so without it every feature reads `no_flow` and every assertion below
+    would be about the wrong state.
+    """
+    h.panel.analysis_inputs_changed.emit()
+    h.plugin._earthworks._build_spillway_rows()
+    return next(r for r in h.panel._spillway_table._rows if r["id"] == ew.id)
+
+
+def check_a_depth_typed_in_the_review_designs_a_spillway(dem_path):
+    """The headline: a feature with no spillway gets one, at this type's design depth.
+
+    Eleven of the thirty-one features on the reported design are in this state, and each
+    one used to cost a modal round trip. Everything asserted here is something the dialog
+    would have got right and a table path can quietly get wrong: the type's head rather
+    than the constructor's, a freeboard left on policy rather than frozen at today's
+    figure, a width still on auto, and a sill that is designed without claiming to be
+    placed.
+    """
+    from terrainflow_assessment.modules.earthwork_design import spillway_policy
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        row = _review_row(h, ew)
+        assert row["state"] == "undesigned", (
+            f"fixture is not in the state this check is about: {row['state']!r}")
+        containment = row["rim_elevation"]
+        assert containment is not None, "no datum — the check cannot say anything"
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.45)
+        h.assert_no_errors("sill depth typed on an undesigned feature")
+
+        sp = ew.spillway
+        assert sp is not None, "typing a depth did not design a spillway"
+        assert abs(sp.crest_elevation - (containment - 0.45)) < 1e-6, (
+            f"crest {sp.crest_elevation:.4f} m does not sit 0.45 m under the "
+            f"{containment:.4f} m this feature is held to")
+        assert abs(sp.drop_below_rim_m - 0.45) < 1e-9, (
+            f"stored depth is {sp.drop_below_rim_m!r}, not the 0.45 m typed")
+        assert sp.head_m == spillway_policy("swale")[1], (
+            f"head is {sp.head_m}, not the swale policy — a spillway created here must "
+            f"not carry the Spillway() constructor default")
+        assert sp.freeboard_m is None, (
+            "freeboard was written in as a number; None is what means 'the type's "
+            "policy', and a figure frozen here would stop tracking a policy change")
+        assert sp.width_auto is True, "the width should still be tracking"
+        assert sp.point_wkt is None, (
+            "designing a sill sited it — the review must not claim a location the user "
+            "has not chosen")
+        assert sp.auto is False, (
+            "auto is still set, so placing this sill would re-seed the crest off the "
+            "ground and throw the typed depth away")
+
+        row = _review_row(h, ew)
+        assert row["designed"] is True and row["state"] == "unsited"
+        assert abs(row["sill_depth_m"] - 0.45) < 1e-6, row["sill_depth_m"]
+        assert row["built_width_m"], (
+            "the auto width was never derived — a designed sill with no width is what "
+            "_refresh_auto_spillway_widths exists to prevent")
+
+
+def check_a_typed_depth_is_the_depth_stored(dem_path):
+    """No band on the way in: type 0.10 m and 0.10 m is what is kept.
+
+    The placement path clamps a crest into the band the type's head and freeboard leave,
+    because a map click lands on arbitrary ground. A typed number is not arbitrary, and
+    clamping it would show the user a corrected figure where theirs had just been.
+    A shallow sill is reported in words instead.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=54))
+        row = _review_row(h, ew)
+        containment = row["rim_elevation"]
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.10)
+        h.assert_no_errors("shallow sill depth typed")
+
+        assert abs(ew.spillway.drop_below_rim_m - 0.10) < 1e-9, (
+            f"0.10 m was typed and {ew.spillway.drop_below_rim_m:.2f} m stored — a band "
+            f"is clamping the value on its way in")
+        assert abs(ew.spillway.crest_elevation - (containment - 0.10)) < 1e-6
+        row = _review_row(h, ew)
+        assert row["problems"], (
+            "a sill far too shallow for its head passed without comment; the clamp was "
+            "removed on the understanding that spillway_validity would say so instead")
+
+
+def check_retyping_the_depth_on_screen_does_not_move_the_sill(dem_path):
+    """The round trip is a no-op, which is only true because the cell derives its figure.
+
+    `drop_below_rim_m` is re-based when a design is restored and not afterwards, while
+    the review recomputes its containment on every build — so after an earthworks
+    re-analysis the two can be measured against different rims. A cell rendering the
+    stored figure would move the crest when the user typed back the number in front of
+    them, which is the worst thing an editable cell can do.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("basin", geometry=line_across_valley(
+            row=60, half_width_m=15.0))
+        row = _review_row(h, ew)
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.55)
+        h.assert_no_errors("first depth")
+
+        row = _review_row(h, ew)
+        shown = row["sill_depth_m"]
+        before = ew.spillway.crest_elevation
+        h.panel.set_spillway_depth_requested.emit(row["index"], shown)
+        h.assert_no_errors("depth retyped unchanged")
+
+        assert abs(ew.spillway.crest_elevation - before) < 1e-9, (
+            f"retyping the {shown:.4f} m the table was showing moved the crest from "
+            f"{before:.4f} m to {ew.spillway.crest_elevation:.4f} m")
+
+
+def check_a_typed_depth_keeps_everything_else_about_the_sill(dem_path):
+    """Only the level moves. The spillway is mutated, never rebuilt.
+
+    A freeboard override, a committed width and a placed location are all things the
+    dialog is careful to carry through untouched. Constructing a fresh Spillway on edit
+    would drop every one of them, and the freeboard override silently — it has no column.
+    """
+    from terrainflow_assessment.modules.earthwork_design import Spillway
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        row = _review_row(h, ew)
+        containment = row["rim_elevation"]
+        assert containment is not None, "no datum — the check cannot say anything"
+        ew.spillway = Spillway(
+            crest_elevation=containment - 0.40, drop_below_rim_m=0.40,
+            head_m=0.20, width_m=3.0, width_auto=False, freeboard_m=0.05,
+            point_wkt="POINT(0 0)", auto=False)
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.30)
+        h.assert_no_errors("depth changed on a configured sill")
+
+        sp = ew.spillway
+        assert abs(sp.drop_below_rim_m - 0.30) < 1e-9, "the depth did not move"
+        assert sp.freeboard_m == 0.05, (
+            f"the freeboard override became {sp.freeboard_m!r} — the spillway was "
+            f"rebuilt rather than mutated, and the override has no column to notice it")
+        assert sp.head_m == 0.20, f"head became {sp.head_m}"
+        assert sp.width_m == 3.0 and sp.width_auto is False, "the built width was lost"
+        assert sp.point_wkt == "POINT(0 0)", "the sill was un-sited by a depth change"
+
+
+def check_a_typed_depth_does_not_reflood_the_feature(dem_path):
+    """Capacity follows the crest off the cached curve, with no depression fill.
+
+    The flood behind the curve is deliberately brim-full with the notch not cut, so a
+    crest move cannot invalidate it. This is the check that catches someone tidying
+    `_reapply_sill_capacity` back into a `_refresh_terrain_capacity` call — which would
+    buy identical numbers at a fill apiece, and would return silently mid-burn.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("basin", geometry=line_across_valley(
+            row=60, half_width_m=15.0))
+        row = _review_row(h, ew)
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.50)
+        controller._refresh_terrain_capacity(ew, quiet=True)
+        curve = getattr(ew, "stage_storage", None)
+        level = ew.terrain_spill_level_m
+        brim = ew.containment_capacity_m3
+        assert curve is not None and level is not None and brim, (
+            "the fixture was never measured, so the claim cannot be tested")
+
+        # Site it, or _sill_limited_capacity correctly declines to cut anything back.
+        ew.spillway.point_wkt = "POINT(0 0)"
+        controller._reapply_sill_capacity(ew)
+        deep_capacity = ew.terrain_capacity_m3
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.05)
+        h.assert_no_errors("sill raised")
+
+        assert ew.stage_storage is curve, (
+            "the stage-storage curve was rebuilt — the feature was re-flooded for a "
+            "crest move that cannot change the flood")
+        assert ew.terrain_spill_level_m == level, "the measured spill level moved"
+        assert ew.containment_capacity_m3 == brim, "the brim volume moved"
+        assert ew.terrain_capacity_m3 != deep_capacity, (
+            "what the feature holds to its sill did not follow the sill")
+
+
+def check_a_dams_first_sill_is_the_one_case_that_re_floods(dem_path):
+    """The single exception to "a depth edit never floods".
+
+    `_refresh_dam_stage_storage` clears the measured levels and returns for a dam with no
+    spillway, on the stated grounds that nothing would read the answer. Designing one from
+    the review is the moment that stops being true, so that one edit has to pay for a
+    fill. Every other edit must not, and the pair is asserted together — a change that
+    made the cheap path unconditional would break the first half, and one that made the
+    flood unconditional would break the second.
+
+    The branch is asserted rather than the resulting curve: whether the fixture's terrain
+    impounds anything behind a wall is a fact about the synthetic DEM, and the decision
+    under test is which path the controller takes.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        dam = h.add_earthwork("dam", geometry=line_across_valley(row=86))
+        swale = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+
+        floods = []
+        original = controller._refresh_terrain_capacity
+        controller._refresh_terrain_capacity = (
+            lambda ew, *a, **kw: (floods.append(ew.id), original(ew, *a, **kw))[1])
+        try:
+            row = _review_row(h, dam)
+            h.panel.set_spillway_depth_requested.emit(row["index"], 0.60)
+            h.assert_no_errors("first sill on a dam")
+            assert floods == [dam.id], (
+                f"designing a dam's first sill did not re-measure it (floods={floods}) — "
+                f"it has no stage-storage curve until this happens, so the Storage "
+                f"column would have nothing to show and never would")
+
+            floods.clear()
+            row = _review_row(h, dam)
+            h.panel.set_spillway_depth_requested.emit(row["index"], 0.40)
+            h.assert_no_errors("second depth on the same dam")
+            assert floods == [], (
+                "moving a sill that already has a curve re-flooded the feature; the "
+                "flood is brim-full with the notch not cut, so a crest cannot change it")
+
+            row = _review_row(h, swale)
+            h.panel.set_spillway_depth_requested.emit(row["index"], 0.35)
+            h.assert_no_errors("first sill on a cut feature")
+            assert floods == [], (
+                "designing a cut feature's first sill re-flooded it — only a dam has no "
+                "curve until it carries a spillway")
+        finally:
+            controller._refresh_terrain_capacity = original
+
+        assert dam.spillway is not None
+        assert dam.spillway.height_above_floor_m is None, (
+            "a dam was given a height above floor — its invert is the ground under the "
+            "wall rather than a cut floor, and that is a figure the dialog refuses to "
+            "offer at all")
+
+
+def check_a_typed_depth_of_zero_is_not_a_deletion(dem_path):
+    """0.00 m is a drawable design that gets flagged, not a way to remove a spillway.
+
+    Deleting one is unrecoverable and is confirmed in exactly one place. Nothing in this
+    column may reach that outcome.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=58))
+        row = _review_row(h, ew)
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.35)
+        row = _review_row(h, ew)
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.0)
+        h.assert_no_errors("zero depth typed")
+
+        assert ew.spillway is not None, "typing 0.00 m deleted the spillway"
+        assert abs(ew.spillway.drop_below_rim_m) < 1e-9
+        row = _review_row(h, ew)
+        assert row["state"] == "fail" and row["problems"], (
+            "a sill flush with the containing ground passed without comment")
+
+
+def check_a_typed_depth_marks_the_design_edited(dem_path):
+    """A moved sill is a design change, so the last burn is one edit staler."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=50))
+        row = _review_row(h, ew)
+        # A design that has never been verified has nothing to go stale, so the counter
+        # stays None by design. Seed it as a burnt design would.
+        h.state.edits_since_verify = 0
+        before = h.state.edits_since_verify
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.35)
+        h.assert_no_errors("depth typed")
+
+        assert (h.state.edits_since_verify or 0) > before, (
+            "setting a sill from the review left the design claiming to be verified")
+
+
+def check_the_review_index_survives_a_filtered_row_list(dem_path):
+    """A berm gets no row, so table position and earthwork index are different numbers.
+
+    `_build_spillway_rows` keeps only the types that can spill and *then* stamps each row
+    with its manager index. Anything that treats the row list as index-aligned edits the
+    wrong feature the moment a berm sits above a swale.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        berm = h.add_earthwork("berm", geometry=line_across_valley(row=44))
+        swale = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        row = _review_row(h, swale)
+        assert row["index"] == 1, (
+            f"fixture is not exercising the offset: the swale is at index "
+            f"{row['index']}")
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.35)
+        h.assert_no_errors("depth typed past a berm")
+
+        assert swale.spillway is not None, "the depth went somewhere other than the swale"
+        assert getattr(berm, "spillway", None) is None, (
+            "the berm was given a spillway — the row list was read as index-aligned")
+
+
+def check_only_the_sill_depth_column_can_be_typed_in(dem_path):
+    """Requirement 3, asserted structurally rather than trusted.
+
+    QTableWidgetItem is editable by *default*, so opening the edit triggers made every
+    column editable until _fill_row started clearing the flag. Edits to the others would
+    have been accepted and silently discarded on the next rebuild, which from the outside
+    is indistinguishable from having worked.
+    """
+    from qgis.PyQt.QtCore import Qt
+
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH, _HEADERS
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        live = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        dead = h.add_earthwork("swale", geometry=line_across_valley(row=68))
+        dead.enabled = False
+        h.plugin._earthworks._build_spillway_rows()
+
+        table = h.panel._spillway_table
+        assert table.table.columnCount() == len(_HEADERS), (
+            "the table and its headers disagree about how many columns there are")
+        assert table.table.horizontalHeaderItem(_COL_DEPTH).text() == "Sill depth", (
+            "the editable column is not where _COL_DEPTH says it is")
+
+        rows = table._rows
+        assert rows, "nothing to inspect"
+        for r, data in enumerate(rows):
+            for c in range(table.table.columnCount()):
+                item = table.table.item(r, c)
+                editable = bool(item.flags() & Qt.ItemFlag.ItemIsEditable)
+                wants = (c == _COL_DEPTH
+                         and data.get("state") != "disabled"
+                         and data.get("rim_elevation") is not None)
+                assert editable == wants, (
+                    f"{data['name']} column {_HEADERS[c]!r}: editable={editable}, "
+                    f"expected {wants}")
+        assert any(r["id"] == dead.id for r in rows), (
+            "the disabled feature dropped out of the review, so the read-only half of "
+            "this check asserted nothing")
+        assert any(r["id"] == live.id for r in rows)
+
+
+def check_the_depth_editor_writes_through(dem_path):
+    """The delegate end to end, without simulating a mouse.
+
+    createEditor -> setEditorData -> setModelData is the whole path the user drives, and
+    it is where the seed value and the deferred commit both live.
+    """
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    from terrainflow_assessment.modules.earthwork_design import default_sill_depth_m
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        h.plugin._earthworks._build_spillway_rows()
+
+        table = h.panel._spillway_table
+        r = next(i for i, row in enumerate(table._rows) if row["id"] == ew.id)
+        index = table.table.model().index(r, _COL_DEPTH)
+        delegate = table.table.itemDelegateForColumn(_COL_DEPTH)
+        assert delegate is not None, "no delegate on the sill depth column"
+
+        editor = delegate.createEditor(table.table, None, index)
+        delegate.setEditorData(editor, index)
+        assert abs(editor.value() - default_sill_depth_m("swale")) < 1e-9, (
+            f"an undesigned swale seeded at {editor.value()}, not at the head plus "
+            f"freeboard its type is designed to")
+
+        editor.setValue(0.42)
+        delegate.setModelData(editor, table.table.model(), index)
+        # The commit is handed to the event loop on purpose, so the rebuild it triggers
+        # does not run inside the editor teardown.
+        for _ in range(3):
+            QCoreApplication.processEvents()
+
+        assert ew.spillway is not None, "the editor did not reach the controller"
+        assert abs(ew.spillway.drop_below_rim_m - 0.42) < 1e-9
+
+
+def check_clicking_out_of_an_untouched_editor_creates_nothing(dem_path):
+    """The silent-creation trap: Qt commits on focus-out, and this column must not.
+
+    Opening the editor on a blank row and clicking elsewhere would otherwise design a
+    spillway the user never asked for, in a plugin with no undo anywhere. A value they
+    did change still commits on the way out — dropping a deliberate keystroke without
+    saying so is the opposite mistake, not a safer one.
+    """
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent
+    from qgis.PyQt.QtGui import QFocusEvent
+
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        h.plugin._earthworks._build_spillway_rows()
+
+        table = h.panel._spillway_table
+        r = next(i for i, row in enumerate(table._rows) if row["id"] == ew.id)
+        index = table.table.model().index(r, _COL_DEPTH)
+        delegate = table.table.itemDelegateForColumn(_COL_DEPTH)
+
+        editor = delegate.createEditor(table.table, None, index)
+        delegate.setEditorData(editor, index)
+        handled = delegate.eventFilter(editor, QFocusEvent(QEvent.Type.FocusOut))
+        for _ in range(3):
+            QCoreApplication.processEvents()
+
+        assert handled is True, (
+            "the untouched editor was allowed through to Qt's default focus-out commit")
+        assert getattr(ew, "spillway", None) is None, (
+            "clicking away from an editor nobody typed in designed a spillway")
+
+        editor.setValue(0.33)
+        delegate.eventFilter(editor, QFocusEvent(QEvent.Type.FocusOut))
+        delegate.setModelData(editor, table.table.model(), index)
+        for _ in range(3):
+            QCoreApplication.processEvents()
+        assert ew.spillway is not None and abs(
+            ew.spillway.drop_below_rim_m - 0.33) < 1e-9, (
+            "a value the user did change was dropped on focus-out")
+
+
+def check_double_clicking_the_sill_depth_does_not_open_the_dialog(dem_path):
+    """Double-click already meant "open properties". On this one column the editor wins.
+
+    Both firing would raise the modal over the editor, and the dialog's OK would then
+    write its own spillway over whatever had been typed.
+
+    Driven against a standalone table rather than the panel's: emitting `edit_requested`
+    through the live plugin opens the real properties dialog, which offscreen is a modal
+    nothing dismisses.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import (
+        _COL_DEPTH,
+        SpillwayTable,
+    )
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        row = _review_row(h, ew)
+        assert row["rim_elevation"] is not None, "the fixture row is not editable"
+
+        table = SpillwayTable()
+        try:
+            table.set_rows([row])
+            seen = []
+            table.edit_requested.connect(seen.append)
+
+            table._on_cell_double_clicked(0, _COL_DEPTH)
+            assert not seen, (
+                "double-clicking the sill depth also asked for the properties dialog, "
+                "which would come up over the editor the same gesture just opened")
+
+            table._on_cell_double_clicked(0, 0)
+            assert seen == [row["index"]], (
+                f"double-clicking another cell stopped opening the properties dialog "
+                f"(saw {seen!r})")
+        finally:
+            table.deleteLater()
+
+
+def check_the_review_keeps_your_place_across_a_rebuild(dem_path):
+    """Thirty-one features, eight visible rows, and a rebuild after every edit.
+
+    Without this the user is thrown back to the top of the list each time they commit a
+    depth, which on its own would make a pass down the column not worth doing. The anchor
+    is the feature id, because a feature added above shifts every row number below it.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        for row_y in (44, 48, 52, 56):
+            h.add_earthwork("swale", geometry=line_across_valley(row=row_y))
+        controller = h.plugin._earthworks
+        controller._build_spillway_rows()
+
+        table = h.panel._spillway_table
+        target = table._rows[2]["id"]
+        table.table.setCurrentCell(2, _COL_DEPTH)
+
+        # A feature inserted above pushes the anchor down a row; matching on position
+        # would land on its neighbour.
+        h.add_earthwork("swale", geometry=line_across_valley(row=40))
+        controller._build_spillway_rows()
+
+        current = table.table.currentRow()
+        assert 0 <= current < len(table._rows), "the current cell was lost entirely"
+        assert table._rows[current]["id"] == target, (
+            f"the rebuild moved the cursor from {target} to "
+            f"{table._rows[current]['id']} — it followed the row number, not the feature")
+        assert table.table.currentColumn() == _COL_DEPTH
+
+
+def check_a_rebuild_waits_for_an_open_editor(dem_path):
+    """A background refresh must not take a half-typed depth with it.
+
+    Any design change, and every storm or soil control, reaches `set_rows`. Replacing the
+    items would destroy the open editor and the value in it, on a table where the user is
+    working down a column. The rows are held instead and drawn when the editor closes.
+
+    The view is asked to *report* that it is editing rather than being made to edit: an
+    offscreen QTableWidget will not open an editor for a synthetic `edit()`, and the
+    branch under test is what `set_rows` does with the answer. That the real editor opens
+    and writes through is `check_the_depth_editor_writes_through`'s job.
+    """
+    from qgis.PyQt.QtWidgets import QAbstractItemView
+
+    from terrainflow_assessment.qgis.widgets.spillway_table import _COL_DEPTH
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        row = _review_row(h, ew)
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.45)
+        _review_row(h, ew)
+
+        table = h.panel._spillway_table
+        r = next(i for i, data in enumerate(table._rows) if data["id"] == ew.id)
+        before = table.table.item(r, _COL_DEPTH).text()
+        assert before.startswith("0.45"), f"the fixture cell reads {before!r}"
+
+        original_state = table.table.state
+        table.table.state = lambda: QAbstractItemView.EditingState
+        try:
+            h.panel.set_spillway_depth_requested.emit(row["index"], 0.20)
+            h.assert_no_errors("depth changed while an editor is open")
+            assert table._pending is not None, (
+                "a rebuild landed while an editor was open instead of being held")
+            assert table.table.item(r, _COL_DEPTH).text() == before, (
+                "the cells were rewritten under the open editor, which would have taken "
+                "the editor and anything half-typed in it")
+        finally:
+            table.table.state = original_state
+
+        table._drain_pending()
+        assert table._pending is None, "the held rows were never drawn"
+        assert table.table.item(r, _COL_DEPTH).text().startswith("0.20"), (
+            f"the held rows were drawn but did not carry the change "
+            f"({table.table.item(r, _COL_DEPTH).text()!r})")
+
+
+# ---------------------------------------------------------------------------
+# One sizing rule: the width a sill needs is solved at the head the sill can pass
+# ---------------------------------------------------------------------------
+
+def _shallow_swale(h, row_index=52, depth_m=0.05):
+    """A swale carrying a sill deliberately shallower than its type's design head.
+
+    0.05 m against a swale's 0.15 m policy head, so the sill is what limits the flow
+    depth and the width has to be solved against it. Everything in this group needs that
+    condition and none of it is interesting without it.
+    """
+    ew = h.add_earthwork("swale", geometry=line_across_valley(row=row_index))
+    row = _review_row(h, ew)
+    h.panel.set_spillway_depth_requested.emit(row["index"], depth_m)
+    return ew, _review_row(h, ew)
+
+
+def _dialog_for(h, index):
+    """Open the properties dialog on *index*, capture it, and reject it.
+
+    Rejecting rather than accepting: this reads what the dialog *says*, and an accepted
+    dialog would write its own spillway back and destroy the state under test. The draw
+    path's dialog is deliberately not used -- it is built with `_provisional_peak_flow`,
+    a feature's own catchment before any routing, so its width would differ from the
+    review's for reasons that have nothing to do with the sizing rule.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+
+    seen = []
+    original = EarthworkPropertiesDialog.exec
+    EarthworkPropertiesDialog.exec = lambda self: (seen.append(self), 0)[1]
+    try:
+        h.plugin._earthworks.edit_selected_earthwork(index=index)
+    finally:
+        EarthworkPropertiesDialog.exec = original
+    assert seen, "the properties dialog was never constructed"
+    return seen[0]
+
+
+def _metres(text):
+    """The leading figure out of a width label such as '2.01 m - at the 0.05 m ...'."""
+    head = text.strip().split(" m")[0]
+    return float(head)
+
+
+def check_the_table_and_the_dialog_size_one_weir(dem_path):
+    """The headline. Two surfaces set a sill depth; they must cost it the same.
+
+    The properties dialog has always solved the width at ``min(design head, sill depth)``
+    -- water standing deeper than the notch is over the containing ground, not over the
+    weir. The review row solved it at the design head, so on a shallow sill the dialog
+    said "2.01 m" and the table said "1.4 m needed" for one structure. Now that a depth
+    can be typed straight into the table, the two are the same control and cannot be
+    allowed to disagree about what it costs.
+
+    Compared to the centimetre rather than exactly: the dialog caps against a spin box
+    rounded to two decimals and the row against an unrounded ``containment - crest``, so
+    bit-equality is not achievable by construction and asserting it would be a flaky
+    test rather than a stricter one.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, row = _shallow_swale(h)
+        assert row["required_width_m"], "the fixture sill was never sized"
+        assert row["sizing_head_m"] < row["target_head_m"], (
+            f"the fixture sill is not shallow enough to limit anything "
+            f"(sizing {row['sizing_head_m']}, target {row['target_head_m']})")
+
+        dlg = _dialog_for(h, row["index"])
+        h.assert_no_errors("properties dialog on a shallow sill")
+        shown = _metres(dlg.lbl_spillway_width.text())
+        assert abs(shown - row["required_width_m"]) <= 0.02, (
+            f"the dialog quotes {shown:.2f} m and the review row {row['required_width_m']:.2f} m "
+            f"for one sill at one depth -- the two surfaces are solving different equations")
+
+
+def check_a_shallower_sill_needs_a_wider_weir(dem_path):
+    """The depth control moves the one number it should move.
+
+    Sizing the width off the design head left the requirement frozen: the same figure at
+    a 1.00 m sill and at a 0.05 m one, when the shallow notch has a fraction of the depth
+    to pass the same flow through.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, deep = _shallow_swale(h, depth_m=0.40)
+        h.panel.set_spillway_depth_requested.emit(deep["index"], 0.05)
+        shallow = _review_row(h, ew)
+
+        assert deep["required_width_m"] and shallow["required_width_m"]
+        assert shallow["required_width_m"] > deep["required_width_m"], (
+            f"taking the sill from 0.40 m to 0.05 m left the requirement at "
+            f"{shallow['required_width_m']:.2f} m (was {deep['required_width_m']:.2f} m)")
+        assert deep["sizing_head_m"] == deep["target_head_m"], (
+            "a sill deeper than the design head must not be capped at all")
+
+
+def check_the_sill_cap_moves_the_width_and_nothing_else(dem_path):
+    """The line the cap must not cross.
+
+    Only the width is sized against the sill. The head, the freeboard reading and the
+    validity sentences all stay on the depth the type designs for, so a sill too shallow
+    for its storm still reads as one. Capping them too would improve the freeboard on
+    exactly the sills that are worst -- a bad design redefining its way into compliance,
+    silently, and in the direction that looks like an improvement.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, deep = _shallow_swale(h, depth_m=0.40)
+        head_before = ew.spillway.head_m
+        h.panel.set_spillway_depth_requested.emit(deep["index"], 0.05)
+        shallow = _review_row(h, ew)
+
+        assert ew.spillway.head_m == head_before, (
+            "the stored design head moved when the sill was made shallower")
+        assert shallow["target_head_m"] == deep["target_head_m"], (
+            "the target head followed the sill depth")
+        assert shallow["actual_head_m"] == deep["actual_head_m"], (
+            f"the achieved head followed the sill depth "
+            f"({deep['actual_head_m']} -> {shallow['actual_head_m']}) -- on an auto width "
+            f"it is the design head by construction and has nothing to follow")
+        assert abs(shallow["freeboard_m"]
+                   - (shallow["sill_depth_m"] - shallow["actual_head_m"])) < 1e-9, (
+            "freeboard is no longer what the notch has left once the flow has run its "
+            "depth, which is the reading that says the sill is too shallow")
+        assert shallow["freeboard_m"] < 0, (
+            "a 0.05 m sill on a swale wanting 0.15 m of head plus freeboard must read "
+            "negative -- that is the whole point of holding the head fixed")
+
+
+def check_the_shortfall_warning_quotes_the_reviews_figure(dem_path):
+    """The message bar and the list must not cost one sill two ways.
+
+    `_check_spillway_capacity` fires in the same recompute that builds the review, one
+    line after it. Sizing its own requirement at the design head put "needs 1.40 m" in
+    the message bar while the list beside it said "needs 2.01 m" -- the divergence this
+    channel exists to report, appearing inside it.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, row = _shallow_swale(h)
+        # Commit the width: the warning skips auto sills, on the grounds that they track
+        # the requirement by definition.
+        ew.spillway.width_auto = False
+        ew.spillway.width_m = 0.5
+        h.iface.messageBar().messages.clear()
+        row = _review_row(h, ew)
+        h.plugin._earthworks._check_spillway_capacity()
+
+        pushed = [m for m in h.iface.messageBar().messages
+                  if "needs" in m[2] and ew.name in m[2]]
+        assert pushed, (
+            f"a 0.5 m weir on a sill needing {row['required_width_m']:.2f} m was not "
+            f"reported at all: {h.iface.messageBar().messages}")
+        text = pushed[-1][2]
+        assert f"needs {row['required_width_m']:.2f} m" in text, (
+            f"the warning quotes a different requirement from the list "
+            f"(list says {row['required_width_m']:.2f} m): {text}")
+        assert "this sill can pass" in text, (
+            f"the warning names a head it did not size against: {text}")
+
+
+def check_the_shortfall_warning_does_not_nag(dem_path):
+    """It reports a change, so it must stop once it has been said.
+
+    This runs on every settled recompute -- every add, edit, storm change and typed
+    depth. Re-pushing the same features every time turns a notification into wallpaper,
+    and a message bar that repaints on every edit is not a warning.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, _row = _shallow_swale(h)
+        ew.spillway.width_auto = False
+        ew.spillway.width_m = 0.5
+        _review_row(h, ew)
+
+        controller = h.plugin._earthworks
+        controller._check_spillway_capacity()
+        h.iface.messageBar().messages.clear()
+        controller._check_spillway_capacity()
+        assert not h.iface.messageBar().messages, (
+            f"the same shortfall was pushed again with nothing changed: "
+            f"{h.iface.messageBar().messages}")
+
+        # A feature joining the set is news again.
+        controller._short_spillways_reported = frozenset()
+        controller._check_spillway_capacity()
+        assert h.iface.messageBar().messages, (
+            "a shortfall that has not been reported yet was suppressed")
+
+
+def check_a_sill_with_no_depth_says_so_in_the_width_column(dem_path):
+    """The most undersized sill possible must not render as a faint dash.
+
+    At zero sill depth the weir equation has no answer -- ``L = Q / (C*H^1.5)`` diverges
+    -- so `calculate_spillway_width` returns 0.0 and the row's requirement is None. Both
+    of `spillway_validity`'s width checks are then skipped, because there is no
+    requirement for them to test against, which leaves this cell as the only thing that
+    can name the condition.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import SpillwayTable
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, _row = _shallow_swale(h, depth_m=0.40)
+        h.panel.set_spillway_depth_requested.emit(_row["index"], 0.0)
+        row = _review_row(h, ew)
+
+        assert row["sizing_head_m"] == 0.0, row["sizing_head_m"]
+        assert row["required_width_m"] is None, (
+            "a zero-head weir has no width that passes anything; 0.0 must not reach the "
+            "row as a designed figure")
+        assert ew.spillway is not None, "a depth of zero is a depth, not a deletion"
+
+        table = SpillwayTable()
+        try:
+            table.set_rows([row])
+            text = table._width_cell(row, False)[0]
+        finally:
+            table.deleteLater()
+        assert "no depth" in text, (
+            f"the width cell reads {text!r} on a sill with nothing to spill through, "
+            f"which is indistinguishable from a feature that simply has no flow")
+
+
+def check_an_unbuildable_width_is_not_adopted(dem_path):
+    """A requirement wider than the feature must not become the width that gets burned.
+
+    Solving at the sill depth makes the requirement grow without bound as the notch gets
+    shallow -- 2.01 m at 0.10 m, 22.43 m at 0.02 m, 63.45 m at 0.01 m -- and nothing
+    downstream clamps it: `_scaled_bar` re-cuts the sill bar to whatever width it is
+    handed. Until this change the figure was contained only by the uncapped auto-width
+    pass overwriting it, and that overwrite is exactly what is being removed.
+
+    Refused rather than clamped: the requirement is still reported in full and
+    `spillway_validity` still says in words that the feature cannot carry it, while the
+    stored width stays the last one that could actually be built.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, row = _shallow_swale(h, depth_m=0.40)
+        buildable = ew.spillway.width_m
+        assert buildable, "the fixture sill never got a width to keep"
+
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.005)
+        row = _review_row(h, ew)
+
+        assert row["required_width_m"] > (ew.length_m or 0.0), (
+            f"the fixture is not extreme enough: it needs "
+            f"{row['required_width_m']:.2f} m on a {ew.length_m:.1f} m feature")
+        assert abs(ew.spillway.width_m - buildable) < 1e-9, (
+            f"a width of {ew.spillway.width_m:.2f} m was adopted on a "
+            f"{ew.length_m:.1f} m feature -- the burn would cut the notch straight "
+            f"through the ground holding the water in")
+        assert any("cannot pass its own" in p or "long" in p for p in row["problems"]), (
+            f"nothing told the user the weir does not fit: {row['problems']}")
+
+
+def check_the_stored_width_matches_the_one_on_screen(dem_path):
+    """The Width column, the map label, the summary and the burn read one number.
+
+    `_refresh_auto_spillway_widths` runs earlier in the same recompute and does no DEM
+    work, so it caps against whatever the previous settled build measured. Without the
+    write-back that follows the review, the stored width lags the displayed one by a
+    recompute -- the column right and everything drawn from the model wrong, which is
+    this change's own divergence relocated rather than fixed.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, row = _shallow_swale(h, depth_m=0.40)
+        assert row["width_auto"], "the fixture sill is not on auto"
+        assert abs(ew.spillway.width_m - row["built_width_m"]) < 1e-9, (
+            f"stored {ew.spillway.width_m} vs displayed {row['built_width_m']}")
+
+        # The case that actually needs the write-back: read the state the typed depth
+        # left behind, with **no** further recompute. `_refresh_auto_spillway_widths`
+        # runs first inside that one recompute and caps against the depth the *previous*
+        # build measured, so it writes the width the old sill needed; only the write-back
+        # that follows the review corrects it. Calling `_review_row` here instead would
+        # run a second recompute -- by which time the cache is fresh and the lag has
+        # closed itself, which is how this check first passed with the write-back
+        # deleted.
+        h.panel.set_spillway_depth_requested.emit(row["index"], 0.08)
+        row = next(r for r in h.state.spillway_rows if r["id"] == ew.id)
+        assert abs(ew.spillway.width_m - row["built_width_m"]) < 1e-9, (
+            f"after a typed depth the model holds {ew.spillway.width_m} while the list "
+            f"shows {row['built_width_m']} -- the write-back did not settle it, so the "
+            f"map label, the summary and the burn are a recompute behind the column")
+        assert abs(ew.spillway.width_required_m - row["required_width_m"]) < 1e-9
+
+
+def check_the_review_survives_features_it_cannot_size(dem_path):
+    """Undesigned, disabled and flow-less features all still build a row.
+
+    `_spillway_row` exists to serve features with no `Spillway` at all -- showing what
+    one would need is the whole of "features auto-size their spillways as you add them".
+    Those rows return before any datum is read, so every figure derived from a datum is
+    None on them, and the freeboard line reaching for one unguarded is a TypeError.
+    `_build_spillway_rows` swallows to a console print, so the symptom is not a crash:
+    it is the entire review going stale, silently, for the whole design.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        undesigned = h.add_earthwork("swale", geometry=line_across_valley(row=40))
+        disabled = h.add_earthwork("basin", geometry=line_across_valley(
+            row=110, half_width_m=15.0))
+        disabled.enabled = False
+        designed, _row = _shallow_swale(h, row_index=70)
+
+        h.panel.analysis_inputs_changed.emit()
+        h.plugin._earthworks._build_spillway_rows()
+        h.assert_no_errors("review over unsizeable features")
+
+        rows = {r["id"]: r for r in h.panel._spillway_table._rows}
+        assert undesigned.id in rows and disabled.id in rows and designed.id in rows, (
+            f"the review dropped features it could not size: {sorted(rows)}")
+        assert rows[disabled.id]["state"] == "disabled"
+        assert rows[undesigned.id]["designed"] is False
+        assert rows[undesigned.id]["required_width_m"], (
+            "an undesigned feature must still be sized")
+        for row in rows.values():
+            assert "sizing_head_m" in row, "the row contract lost sizing_head_m"
+
+
+def check_a_feature_that_cannot_be_measured_caps_nothing(dem_path):
+    """The cached depth must never outlive the crest it was measured against.
+
+    Two width solves cannot call `_spillway_datums` for themselves -- one runs per drag
+    frame and the other has no footprint mask -- so they read a measurement cached on the
+    feature. A cache that survived a feature being switched off, or its spillway being
+    replaced wholesale by the properties dialog, would go on capping the width against a
+    sill that no longer exists. `None` means "not measured", which correctly means "do
+    not cap", and that is the same thing the review row does with the same absent datum.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew, row = _shallow_swale(h, depth_m=0.40)
+        assert ew.measured_sill_depth_m is not None, "nothing was ever measured"
+
+        ew.enabled = False
+        _rows = h.plugin._earthworks._build_spillway_rows()
+        assert ew.measured_sill_depth_m is None, (
+            "a disabled feature kept a measured depth, which the auto-width pass would "
+            "go on sizing against")
+
+        ew.enabled = True
+        _review_row(h, ew)
+        assert ew.measured_sill_depth_m is not None, "it was never measured again"
+
+        h.plugin._earthworks._clear_measured_levels(ew)
+        assert ew.measured_sill_depth_m is None, (
+            "the measured depth is not cleared with the other three figures measured "
+            "off the same flood, so it can outlive them")
+
+
+def check_a_column_widens_for_content_it_has_never_held(dem_path):
+    """A column that gains a number for the first time must not elide it.
+
+    `set_rows` re-measures the columns only when the row count changed, so that they do
+    not shimmy under the cursor as a dash becomes "0.60 m" while the user is typing down
+    the Sill depth column. The cost of that guard is that a column can never *grow*
+    either -- and this table opens on a design whose features have no spillway yet, so
+    Sill is laid out for an em dash. Typing the first depth fills it with an elevation on
+    a rebuild with the same row count, which is exactly the rebuild the guard skips: the
+    figure the column exists to show renders as "84...", indefinitely.
+
+    Caught by looking at a screenshot rather than by any assertion, which is what the
+    visual checks are for. Pinned here because it is a behaviour, not a rendering.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import _HEADERS, SpillwayTable
+
+    col_sill = _HEADERS.index("Sill")
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley(row=52))
+        undesigned = _review_row(h, ew)
+        assert undesigned["crest_elevation"] is None, "the fixture starts designed"
+
+        table = SpillwayTable()
+        try:
+            table.window().show()
+            table.show()
+            table.resize(660, 320)
+            table.set_rows([undesigned])
+            narrow = table.table.columnWidth(col_sill)
+
+            h.panel.set_spillway_depth_requested.emit(undesigned["index"], 0.40)
+            designed = _review_row(h, ew)
+            assert designed["crest_elevation"] is not None
+
+            # The same row count, so the full re-measure is skipped -- which is the whole
+            # point of the fixture.
+            table.set_rows([designed])
+            assert table.table.rowCount() == 1
+            grown = table.table.columnWidth(col_sill)
+            assert grown >= table.table.sizeHintForColumn(col_sill), (
+                f"the Sill column stayed {grown}px against a content width of "
+                f"{table.table.sizeHintForColumn(col_sill)}px, so the crest elevation is "
+                f"rendered elided")
+            assert grown > narrow, (
+                f"the column did not widen at all ({narrow}px -> {grown}px) when it went "
+                f"from an em dash to an elevation")
+
+            # And it must not give the space back on the way down, which is what the
+            # anti-shimmy guard is protecting.
+            table.set_rows([undesigned])
+            assert table.table.columnWidth(col_sill) == grown, (
+                "the column narrowed again when the elevation went away, which is the "
+                "shimmy the row-count guard exists to prevent")
+        finally:
+            table.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# The user's standard earthwork dimensions
+# ---------------------------------------------------------------------------
+
+def _standard_key():
+    from terrainflow_assessment.qgis.controllers.earthworks import EarthworksController
+    return EarthworksController._EARTHWORK_DEFAULTS_KEY
+
+
+def _set_standard(text):
+    """Write the stored standard directly, returning the previous value.
+
+    QgsSettings is process-wide. The harness points the org/app name at
+    TerrainFlowTests so a run cannot touch the real QGIS profile, but that does
+    nothing to isolate one check from the next in the same subprocess — so every
+    check here restores what it found in a finally, or every later check in this
+    module draws swales at the test's dimensions.
+    """
+    from qgis.core import QgsSettings
+    settings = QgsSettings()
+    previous = settings.value(_standard_key(), "")
+    settings.setValue(_standard_key(), text)
+    return previous
+
+
+def check_a_drawn_swale_uses_the_users_standard(dem_path):
+    """A stored standard must reach the feature the user ends up with."""
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    original_exec = EarthworkPropertiesDialog.exec
+    EarthworkPropertiesDialog.exec = lambda self: 1
+    previous = _set_standard(
+        '{"swale": {"depth": 0.35, "top_width_m": 1.6, "bottom_width_m": 0.9}}')
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.assert_no_errors("baseline run")
+
+            h.plugin._earthworks._on_geometry_drawn("swale", line_across_valley())
+            h.assert_no_errors("geometry drawn with a standard set")
+
+            ew = h.state.earthwork_manager.get(0)
+            assert abs(ew.depth - 0.35) < 1e-6, f"depth was {ew.depth}, expected 0.35"
+            assert abs(ew.top_width_m - 1.6) < 1e-6, f"top width was {ew.top_width_m}"
+            assert abs(ew.bottom_width_m - 0.9) < 1e-6, (
+                f"bottom width was {ew.bottom_width_m}, expected 0.9"
+            )
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        _set_standard(previous)
+
+
+def check_the_properties_dialog_opens_at_the_standard(dem_path):
+    """The dialog must show the standard, and offer to keep it.
+
+    Also pins that the dialog seeds from the constructed Earthwork rather than from
+    the registry directly: if it read ``_cfg.default_*`` the spin boxes would show
+    the shipped 0.50 / 2.00 here.
+    """
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    seen = {}
+    original_exec = EarthworkPropertiesDialog.exec
+
+    def capture(dialog):
+        seen["depth"] = dialog.spin_depth.value()
+        seen["width"] = dialog.spin_width.value()
+        seen["bottom"] = dialog.spin_bottom_width.value()
+        seen["toggle_present"] = dialog.chk_save_standard is not None
+        seen["toggle_on"] = dialog.get_save_as_standard()
+        seen["label"] = dialog.chk_save_standard.text()
+        # Departing from the standard must clear the toggle, so changing the size is
+        # never a silent rewrite of what the user built to last week.
+        dialog.spin_depth.setValue(0.80)
+        seen["toggle_after_change"] = dialog.get_save_as_standard()
+        return 0  # rejected — this check is only about what the dialog offered
+
+    EarthworkPropertiesDialog.exec = capture
+    previous = _set_standard(
+        '{"swale": {"depth": 0.35, "top_width_m": 1.6, "bottom_width_m": 0.9}}')
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.plugin._earthworks._on_geometry_drawn("swale", line_across_valley())
+            h.assert_no_errors("properties dialog with a standard set")
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        _set_standard(previous)
+
+    assert seen, "the properties dialog never opened"
+    assert abs(seen["depth"] - 0.35) < 1e-6, "dialog depth was {}".format(seen["depth"])
+    assert abs(seen["width"] - 1.6) < 1e-6, "dialog width was {}".format(seen["width"])
+    assert abs(seen["bottom"] - 0.9) < 1e-6, "dialog bottom was {}".format(seen["bottom"])
+    assert seen["toggle_present"], "a drawn feature must offer the standard toggle"
+    assert seen["toggle_on"], "matching the standard should leave the toggle ticked"
+    assert not seen["toggle_after_change"], (
+        "departing from the standard must clear the toggle"
+    )
+    assert "1.60" in seen["label"] and "0.35" in seen["label"], (
+        "the toggle should name the current standard, got {!r}".format(seen["label"])
+    )
+
+
+def check_the_toggle_is_on_for_a_first_feature(dem_path):
+    """With no standard stored the toggle starts ticked, so the first one sets it."""
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    seen = {}
+    original_exec = EarthworkPropertiesDialog.exec
+
+    def capture(dialog):
+        seen["on"] = dialog.get_save_as_standard()
+        seen["label"] = dialog.chk_save_standard.text()
+        return 0
+
+    EarthworkPropertiesDialog.exec = capture
+    previous = _set_standard("")
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.plugin._earthworks._on_geometry_drawn("swale", line_across_valley())
+            h.assert_no_errors("properties dialog with no standard set")
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        _set_standard(previous)
+
+    assert seen.get("on"), "the first feature drawn should offer to set the standard"
+    assert "now" not in seen["label"], (
+        "with no standard stored the label should not quote one: {!r}".format(seen["label"])
+    )
+
+
+def check_saving_a_standard_round_trips(dem_path):
+    """Accepting with the toggle on must persist, and be read back on next load."""
+    from qgis.core import QgsSettings
+
+    from terrainflow_assessment.core.registry.earthwork_defaults import decode
+    from terrainflow_assessment.earthwork_properties_dialog import EarthworkPropertiesDialog
+
+    original_exec = EarthworkPropertiesDialog.exec
+
+    def accept_with_new_size(dialog):
+        dialog.spin_depth.setValue(0.42)
+        dialog.spin_width.setValue(1.80)
+        dialog.spin_bottom_width.setValue(1.10)
+        dialog.chk_save_standard.setChecked(True)
+        return 1
+
+    EarthworkPropertiesDialog.exec = accept_with_new_size
+    previous = _set_standard("")
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.plugin._earthworks._on_geometry_drawn("swale", line_across_valley())
+            h.assert_no_errors("accepting with save-as-standard ticked")
+
+            stored = decode(QgsSettings().value(_standard_key(), ""))
+            assert "swale" in stored, f"nothing was stored: {stored!r}"
+            assert abs(stored["swale"].depth - 0.42) < 1e-6
+            assert abs(stored["swale"].top_width_m - 1.80) < 1e-6
+            assert abs(stored["swale"].bottom_width_m - 1.10) < 1e-6
+
+            # A reload must read the same thing back.
+            h.plugin._earthworks.load_earthwork_defaults()
+            dims = h.plugin._earthworks._resolved_dims("swale")
+            assert abs(dims.depth - 0.42) < 1e-6, f"reloaded depth was {dims.depth}"
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+        _set_standard(previous)
+
+
+def check_a_saved_design_ignores_the_users_standard(dem_path):
+    """A stored design must reload at its own size, not at the reader's standard.
+
+    The guarantee the constructor parameter buys: ``from_dict`` passes no dims, so a
+    payload written before a field existed comes back at the shipped default rather
+    than at whatever the person opening it happens to prefer.
+    """
+    import json
+
+    previous = _set_standard(
+        '{"swale": {"depth": 0.35, "top_width_m": 1.6, "bottom_width_m": 0.9}}')
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.add_earthwork("swale")
+            payload = json.loads(h.state.earthwork_manager.to_json())
+            items = payload if isinstance(payload, list) else payload.get("earthworks", [])
+            # Strip the dimensions, as a design written by an older schema would be.
+            for item in items:
+                for field in ("depth", "top_width_m", "bottom_width_m"):
+                    item.pop(field, None)
+
+            h.plugin._earthworks.restore_earthworks_from_json(json.dumps(payload))
+            h.assert_no_errors("restoring a design with no stored dimensions")
+
+            ew = h.state.earthwork_manager.get(0)
+            assert abs(ew.depth - 0.5) < 1e-6, (
+                f"a restored swale loaded at {ew.depth} — the reader's standard leaked into a "
+                "saved design"
+            )
+    finally:
+        _set_standard(previous)
+
+
+def check_the_provisional_catchment_uses_the_standard_width(dem_path):
+    """The inflow shown on screen must describe the swale actually being built."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        ew_ctl = h.plugin._earthworks
+        geometry = line_across_valley()
+        narrow = ew_ctl._provisional_catchment("swale", geometry, top_width_m=0.5)
+        wide = ew_ctl._provisional_catchment("swale", geometry, top_width_m=8.0)
+        assert narrow != wide, (
+            "footprint width does not affect the provisional catchment, so this check "
+            "cannot prove the two call sites agree"
+        )
+
+        # What _on_geometry_drawn passes must be what the constructor seeds.
+        dims = ew_ctl._resolved_dims("swale")
+        assert (ew_ctl._provisional_catchment("swale", geometry)
+                == ew_ctl._provisional_catchment("swale", geometry,
+                                                 top_width_m=dims.top_width_m)), (
+            "the provisional catchment and the seeded feature disagree on width"
+        )
+
+
+def check_a_basin_ignores_a_width_standard(dem_path):
+    """A basin's footprint is the drawn polygon, so a stored width is not a preference."""
+    from terrainflow_assessment.core.registry.earthwork_defaults import decode
+
+    previous = _set_standard('{"basin": {"depth": 2.2, "top_width_m": 3.0}}')
+    try:
+        stored = decode('{"basin": {"depth": 2.2, "top_width_m": 3.0}}')
+        assert stored["basin"].top_width_m is None, (
+            "a basin has no width row, so a width entry must be dropped"
+        )
+        assert abs(stored["basin"].depth - 2.2) < 1e-6
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            dims = h.plugin._earthworks._resolved_dims("basin")
+            assert abs(dims.depth - 2.2) < 1e-6, f"basin depth was {dims.depth}"
+            assert abs(dims.top_width_m - 0.0) < 1e-6, (
+                f"basin top width should stay 0.0, was {dims.top_width_m}"
+            )
+    finally:
+        _set_standard(previous)

@@ -157,18 +157,34 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
     import tempfile
 
     import geopandas as gpd
+    import rasterio
 
     if output_path is None:
         output_path = tempfile.mktemp(suffix="_contours.gpkg")
 
-    # Run GDAL contour
+    # gdal_contour picks the range of levels it will emit from the band statistics,
+    # and it accepts *approximate* ones. QGIS writes exactly those into a PAM
+    # sidecar (`<dem>.tif.aux.xml`, STATISTICS_APPROXIMATE=YES) the first time it
+    # renders a raster, and an approximate maximum is computed from a decimated
+    # sample, so it misses summits: on the 1 m Quail Island DEM it reads 72.4 m
+    # against a true 84.8 m, and every contour above 72 m went missing while the
+    # ones below it were correct. Turning PAM off makes gdal_contour compute the
+    # real min/max from the pixels. The declared nodata is the one thing worth
+    # keeping from the sidecar, so read it here — where PAM is still on — and pass
+    # it explicitly, or a DEM that declares nodata only there would be contoured
+    # straight through its -9999 fill.
+    with rasterio.open(dem_path) as src:
+        nodata = src.nodata
+
     cmd = [
         "gdal_contour",
+        "--config", "GDAL_PAM_ENABLED", "NO",
         "-a", "ELEV",
         "-i", str(interval_m),
-        dem_path,
-        output_path,
     ]
+    if nodata is not None:
+        cmd += ["-snodata", repr(float(nodata))]
+    cmd += [dem_path, output_path]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:

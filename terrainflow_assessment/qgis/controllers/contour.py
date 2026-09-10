@@ -1011,18 +1011,36 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             return
         try:
             import processing
+            import rasterio
             interval = self._panel.simple_contour_interval_m
-            result = processing.run("gdal:contour", {
+            # EXTRA and NODATA for the same reason as
+            # contour_analysis.extract_contours: gdal_contour takes the range of
+            # levels it emits from the band statistics and accepts the approximate
+            # ones QGIS caches in a PAM sidecar, which are computed from a decimated
+            # sample and so read a summit lower than it is — the contours above that
+            # under-read maximum are simply never drawn. PAM off makes it read the
+            # real pixels; the nodata it would have found there is passed on instead.
+            with rasterio.open(self._state.dem_path) as src:
+                nodata = src.nodata
+            params = {
                 "INPUT": self._state.dem_path,
                 "BAND": 1,
                 "INTERVAL": interval,
                 "FIELD_NAME": "ELEV",
+                "EXTRA": "--config GDAL_PAM_ENABLED NO",
                 "OUTPUT": "TEMPORARY_OUTPUT",
-            })
+            }
+            if nodata is not None:
+                params["NODATA"] = float(nodata)
+            result = processing.run("gdal:contour", params)
             out = result.get("OUTPUT")
             if hasattr(out, "source"):
                 out = out.source()
 
+            # A picking tool may be holding this layer — the swale tools draw from
+            # it now, not just from the analysed candidates — and regenerating
+            # would leave it pointing at a layer the project no longer owns.
+            self._reset_contour_map_tool()
             remove_layer(self._project, self._state.simple_contour_layer_id)
 
             layer = QgsVectorLayer(out, f"Contours ({interval} m)", "ogr")

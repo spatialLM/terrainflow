@@ -13,20 +13,27 @@ Right-click or Escape cancels at any phase.
 import json
 
 from qgis.core import (
-    QgsFeatureRequest,
     QgsGeometry,
     QgsPointXY,
-    QgsRectangle,
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QCursor
 
+from terrainflow_assessment.map_tools._contour_pick import (
+    as_layers,
+    elevation_of,
+    nearest_contour,
+)
+
 
 class ContourSegmentTool(QgsMapTool):
     """
     Three-click contour-segment selector.
+
+    Takes one contour layer or a list of them, so a segment can be cut from any
+    contour on screen rather than only from one the analysis ranked.
 
     Signals
     -------
@@ -45,10 +52,10 @@ class ContourSegmentTool(QgsMapTool):
         "Click the END point of the swale on the contour",
     ]
 
-    def __init__(self, canvas, contour_layer, status_bar=None):
+    def __init__(self, canvas, contour_layers, status_bar=None):
         super().__init__(canvas)
         self._canvas = canvas
-        self._layer = contour_layer
+        self._layers = as_layers(contour_layers)
         self._status_bar = status_bar   # optional QStatusBar for hints
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
@@ -115,40 +122,17 @@ class ContourSegmentTool(QgsMapTool):
 
     def _try_select_contour(self, pt):
         radius = self._canvas.mapUnitsPerPixel() * 12
-        rect = QgsRectangle(
-            pt.x() - radius, pt.y() - radius,
-            pt.x() + radius, pt.y() + radius,
-        )
-        # Find all candidates, pick geometrically nearest
-        click_geom = QgsGeometry.fromPointXY(pt)
-        request = QgsFeatureRequest().setFilterRect(rect)
-        best_feature = None
-        best_dist = float("inf")
-        try:
-            features = list(self._layer.getFeatures(request))
-        except RuntimeError:
-            # The contour layer was deleted/swapped while this tool was active.
+        best_feature, alive = nearest_contour(self._layers, pt, radius)
+        if not alive:
+            # Every contour layer was deleted/swapped while this tool was active.
             self._cleanup()
             self.cancelled.emit()
             return
-        for feature in features:
-            dist = feature.geometry().distance(click_geom)
-            if dist < best_dist:
-                best_dist = dist
-                best_feature = feature
-
         if best_feature is None:
             return
 
         geom = best_feature.geometry()
-        elev = 0.0
-        for fname in ("ELEV", "elev", "elevation", "Elevation", "HEIGHT", "height"):
-            if fname in best_feature.fields().names():
-                try:
-                    elev = float(best_feature[fname])
-                except (ValueError, TypeError):
-                    pass
-                break
+        elev = elevation_of(best_feature)
 
         # Convert to shapely — handle multi-geometry by taking longest part
         try:

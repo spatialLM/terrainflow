@@ -19,11 +19,14 @@ from terrainflow_assessment.modules.earthwork_design import (
     Earthwork,
     EarthworkManager,
     Spillway,
+    adoptable_spillway_width,
     bind_crest,
     calculate_spillway_width,
+    default_sill_depth_m,
     effective_freeboard_m,
     effective_head_m,
     head_for_width,
+    sill_limited_head_m,
     spillway_datum,
     spillway_policy,
     spillway_validity,
@@ -415,6 +418,120 @@ class TestSpillwayPolicy:
         _fb, swale_head, swale_band = spillway_policy("swale")
         assert swale_band[0] <= swale_head <= swale_band[1]
         assert swale_band != spillway_policy("dam")[2]
+
+
+class TestDefaultSillDepth:
+    """The depth a fresh sill opens at, which the review table's editor seeds from."""
+
+    def test_it_is_the_types_head_plus_its_freeboard(self):
+        for ew_type in ("swale", "dam", "basin"):
+            freeboard, head, _band = spillway_policy(ew_type)
+            assert default_sill_depth_m(ew_type) == pytest.approx(head + freeboard)
+
+    def test_a_swale_opens_shallower_than_an_embankment(self):
+        """Pinned as a difference rather than as two numbers: the point is that the seed
+        follows the type, and a hard-coded 0.60 would pass a test that only asserted
+        a dam."""
+        assert default_sill_depth_m("swale") < default_sill_depth_m("dam")
+        assert default_sill_depth_m("swale") == pytest.approx(0.30)
+        assert default_sill_depth_m("dam") == pytest.approx(0.60)
+
+    def test_an_unknown_type_falls_back_with_the_policy(self):
+        assert default_sill_depth_m("no-such-type") == pytest.approx(
+            SPILLWAY_MIN_FREEBOARD_M + 0.30)
+
+    def test_it_matches_the_top_of_the_crest_band(self):
+        """The dialog seeds a fresh sill at ``spillway_datum``'s ceiling, so the depth
+        below containment *is* this figure. Two expressions of one rule, pinned together
+        so they cannot drift apart."""
+        rim = 100.0
+        for ew_type in ("swale", "dam"):
+            freeboard, head, _band = spillway_policy(ew_type)
+            _lowest, highest = spillway_datum(
+                rim, invert_elevation=None, head_m=head, min_freeboard_m=freeboard)
+            assert rim - highest == pytest.approx(default_sill_depth_m(ew_type))
+
+
+class TestSillLimitedHead:
+    """The head the *width* is solved at, once the sill is shallower than the design head.
+
+    One rule, and it has to be one function: the properties dialog, the review table, the
+    auto-width pass and the undersized-spillway warning all size the same weir, and a
+    second expression of ``min(head, depth)`` is a second place for them to disagree about
+    what a sill can pass.
+    """
+
+    def test_a_deep_sill_does_not_cap_the_design_head(self):
+        assert sill_limited_head_m(0.30, 1.00) == pytest.approx(0.30)
+
+    def test_a_shallow_sill_is_the_head(self):
+        """The case that discriminates a ``min`` from a ``max``.
+
+        A monotonicity property does not: ``Q / (C*H^1.5)`` is decreasing in H, so the
+        width comes out non-increasing in the depth under *either* operator, and a test
+        that only checked the trend would pass a sign error.
+        """
+        assert sill_limited_head_m(0.30, 0.10) == pytest.approx(0.10)
+
+    def test_an_equal_sill_is_the_same_number_either_way(self):
+        assert sill_limited_head_m(0.30, 0.30) == pytest.approx(0.30)
+
+    def test_no_datum_means_no_cap(self):
+        """What every caller wants where the containment level is unknown -- and what
+        keeps the drag tier and the settled tier from disagreeing about whether the cap
+        applies at all."""
+        assert sill_limited_head_m(0.30, None) == pytest.approx(0.30)
+
+    def test_a_crest_above_its_containment_floors_at_zero(self):
+        """A negative drop is a fault `spillway_validity` reports, not a negative head to
+        raise to the 3/2 power."""
+        assert sill_limited_head_m(0.30, -0.20) == pytest.approx(0.0)
+
+    def test_no_head_stays_no_head(self):
+        assert sill_limited_head_m(None, 0.20) is None
+
+    def test_it_widens_the_weir_the_shallower_the_sill_gets(self):
+        """The behaviour the whole change exists for: the depth control moves the width."""
+        flow = 0.092
+        wide = calculate_spillway_width(flow, sill_limited_head_m(0.30, 0.10))
+        narrow = calculate_spillway_width(flow, sill_limited_head_m(0.30, 1.00))
+        assert wide > narrow
+
+
+class TestAdoptableSpillwayWidth:
+    """A requirement becoming a width the terrain is actually cut to."""
+
+    def test_it_rounds_up_to_whole_cells(self):
+        from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
+
+        assert adoptable_spillway_width(1.43, cell_size=1.0) == pytest.approx(
+            spillway_burn_width(1.43, 1.0))
+
+    def test_without_a_cell_size_it_passes_the_requirement_through(self):
+        assert adoptable_spillway_width(1.43) == pytest.approx(1.43)
+
+    def test_a_requirement_wider_than_the_feature_is_refused(self):
+        """Refused, not clamped. A clamped width would sit permanently short of its own
+        requirement and fire two validity sentences about it forever; ``None`` leaves the
+        caller holding the last width that could be built, with the requirement still
+        reported in full."""
+        assert adoptable_spillway_width(63.45, cell_size=1.0,
+                                        feature_length_m=18.0) is None
+
+    def test_a_requirement_the_feature_can_carry_is_adopted(self):
+        assert adoptable_spillway_width(2.01, cell_size=1.0,
+                                        feature_length_m=18.0) == pytest.approx(3.0)
+
+    def test_both_kinds_of_missing_length_mean_no_bound(self):
+        """The dialog supplies ``None`` for an unmeasurable feature and
+        ``Earthwork.length_m`` supplies ``0.0``; neither is a constraint."""
+        assert adoptable_spillway_width(63.45, feature_length_m=None) is not None
+        assert adoptable_spillway_width(63.45, feature_length_m=0.0) is not None
+
+    def test_a_requirement_of_zero_or_none_is_not_a_width(self):
+        """`calculate_spillway_width` returns 0.0 to mean "these inputs say nothing"."""
+        assert adoptable_spillway_width(0.0, cell_size=1.0) is None
+        assert adoptable_spillway_width(None, cell_size=1.0) is None
 
 
 class TestEffectiveFreeboard:

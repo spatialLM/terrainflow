@@ -18,6 +18,11 @@ from terrainflow_assessment.modules.earthwork_design import (
     calculate_fill_volume,
     calculate_spillway_width,
 )
+from terrainflow_assessment.core.registry.earthwork_defaults import (
+    DimensionDefaults,
+    ResolvedDims,
+    resolve_dimensions,
+)
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
 
 # ---------------------------------------------------------------------------
@@ -1918,3 +1923,78 @@ class TestDamWindowedFlood:
         r_lo, r_hi, c_lo, c_hi = b._feature_cell_bounds(basin)
         assert 0 <= r_lo < r_hi < 300
         assert 0 <= c_lo < c_hi < 40
+
+
+# ---------------------------------------------------------------------------
+# The user's standard dimensions (core/registry/earthwork_defaults)
+# ---------------------------------------------------------------------------
+
+class TestUserStandardDimensions:
+    """The seed path, both halves: shipped when nothing is set, the user's when it is."""
+
+    def _make(self, ew_type="swale", **kw):
+        return Earthwork(ew_type, make_mock_line_geom(), f"Test {ew_type}", **kw)
+
+    @pytest.mark.parametrize("key", ["swale", "berm", "basin", "dam", "diversion"])
+    def test_no_standard_set_reproduces_the_constructor_exactly(self, key):
+        """The acceptance criterion for the whole feature.
+
+        If ``resolve_dimensions`` with no preference does not equal what the
+        constructor has always produced, then a user who never sets a standard has
+        had their numbers moved — which is the one thing this must not do.
+        """
+        ew = self._make(key)
+        shipped = resolve_dimensions(key)
+        assert ew.depth == pytest.approx(shipped.depth)
+        assert ew.top_width_m == pytest.approx(shipped.top_width_m)
+        assert ew.bottom_width_m == pytest.approx(shipped.bottom_width_m)
+
+    def test_unknown_type_also_agrees(self):
+        ew = self._make("moat")
+        shipped = resolve_dimensions("moat")
+        assert (ew.depth, ew.top_width_m, ew.bottom_width_m) == pytest.approx(
+            (shipped.depth, shipped.top_width_m, shipped.bottom_width_m))
+
+    def test_dims_argument_overrides_the_registry_seed(self):
+        ew = self._make("swale", dims=ResolvedDims(0.35, 1.6, 0.9))
+        assert ew.depth == 0.35
+        assert ew.top_width_m == 1.6
+        assert ew.bottom_width_m == 0.9
+
+    def test_dims_argument_does_not_clamp_bottom_width(self):
+        """Storing bottom width is what keeps a user's number off the 0.1 m floor.
+
+        Derived, this triple would floor to 0.1 and describe a V-ditch; passed in, it
+        is the trench the machine actually cuts.
+        """
+        ew = self._make("swale", dims=ResolvedDims(depth=1.0, top_width_m=2.0,
+                                                   bottom_width_m=1.2))
+        assert ew.bottom_width_m == 1.2
+
+    def test_a_standard_reaches_the_constructor_through_resolve(self):
+        prefs = {"swale": DimensionDefaults(0.35, 1.6, 0.9)}
+        ew = self._make("swale", dims=resolve_dimensions("swale", prefs))
+        assert (ew.depth, ew.top_width_m, ew.bottom_width_m) == (0.35, 1.6, 0.9)
+
+    def test_from_dict_ignores_the_users_standard(self):
+        """A saved design must load identically for everyone.
+
+        ``from_dict`` passes no ``dims``, so a payload written before a field existed
+        comes back at the shipped default rather than at whatever the person opening
+        it happens to prefer. This is the guarantee the constructor parameter buys
+        over an ambient global, and it is worth a test of its own.
+        """
+        data = {"type": "swale", "name": "S1",
+                "geometry_wkt": "LINESTRING(0 0, 10 10)"}
+        ew = Earthwork.from_dict(data,
+                                 geometry_factory=lambda _wkt: make_mock_line_geom())
+        assert ew is not None
+        assert ew.depth == 0.5
+        assert ew.top_width_m == 2.0
+
+    def test_from_dict_still_honours_a_stored_dimension(self):
+        data = {"type": "swale", "name": "S1", "depth": 0.42,
+                "geometry_wkt": "LINESTRING(0 0, 10 10)"}
+        ew = Earthwork.from_dict(data,
+                                 geometry_factory=lambda _wkt: make_mock_line_geom())
+        assert ew.depth == 0.42

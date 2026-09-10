@@ -165,6 +165,9 @@ class TerrainFlowAssessmentPlugin:
 
         self._wire_signals()
         self._wire_project_persistence()
+        # After wiring, so the emit lands on a connected panel: start the swale-segment
+        # criteria at the user's own standard section rather than the shipped one.
+        self._earthworks.seed_swale_criteria_from_standard()
 
     def _wire_project_persistence(self):
         """Save/restore the earthwork design with the QGIS project.
@@ -249,6 +252,7 @@ class TerrainFlowAssessmentPlugin:
         p.place_spillway_requested.connect(ew.activate_place_spillway)
         p.place_spillway_for_requested.connect(ew.place_spillway_for)
         p.edit_earthwork_requested.connect(ew.edit_earthwork_at)
+        p.set_spillway_depth_requested.connect(ew.set_spillway_depth)
         p.connect_earthworks_requested.connect(ew.activate_connect_earthworks)
         p.link_drain_to_spillway_requested.connect(ew.activate_link_drain_to_spillway)
         p.choose_design_intensity_requested.connect(ew.choose_design_intensity)

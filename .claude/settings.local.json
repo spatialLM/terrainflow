@@ -1,6 +1,10 @@
 {
+  "env": {
+    "TERRAINFLOW_QGIS_PYTHON": "F:\\bin\\python-qgis-ltr.bat"
+  },
   "permissions": {
     "allow": [
+      "PowerShell(& \"F:\\\\Terrain Flow Design\\\\TerrainFlow\\\\run_qgis_tests.ps1\"*)",
       "Bash(wc:*)",
       "Bash(pip show:*)",
       "Bash(pip install:*)",
@@ -14,16 +18,15 @@
       "Bash(git commit *)",
       "Skill(run)",
       "Skill(run:*)",
-      "PowerShell(Start-Process \"C:\\\\Program Files\\\\QGIS 3.40.15\\\\bin\\\\qgis-ltr-bin.exe\")",
+      "PowerShell(Start-Process \"F:\\\\bin\\\\qgis-ltr-bin.exe\")",
       "Bash(git ls-remote *)",
       "Bash(git push *)",
       "Bash(git tag *)",
       "Bash(git remote *)",
       "Bash(git fetch *)",
-      "PowerShell(& \"C:\\\\Users\\\\liamm\\\\Documents\\\\TerrainFlow\\\\deploy.ps1\")",
+      "PowerShell(& \"F:\\\\Terrain Flow Design\\\\TerrainFlow\\\\deploy.ps1\")",
       "PowerShell(.\\\\run_qgis_tests.ps1:*)",
-      "PowerShell(& \"C:\\\\Users\\\\liamm\\\\Documents\\\\TerrainFlow\\\\run_qgis_tests.ps1\"*)",
-      "Read(//c/Users/liamm/.claude/**)"
+      "Read(//c/Users/Liam/.claude/**)"
     ]
   }
 }
