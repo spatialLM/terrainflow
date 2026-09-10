@@ -31,6 +31,12 @@ plugin/plugin/
 /*.sbn
 /*.sbx
 
+# Diagnostic dumps written to the repo ROOT while chasing something down (the
+# per-feature catchment/labelling table, and whatever the next one is). Scratch
+# output of one debugging session, not a record worth carrying — root-anchored
+# for the same reason as the stray shapefiles above.
+/*_diag.txt
+
 # Test-harness screenshots (tests_qgis/ Tier 2) - regenerated every run
 tests_qgis/_shots/
 tests_qgis/_shots_baseline/

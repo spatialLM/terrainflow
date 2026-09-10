@@ -1,6 +1,0 @@
-Swale 1      type=swale      enabled=True geom=LineString valid=True cells=255 in_domain=255 labelled=True catchment=28361 outlet=True
-Swale 2      type=swale      enabled=True geom=LineString valid=True cells=276 in_domain=276 labelled=True catchment=5447 outlet=True
-Swale 3      type=swale      enabled=True geom=LineString valid=True cells=546 in_domain=546 labelled=True catchment=30082 outlet=True
-Dam 4        type=dam        enabled=True geom=LineString valid=True cells=38 in_domain=38 labelled=True catchment=20285 outlet=True
-Basin 5      type=basin      enabled=True geom=Polygon valid=True cells=3459 in_domain=3459 labelled=True catchment=7517 outlet=True
-grid=(1319, 2157)  domain=2845083  exit=2397220  sink=356171
