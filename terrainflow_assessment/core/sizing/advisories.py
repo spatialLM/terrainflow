@@ -135,6 +135,63 @@ def cn_slope_crosscheck(cn: float, side_slope: float) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Earthmoving: bulking and compaction
+# ---------------------------------------------------------------------------
+
+# **The number this replaces was anonymous, and there were two of them.**
+# `earthwork_design.berm_spoil_per_metre` multiplies a trench section by a bare 0.75,
+# and `DEMBurner` does the same to a cut-depth sum, with no source on either and
+# MATHS_AUDIT §5 still listing shrink/swell as unverified. A third differently-sourced
+# factor would be the "four incompatible derivations of berm height" trap the project
+# already documents, so this is the one place it is named.
+#
+# Two factors, because cut and fill are measured in different states and the difference
+# is the whole point of a balance:
+#
+#   BULKING     bank (in situ) → loose. What a truck carries.
+#   COMPACTION  bank → placed and compacted. What a fill consumes.
+#
+# Values are the usual small-earthworks ranges (Caterpillar *Performance Handbook*
+# load-and-swell tables; Church, *Excavation Handbook*), on the same five textures as
+# every other table here. They are **typical figures, not a soil test**, and the
+# advisory says so.
+
+#: bank → loose. Excavated soil takes up more room than it did in the ground.
+SOIL_BULKING: dict[str, float] = {
+    "Sand":       1.10,
+    "Sandy loam": 1.18,
+    "Loam":       1.25,
+    "Clay loam":  1.30,
+    "Clay":       1.35,
+}
+
+#: bank → compacted fill. Placed and rolled, soil occupies less than it did in situ.
+SOIL_COMPACTION: dict[str, float] = {
+    "Sand":       0.95,
+    "Sandy loam": 0.90,
+    "Loam":       0.88,
+    "Clay loam":  0.87,
+    "Clay":       0.85,
+}
+
+#: The historical factor, kept as a named constant so the existing spoil figures do
+#: not move. `berm_spoil_per_metre` and the burner still use **this**, not the
+#: soil-keyed table: wiring those onto soil changes berm sizing on every design, which
+#: is a decision to take on its own with `checks_fixture_regression` in hand.
+DEFAULT_COMPACTION = 0.75
+
+
+def bulking_factor(soil_name: str | None) -> float:
+    """bank → loose, for the soil. See :data:`SOIL_BULKING`."""
+    return SOIL_BULKING[_resolve_soil(soil_name)]
+
+
+def compaction_factor(soil_name: str | None) -> float:
+    """bank → compacted fill, for the soil. See :data:`SOIL_COMPACTION`."""
+    return SOIL_COMPACTION[_resolve_soil(soil_name)]
+
+
+# ---------------------------------------------------------------------------
 # Spacing between contour-aligned features
 # ---------------------------------------------------------------------------
 

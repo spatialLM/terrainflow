@@ -317,6 +317,7 @@ class ReportingController:
             natural_ponding_m3=(state.baseline_result or {}).get(
                 "ponded_volume_m3"),
             burn_quantities=state.burn_quantities,
+            haul_plan=state.haul_plan,
             inputs=self._inputs(),
             dem=self._dem_provenance(),
             maps=self._map_reasons(),

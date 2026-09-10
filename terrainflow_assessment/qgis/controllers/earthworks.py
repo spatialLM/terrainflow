@@ -5036,7 +5036,26 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 moved = burn_quantities(burner.original, modified_dem, cell_area)
             except Exception:
                 moved = None
-            return {"path": mod_path, "burn_quantities": moved,
+
+            # Where the earth has to go, computed in the same pass because both
+            # surfaces are already in frame. Re-reading them elsewhere would be a
+            # second alignment path over the same two rasters.
+            haul = None
+            try:
+                report(75, "Matching cut to fill...")
+                from terrainflow_assessment.modules.mass_haul import (
+                    allocate_haul,
+                    haul_regions,
+                )
+                cuts, fills = haul_regions(
+                    burner.original, modified_dem, burner.transform, cell_area)
+                haul = allocate_haul(cuts, fills)
+            except Exception:
+                # A haul plan is enrichment; a burn that produced a surface must not
+                # fail because the earth could not be matched.
+                haul = None
+
+            return {"path": mod_path, "burn_quantities": moved, "haul_plan": haul,
                     "warnings": list(getattr(burner, "warnings", []))}
 
         worker = TaskWorker(work, label="burn")
@@ -5055,6 +5074,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._iface.messageBar().pushWarning("TerrainFlow Assessment", msg)
         self._state.modified_dem_path = burned["path"]
         self._state.burn_quantities = burned["burn_quantities"]
+        self._state.haul_plan = burned.get("haul_plan")
         mod_path = burned["path"]
 
         cell_area_m2 = self._state.dem_info.cell_area_m2 if self._state.dem_info else 1.0

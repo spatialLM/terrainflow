@@ -220,6 +220,10 @@ class ReportData:
     # {cut_m3, fill_m3} the burn moved. None before a burn — the measured
     # earthmoving does not exist until the design has been cut into the terrain.
     burn_quantities: Optional[dict] = None
+    # Where the earth has to go: matched cut and fill regions, haul moment, mean
+    # distance and the free-haul split. None before a burn, and None where the burn
+    # produced no matched regions — the balance still prints without it.
+    haul_plan: Optional[dict] = None
 
     inputs: dict = field(default_factory=dict)   # panel settings, for the appendix
     dem: dict = field(default_factory=dict)      # provenance
@@ -1568,7 +1572,7 @@ def _earthmoving(data):
         ["Fill — soil placed", fmt_volume(drawn_fill), fmt_volume(fill),
          _ratio(drawn_fill, fill)],
     ]
-    return [DataTable(
+    sections = [DataTable(
         title="Earthmoving — drawn against measured",
         headers=["", "Geometric calculated (flat ground)", "Measured (this terrain)",
                  "Difference"],
@@ -1580,6 +1584,72 @@ def _earthmoving(data):
               "Site totals only: earthworks overlap and a berm sits outside its own "
               "footprint, so splitting the measured figure between features would "
               "report the splitting rule rather than the job."))]
+
+    sections.extend(_earthwork_balance_section(data, cut, fill))
+    return sections
+
+
+def _earthwork_balance_section(data, cut, fill):
+    """Does the design balance, and what does moving it cost.
+
+    Cut and fill are both **bank** measure off the burn, and subtracting one from the
+    other is not a balance: a compacted fill swallows more in-situ soil than its own
+    placed volume. The row that matters is the bank volume the fill actually consumes,
+    and the surplus or deficit that leaves.
+
+    Built from existing section types on purpose — a new ``Section`` subclass would
+    cost a handler in both renderers and the parity test, for a table.
+    """
+    if cut is None and fill is None:
+        return []
+
+    from terrainflow_assessment.modules.mass_haul import earthwork_balance
+
+    soil = (getattr(data, "earthwork_soil_name", None)
+            or getattr(data, "soil_name", None))
+    b = earthwork_balance(cut or 0.0, fill or 0.0, soil)
+
+    rows = [
+        ["Cut (bank measure)", fmt_volume(b["bank_cut_m3"])],
+        ["Loose to cart", fmt_volume(b["loose_from_cut_m3"])],
+        ["Fill placed (compacted)", fmt_volume(b["bank_fill_m3"])],
+        ["In-situ soil the fill consumes", fmt_volume(b["bank_needed_for_fill_m3"])],
+    ]
+    if b["surplus_m3"] > 0:
+        rows.append(["Surplus — spoil to dispose of", fmt_volume(b["surplus_m3"])])
+    elif b["deficit_m3"] > 0:
+        rows.append(["Deficit — soil to import", fmt_volume(b["deficit_m3"])])
+    else:
+        rows.append(["Balance", "balanced"])
+
+    haul = getattr(data, "haul_plan", None) or {}
+    if haul.get("matched_m3"):
+        rows.extend([
+            ["Earth matched cut to fill", fmt_volume(haul["matched_m3"])],
+            ["Mean haul distance", f"{haul['mean_haul_m']:,.0f} m"],
+            ["Haul moment", f"{haul['haul_moment_m3m']:,.0f} m3.m"],
+            [f"Within free haul ({haul.get('free_haul_m', 0):,.0f} m)",
+             fmt_volume(haul["free_haul_m3"])],
+            ["Overhaul", f"{haul['overhaul_m3m']:,.0f} m3.m"],
+        ])
+        haul_note = (
+            f" Haul matched by {haul.get('method', 'allocation')} between cut and fill "
+            "regions, measured STRAIGHT LINE — real haul follows a track, around a "
+            "gully and up a grade, so this is a lower bound. The free-haul distance is "
+            "a contract term, not a physical one.")
+    else:
+        haul_note = (" No haul figure: the burn produced no matched cut and fill "
+                     "regions to move earth between.")
+
+    return [DataTable(
+        title="Earthwork balance and haul",
+        headers=["", "Volume"],
+        rows=rows,
+        note=("Measured · Cut and fill are quoted in different states and are not "
+              f"comparable as they stand: bulking {b['bulking_factor']:.2f} takes bank "
+              f"to loose, compaction {b['compaction_factor']:.2f} takes bank to placed "
+              "fill. Both are typical figures for the soil named, not a soil test."
+              + haul_note))]
 
 
 def _measured(v):

@@ -103,7 +103,13 @@ class ComparisonResult:
     post: Optional[PostInterventionReport] = None
     net_cut_m3: float = 0.0             # total soil excavated
     net_fill_m3: float = 0.0            # total material placed
-    net_cut_fill_m3: float = 0.0        # cut - fill (positive = net cut)
+    # cut − fill, both drawn from the sections. A **geometric difference, not a
+    # balance**: the two are quoted in different states, because a compacted fill
+    # swallows more in-situ soil than its own placed volume. The balance is
+    # ``mass_haul.earthwork_balance``, which converts between the states first, and it
+    # is what the report prints. Kept because callers read it — but it must not be
+    # labelled "balance" anywhere a user can see.
+    net_cut_fill_m3: float = 0.0
     verification: Optional[VerificationResult] = None  # terrain-vs-analytic (§4)
 
 

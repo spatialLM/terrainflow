@@ -1626,3 +1626,76 @@ class TestLetteringPastTheAlphabet:
 
         for n in range(200):
             assert _suffix(n).isalpha(), (n, _suffix(n))
+
+
+class TestEarthworkBalanceSection:
+    """The balance and haul rows, which extend the existing earthmoving section.
+
+    Built from existing section types on purpose — a new `Section` subclass would cost
+    a handler in both renderers and the parity test, for a table.
+    """
+
+    @staticmethod
+    def _report(**kwargs):
+        # The build-schedule page needs a design; without one the whole page — and so
+        # the earthmoving section it ends with — is correctly absent.
+        kwargs.setdefault("earthworks", [_feature()])
+        kwargs.setdefault("burn_quantities", {"cut_m3": 1000.0, "fill_m3": 900.0})
+        return build_report(_data(**kwargs))
+
+    @staticmethod
+    def _balance_table(report):
+        found = [t for t in _sections(report, DataTable)
+                 if t.title == "Earthwork balance and haul"]
+        return found[0] if found else None
+
+    def test_the_section_appears_once_a_burn_has_run(self):
+        table = self._balance_table(self._report())
+        assert table is not None, "no balance table after a burn"
+        labels = [row[0] for row in table.rows]
+        assert "Cut (bank measure)" in labels
+        assert "In-situ soil the fill consumes" in labels
+
+    def test_a_balance_is_not_cut_minus_fill(self):
+        """1000 cut against 900 placed fill is a DEFICIT once compaction is applied,
+        even though the raw difference is +100."""
+        table = self._balance_table(self._report())
+        labels = [row[0] for row in table.rows]
+        assert any("Deficit" in label for label in labels), labels
+
+    def test_the_factors_are_named_on_the_page(self):
+        """A figure derived from a factor the reader cannot see is a rumour."""
+        table = self._balance_table(self._report())
+        assert "bulking" in table.note and "compaction" in table.note
+        assert "not a soil test" in table.note
+
+    def test_haul_rows_appear_when_a_plan_exists(self):
+        plan = {
+            "matched_m3": 500.0, "mean_haul_m": 40.0, "haul_moment_m3m": 20_000.0,
+            "free_haul_m3": 500.0, "overhaul_m3m": 0.0, "free_haul_m": 150.0,
+            "method": "least-cost transportation (LP)",
+        }
+        table = self._balance_table(self._report(haul_plan=plan))
+        labels = [row[0] for row in table.rows]
+        assert "Mean haul distance" in labels
+        assert "Haul moment" in labels
+
+    def test_the_straight_line_caveat_is_stated(self):
+        """Real haul follows a track, around a gully, up a grade. This is a lower
+        bound and the page has to say so."""
+        plan = {
+            "matched_m3": 500.0, "mean_haul_m": 40.0, "haul_moment_m3m": 20_000.0,
+            "free_haul_m3": 500.0, "overhaul_m3m": 0.0, "free_haul_m": 150.0,
+            "method": "least-cost transportation (LP)",
+        }
+        table = self._balance_table(self._report(haul_plan=plan))
+        assert "STRAIGHT LINE" in table.note
+        assert "lower bound" in table.note
+        assert "contract term" in table.note
+
+    def test_without_a_haul_plan_the_balance_still_prints_and_says_why(self):
+        table = self._balance_table(self._report(haul_plan=None))
+        assert table is not None
+        assert "No haul figure" in table.note
+        labels = [row[0] for row in table.rows]
+        assert "Mean haul distance" not in labels
