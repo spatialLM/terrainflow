@@ -27,9 +27,32 @@ function Find-QgisGui {
         }
         return $env:TERRAINFLOW_QGIS_GUI
     }
-    $roots = @('C:\Program Files', 'C:\Program Files (x86)', 'C:\OSGeo4W')
+    # An OSGeo4W install put at a drive root has bin\qgis-ltr.bat directly under it,
+    # with no "QGIS x.y" folder in between -- which is the shape on this machine
+    # (F:\bin\qgis-ltr.bat). Scanning only C:\Program Files finds nothing there and
+    # the throw below then blames a missing QGIS rather than a missed layout.
+    $drives = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+              Where-Object { $_.Root -match '^[A-Za-z]:\\$' }
+    foreach ($drive in $drives) {
+        foreach ($name in @('qgis-ltr.bat', 'qgis.bat')) {
+            $candidate = Join-Path $drive.Root "bin\$name"
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+
+    $roots = @()
+    foreach ($drive in $drives) {
+        $roots += (Join-Path $drive.Root 'Program Files')
+        $roots += (Join-Path $drive.Root 'Program Files (x86)')
+        $roots += (Join-Path $drive.Root 'OSGeo4W')
+        $roots += (Join-Path $drive.Root 'OSGeo4W64')
+    }
     foreach ($root in $roots) {
         if (-not (Test-Path $root)) { continue }
+        foreach ($name in @('qgis-ltr.bat', 'qgis.bat')) {
+            $direct = Join-Path $root "bin\$name"
+            if (Test-Path $direct) { return $direct }
+        }
         $installs = Get-ChildItem $root -Directory -Filter 'QGIS *' -ErrorAction SilentlyContinue |
                     Sort-Object Name -Descending
         foreach ($install in $installs) {
@@ -60,6 +83,17 @@ $qgisArgs = @(
     '--code', $Script
 )
 
+# Start-Process joins -ArgumentList with spaces and does NOT quote the parts, so a
+# script path containing a space (this repo lives under "Terrain Flow Design")
+# arrives at QGIS as three arguments and --code gets a truncated path. QGIS swallows
+# that silently: it starts normally, never runs launch_in_qgis.py, and the run dies
+# at the watchdog with no report and nothing to explain it.
+# The call operator (&) quotes properly, so only the Start-Process form needs this --
+# which is why -Keep worked while unattended runs did not.
+$qgisArgsQuoted = $qgisArgs | ForEach-Object {
+    if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+}
+
 function Get-QgisPids {
     @(Get-Process -Name 'qgis*' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Id)
@@ -79,7 +113,7 @@ if ($Keep) {
         Write-Host "Note: $($preExisting.Count) QGIS process(es) already running; they will not be touched."
     }
 
-    Start-Process -FilePath $QgisGui -ArgumentList $qgisArgs | Out-Null
+    Start-Process -FilePath $QgisGui -ArgumentList $qgisArgsQuoted | Out-Null
 
     $ourPids = @()
     $appearBy = (Get-Date).AddSeconds(60)
@@ -107,6 +141,16 @@ if ($Keep) {
         if (Test-Path $Report) {
             Write-Host "`n--- gui_report.txt (partial) ---"
             Get-Content $Report -Encoding UTF8
+        } else {
+            # launch_in_qgis.py writes a breadcrumb report the moment it loads, so no
+            # report AT ALL means --code never reached the file -- not that the run
+            # hung. Say so, or this presents as a timing problem for the next hour.
+            Write-Warning @"
+No report was written at all, so --code never reached launch_in_qgis.py.
+launch_in_qgis.py writes a breadcrumb the moment it loads, so its absence means
+the script was never executed - check the path is correct and quoted:
+  $Script
+"@
         }
         exit 1
     }
