@@ -131,6 +131,76 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
     # ---------------------------------------------------------------- Contour analysis
 
+    def suggest_spacing(self):
+        """Derive a contour interval from the terrain instead of asking for a guess.
+
+        Reads the slope raster over the usable area, then asks both spacing rules —
+        the terrace vertical interval for erosion control, and how wide an upslope
+        strip the drawn section can actually hold — and reports the one that governs.
+
+        Cheap enough to run inline: a percentile over the slope array is tens of
+        milliseconds, so there is no worker and no progress to report.
+        """
+        # The precondition is a loaded DEM, not a baseline: the slope raster is written
+        # by ``on_dem_changed``. The erosion rule needs only slope, so the advice is
+        # available immediately; the capture rule needs a storm depth and degrades to
+        # "erosion governs" until Baseline has produced one.
+        slope_path = self._state.slope_raster_path
+        if not slope_path or not os.path.exists(slope_path):
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "Load a DEM first — the advice is read off its slope raster.")
+            return
+
+        import numpy as np
+        import rasterio
+
+        from terrainflow_assessment.core.sizing import spacing_advisory
+        from terrainflow_assessment.modules.swale_design import capacity_per_metre
+        from terrainflow_assessment.modules.terrain_indices import slope_statistics
+
+        with rasterio.open(slope_path) as src:
+            slope = src.read(1).astype("float64")
+            nodata = src.nodata
+        if nodata is not None:
+            slope = np.where(slope == nodata, np.nan, slope)
+
+        stats = slope_statistics(slope)
+        if stats is None:
+            self._iface.messageBar().pushWarning(
+                "TerrainFlow Assessment",
+                "No usable slope values — the DEM may be entirely nodata here.")
+            return
+
+        panel = self._panel
+        capacity = capacity_per_metre(
+            panel.swale_depth_m, panel.swale_width_m,
+            side_slope=panel.swale_side_slope,
+            duration_hr=panel.duration_hr,
+        )
+        runoff_mm = (self._state.baseline_result or {}).get("runoff_mm")
+
+        # Advised at the MEDIAN slope, with the quartiles printed beside it. A farm is
+        # not one slope, and a single figure is the answer that hides the paddock the
+        # advice is wrong for.
+        advice = spacing_advisory(
+            stats["p50_grade"] * 100.0,
+            soil_name=panel.earthwork_soil_name,
+            runoff_mm=runoff_mm,
+            capacity_m3_per_m=capacity or None,
+        )
+
+        vi = advice["vertical_interval_m"]
+        spread = (f"Ground runs {stats['p25']:.1f}° / {stats['p50']:.1f}° / "
+                  f"{stats['p75']:.1f}° (quartiles). ")
+        if advice["recommended_spacing_m"] is None:
+            self._panel.set_spacing_advice(spread + advice["text"])
+            return
+
+        text = (f"{spread}{advice['text']} Interval set to {vi:.1f} m; "
+                f"features about {advice['recommended_spacing_m']:.0f} m apart.")
+        self._panel.set_spacing_advice(text, interval_m=round(vi, 1))
+
     def run_contour_analysis(self):
         if not self._state.dem_path:
             self._iface.messageBar().pushWarning(

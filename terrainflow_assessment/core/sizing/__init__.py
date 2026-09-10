@@ -22,9 +22,12 @@ Conventions
 
 from .advisories import (  # noqa: F401
     batter_advisory,
+    capture_spacing,
     cn_slope_crosscheck,
     grade_advisory,
     soil_from_cn,
+    spacing_advisory,
+    terrace_vertical_interval,
 )
 from .primitives import (  # noqa: F401
     BasinResult,

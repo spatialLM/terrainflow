@@ -208,6 +208,88 @@ SPILLWAY_BURNED_FILL = (18, 115, 181, 120)
 SPILLWAY_BURNED_EDGE = (18, 115, 181, 255)
 
 
+# --------------------------------------------------------------------------- terrain indices
+
+# The terrain indices are the first rasters here that are not volumes of water, and two
+# of them cannot be drawn under the two rules at the top of this file. Rather than bend
+# those rules quietly, the exceptions are written out — the same way surface runoff's
+# fade-in is — so the report legend and the panel key can be read against them.
+#
+# **A third rule, for signed quantities.** A diverging ramp is for a quantity whose
+# **zero is a real boundary**, not merely its midpoint: convex ground and concave ground
+# are different things, and the cell between them is neither. Such a ramp must be
+# anchored **symmetrically** about zero, or the two tails re-order against each other
+# and the eye reads an asymmetry the terrain does not have. Its centre is transparent,
+# which keeps "alpha is for absence" intact — planar ground is the *absence* of
+# curvature, not a small amount of it.
+#
+# **A fourth, for cyclic quantities.** Aspect has no magnitude at all: 359° and 1° are
+# neighbours, so any light-to-dark ramp puts a hard seam across the map at north. It is
+# drawn as **named classes**, not a ramp — which is also what the decision needs ("that
+# face is north-facing"), and what the report legend can print as swatches with words.
+
+#: Topographic wetness index. A water quantity, so the rules at the top apply as
+#: written: light where dry, dark where wet, alpha only to keep dry ground out of the
+#: way. Shares the ``WATER_CAPTURED`` hue family on purpose — the wetness map and the
+#: ponding map answer the same question at different confidence, and a reader who has
+#: learnt one should be able to read the other.
+WETNESS_INDEX = (
+    (0.0, (168, 224, 240, 0), "driest"),
+    (0.25, (168, 224, 240, 255), "dry"),
+    (0.55, (72, 160, 215, 255), "damp"),
+    (0.8, (28, 96, 180, 255), "wet"),
+    (1.0, (8, 36, 110, 255), "wettest"),
+)
+
+#: Stream power and sediment transport — the erosive pair.
+#:
+#: **Warm, and deliberately not blue.** This is not water arriving; it is soil leaving.
+#: Drawing it in the water family would say "more water" about a quantity that means
+#: "more erosion", and the two maps get read side by side. It is not the overtopping red
+#: either — that is a hazard on one structure, and this is a gradient over the whole
+#: site — so it runs through ochre to a dark red-brown rather than to a signal red.
+EROSIVE_POWER = (
+    (0.0, (250, 240, 200, 0), "none"),
+    (0.2, (250, 232, 168, 255), "low"),
+    (0.5, (221, 168, 83, 255), "moderate"),
+    (0.78, (176, 106, 38, 255), "high"),
+    (1.0, (105, 48, 18, 255), "severe"),
+)
+
+#: Plan and profile curvature — the file's first diverging ramp.
+#:
+#: Fractions run −1 → +1 and the renderer anchors them on ±p95 of |curvature|, not on
+#: the raw min and max: one spike would otherwise pull a tail out and leave the other
+#: flat. Concave (collecting — a hollow) is blue-green and convex (shedding — a nose) is
+#: ochre; neither end is the water blue, because convex ground drawn in it would read as
+#: standing water.
+CURVATURE = (
+    (-1.0, (13, 106, 110, 255), "concave"),
+    (-0.35, (110, 178, 180, 200), "gathering"),
+    (0.0, (245, 245, 240, 0), "planar"),
+    (0.35, (214, 172, 106, 200), "shedding"),
+    (1.0, (140, 88, 20, 255), "convex"),
+)
+
+#: Aspect, as eight named compass classes plus the flat sentinel.
+#:
+#: The value is each class's lower bound in compass degrees; ``-1`` is ground with no
+#: aspect at all. Opposing faces are the contrast that matters on a NZ hill farm — a
+#: north face dry and warm, a south face cool and damp — so those two are the strongest
+#: pair here and the side slopes are deliberately muted between them.
+ASPECT_CLASSES = (
+    (-1.0, (235, 235, 232, 255), "flat"),
+    (0.0, (214, 96, 45, 255), "N"),
+    (45.0, (223, 152, 92, 255), "NE"),
+    (90.0, (226, 205, 150, 255), "E"),
+    (135.0, (176, 200, 160, 255), "SE"),
+    (180.0, (58, 122, 156, 255), "S"),
+    (225.0, (108, 158, 182, 255), "SW"),
+    (270.0, (168, 196, 206, 255), "W"),
+    (315.0, (208, 168, 120, 255), "NW"),
+)
+
+
 def surface_runoff_ramp(scale=DEFAULT_SURFACE_RUNOFF_SCALE):
     """Stops for the surface-runoff raster at the given panel scale mode."""
     fractions = SURFACE_RUNOFF_SCALES.get(scale,

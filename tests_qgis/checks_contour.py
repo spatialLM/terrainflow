@@ -659,3 +659,59 @@ def check_usable_area_in_a_different_crs_still_clips(dem_path):
             f"the identical area in the DEM's own CRS — the reprojection is wrong, not "
             f"merely present"
         )
+
+
+def check_spacing_advice_works_before_a_baseline(dem_path):
+    """A loaded DEM is the whole precondition — the slope raster is written with it.
+
+    The erosion rule needs only slope, so the advice is available immediately. The
+    capture rule needs a storm depth and simply does not answer until Baseline has
+    produced one, which is why "erosion governs" is the honest reading here rather
+    than a refusal.
+    """
+    with PluginHarness(dem_path) as h:
+        h.panel.suggest_spacing_requested.emit()
+        h.assert_no_errors("spacing advice before baseline")
+
+        text = h.panel._spacing_advice_lbl.text()
+        assert text, "no advice was produced from a loaded DEM"
+        assert "governs" in text or "level" in text
+
+
+def check_spacing_advisor_fills_the_interval_and_says_why(dem_path):
+    """The interval stops being a guess, and arrives with the sentence that produced it."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+
+        before = h.panel.contour_interval_m
+        h.panel.suggest_spacing_requested.emit()
+        h.assert_no_errors("spacing advice")
+
+        text = h.panel._spacing_advice_lbl.text()
+        assert text, "the advisory produced no text"
+        assert "quartiles" in text, (
+            "the advice should report the slope spread — a farm is not one slope, and "
+            "a single figure hides the paddock the advice is wrong for"
+        )
+        assert "governs" in text, (
+            "the advice must name which of the two rules bound, or the number has no "
+            "stated basis"
+        )
+
+        after = h.panel.contour_interval_m
+        assert after > 0
+        # The spin box stays editable and the advisory is a suggestion, but on sloping
+        # ground it should actually have offered something.
+        assert after != before or "level" in text
+
+
+def check_spacing_advice_does_not_overwrite_on_flat_ground(dem_path):
+    """No finite erosion spacing means nothing to fill, and the user's value stands."""
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel._contour_interval_spin.setValue(3.7)
+        h.panel.set_spacing_advice("ground is effectively level", interval_m=None)
+        assert h.panel.contour_interval_m == 3.7, (
+            "an advisory with no recommendation still moved the user's interval"
+        )

@@ -20,6 +20,7 @@ from terrainflow_assessment.qgis.controllers.design_file import DesignFileContro
 from terrainflow_assessment.qgis.controllers.earthworks import EarthworksController
 from terrainflow_assessment.qgis.controllers.reporting import ReportingController
 from terrainflow_assessment.qgis.controllers.simulation import SimulationController
+from terrainflow_assessment.qgis.controllers.terrain import TerrainController
 from terrainflow_assessment.qgis.workers._lifecycle import join_workers
 
 
@@ -78,7 +79,7 @@ class TerrainFlowAssessmentPlugin:
 
         # 2 + 3. Per-controller teardown: active map tool off the canvas, and the
         #        canvas/layer-tree connections undone.
-        for name in ("_baseline", "_contour", "_earthworks",
+        for name in ("_baseline", "_contour", "_terrain", "_earthworks",
                      "_simulation", "_reporting", "_design_file"):
             controller = getattr(self, name, None)
             teardown = getattr(controller, "teardown", None)
@@ -146,6 +147,7 @@ class TerrainFlowAssessmentPlugin:
 
         self._baseline = BaselineController(*args)
         self._contour = ContourController(*args)
+        self._terrain = TerrainController(*args)
         self._earthworks = EarthworksController(*args)
         self._simulation = SimulationController(*args)
         self._reporting = ReportingController(*args)
@@ -199,6 +201,7 @@ class TerrainFlowAssessmentPlugin:
         p = self.panel
         bl = self._baseline
         ct = self._contour
+        tr = self._terrain
         ew = self._earthworks
         sim = self._simulation
         rep = self._reporting
@@ -222,7 +225,12 @@ class TerrainFlowAssessmentPlugin:
         p.toggle_slope_class_requested.connect(ew.toggle_slope_class)
         p.toggle_slope_vectors_requested.connect(ew.toggle_slope_vectors)
 
+        # Terrain indices
+        p.run_terrain_indices_requested.connect(tr.run_terrain_indices)
+        p.terrain_index_toggled.connect(tr.toggle_terrain_index)
+
         # Contour
+        p.suggest_spacing_requested.connect(ct.suggest_spacing)
         p.run_contour_analysis_requested.connect(ct.run_contour_analysis)
         p.select_top5_contours_requested.connect(ct.select_top5_contours)
         p.find_segments_requested.connect(ct.run_segment_analysis)

@@ -381,3 +381,115 @@ class TestLevelCrestFromSpoil:
         import math
         assert level_crest_from_spoil(
             [50.0, math.nan, 50.0], 1.0, 4.0) == pytest.approx(52.0)
+
+
+# ---------------------------------------------------------------------------
+# Spacing advisory — the terrace rule, the capture rule, and which governs
+# ---------------------------------------------------------------------------
+
+class TestTerraceVerticalInterval:
+    def test_matches_the_published_form_by_hand(self):
+        """VI(ft) = X*S% + Y, then feet to metres. Nothing else."""
+        from terrainflow_assessment.core.sizing import terrace_vertical_interval
+
+        # X=0.6, Y=2.0, S=10% -> 0.6*10 + 2.0 = 8.0 ft -> 2.4384 m
+        got = terrace_vertical_interval(10.0, x=0.6, y=2.0)
+        assert got == pytest.approx(8.0 * 0.3048)
+
+    def test_rises_with_slope(self):
+        from terrainflow_assessment.core.sizing import terrace_vertical_interval
+
+        assert (terrace_vertical_interval(20.0, "Loam")
+                > terrace_vertical_interval(5.0, "Loam"))
+
+    def test_erodible_soils_get_the_closer_spacing(self):
+        """Sand carries the lowest Y, so its interval is the tightest."""
+        from terrainflow_assessment.core.sizing import terrace_vertical_interval
+
+        assert (terrace_vertical_interval(10.0, "Sand")
+                < terrace_vertical_interval(10.0, "Clay"))
+
+    def test_level_ground_returns_the_constant_not_zero(self):
+        from terrainflow_assessment.core.sizing import terrace_vertical_interval
+
+        assert terrace_vertical_interval(0.0, x=0.6, y=2.0) == pytest.approx(
+            2.0 * 0.3048)
+
+
+class TestCaptureSpacing:
+    def test_is_capacity_over_runoff_depth(self):
+        from terrainflow_assessment.core.sizing import capture_spacing
+
+        # 0.5 m3 per metre of swale, 25 mm of runoff -> 0.5 / 0.025 = 20 m strip
+        assert capture_spacing(25.0, 0.5) == pytest.approx(20.0)
+
+    def test_no_runoff_means_no_limit(self):
+        from terrainflow_assessment.core.sizing import capture_spacing
+
+        assert capture_spacing(0.0, 0.5) == math.inf
+
+
+class TestSpacingAdvisory:
+    def test_the_smaller_rule_governs(self):
+        """Two different failure modes, and neither excuses the other."""
+        from terrainflow_assessment.core.sizing import spacing_advisory
+
+        # Steep ground: the terrace rule bites first.
+        steep = spacing_advisory(25.0, "Loam", runoff_mm=10.0,
+                                 capacity_m3_per_m=5.0)
+        assert steep["governing"] == "erosion"
+        assert steep["recommended_spacing_m"] == pytest.approx(
+            steep["erosion_spacing_m"])
+
+        # Gentle ground with a small section: capture bites first.
+        gentle = spacing_advisory(1.0, "Loam", runoff_mm=40.0,
+                                  capacity_m3_per_m=0.2)
+        assert gentle["governing"] == "capture"
+        assert gentle["recommended_spacing_m"] == pytest.approx(
+            gentle["capture_spacing_m"])
+
+    def test_the_recommendation_never_exceeds_either_rule(self):
+        from terrainflow_assessment.core.sizing import spacing_advisory
+
+        for slope in (1.0, 5.0, 12.0, 30.0):
+            r = spacing_advisory(slope, "Loam", runoff_mm=25.0,
+                                 capacity_m3_per_m=0.6)
+            assert r["recommended_spacing_m"] <= r["erosion_spacing_m"] + 1e-9
+            assert r["recommended_spacing_m"] <= r["capture_spacing_m"] + 1e-9
+
+    def test_flat_ground_reports_rather_than_returning_infinity(self):
+        """`inf` in a spin box is how a recommendation becomes a bug report."""
+        from terrainflow_assessment.core.sizing import spacing_advisory
+
+        r = spacing_advisory(0.0, "Loam")
+        assert r["erosion_spacing_m"] == math.inf
+        assert r["recommended_spacing_m"] is None
+        assert r["governing"] == "none"
+        assert "level" in r["text"]
+
+    def test_without_a_storm_only_the_erosion_rule_answers(self):
+        from terrainflow_assessment.core.sizing import spacing_advisory
+
+        r = spacing_advisory(10.0, "Loam")
+        assert r["capture_spacing_m"] is None
+        assert r["governing"] == "erosion"
+
+    def test_the_text_names_its_own_basis(self):
+        """An advisory that does not say where its number came from is a rumour."""
+        from terrainflow_assessment.core.sizing import spacing_advisory
+
+        r = spacing_advisory(10.0, "Clay loam", runoff_mm=25.0,
+                             capacity_m3_per_m=0.6)
+        assert "Clay loam" in r["text"]
+        assert r["governing"] in r["text"] or "governs" in r["text"]
+
+    def test_it_goes_through_contour_spacing(self):
+        """The primitive had no production caller until this advisory."""
+        from terrainflow_assessment.core.sizing import (
+            contour_spacing,
+            spacing_advisory,
+        )
+
+        r = spacing_advisory(8.0, "Loam")
+        expected = contour_spacing(r["vertical_interval_m"], 0.08).spacing
+        assert r["erosion_spacing_m"] == pytest.approx(expected)

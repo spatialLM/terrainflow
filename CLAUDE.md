@@ -374,6 +374,7 @@ run now prints which modules it chose and what matched them, so check that line.
 |---|---|
 | `controllers/baseline.py`, `workers/analysis_worker.py` | `checks_baseline` |
 | `controllers/contour.py`, `modules/contour_analysis.py`, `modules/keypoint_analysis.py` | `checks_contour` |
+| `controllers/terrain.py`, `modules/terrain_indices.py` | `checks_terrain` |
 | `controllers/earthworks.py` | `checks_earthworks` |
 | `controllers/simulation.py`, `workers/simulation_worker.py` | `checks_simulation` |
 | `controllers/reporting.py`, `modules/report_*.py`, `adapters/layout_pdf.py` | `checks_report` |

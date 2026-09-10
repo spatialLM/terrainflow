@@ -147,6 +147,94 @@ SLOPE_VECTORS = (
     "Sampled from the DEM surface gradient. Requires: baseline analysis run."
 )
 
+SPACING_ADVISOR = (
+    "Derive the contour interval from the terrain instead of guessing it.\n\n"
+    "Two rules are asked, and they answer different questions:\n\n"
+    "EROSION — the terrace vertical interval, VI(ft) = X × slope% + Y, from the\n"
+    "USDA-NRCS Engineering Field Handbook Ch. 8. How far apart features can be\n"
+    "before the slope between them scours. X and Y cover rainfall erosivity and\n"
+    "cover/tillage; these are American constants applied to NZ ground, so check\n"
+    "your regional council's soil-conservation guidance before setting out on them.\n\n"
+    "CAPTURE — how wide an upslope strip one metre of the swale section you have\n"
+    "drawn can actually hold for this storm. Same model the swale sizer uses.\n\n"
+    "The SMALLER of the two governs: neither excuses the other. A spacing that\n"
+    "holds the water can still let the slope between features scour, and one that\n"
+    "protects the slope can still overtop.\n\n"
+    "Advised at the median ground slope, with the quartiles shown beside it — a\n"
+    "farm is not one slope. The interval is filled in for you and stays editable."
+)
+
+TERRAIN_INDICES = (
+    "Compute the six terrain indices in one pass, then show them one at a time.\n\n"
+    "They rank ground by SHAPE and CONTRIBUTING AREA only — no soil, no ground\n"
+    "cover, no rainfall. They say where water tends to gather, where flow gathers\n"
+    "force, and which way a face looks. They do not predict a depth, a rate or a\n"
+    "tonnage, and they look far more quantitative than they are.\n\n"
+    "Requires: baseline analysis run — they are built on its flow accumulation."
+)
+
+TWI = (
+    "Topographic Wetness Index — ln(a / tan β), where a is the upslope area per\n"
+    "metre of contour and β is the ground slope. Beven & Kirkby (1979).\n\n"
+    "High where a lot of ground drains to somewhere flat: the places that hold\n"
+    "water, and so the places a pond or a basin has something to hold. Low on\n"
+    "steep ground and on ridges, which shed what falls on them.\n\n"
+    "A perfectly flat cell has no defensible value — the index divides by slope —\n"
+    "so those cells use a 0.001 m/m floor and the run reports how much of the site\n"
+    "that was. A steady-state INDEX, not a depth and not a prediction of standing\n"
+    "water."
+)
+
+STREAM_POWER_INDEX = (
+    "Stream Power Index — a × tan β. Moore, Grayson & Ladson (1991).\n\n"
+    "The erosive power of overland flow: high where a large catchment meets steep\n"
+    "ground. That is where a drain will scour, where a gully is already forming,\n"
+    "and where a diversion or a check structure earns its keep.\n\n"
+    "Drawn on a log scale — the raw field spans six decades, so a linear ramp\n"
+    "paints one gully bright and the whole rest of the site black. A relative\n"
+    "index of erosive power, not a shear stress."
+)
+
+SEDIMENT_TRANSPORT_INDEX = (
+    "Sediment Transport Index — the unit-stream-power form of RUSLE's LS factor.\n"
+    "Moore & Burch (1986).\n\n"
+    "Where soil tends to leave, relative to the rest of this site.\n\n"
+    "RELATIVE ONLY. Without soil erodibility and ground cover this is not a\n"
+    "sediment transport rate and must not be read as one — it ranks ground, it\n"
+    "does not measure tonnes."
+)
+
+PLAN_CURVATURE = (
+    "Curvature ACROSS the slope — whether flow spreads out or gathers together.\n"
+    "Zevenbergen & Thorne (1987), in 1/m.\n\n"
+    "Negative (blue-green) is concave in plan: a hollow, a valley, water\n"
+    "converging. Positive (ochre) is convex: a nose, a spur, a ridge, water\n"
+    "diverging. Near zero is planar ground.\n\n"
+    "This is the ridge/valley distinction Yeomans' two cultivation patterns turn\n"
+    "on. Drawn on a scale set by the 95th percentile, so one cliff edge cannot\n"
+    "flatten the rest of the map."
+)
+
+PROFILE_CURVATURE = (
+    "Curvature ALONG the slope — whether the ground steepens or eases downhill.\n"
+    "Zevenbergen & Thorne (1987), in 1/m.\n\n"
+    "Positive (ochre) is convex: the slope steepens, flow accelerates, ground\n"
+    "sheds. Negative (blue-green) is concave: the slope eases, flow slows, soil\n"
+    "settles out.\n\n"
+    "The strongest concave reading along a valley floor is the Yeomans keypoint —\n"
+    "the break from steep above to gentler below."
+)
+
+ASPECT = (
+    "Which way the ground faces, as eight compass classes plus flat.\n\n"
+    "Named classes rather than a colour wheel, on purpose: aspect is cyclic, so\n"
+    "359° and 1° are neighbours and any light-to-dark ramp puts a hard seam\n"
+    "across the map at north.\n\n"
+    "On a NZ hill farm the pair that matters is north-facing (sun, dries first)\n"
+    "against south-facing (shade, stays damp), so those two carry the strongest\n"
+    "contrast here. Genuinely flat ground has no aspect at all and is drawn so."
+)
+
 # Rich-text body for the slope-class info dialog (F3).
 SLOPE_CLASS_INFO = (
     "<b>Slope classes &amp; earthwork suitability</b>"

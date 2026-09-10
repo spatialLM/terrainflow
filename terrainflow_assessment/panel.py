@@ -129,7 +129,12 @@ class AssessmentPanel(QDockWidget):
     toggle_throughflow_requested = pyqtSignal(bool)   # blue per-cell water gradient
     throughflow_scale_changed = pyqtSignal(str)
 
+    # Terrain indices — wetness, stream power, sediment transport, curvature, aspect
+    run_terrain_indices_requested = pyqtSignal()
+    terrain_index_toggled = pyqtSignal(str, bool)     # (index key, shown)
+
     # Contour analysis
+    suggest_spacing_requested = pyqtSignal()   # derive an interval from the terrain
     run_contour_analysis_requested = pyqtSignal()
     select_top5_contours_requested = pyqtSignal()
     find_segments_requested = pyqtSignal()
@@ -855,6 +860,8 @@ class AssessmentPanel(QDockWidget):
         self._toggle_slope_vectors_btn.setToolTip(H.SLOPE_VECTORS)
         lay.addWidget(self._toggle_slope_vectors_btn)
 
+        self._build_terrain_indices(lay)
+
         contour_row = QHBoxLayout()
         self._simple_contour_interval_spin = QDoubleSpinBox()
         self._simple_contour_interval_spin.setRange(0.1, 100.0)
@@ -956,12 +963,27 @@ class AssessmentPanel(QDockWidget):
         contour_lay = QVBoxLayout(contour_w)
 
         contour_lay.addWidget(self._label("Contour interval (m)"))
+        interval_row = QHBoxLayout()
+        interval_row.setSpacing(6)
         self._contour_interval_spin = QDoubleSpinBox()
         self._contour_interval_spin.setRange(0.1, 100)
         self._contour_interval_spin.setValue(1.0)
         self._contour_interval_spin.setSuffix(" m")
         self._contour_interval_spin.setToolTip(H.CONTOUR_INTERVAL)
-        contour_lay.addWidget(self._contour_interval_spin)
+        interval_row.addWidget(self._contour_interval_spin, 1)
+        self._suggest_spacing_btn = QPushButton("Advise")
+        self._suggest_spacing_btn.setEnabled(False)
+        self._suggest_spacing_btn.setFixedWidth(70)
+        self._suggest_spacing_btn.setToolTip(H.SPACING_ADVISOR)
+        self._suggest_spacing_btn.clicked.connect(
+            self.suggest_spacing_requested.emit)
+        interval_row.addWidget(self._suggest_spacing_btn)
+        contour_lay.addLayout(interval_row)
+
+        self._spacing_advice_lbl = QLabel("")
+        self._spacing_advice_lbl.setWordWrap(True)
+        self._spacing_advice_lbl.setStyleSheet("font-size: 10px; color: #555;")
+        contour_lay.addWidget(self._spacing_advice_lbl)
 
         contour_lay.addWidget(self._label("Max slope (°) — filter"))
         self._max_slope_spin = QDoubleSpinBox()
@@ -1766,6 +1788,8 @@ class AssessmentPanel(QDockWidget):
         self._toggle_throughflow_btn.setEnabled(True)
         self._throughflow_scale_combo.setEnabled(True)
         self._generate_contours_btn.setEnabled(True)
+        self._terrain_run_btn.setEnabled(True)
+        self._suggest_spacing_btn.setEnabled(True)
 
     def set_baseline_failed(self, summary):
         """A baseline that errored must not look like one that worked.
@@ -2101,6 +2125,105 @@ class AssessmentPanel(QDockWidget):
         wkt = item.data(Qt.UserRole)
         if wkt:
             self.segment_activated.emit(wkt)
+
+    # ------------------------------------------------------------------ Terrain indices
+
+    #: key → button label. Order is the order they are offered in.
+    TERRAIN_INDEX_LABELS = (
+        ("twi", "Wetness"),
+        ("spi", "Stream power"),
+        ("sti", "Sediment transport"),
+        ("plan_curvature", "Plan curvature"),
+        ("profile_curvature", "Profile curvature"),
+        ("aspect", "Aspect"),
+    )
+
+    def _build_terrain_indices(self, lay):
+        """The terrain-index row: one compute button, six toggles.
+
+        The toggles stay disabled until the indices have been computed, so a click can
+        never mean "show me a raster that does not exist yet" — the same enablement
+        shape the slope tools above use.
+        """
+        lay.addWidget(self._label("Terrain indices"))
+
+        self._terrain_run_btn = RunButton("Compute Terrain Indices")
+        self._terrain_run_btn.setEnabled(False)
+        self._terrain_run_btn.setToolTip(H.TERRAIN_INDICES)
+        self._terrain_run_btn.clicked.connect(self.run_terrain_indices_requested.emit)
+        lay.addWidget(self._terrain_run_btn)
+
+        tooltips = {
+            "twi": H.TWI,
+            "spi": H.STREAM_POWER_INDEX,
+            "sti": H.SEDIMENT_TRANSPORT_INDEX,
+            "plan_curvature": H.PLAN_CURVATURE,
+            "profile_curvature": H.PROFILE_CURVATURE,
+            "aspect": H.ASPECT,
+        }
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 2)
+        grid.setHorizontalSpacing(6)
+        self._terrain_index_buttons = {}
+        for i, (key, label) in enumerate(self.TERRAIN_INDEX_LABELS):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setEnabled(False)
+            btn.setToolTip(tooltips[key])
+            btn.toggled.connect(
+                lambda checked, k=key: self.terrain_index_toggled.emit(k, checked))
+            grid.addWidget(btn, i // 2, i % 2)
+            self._terrain_index_buttons[key] = btn
+        lay.addLayout(grid)
+
+        self._terrain_status_lbl = QLabel("")
+        self._terrain_status_lbl.setWordWrap(True)
+        self._terrain_status_lbl.setStyleSheet("font-size: 10px; color: #555;")
+        lay.addWidget(self._terrain_status_lbl)
+
+    def set_terrain_progress(self, pct, msg=""):
+        self._terrain_run_btn.set_progress(pct, msg)
+
+    def set_terrain_complete(self, msg=""):
+        # An empty message is the failure path re-arming the button, not a silent
+        # success: there is nothing to report, so the button goes back to idle rather
+        # than showing a tick over a run that did not finish.
+        if msg:
+            self._terrain_run_btn.set_done()
+        else:
+            self._terrain_run_btn.set_idle()
+        self._terrain_status_lbl.setText(msg)
+
+    def set_terrain_available(self, keys):
+        """Enable the toggles for indices that now exist on disk."""
+        available = set(keys or ())
+        for key, btn in self._terrain_index_buttons.items():
+            btn.setEnabled(key in available)
+
+    def set_terrain_enabled(self, enabled):
+        """The compute button follows the baseline, as the slope tools do."""
+        self._terrain_run_btn.setEnabled(bool(enabled))
+
+    # ------------------------------------------------------------------ Spacing advice
+
+    def set_spacing_advice(self, text, interval_m=None):
+        """Show the advisory, and fill the interval when there is one to fill.
+
+        Writing the spin box here is not the silent clamp ``advisories`` forbids: the
+        user pressed **Advise**, which is the consent. What matters is that the number
+        arrives with the sentence that produced it, that it stays editable, and that
+        nothing writes the box unless it was asked to — on flat ground, where the
+        erosion rule gives no finite answer, *interval_m* is ``None`` and the box is
+        left exactly as the user set it.
+        """
+        self._spacing_advice_lbl.setText(text or "")
+        if interval_m is None:
+            return
+        self._contour_interval_spin.blockSignals(True)
+        try:
+            self._contour_interval_spin.setValue(float(interval_m))
+        finally:
+            self._contour_interval_spin.blockSignals(False)
 
     def _show_slope_class_info(self):
         from qgis.PyQt.QtWidgets import QMessageBox

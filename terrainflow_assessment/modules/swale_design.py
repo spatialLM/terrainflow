@@ -108,16 +108,35 @@ def recommend_swale_length(peak_inflow_m3, depth, width, *,
     if depth <= 0 or width <= 0 or peak_inflow_m3 <= 0:
         return 0.0
 
-    # Trapezoidal cross-section (bottom width narrows with battered walls).
-    section = _channel_section(width, depth, side_slope)
-
-    storage_per_m = section.area
-    infil_per_m = (max(0.0, infiltration_mm_hr) / 1000.0) * max(0.0, duration_hr) * width
-    capacity_per_m = storage_per_m + infil_per_m
+    capacity_per_m = capacity_per_metre(
+        depth, width, side_slope=side_slope,
+        infiltration_mm_hr=infiltration_mm_hr, duration_hr=duration_hr)
     if capacity_per_m <= 0:
         return 0.0
 
     return round(peak_inflow_m3 / capacity_per_m, 1)
+
+
+def capacity_per_metre(depth, width, *, side_slope=1.0,
+                       infiltration_mm_hr=0.0, duration_hr=0.0):
+    """What one metre of swale sheds over the event, in m³ per metre.
+
+    ``A_x + (f/1000) · duration · T`` — trapezoidal live storage plus infiltration
+    through the wetted footprint, the model documented on
+    :func:`recommend_swale_length`.
+
+    Extracted so the spacing advisor can ask the *transposed* question — how wide an
+    upslope strip one metre of this section can hold — off the same arithmetic. Two
+    copies of this would be two answers to "does the swale hold its storm", which is
+    the divergence ``core/sizing`` exists to stop.
+    """
+    if depth <= 0 or width <= 0:
+        return 0.0
+    # Trapezoidal cross-section (bottom width narrows with battered walls).
+    section = _channel_section(width, depth, side_slope)
+    storage_per_m = section.area
+    infil_per_m = (max(0.0, infiltration_mm_hr) / 1000.0) * max(0.0, duration_hr) * width
+    return storage_per_m + infil_per_m
 
 
 @dataclass

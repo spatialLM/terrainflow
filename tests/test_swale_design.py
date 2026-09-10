@@ -421,3 +421,43 @@ class TestConvergedWallSection:
         at_convergence = recommend_swale_length(
             100.0, depth=0.5, width=1.0, side_slope=1.0)
         assert converged == pytest.approx(at_convergence)
+
+
+class TestCapacityPerMetre:
+    """The extracted capacity term, and the round trip that keeps it honest."""
+
+    def test_recommend_swale_length_is_inflow_over_this(self):
+        """One model, two questions. If these diverge the plugin answers 'does the
+        swale hold its storm' two different ways depending on which button was pressed.
+        """
+        from terrainflow_assessment.modules.swale_design import (
+            capacity_per_metre,
+            recommend_swale_length,
+        )
+
+        kwargs = dict(side_slope=1.0, infiltration_mm_hr=12.0, duration_hr=24.0)
+        cap = capacity_per_metre(0.5, 2.0, **kwargs)
+        length = recommend_swale_length(120.0, 0.5, 2.0, **kwargs)
+        assert length == pytest.approx(round(120.0 / cap, 1))
+
+    def test_infiltration_adds_to_storage_over_the_event(self):
+        from terrainflow_assessment.modules.swale_design import capacity_per_metre
+
+        dry = capacity_per_metre(0.5, 2.0)
+        wet = capacity_per_metre(0.5, 2.0, infiltration_mm_hr=20.0, duration_hr=24.0)
+        assert wet > dry
+
+    def test_degenerate_section_has_no_capacity(self):
+        from terrainflow_assessment.modules.swale_design import capacity_per_metre
+
+        assert capacity_per_metre(0.0, 2.0) == 0.0
+        assert capacity_per_metre(0.5, 0.0) == 0.0
+
+    def test_it_feeds_the_spacing_advisory(self):
+        """The transposed question: how wide a strip does one metre of this hold?"""
+        from terrainflow_assessment.core.sizing import spacing_advisory
+        from terrainflow_assessment.modules.swale_design import capacity_per_metre
+
+        cap = capacity_per_metre(0.5, 2.0)
+        r = spacing_advisory(2.0, "Loam", runoff_mm=25.0, capacity_m3_per_m=cap)
+        assert r["capture_spacing_m"] == pytest.approx(cap / 0.025)

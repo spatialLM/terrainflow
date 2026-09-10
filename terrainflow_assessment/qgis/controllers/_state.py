@@ -129,6 +129,14 @@ class PluginState:
     segment_layer_id: str | None = None
     segment_gradient_layer_id: str | None = None
     simple_contour_layer_id: str | None = None
+    # Terrain indices. Paths are written once per run and the layers are built lazily,
+    # one per toggle, because each is a full-size float32 raster and most sessions open
+    # one of the six. ``bounds`` carries the symmetric display bound for the signed
+    # indices, taken while the values were still in memory — the band maximum is a
+    # cliff-edge cell and scaling curvature to it paints the whole site planar.
+    terrain_index_paths: dict = field(default_factory=dict)
+    terrain_index_layer_ids: dict = field(default_factory=dict)
+    terrain_index_bounds: dict = field(default_factory=dict)
     inflow_bands_layer_id: str | None = None
     # Natural-breaks boundaries the candidate contours are currently banded on, so
     # the panel legend prints the same numbers the map is drawn with.
@@ -214,6 +222,7 @@ class PluginState:
     # keyline, not keypoints alone.
     contour_worker: Any | None = None
     design_worker: Any | None = None
+    terrain_worker: Any | None = None
 
     # ------------------------------------------------------------------ Cache invalidation
     # Lives on the state rather than a controller so any controller can invalidate

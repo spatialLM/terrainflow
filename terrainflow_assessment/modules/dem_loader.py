@@ -290,6 +290,31 @@ def slope_degrees(dem, cell_w, cell_h):
     -------
     float32 array of slope in degrees, same shape as *dem*; NaN where *dem* is NaN.
     """
+    dz_dx, dz_dy, invalid = horn_gradient(dem, cell_w, cell_h)
+    slope = np.degrees(np.arctan(np.sqrt(dz_dx ** 2 + dz_dy ** 2)))
+    slope[invalid] = np.nan
+    return slope.astype("float32")
+
+
+def horn_gradient(dem, cell_w, cell_h):
+    """Horn's (1981) 8-neighbour partial derivatives — ``(dz_dx, dz_dy, invalid)``.
+
+    Extracted from :func:`slope_degrees` so slope and aspect share one stencil rather
+    than each carrying its own. That is not tidiness: a Horn slope beside a
+    differently-derived aspect can disagree about which way the same cell faces, and
+    this particular stencil carries two corrections that must not be re-derived by hand
+    — the ESRI nodata-neighbour convention and the halved border divisor, both written
+    up in :func:`slope_degrees`.
+
+    ``invalid`` is the mask of cells that are themselves nodata; every caller has to
+    decide what to emit there (NaN for slope, the flat sentinel for aspect), so it is
+    returned rather than applied.
+
+    Units are metres per metre. Positive ``dz_dx`` is rising toward increasing column
+    (east on a north-up grid); positive ``dz_dy`` is rising toward increasing *row*,
+    which on a north-up grid is **southward** — the row axis runs opposite to the map's
+    y axis, and every consumer has to say which it means.
+    """
     z = np.asarray(dem, dtype="float64")
     invalid = ~np.isfinite(z)
     centre = np.where(invalid, 0.0, z)
@@ -315,9 +340,35 @@ def slope_degrees(dem, cell_w, cell_h):
 
     dz_dx = ((c + 2.0 * f + i) - (a + 2.0 * d + g)) / span_x[np.newaxis, :]
     dz_dy = ((g + 2.0 * h + i) - (a + 2.0 * b + c)) / span_y[:, np.newaxis]
-    slope = np.degrees(np.arctan(np.sqrt(dz_dx ** 2 + dz_dy ** 2)))
-    slope[invalid] = np.nan
-    return slope.astype("float32")
+    return dz_dx, dz_dy, invalid
+
+
+def aspect_degrees(dem, cell_w, cell_h):
+    """Downslope aspect in compass degrees — 0° = north, clockwise, ``-1`` on the flat.
+
+    Horn (1981), off the same stencil as :func:`slope_degrees` by construction.
+
+    ``horn_gradient``'s ``dz_dy`` rises toward increasing *row*, which is southward on a
+    north-up grid, so the northward rise is ``-dz_dy``. Aspect points **downslope** —
+    the direction water runs — so it is the bearing of the negated gradient.
+
+    A perfectly flat cell has no aspect at all, and inventing one would put a hard
+    north-facing seam across every plateau. It returns ``-1``, the sentinel GDAL and
+    ESRI both use. Cells that are themselves nodata return NaN.
+    """
+    dz_dx, dz_dy, invalid = horn_gradient(dem, cell_w, cell_h)
+
+    rise_east = dz_dx
+    rise_north = -dz_dy
+    # Downslope bearing: atan2(east, north) of the *negated* rise, measured clockwise
+    # from north, wrapped into [0, 360).
+    aspect = np.degrees(np.arctan2(-rise_east, -rise_north))
+    aspect = np.mod(aspect, 360.0)
+
+    flat = (rise_east == 0.0) & (rise_north == 0.0)
+    aspect = np.where(flat, -1.0, aspect)
+    aspect[invalid] = np.nan
+    return aspect.astype("float32")
 
 
 def compute_slope_raster(dem_path, output_path):
