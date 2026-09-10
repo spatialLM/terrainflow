@@ -1258,13 +1258,25 @@ class AssessmentPanel(QDockWidget):
         self._keyline_spacing_spin.setToolTip(H.KEYLINE_SPACING)
         keyline_grid.addWidget(self._keyline_spacing_spin, 1, 1)
 
-        keyline_grid.addWidget(self._label("Guide grade (1 : N)"), 2, 0)
+        # A LIMIT, not a setting. The old "Guide grade (1 : N)" fed a value that never
+        # reached the geometry — identical lines at 1:50 and 1:5000, while the layer
+        # carried a column asserting the grade they did not have. The number and the
+        # mental model stay; what changes is that it now does something that cannot
+        # lie, and the drift each guide achieves is measured and reported beside it.
+        keyline_grid.addWidget(self._label("Flag drift steeper than (1 : N)"), 2, 0)
         self._keyline_grade_spin = QSpinBox()
         self._keyline_grade_spin.setRange(50, 5000)
         self._keyline_grade_spin.setValue(500)
         self._keyline_grade_spin.setSingleStep(50)
         self._keyline_grade_spin.setToolTip(H.KEYLINE_GRADE)
         keyline_grid.addWidget(self._keyline_grade_spin, 2, 1)
+
+        keyline_grid.addWidget(self._label("Valleys to key"), 3, 0)
+        self._keyline_valleys_spin = QSpinBox()
+        self._keyline_valleys_spin.setRange(1, 40)
+        self._keyline_valleys_spin.setValue(8)
+        self._keyline_valleys_spin.setToolTip(H.KEYLINE_MAX_VALLEYS)
+        keyline_grid.addWidget(self._keyline_valleys_spin, 3, 1)
         keypoint_lay.addLayout(keyline_grid)
 
         self._run_keyline_btn = RunButton(
@@ -2693,8 +2705,19 @@ class AssessmentPanel(QDockWidget):
 
     @property
     def keyline_cross_grade(self):
+        """Deprecated — the grade never reached the geometry. See
+        :attr:`keyline_max_grade_n`, which is the limit the drift is flagged against."""
         n = self._keyline_grade_spin.value()
         return 1.0 / n if n else 0.0
+
+    @property
+    def keyline_max_grade_n(self):
+        """Flag a guide whose measured drift is steeper than 1 : this."""
+        return int(self._keyline_grade_spin.value())
+
+    @property
+    def keyline_max_valleys(self):
+        return int(self._keyline_valleys_spin.value())
 
     @property
     def earthwork_soil_name(self):
@@ -2806,6 +2829,11 @@ class AssessmentPanel(QDockWidget):
         "max_slope_deg": ("_max_slope_spin", "value"),
         "min_contour_length_m": ("_min_contour_length_spin", "value"),
         "min_catchment_ha": ("_min_catchment_ha_spin", "value"),
+        "keypoint_count": ("_keypoint_count_spin", "value"),
+        "keyline_runs": ("_keyline_runs_spin", "value"),
+        "keyline_spacing_m": ("_keyline_spacing_spin", "value"),
+        "keyline_max_grade_n": ("_keyline_grade_spin", "value"),
+        "keyline_max_valleys": ("_keyline_valleys_spin", "value"),
         "swale_depth_m": ("_swale_depth_spin", "value"),
         "swale_width_m": ("_swale_width_spin", "value"),
         # The batter is derived from these three and so is not saved: storing a

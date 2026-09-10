@@ -425,3 +425,133 @@ def topological_order(edges):
     broken = [k for k in nodes if k not in placed]
     order.extend(broken)
     return order, broken
+
+
+# ---------------------------------------------------------------------------
+# Stream ordering — which valleys are the *primary* ones
+# ---------------------------------------------------------------------------
+
+def strahler_order(next_flat, stream_mask_flat):
+    """Strahler (1957) order for every channel cell, as a flat int32 array.
+
+    Order 1 is a headwater link: a channel cell with no channel cell draining into it,
+    and everything below it until it meets another. Where two links of order *n* meet
+    the result is *n + 1*; where orders differ the larger simply continues.
+
+    Yeomans' **primary valley** is the small upland valley at the head of a
+    ridge-and-valley pair, which is what an order-1 link is. The trunk of a catchment
+    is not a primary valley, and running the keypoint criterion on it — as the single
+    ``argmax(acc)`` stem did — answers a different question from the one the method asks.
+
+    **Run this over the stream mask only.** The channel network is typically under 2% of
+    a tile; ordering 50,000 cells is a pure-Python pass of about 0.05 s, and ordering
+    2.8 million is 5 s and a temptation to reach for numba for no gain.
+
+    Non-channel cells come back as 0.
+    """
+    next_flat = np.asarray(next_flat, dtype=np.int64)
+    stream = np.asarray(stream_mask_flat, dtype=bool).ravel()
+    n = next_flat.size
+
+    order = np.zeros(n, dtype=np.int32)
+    cells = np.flatnonzero(stream)
+    if cells.size == 0:
+        return order
+
+    # How many channel cells drain into each channel cell. A cell with none is a
+    # headwater source, and the sweep below can start from it.
+    indeg = np.zeros(n, dtype=np.int32)
+    for i in cells:
+        j = int(next_flat[i])
+        if j != i and stream[j]:
+            indeg[j] += 1
+
+    # Highest order arriving at each cell, and how many links arrive carrying it —
+    # Strahler's rule needs both, because two equal orders promote and unequal ones
+    # do not.
+    best = np.zeros(n, dtype=np.int32)
+    best_count = np.zeros(n, dtype=np.int32)
+    pending = indeg.copy()
+
+    from collections import deque
+    queue = deque(int(i) for i in cells if indeg[i] == 0)
+
+    seen = 0
+    while queue:
+        i = queue.popleft()
+        seen += 1
+        if best_count[i] == 0:
+            order[i] = 1                      # a source
+        elif best_count[i] >= 2:
+            order[i] = best[i] + 1            # two equal orders meet
+        else:
+            order[i] = best[i]                # the larger continues
+
+        j = int(next_flat[i])
+        if j == i or not stream[j]:
+            continue
+        o = order[i]
+        if o > best[j]:
+            best[j], best_count[j] = o, 1
+        elif o == best[j]:
+            best_count[j] += 1
+        pending[j] -= 1
+        if pending[j] == 0:
+            queue.append(j)
+
+    # A conditioned DEM gives an acyclic pointer graph, so everything should drain. If
+    # anything is left it is a ring, and it keeps order 0 rather than being guessed at.
+    return order
+
+
+def stream_links(next_flat, stream_mask_flat, order_flat, cols, max_order=1,
+                 min_cells=3):
+    """Channel links of order ≤ *max_order*, each as an ordered list of ``(row, col)``.
+
+    A *link* runs from a source (or a junction) down to the next junction. Splitting
+    there is what makes "one valley" a well-defined thing to trace a profile along, and
+    the cells come back already ordered from the top down, which is what the keypoint
+    profile needs.
+
+    Links shorter than *min_cells* are dropped: a two-cell stub has no profile to take a
+    second derivative of, and fitting one to it produces a keypoint out of noise.
+    """
+    next_flat = np.asarray(next_flat, dtype=np.int64)
+    stream = np.asarray(stream_mask_flat, dtype=bool).ravel()
+    order = np.asarray(order_flat, dtype=np.int32).ravel()
+    n = next_flat.size
+
+    indeg = np.zeros(n, dtype=np.int32)
+    for i in np.flatnonzero(stream):
+        j = int(next_flat[i])
+        if j != i and stream[j]:
+            indeg[j] += 1
+
+    links = []
+    for start in np.flatnonzero(stream & (order > 0) & (order <= max_order)):
+        start = int(start)
+        # Begin only at a source, or immediately below a junction — otherwise every
+        # cell along a link would seed its own duplicate of that link's tail.
+        upstream_same = indeg[start] == 1
+        if upstream_same:
+            continue
+
+        path = []
+        i = start
+        while True:
+            r, c = divmod(i, cols)
+            path.append((int(r), int(c)))
+            j = int(next_flat[i])
+            if j == i or not stream[j]:
+                break
+            if order[j] != order[i]:
+                break          # the link ends where the order changes
+            if indeg[j] > 1:
+                path.append((int(j // cols), int(j % cols)))
+                break          # ...and at the junction itself
+            i = j
+
+        if len(path) >= min_cells:
+            links.append(path)
+
+    return links

@@ -527,3 +527,138 @@ class TestTieBreak:
 
         assert _OFFSETS == ((-1, -1), (-1, 0), (-1, 1), (0, -1),
                             (0, 1), (1, -1), (1, 0), (1, 1))
+
+
+# ---------------------------------------------------------------------------
+# Strahler ordering and link extraction
+# ---------------------------------------------------------------------------
+
+class TestStrahlerOrder:
+    @staticmethod
+    def _chain(cells, cols):
+        """Pointers for a hand-built network: cells is {flat_idx: downstream_flat_idx}."""
+        n = max(max(cells), max(cells.values())) + 1
+        nxt = np.arange(n, dtype=np.int32)
+        for src, dst in cells.items():
+            nxt[src] = dst
+        mask = np.zeros(n, dtype=bool)
+        mask[list(cells)] = True
+        mask[list(cells.values())] = True
+        return nxt, mask
+
+    def test_a_single_chain_is_order_one_throughout(self):
+        from terrainflow_assessment.modules.flow_graph import strahler_order
+
+        nxt, mask = self._chain({0: 1, 1: 2, 2: 3}, cols=1)
+        order = strahler_order(nxt, mask)
+        assert list(order[:4]) == [1, 1, 1, 1]
+
+    def test_two_equal_orders_promote_where_they_meet(self):
+        """Strahler's rule: 1 + 1 = 2, and it stays 2 downstream."""
+        from terrainflow_assessment.modules.flow_graph import strahler_order
+
+        #  0 -> 2 <- 1 ;  2 -> 3
+        nxt, mask = self._chain({0: 2, 1: 2, 2: 3}, cols=1)
+        order = strahler_order(nxt, mask)
+        assert order[0] == 1 and order[1] == 1
+        assert order[2] == 2, "two order-1 links meeting must promote"
+        assert order[3] == 2
+
+    def test_unequal_orders_do_not_promote(self):
+        from terrainflow_assessment.modules.flow_graph import strahler_order
+
+        # A 2 (from 0,1 meeting at 2) joined by a 1 (from 4) at 3.
+        nxt, mask = self._chain({0: 2, 1: 2, 2: 3, 4: 3, 3: 5}, cols=1)
+        order = strahler_order(nxt, mask)
+        assert order[2] == 2 and order[4] == 1
+        assert order[3] == 2, "a smaller tributary must not promote the trunk"
+
+    def test_non_channel_cells_are_zero(self):
+        from terrainflow_assessment.modules.flow_graph import strahler_order
+
+        nxt = np.arange(6, dtype=np.int32)
+        nxt[0] = 1
+        mask = np.zeros(6, dtype=bool)
+        mask[[0, 1]] = True
+        order = strahler_order(nxt, mask)
+        assert list(order[2:]) == [0, 0, 0, 0]
+
+    def test_an_empty_network_is_all_zero(self):
+        from terrainflow_assessment.modules.flow_graph import strahler_order
+
+        order = strahler_order(np.arange(5, dtype=np.int32), np.zeros(5, dtype=bool))
+        assert not order.any()
+
+
+class TestStreamLinks:
+    def test_a_headwater_link_comes_back_ordered_top_down(self):
+        """The profile needs the cells in order; that is half of why links exist."""
+        from terrainflow_assessment.modules.flow_graph import (
+            strahler_order,
+            stream_links,
+        )
+
+        cols = 1
+        nxt = np.arange(6, dtype=np.int32)
+        for src, dst in {0: 1, 1: 2, 2: 3, 3: 4}.items():
+            nxt[src] = dst
+        mask = np.zeros(6, dtype=bool)
+        mask[:5] = True
+
+        order = strahler_order(nxt, mask)
+        links = stream_links(nxt, mask, order, cols, max_order=1, min_cells=3)
+        assert len(links) == 1
+        rows = [r for r, _c in links[0]]
+        assert rows == sorted(rows), "the link must run from the top down"
+
+    def test_a_junction_splits_two_primary_valleys(self):
+        """Two order-1 tributaries are two valleys, not one."""
+        from terrainflow_assessment.modules.flow_graph import (
+            strahler_order,
+            stream_links,
+        )
+
+        # Two chains of three meeting at 6, which drains to 7.
+        nxt = np.arange(9, dtype=np.int32)
+        for src, dst in {0: 1, 1: 2, 2: 6, 3: 4, 4: 5, 5: 6, 6: 7}.items():
+            nxt[src] = dst
+        mask = np.zeros(9, dtype=bool)
+        mask[:8] = True
+
+        order = strahler_order(nxt, mask)
+        links = stream_links(nxt, mask, order, cols=1, max_order=1, min_cells=3)
+        assert len(links) == 2, f"expected two primary valleys, got {len(links)}"
+
+    def test_short_stubs_are_dropped(self):
+        """A two-cell link has no profile to take a second derivative of."""
+        from terrainflow_assessment.modules.flow_graph import (
+            strahler_order,
+            stream_links,
+        )
+
+        nxt = np.arange(4, dtype=np.int32)
+        nxt[0] = 1
+        mask = np.zeros(4, dtype=bool)
+        mask[[0, 1]] = True
+        order = strahler_order(nxt, mask)
+        assert stream_links(nxt, mask, order, cols=1, min_cells=3) == []
+
+    def test_the_trunk_is_not_a_primary_valley(self):
+        """max_order=1 excludes what two tributaries make when they meet."""
+        from terrainflow_assessment.modules.flow_graph import (
+            strahler_order,
+            stream_links,
+        )
+
+        nxt = np.arange(12, dtype=np.int32)
+        for src, dst in {0: 1, 1: 2, 2: 6, 3: 4, 4: 5, 5: 6,
+                         6: 7, 7: 8, 8: 9}.items():
+            nxt[src] = dst
+        mask = np.zeros(12, dtype=bool)
+        mask[:10] = True
+
+        order = strahler_order(nxt, mask)
+        assert order[7] == 2
+        links = stream_links(nxt, mask, order, cols=1, max_order=1, min_cells=3)
+        flat = {r for link in links for r, _c in link}
+        assert 7 not in flat, "the order-2 trunk was returned as a primary valley"

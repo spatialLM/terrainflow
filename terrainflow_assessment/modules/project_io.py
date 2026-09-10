@@ -107,6 +107,15 @@ INPUT_FIELDS = {
     "max_slope_deg": (float, 18.0),
     "min_contour_length_m": (float, 50.0),
     "min_catchment_ha": (float, 0.5),
+    # Keyline settings. Inputs only — the generated keylines themselves are derived
+    # from the DEM plus these four numbers and are never serialised, under the same
+    # rule that keeps a stage-storage curve and an auto spillway width out of the file.
+    # Every default here must equal its spin box; the parity check walks them.
+    "keypoint_count": (int, 5),
+    "keyline_runs": (int, 3),
+    "keyline_spacing_m": (float, 5.0),
+    "keyline_max_grade_n": (int, 500),
+    "keyline_max_valleys": (int, 8),
     # These three must match the panel spin boxes they restore, and they did not: the
     # pair was written as 0.6/2.0 while the criteria boxes were 0.3/0.6.
     # ``normalise_inputs`` fills every absent key from these defaults, so a file saved

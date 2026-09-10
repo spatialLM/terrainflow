@@ -140,6 +140,8 @@ class PluginState:
     # Ranked impoundment sites from the last run, refusals included — a candidate
     # the user can see was considered beats a quietly shorter list.
     pond_sites: list = field(default_factory=list)
+    # One keypoint per primary valley from the last keyline run.
+    keyline_keypoints: list = field(default_factory=list)
     inflow_bands_layer_id: str | None = None
     # Natural-breaks boundaries the candidate contours are currently banded on, so
     # the panel legend prints the same numbers the map is drawn with.

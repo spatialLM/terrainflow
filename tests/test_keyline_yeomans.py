@@ -136,19 +136,50 @@ class TestYeomansKeylineAnalysis:
         # 2 above + keyline + 2 below = 5 total
         assert len(runs) == 5
 
-    def test_cultivation_run_has_constant_crossgrade(self, tmp_path):
-        """
-        Phase 1 item 4b: every cultivation run must carry the declared
-        cross_grade in its metadata.
+    def test_every_run_reports_the_drift_it_actually_achieves(self, tmp_path):
+        """The measurement that replaced the control which never did anything.
+
+        `cross_grade` was echoed onto every run and read by nothing, so a user could
+        set 1:50 or 1:5000 and get byte-identical lines — while the map carried a
+        column asserting the grade the geometry did not have. Now the geometry is
+        measured and the number is an output.
         """
         dem_path, _ = _make_valley_dem(tmp_path)
         ya = YeomansKeylineAnalysis(dem_path)
         kp = ya.find_keypoint()
 
-        cg = 1 / 500
-        runs = ya.get_cultivation_runs(kp, n_runs=1, cross_grade=cg)
+        runs = ya.get_cultivation_runs(kp, n_runs=1)
+        assert runs
         for run in runs:
-            assert run["cross_grade"] == pytest.approx(cg, rel=1e-9)
+            assert "cross_grade" not in run, "the inert field must be gone, not renamed"
+            assert "drift_1_in_n" in run and "drift_fall_m" in run
+            assert "over_limit" in run
+
+    def test_the_grade_input_is_a_limit_that_flags_rather_than_a_generator(self, tmp_path):
+        """Two limits, same geometry, different flags — which is what a limit means."""
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+
+        loose = ya.get_cultivation_runs(kp, n_runs=1, max_grade_n=1)
+        strict = ya.get_cultivation_runs(kp, n_runs=1, max_grade_n=100_000)
+
+        loose_xy = [[(x, y) for x, y, *_ in r["geometry"].coords] for r in loose]
+        strict_xy = [[(x, y) for x, y, *_ in r["geometry"].coords] for r in strict]
+        assert loose_xy == strict_xy, "a limit must not move the geometry"
+
+        drifting = [r for r in strict if r["drift_1_in_n"] is not None]
+        if drifting:
+            assert any(r["over_limit"] for r in strict), (
+                "an impossibly strict limit should flag something")
+        assert not any(r["over_limit"] for r in loose)
+
+    def test_the_old_cross_grade_argument_warns(self, tmp_path):
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+        with pytest.warns(DeprecationWarning):
+            ya.get_cultivation_runs(kp, n_runs=1, cross_grade=1 / 500)
 
     def test_cultivation_run_geometry_has_z_coords(self, tmp_path):
         """Cultivation run LineStrings must be 3D (Z = elevation with grade)."""
@@ -169,8 +200,40 @@ class TestYeomansKeylineAnalysis:
         runs = ya.get_cultivation_runs(kp, n_runs=1)
         types = [r["line_type"] for r in runs]
         assert "keyline" in types
-        assert "cultivation_upper" in types
-        assert "cultivation_lower" in types
+        # Yeomans names two patterns and stresses that most of a landscape is the
+        # second; the guides are now labelled by which one they belong to, and by
+        # MEASURED elevation rather than by the sign of the offset.
+        assert "ridge_guide" in types
+        assert "valley_guide" in types
+
+    def test_a_pattern_can_be_asked_for_on_its_own(self, tmp_path):
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+
+        valley = ya.get_cultivation_runs(kp, n_runs=2, pattern="valley")
+        assert {r["line_type"] for r in valley} <= {"keyline", "valley_guide"}
+
+        ridge = ya.get_cultivation_runs(kp, n_runs=2, pattern="ridge")
+        assert {r["line_type"] for r in ridge} <= {"keyline", "ridge_guide"}
+
+    def test_guides_are_labelled_by_measured_elevation(self, tmp_path):
+        """`offset_curve`'s sign means left-of-travel, not uphill.
+
+        The traced contour's winding comes from find_contours and is never normalised,
+        so labelling by the sign of the offset assigned upper and lower arbitrarily.
+        """
+        dem_path, _ = _make_valley_dem(tmp_path)
+        ya = YeomansKeylineAnalysis(dem_path)
+        kp = ya.find_keypoint()
+        runs = ya.get_cultivation_runs(kp, n_runs=2)
+
+        keyline = next(r for r in runs if r["line_type"] == "keyline")
+        for run in runs:
+            if run["line_type"] == "ridge_guide":
+                assert run["elevation"] >= keyline["elevation"]
+            elif run["line_type"] == "valley_guide":
+                assert run["elevation"] <= keyline["elevation"]
 
     def test_keyline_traces_curved_contour(self, tmp_path):
         """The keyline should follow the valley contour (many vertices), not a
@@ -190,7 +253,7 @@ class TestYeomansKeylineAnalysis:
         kp = ya.find_keypoint()
         runs = ya.get_cultivation_runs(kp, n_runs=1, spacing_m=5.0)
         keyline = next(r for r in runs if r["line_type"] == "keyline")
-        upper = next(r for r in runs if r["line_type"] == "cultivation_upper")
+        upper = next(r for r in runs if r["line_type"] != "keyline")
         # 2-D footprints should differ once offset.
         kl_xy = [(x, y) for x, y, *_ in keyline["geometry"].coords]
         up_xy = [(x, y) for x, y, *_ in upper["geometry"].coords]
@@ -318,3 +381,132 @@ class TestMathsAuditRegressions:
         if clean is not None and pitted is not None:
             # A single nodata row must not relocate the keypoint to it.
             assert pitted["elevation"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Per-primary-valley keypoints — the scope fix
+# ---------------------------------------------------------------------------
+
+def _two_valley_dem(path, n=120):
+    """Two parallel valleys draining south, each with a real break in its floor.
+
+    The floor of each valley falls steeply for the top half and gently for the bottom
+    half, so there is a genuine steep-above / gentler-below break — Yeomans' keypoint —
+    at the join. Two of them, so a per-valley pass must find two.
+    """
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    # Floor profile: steep to row 60, then gentle.
+    fall = np.where(r < 60, 0.30 * r, 0.30 * 60 + 0.05 * (r - 60))
+    # Two V-shaped valleys centred on columns 30 and 90.
+    across = np.minimum(np.abs(c - 30), np.abs(c - 90))
+    return _write_dem(path, 200.0 - fall + 0.5 * across, cell_size=1.0)
+
+
+def _uniform_valley_dem(path, n=120):
+    """One valley whose floor falls at a constant grade — so it has NO keypoint."""
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    across = np.abs(c - n // 2)
+    return _write_dem(path, 200.0 - 0.20 * r + 0.5 * across, cell_size=1.0)
+
+
+class TestKeypointsPerPrimaryValley:
+    def test_two_valleys_give_two_keypoints(self, tmp_path):
+        """The scope fix. `find_keypoint` walks the single largest stream, so it
+        answers the right question about the wrong feature — once."""
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        keypoints, _skipped = ya.find_keypoints(max_valleys=8)
+        assert len(keypoints) >= 2, (
+            f"expected a keypoint per primary valley, got {len(keypoints)}")
+
+        # They should be in different valleys, not two picks on one.
+        cols = sorted(kp["col"] for kp in keypoints[:2])
+        assert cols[1] - cols[0] > 20, f"both keypoints landed in one valley: {cols}"
+
+    def test_a_uniform_valley_has_no_keypoint_and_says_so(self, tmp_path):
+        """`argmax` always returns something; a constant-gradient floor has no break.
+
+        Harmless while one keypoint was found on one stem. Run per valley it would
+        fabricate them at scale, which is why the prominence bar exists.
+        """
+        dem_path = _uniform_valley_dem(str(tmp_path / "uniform.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        keypoints, skipped = ya.find_keypoints(max_valleys=8)
+        assert keypoints == [], (
+            "a uniform-gradient valley has no steep-to-gentle break, so a keypoint "
+            "here is invented")
+        assert skipped, "a refusal must be reported, not returned as a shorter list"
+        assert "grade" in skipped[0]
+
+    def test_keypoints_carry_their_catchment_and_a_label(self, tmp_path):
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        keypoints, _ = ya.find_keypoints(max_valleys=4)
+        assert keypoints
+        for kp in keypoints:
+            assert kp["catchment_ha"] > 0
+            assert kp["label"]
+            assert kp["_row"] == kp["row"] and kp["_col"] == kp["col"]
+
+    def test_the_cap_is_honoured(self, tmp_path):
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        keypoints, _ = ya.find_keypoints(max_valleys=1)
+        assert len(keypoints) <= 1
+
+    def test_keypoint_on_path_keeps_the_verified_criterion(self, tmp_path):
+        """The maths is unchanged: the strongest easing of the valley floor.
+
+        Only its scope moved. A profile that steepens throughout has its keypoint at
+        the *least* steepening, and one that eases has it at the break.
+        """
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        path = [(r, 30) for r in range(5, 115)]
+        kp = ya.keypoint_on_path(path)
+        assert kp is not None
+        # The break is at row 60; allow for the smoothing window.
+        assert 40 <= kp["row"] <= 80, kp
+        assert kp["slope_ease"] > 0
+
+
+class TestOffsetParts:
+    def test_a_fold_is_refused_rather_than_returned(self, tmp_path):
+        """`offset_curve` self-intersects wherever the offset exceeds the local radius
+        of curvature — which is every tight valley head, which is where a keyline is."""
+        from shapely.geometry import LineString
+
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+
+        # A hairpin with a 2 m radius, offset by 20 m on the inside.
+        hairpin = LineString([(0, 0), (40, 0), (42, 2), (40, 4), (0, 4)])
+        parts = ya.offset_parts(hairpin, -20.0)
+        for part in parts:
+            n = 12
+            dists = [part.interpolate(part.length * i / n).distance(hairpin)
+                     for i in range(n + 1)]
+            assert max(dists) - min(dists) < 20.0, (
+                "a folded lobe came back as a guide")
+
+    def test_both_limbs_of_a_split_guide_survive(self, tmp_path):
+        """A guide that splits around a spur is two real plough runs, not one."""
+        from shapely.geometry import LineString
+
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+
+        # A deep notch: offsetting outward splits the result in two.
+        notched = LineString([(0, 0), (20, 0), (25, 30), (30, 0), (50, 0)])
+        parts = ya.offset_parts(notched, -6.0)
+        assert len(parts) >= 1
+        assert all(p.length > 0 for p in parts)
+
+    def test_a_straight_line_offsets_to_one_clean_part(self, tmp_path):
+        from shapely.geometry import LineString
+
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        parts = ya.offset_parts(LineString([(0, 0), (100, 0)]), 5.0)
+        assert len(parts) == 1
+        assert parts[0].length == pytest.approx(100.0, rel=0.05)

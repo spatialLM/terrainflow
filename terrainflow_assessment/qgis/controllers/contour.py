@@ -1381,22 +1381,41 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         dem_path = self._state.dem_path
         n_runs = self._panel.keyline_runs
-        cross_grade = self._panel.keyline_cross_grade
+        max_grade_n = self._panel.keyline_max_grade_n
         spacing_m = self._panel.keyline_spacing_m
+        max_valleys = self._panel.keyline_max_valleys
 
         def work(report):
-            report(10, "Extracting primary valley…")
+            report(10, "Finding primary valleys…")
             ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path)
-            report(45, "Locating keypoint…")
-            keypoint = ya.find_keypoint()
-            if keypoint is None:
-                return None, []
+
+            # One keypoint per PRIMARY valley — a Strahler order-1 link, which is what
+            # Yeomans means by a primary valley. The single largest stream is the trunk
+            # of the catchment and is not one, so the old pass applied the right
+            # criterion to the wrong feature.
+            report(40, "Locating keypoints…")
+            keypoints, skipped = ya.find_keypoints(max_valleys=max_valleys)
+            if not keypoints:
+                # Fall back to the historical single-stem answer rather than returning
+                # nothing: on a small or single-valley DEM there may be no order-1 link
+                # long enough to profile, and the old answer is still an answer.
+                one = ya.find_keypoint()
+                if one is None:
+                    return [], [], skipped
+                one.setdefault("_row", one["row"])
+                one.setdefault("_col", one["col"])
+                one.setdefault("label", f"Keypoint at {one['elevation']:.1f} m")
+                keypoints = [one]
+
             report(70, "Generating cultivation guides…")
-            runs = ya.get_cultivation_runs(
-                keypoint, n_runs=n_runs, cross_grade=cross_grade,
-                spacing_m=spacing_m,
-            )
-            return keypoint, runs
+            runs = []
+            for index, keypoint in enumerate(keypoints, start=1):
+                for run in ya.get_cultivation_runs(
+                        keypoint, n_runs=n_runs, max_grade_n=max_grade_n,
+                        spacing_m=spacing_m):
+                    run["valley"] = index
+                    runs.append(run)
+            return keypoints, runs, skipped
 
         self._start_task(work, "keyline",
                          self._panel.set_keyline_progress,
@@ -1405,8 +1424,8 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                          "Keyline analysis failed")
 
     def _on_keyline_ready(self, result):
-        keypoint, runs = result
-        if keypoint is None:
+        keypoints, runs, skipped = result
+        if not keypoints:
             self._panel.set_keyline_complete("")
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment",
@@ -1418,11 +1437,30 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         # this side because it reads `state.usable_polygon`, which the user can
         # change while the analysis runs.
         runs = self._clip_runs_to_usable(runs)
-        self._display_keylines(runs, keypoint)
-        self._panel.set_keyline_complete(
-            f"Keyline at {keypoint['elevation']:.1f} m + "
-            f"{len(runs) - 1} cultivation guide(s)."
-        )
+        self._state.keyline_keypoints = keypoints
+        self._display_keylines(runs, keypoints[0])
+
+        guides = [r for r in runs if r["line_type"] != "keyline"]
+        flagged = [r for r in guides if r.get("over_limit")]
+        drifts = [r["drift_1_in_n"] for r in guides
+                  if r.get("drift_1_in_n") is not None]
+
+        summary = (f"{len(keypoints)} primary valley(s) | "
+                   f"{len(guides)} cultivation guide(s)")
+        if drifts:
+            # The number nobody had ever measured. "The drift is emergent from
+            # parallelism" had stood in a docstring since this feature was written;
+            # this is the measurement of it.
+            summary += f" | drift 1:{min(drifts):.0f}–1:{max(drifts):.0f}"
+        if flagged:
+            summary += f" | {len(flagged)} steeper than the limit"
+        self._panel.set_keyline_complete(summary + ".")
+
+        if skipped:
+            # Refusals are named, not swallowed — the house style everywhere else here.
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                f"{len(skipped)} valley(s) had no keypoint: {skipped[0]}")
 
     def activate_draw_keyline(self):
         """Let the user draw a keyline plough guide freehand, with the live slope
@@ -1504,10 +1542,18 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         crs_str = dem_crs(self._state)
         layer = QgsVectorLayer(f"LineString?crs={crs_str}", "Keyline Design", "memory")
         pr = layer.dataProvider()
+        # ``cross_grade`` is gone. It carried the value of a spin box that never
+        # reached the geometry, so the attribute table asserted a grade the lines did
+        # not have — a sharper fault than the control merely doing nothing. What
+        # replaces it is measured: the drift each guide actually achieves.
         pr.addAttributes([
-            QgsField("line_type",   QMetaType.QString),
-            QgsField("elevation",   QMetaType.Double),
-            QgsField("cross_grade", QMetaType.Double),
+            QgsField("line_type",    QMetaType.QString),
+            QgsField("valley",       QMetaType.Int),
+            QgsField("elevation",    QMetaType.Double),
+            QgsField("offset_m",     QMetaType.Double),
+            QgsField("drift_1_in_n", QMetaType.Double),
+            QgsField("drift_fall_m", QMetaType.Double),
+            QgsField("over_limit",   QMetaType.Bool),
         ])
         layer.updateFields()
 
@@ -1518,13 +1564,20 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                 continue
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromPolylineXY(xy))
-            f.setAttributes([run["line_type"], run["elevation"], run["cross_grade"]])
+            f.setAttributes([
+                run["line_type"], run.get("valley", 1), run["elevation"],
+                run.get("offset_m"), run.get("drift_1_in_n"),
+                run.get("drift_fall_m"), bool(run.get("over_limit")),
+            ])
             feats.append(f)
         pr.addFeatures(feats)
 
-        # Keyline solid brown-gold; cultivation guides dashed grey-green.
+        # Keyline solid brown-gold; guides dashed, and a guide whose measured drift
+        # exceeds the limit is drawn in a warning red so the flag is on the map and
+        # not only in the table.
         color_expr = (
-            "CASE WHEN \"line_type\" = 'keyline' THEN color_rgb(150,90,30)"
+            "CASE WHEN \"over_limit\" THEN color_rgb(190,60,40)"
+            " WHEN \"line_type\" = 'keyline' THEN color_rgb(150,90,30)"
             " ELSE color_rgb(90,140,90) END"
         )
         width_expr = "CASE WHEN \"line_type\" = 'keyline' THEN 1.8 ELSE 0.9 END"

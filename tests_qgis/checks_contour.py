@@ -453,12 +453,58 @@ def check_keypoint_analysis(dem_path):
 
 
 def check_keyline_analysis(dem_path):
-    """Yeomans keyline generation off the keypoint result."""
+    """Yeomans keyline generation, asserted rather than smoke-tested.
+
+    This check ran the button and asserted only that nothing errored, which would have
+    passed just as happily on an empty layer, on guides labelled by an arbitrary offset
+    sign, or on a grade column asserting a value the geometry did not have.
+    """
+    from qgis.core import QgsProject
+
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.panel.run_keypoint_analysis_requested.emit()
         h.panel.run_keyline_requested.emit()
         h.assert_no_errors("keyline analysis")
+
+        layers = QgsProject.instance().mapLayersByName("Keyline Design")
+        assert layers, "no 'Keyline Design' layer created"
+        layer = layers[0]
+        assert layer.featureCount() > 0, "the keyline layer is empty"
+
+        names = {f.name() for f in layer.fields()}
+        assert "cross_grade" not in names, (
+            "the inert grade column is back — it asserted a grade the geometry never "
+            "had, which is worse than a control that merely does nothing")
+        assert {"line_type", "valley", "drift_1_in_n", "over_limit"} <= names,             sorted(names)
+
+        rows = [dict(zip(names, f.attributes())) for f in layer.getFeatures()]
+        by_type = {}
+        for feat in layer.getFeatures():
+            by_type.setdefault(feat["line_type"], []).append(feat)
+
+        assert "keyline" in by_type, "no keyline was drawn"
+        assert len(by_type["keyline"]) == len(h.state.keyline_keypoints), (
+            "there should be exactly one keyline per primary valley keyed")
+
+        guides = [f for t, fs in by_type.items() if t != "keyline" for f in fs]
+        assert guides, "the keyline came with no cultivation guides"
+        assert set(by_type) <= {"keyline", "valley_guide", "ridge_guide"}, sorted(by_type)
+
+        # The drift is measured, which is the thing that had never been done.
+        measured = [f["drift_1_in_n"] for f in guides
+                    if f["drift_1_in_n"] is not None]
+        assert measured, "no guide reported the drift it achieves"
+
+        # Guides sit on the right side of the keyline by MEASURED elevation.
+        keyline_elev = by_type["keyline"][0]["elevation"]
+        for feat in guides:
+            if feat["line_type"] == "ridge_guide":
+                assert feat["elevation"] >= keyline_elev - 1e-6
+            else:
+                assert feat["elevation"] <= keyline_elev + 1e-6
+
+        assert rows
 
 
 def _contour_midpoint_in_view(canvas, layer):

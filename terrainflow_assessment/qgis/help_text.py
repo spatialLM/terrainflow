@@ -147,6 +147,18 @@ SLOPE_VECTORS = (
     "Sampled from the DEM surface gradient. Requires: baseline analysis run."
 )
 
+KEYLINE_MAX_VALLEYS = (
+    "How many primary valleys to key, largest catchment first.\n\n"
+    "A keypoint belongs to a PRIMARY valley — the small upland valley at the head\n"
+    "of a ridge-and-valley pair, which is a first-order stream link. The trunk of a\n"
+    "catchment is not one, which is why keying only the largest stream answered the\n"
+    "right question about the wrong feature.\n\n"
+    "A fine DEM has many primary valleys, and drawing a keyline set on every one is\n"
+    "neither useful nor quick, so the ones carrying the most water are keyed first.\n"
+    "Valleys whose floor has no genuine steep-to-gentle break are reported and\n"
+    "skipped rather than given an invented keypoint."
+)
+
 SPACING_ADVISOR = (
     "Derive the contour interval from the terrain instead of guessing it.\n\n"
     "Two rules are asked, and they answer different questions:\n\n"
@@ -508,14 +520,28 @@ KEYLINE_SPACING = (
     "(typically the plough/implement working width)."
 )
 KEYLINE_GRADE = (
-    "Advisory guide grade as 1:N (e.g. 500 = 1:500). Recorded on each\n"
-    "guide; the off-contour drift itself comes from the parallel geometry."
+    "A LIMIT, not a setting. Guides whose measured drift is steeper than 1:N are\n"
+    "flagged in the results and drawn in red on the map.\n\n"
+    "It does not shape the geometry, and nothing here does: in Yeomans' method the\n"
+    "guides are parallel to the keyline BECAUSE that is what a plough can follow in\n"
+    "one pass, and the off-contour drift emerges from that parallelism. Imposing a\n"
+    "constant grade would make the guides non-parallel and stop them being a pattern.\n\n"
+    "This box used to carry an 'advisory guide grade' that reached nothing — 1:50 and\n"
+    "1:5000 drew identical lines while the layer recorded the grade they did not\n"
+    "have. The drift each guide actually achieves is now measured and reported.\n\n"
+    "If you want a line set out to a designed grade, that is a diversion drain."
 )
 RUN_KEYLINE = (
-    "Yeomans keyline design: find the keypoint on the primary valley, draw\n"
-    "the on-contour keyline through it, and generate parallel cultivation\n"
-    "guides above and below. The guides deliberately drift off-contour to\n"
-    "move water from the wet valley toward the drier ridges.\n\n"
+    "Yeomans keyline design: find the keypoint on each PRIMARY valley, draw the\n"
+    "on-contour keyline through it, and generate parallel cultivation guides.\n\n"
+    "Two patterns, because Yeomans specifies two — and he stresses that most of a\n"
+    "landscape is the second:\n"
+    "  VALLEY — guides below the keyline, spreading runoff out of the valley floor\n"
+    "           toward the flanking ridges.\n"
+    "  RIDGE  — guides above a contour on the ridge, drifting water off the ridge\n"
+    "           nose out toward the valleys.\n\n"
+    "Guides are labelled by their MEASURED elevation, not by which side of the\n"
+    "offset they fell on, and each reports the drift it achieves.\n\n"
     "Requires: a DEM (baseline analysis recommended for best flow routing)."
 )
 DRAW_KEYLINE = (

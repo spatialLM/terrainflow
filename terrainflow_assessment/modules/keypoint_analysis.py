@@ -628,25 +628,49 @@ class YeomansKeylineAnalysis:
     # Public API
     # ------------------------------------------------------------------
 
+    #: Minimum easing of the valley floor, in metres of fall per metre, for a break to
+    #: count as a keypoint.
+    #:
+    #: ``argmax`` always returns something. On a uniform-gradient valley there is *no*
+    #: keypoint — Yeomans' break from steeper above to gentler below simply is not there
+    #: — and the old single-keypoint code invented one anyway. That was survivable while
+    #: one keypoint was found on one stem; run per primary valley it fabricates them at
+    #: scale. So the peak in ``d²E/ds²`` must clear a prominence expressed in terms a
+    #: reader can judge: the slope has to ease by at least this much across the break.
+    MIN_SLOPE_EASE = 0.02          # 2 % — a 1:50 change in grade
+
     def find_keypoint(self):
-        """
-        Detect the Yeomans keypoint on the primary thalweg.
+        """The Yeomans keypoint on the largest stream, or ``None``.
 
-        Returns a dict with keys ``x``, ``y``, ``elevation``, ``row``,
-        ``col``, ``arc_length_m``.  Returns *None* if the DEM is too
-        small to compute a meaningful profile.
+        Preserved as it was so existing callers and tests keep their meaning;
+        :meth:`find_keypoints` is the per-primary-valley form and is what the keyline
+        path now uses.
         """
-        from scipy.signal import savgol_filter
-
         fdir_arr, acc_arr = self._ensure_flow_data()
-
-        # Primary thalweg = drainage path traced upstream from the outlet
-        # (the cell with maximum accumulation).
         outlet_r, outlet_c = np.unravel_index(
             int(np.argmax(acc_arr)), acc_arr.shape
         )
         thalweg = self._trace_thalweg(fdir_arr, acc_arr, outlet_r, outlet_c)
-        if len(thalweg) < 5:
+        return self.keypoint_on_path(thalweg)
+
+    def keypoint_on_path(self, thalweg, require_prominence=False):
+        """Run the keypoint criterion along one ordered run of valley-floor cells.
+
+        Lifted out of ``find_keypoint`` so the criterion is written once and applied N
+        times. The maths is unchanged and is the *verified* one: Yeomans places the
+        keypoint where "the lower and more level portion of the primary valley floor
+        suddenly steepens higher", which is the strongest easing of the profile, and a
+        second derivative is invariant to which way the profile is walked.
+
+        With *require_prominence*, a break that does not ease the slope by at least
+        :data:`MIN_SLOPE_EASE` returns ``None`` rather than the best available noise.
+
+        Returns a dict with ``x``, ``y``, ``elevation``, ``row``, ``col``,
+        ``arc_length_m`` and ``slope_ease`` — or ``None``.
+        """
+        from scipy.signal import savgol_filter
+
+        if thalweg is None or len(thalweg) < 5:
             return None
 
         # Elevation profile and arc-length vector along thalweg. Nodata cells are
@@ -660,6 +684,8 @@ class YeomansKeylineAnalysis:
             dc = thalweg[i][1] - thalweg[i - 1][1]
             arc_all.append(arc_all[-1] + (dr ** 2 + dc ** 2) ** 0.5 * self.cell_size)
         total_len = arc_all[-1]
+        if total_len <= 0:
+            return None
 
         arc, elevs = [], []
         for s, (r, c) in zip(arc_all, thalweg):
@@ -685,11 +711,27 @@ class YeomansKeylineAnalysis:
 
         # Second derivative along arc length
         ds = total_len / max(n_samp - 1, 1)
-        d2 = np.gradient(np.gradient(elev_smooth, ds), ds)
+        slope = np.gradient(elev_smooth, ds)
+        d2 = np.gradient(slope, ds)
 
-        # Keypoint = maximum positive d²E/ds² (slope easing most rapidly)
-        kp_idx = int(np.argmax(d2))
+        # The ends are fitting the boundary of the smoothing window rather than the
+        # terrain, so a peak there is an artefact of the filter. Half a window in from
+        # each end is the region where the second derivative means something.
+        guard = max(1, win // 2)
+        if n_samp - 2 * guard < 3:
+            return None
+        interior = slice(guard, n_samp - guard)
+
+        kp_idx = int(np.argmax(d2[interior])) + guard
         kp_s = float(s_uni[kp_idx])
+
+        # How much the floor actually eases across the break, as a change in grade —
+        # a number a reader can judge, unlike a raw 1/m curvature.
+        lo = max(0, kp_idx - guard)
+        hi = min(n_samp - 1, kp_idx + guard)
+        slope_ease = float(slope[hi] - slope[lo])
+        if require_prominence and slope_ease < self.MIN_SLOPE_EASE:
+            return None
 
         # Map back to the nearest thalweg cell
         kp_thalweg_idx = int(np.argmin(np.abs(np.array(arc) - kp_s)))
@@ -704,44 +746,122 @@ class YeomansKeylineAnalysis:
             "row": kr,
             "col": kc,
             "arc_length_m": round(kp_s, 1),
+            "slope_ease": round(slope_ease, 4),
         }
 
-    def get_cultivation_runs(self, keypoint, n_runs=3, cross_grade=1 / 500,
-                             spacing_m=None):
+    def find_keypoints(self, max_valleys=8, stream_threshold_cells=None,
+                       max_order=1, boundary_mask=None):
+        """One keypoint per **primary valley**, which is what Yeomans' method asks for.
+
+        ``find_keypoint`` walks the single largest stream. The trunk of a catchment is
+        not a primary valley — Yeomans' primary valley is the small upland valley at the
+        head of a ridge-and-valley pair, which is a Strahler order-1 link — so the old
+        answer was the right criterion applied to the wrong feature, once.
+
+        Valleys are ranked by contributing area and capped at *max_valleys*: a fine DEM
+        with a low stream threshold has thousands of order-1 links, and drawing a keyline
+        set on every one of them is neither useful nor affordable.
+
+        Returns ``(keypoints, skipped)``. Each skipped valley carries its own reason —
+        the house style is to say what was refused and why, not to return a shorter list.
         """
-        Generate the Yeomans keyline + parallel cultivation guides.
+        from terrainflow_assessment.modules.flow_graph import (
+            d8_from_dem,
+            strahler_order,
+            stream_links,
+        )
 
-        Per Yeomans' method (``The Keyline Plan``, 1954) the **keyline** is the
-        on-contour line through the keypoint — it follows the valley shape at the
-        keypoint elevation. **Cultivation guides** are geometric *parallel offsets*
-        of that keyline, above and below. Because a parallel offset of a curved
-        valley contour is not itself a contour, the guides drift off-contour
-        automatically, moving water from the wet valley floor toward the drier
-        ridge (the purpose of keyline cultivation). The drift is emergent from
-        parallelism, so no artificial cross-grade is imposed on the geometry;
-        ``cross_grade`` is retained as advisory metadata (the intended slight
-        irrigation guide-grade) and echoed on every run.
+        _fdir, acc_arr = self._ensure_flow_data()
+        rows, cols = self.dem.shape
 
-        Parameters
-        ----------
-        keypoint : dict
-            Output from :meth:`find_keypoint`.
-        n_runs : int
-            Number of guides above/below the keyline (total = 2 × n_runs + 1).
-        cross_grade : float
-            Advisory guide-grade metadata (e.g. 1/500 = 0.002).
-        spacing_m : float or None
-            Horizontal spacing between parallel guides (implement/plough width).
-            Defaults to ``max(3.0, 5·cell_size)``.
+        if stream_threshold_cells is None:
+            # A modest default in CELLS derived from the grid, not a bare constant:
+            # KPA-05 is the standing lesson that a cell threshold means a different
+            # catchment on every resolution.
+            stream_threshold_cells = max(20, int(round(2_000.0 / (self.cell_w * self.cell_h))))
 
-        Returns
-        -------
-        list of dict
-            Each dict has keys ``elevation`` (mean DEM elevation along the guide),
-            ``geometry`` (shapely 3D LineString, Z sampled from the DEM),
-            ``cross_grade``, ``line_type`` ("keyline" | "cultivation_upper" |
-            "cultivation_lower").
+        stream = (acc_arr >= stream_threshold_cells) & np.isfinite(self.dem)
+        if boundary_mask is not None:
+            stream &= boundary_mask
+        if not stream.any():
+            return [], ["no channel network at this threshold"]
+
+        next_flat, _sink = d8_from_dem(self.dem, self.cell_w, self.cell_h)
+        order = strahler_order(next_flat, stream.ravel())
+        links = stream_links(next_flat, stream.ravel(), order, cols,
+                             max_order=max_order)
+
+        # Largest catchment first — if only some valleys get a keyline, they should be
+        # the ones carrying the most water.
+        def _catchment(link):
+            r, c = link[-1]
+            return float(acc_arr[r, c])
+
+        links.sort(key=_catchment, reverse=True)
+
+        keypoints, skipped = [], []
+        for link in links:
+            if len(keypoints) >= max_valleys:
+                break
+            kp = self.keypoint_on_path(link, require_prominence=True)
+            if kp is None:
+                skipped.append(
+                    f"valley at row {link[0][0]}, col {link[0][1]}: no break in the "
+                    f"floor clearing {self.MIN_SLOPE_EASE:.0%} of grade change")
+                continue
+            kp["valley_cells"] = len(link)
+            kp["catchment_ha"] = _catchment(link) * (self.cell_w * self.cell_h) / 10_000.0
+            kp["_row"], kp["_col"] = kp["row"], kp["col"]
+            kp["label"] = (
+                f"Keypoint at {kp['elevation']:.1f} m — "
+                f"{kp['catchment_ha']:.1f} ha above")
+            keypoints.append(kp)
+
+        return keypoints, skipped
+
+    def get_cultivation_runs(self, keypoint, n_runs=3, max_grade_n=500,
+                             spacing_m=None, pattern="both", cross_grade=None):
+        """The Yeomans keyline and its cultivation guides, with the drift **measured**.
+
+        Per Yeomans (*The Keyline Plan*, 1954) the **keyline** is the on-contour line
+        through the keypoint. **Cultivation guides** are geometric parallel offsets of
+        it. Because a parallel offset of a curved valley contour is not itself a
+        contour, the guides drift off-contour on their own, moving water from the wet
+        valley floor toward the drier ridge — the drift is emergent from parallelism,
+        and no artificial grade is imposed on the geometry.
+
+        **Two patterns, because Yeomans specifies two**, and he stresses that most of a
+        landscape is the second:
+
+        * ``"valley"`` — guides parallel to and **below** the keyline, which spread
+          runoff out of the valley floor toward the flanking ridges.
+        * ``"ridge"`` — guides parallel to and **above** a contour guide taken on the
+          ridge, which drift water off the ridge nose out toward the valleys.
+
+        The default is ``"both"``, which is what a whole ridge-and-valley pair wants —
+        and what keeps a keypoint in a valley from producing guides on only one side of
+        itself.
+
+        **The grade is a limit, not a generator.** ``cross_grade`` used to be echoed
+        onto every run and read by nothing, so a user could set 1:50 or 1:5000 and get
+        byte-identical lines — while the map carried a column asserting the grade the
+        geometry did not have. It is gone. ``max_grade_n`` is a **threshold**: every run
+        reports the drift it actually achieves, and guides steeper than 1:``max_grade_n``
+        are flagged. That is the number nobody had ever measured, and it is what the
+        "does the drift make sense" question was really asking.
+
+        Returns a list of dicts with ``elevation``, ``geometry`` (3D LineString, Z
+        sampled from the ground — a plough guide sits *on* the ground, and a line set
+        out to a designed invert is a diversion drain, which exists), ``line_type``
+        (``keyline`` | ``valley_guide`` | ``ridge_guide``), ``offset_m``,
+        ``drift_1_in_n``, ``drift_fall_m``, ``over_limit``.
         """
+        if cross_grade is not None:
+            warnings.warn(
+                "cross_grade is gone: it never reached the geometry. Use max_grade_n, "
+                "which flags guides whose *measured* drift is steeper than 1:N.",
+                DeprecationWarning, stacklevel=2)
+
         kr, kc = keypoint["row"], keypoint["col"]
         base_elev = keypoint["elevation"]
         if spacing_m is None:
@@ -754,33 +874,63 @@ class YeomansKeylineAnalysis:
         base_line = LineString(keyline_xy)
 
         results = []
-        for offset in range(-n_runs, n_runs + 1):
-            if offset == 0:
-                line2d = base_line
-            else:
-                line2d = self._offset_line(base_line, offset * spacing_m, kr, kc)
-            if line2d is None or line2d.is_empty or line2d.length <= 0:
-                continue
+        keyline_pts, keyline_elev = self._sample_z(base_line, base_elev)
+        if len(keyline_pts) >= 2:
+            results.append(self._run_record(
+                LineString(keyline_pts), keyline_elev, "keyline", 0.0, max_grade_n))
 
-            pts3d, mean_elev = self._sample_z(line2d, base_elev)
-            if len(pts3d) < 2:
-                continue
+        wants_valley = pattern in ("valley", "both", "auto")
+        wants_ridge = pattern in ("ridge", "both", "auto")
 
-            if offset == 0:
-                line_type = "keyline"
-            elif offset > 0:
-                line_type = "cultivation_upper"
-            else:
-                line_type = "cultivation_lower"
+        for step in range(1, n_runs + 1):
+            distance = step * spacing_m
+            for signed in (distance, -distance):
+                for part in self.offset_parts(base_line, signed):
+                    pts3d, mean_elev = self._sample_z(part, base_elev)
+                    if len(pts3d) < 2:
+                        continue
 
-            results.append({
-                "elevation": round(mean_elev, 2),
-                "geometry": LineString(pts3d),
-                "cross_grade": cross_grade,
-                "line_type": line_type,
-            })
+                    # **Labelled by measured elevation, not by the sign of the offset.**
+                    # ``offset_curve``'s sign means "left of the direction of travel",
+                    # and the traced contour's winding comes from find_contours without
+                    # being normalised — so upper and lower were being assigned by an
+                    # arbitrary sign. Measuring is this repo's own lesson.
+                    above = mean_elev >= keyline_elev
+                    if above and not wants_ridge:
+                        continue
+                    if not above and not wants_valley:
+                        continue
+                    line_type = "ridge_guide" if above else "valley_guide"
+
+                    results.append(self._run_record(
+                        LineString(pts3d), mean_elev, line_type,
+                        distance if above else -distance, max_grade_n))
 
         return results
+
+    def _run_record(self, geometry, mean_elev, line_type, offset_m, max_grade_n):
+        """One cultivation run, with its achieved drift attached.
+
+        The drift is the net fall from one end of the guide to the other over its
+        length, reported as ``1:N``. The claim that "the drift is emergent from
+        parallelism" has stood in a docstring since this feature was written and has
+        never been measured anywhere; this is the measurement.
+        """
+        coords = list(geometry.coords)
+        fall = float(coords[0][2] - coords[-1][2]) if len(coords[0]) > 2 else 0.0
+        length = geometry.length
+        grade = abs(fall) / length if length > 0 else 0.0
+        one_in_n = (1.0 / grade) if grade > 0 else None
+        over = bool(max_grade_n and one_in_n is not None and one_in_n < max_grade_n)
+        return {
+            "elevation": round(mean_elev, 2),
+            "geometry": geometry,
+            "line_type": line_type,
+            "offset_m": round(offset_m, 2),
+            "drift_fall_m": round(fall, 3),
+            "drift_1_in_n": round(one_in_n, 1) if one_in_n is not None else None,
+            "over_limit": over,
+        }
 
     # ------------------------------------------------------------------
     # Keyline geometry helpers
@@ -840,10 +990,32 @@ class YeomansKeylineAnalysis:
         return [(kx - cx * half_len, ky - cy * half_len),
                 (kx + cx * half_len, ky + cy * half_len)]
 
-    def _offset_line(self, line, signed_dist, kr, kc):
-        """Parallel offset of *line* by *signed_dist* (metres). Prefers shapely's
-        offset_curve (constant perpendicular spacing); falls back to translating
-        the line along the keypoint gradient so a guide is always produced."""
+    #: How far an offset part may sit from its source, as a fraction of the offset
+    #: distance, before it is treated as a fold rather than a guide.
+    _OFFSET_TOLERANCE = 0.25
+
+    def offset_parts(self, line, signed_dist):
+        """Every usable parallel offset of *line*, as a list of LineStrings.
+
+        Two faults in one place, both fixed here.
+
+        **Folding.** ``offset_curve`` self-intersects wherever the offset exceeds the
+        local radius of curvature — which is every tight valley head, which is exactly
+        where a keyline is. The old code took ``max(off.geoms, key=length)`` and
+        returned it, so a folded lobe came back looking like a guide. Parts are now
+        kept only where their distance back to the source stays within
+        :data:`_OFFSET_TOLERANCE` of ``|signed_dist|``; a fold comes back *closer* than
+        the offset, which is what makes it identifiable.
+
+        **Discarding real limbs.** Taking only the longest part also threw away the
+        second limb of a guide that legitimately splits around a spur. Both are real
+        plough runs, so both are returned.
+
+        Returns ``[]`` when nothing survives — the caller refuses the guide and says
+        why, rather than drawing a line a plough cannot follow.
+        """
+        from shapely.ops import linemerge, unary_union
+
         off = None
         try:
             off = line.offset_curve(signed_dist)
@@ -853,11 +1025,41 @@ class YeomansKeylineAnalysis:
                 off = line.parallel_offset(abs(signed_dist), side)
             except Exception:
                 off = None
-        if off is not None and not off.is_empty:
-            if off.geom_type == "MultiLineString":
-                off = max(off.geoms, key=lambda g: g.length)
-            if off.length > 0:
-                return off
+
+        if off is None or off.is_empty:
+            return []
+
+        try:
+            merged = linemerge(unary_union(off))
+        except Exception:
+            merged = off
+
+        parts = list(merged.geoms) if merged.geom_type == "MultiLineString" else [merged]
+
+        target = abs(signed_dist)
+        tol = max(self.cell_size, target * self._OFFSET_TOLERANCE)
+        kept = []
+        for part in parts:
+            if part.geom_type != "LineString" or part.length <= 0:
+                continue
+            # Sample the part rather than trusting a single distance: a fold is only
+            # close to the source along the folded section.
+            n = max(2, min(24, int(part.length / max(self.cell_size, 1e-6))))
+            dists = [part.interpolate(part.length * i / n).distance(line)
+                     for i in range(n + 1)]
+            if max(abs(d - target) for d in dists) <= tol:
+                kept.append(part)
+        return kept
+
+    def _offset_line(self, line, signed_dist, kr, kc):
+        """One parallel offset of *line*, or a translated fallback.
+
+        Kept for the callers that want a single line. New code should prefer
+        :meth:`offset_parts`, which returns every usable limb instead of the longest.
+        """
+        parts = self.offset_parts(line, signed_dist)
+        if parts:
+            return max(parts, key=lambda g: g.length)
         # Fallback: translate along the (down-slope) gradient direction.
         rows, cols = self.dem.shape
         r0, r1 = max(0, kr - 1), min(rows - 1, kr + 1)
