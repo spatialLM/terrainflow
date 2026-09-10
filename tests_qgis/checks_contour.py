@@ -1,5 +1,6 @@
 """Contour analysis, Processing integration, and the keypoint/keyline paths."""
 
+import pytest
 from _harness import PluginHarness
 from _mouse import click_map
 from qgis.PyQt.QtCore import Qt
@@ -34,9 +35,26 @@ def check_recommend_ponds(dem_path):
 
         from qgis.core import QgsProject
 
-        sites = QgsProject.instance().mapLayersByName("Recommended Pond Sites")
-        assert sites, "no 'Recommended Pond Sites' layer created"
+        sites = QgsProject.instance().mapLayersByName("Ranked Pond Sites")
+        assert sites, "no 'Ranked Pond Sites' layer created"
         assert sites[0].featureCount() > 0, "pond sites layer is empty"
+
+        # The index, and the columns that must stay beside it rather than inside it.
+        names = {f.name() for f in sites[0].fields()}
+        assert {"storage_ratio", "storage_m3", "fill_m3", "wall_height_m",
+                "wall_length_m", "catchment_ha"} <= names, sorted(names)
+
+        ranked = [s for s in h.state.pond_sites if not s.get("notes")]
+        for site in ranked:
+            assert site["storage_ratio"] == pytest.approx(
+                site["storage_m3"] / site["fill_m3"]), (
+                "the rank is storage over embankment; anything else is a blend")
+            assert site["wall_height_m"] in (1.0, 1.5, 2.0, 3.0, 4.0), (
+                "the winning trial height must be reported — a ratio with no wall "
+                "attached cannot be acted on")
+
+        ratios = [s.get("storage_ratio", 0.0) for s in h.state.pond_sites]
+        assert ratios == sorted(ratios, reverse=True), "sites are not ranked"
 
 
 def check_recommend_ponds_without_keypoints_warns(dem_path):

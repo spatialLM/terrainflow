@@ -137,6 +137,9 @@ class PluginState:
     terrain_index_paths: dict = field(default_factory=dict)
     terrain_index_layer_ids: dict = field(default_factory=dict)
     terrain_index_bounds: dict = field(default_factory=dict)
+    # Ranked impoundment sites from the last run, refusals included — a candidate
+    # the user can see was considered beats a quietly shorter list.
+    pond_sites: list = field(default_factory=list)
     inflow_bands_layer_id: str | None = None
     # Natural-breaks boundaries the candidate contours are currently banded on, so
     # the panel legend prints the same numbers the map is drawn with.

@@ -1258,42 +1258,56 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         )
 
     def run_recommend_ponds(self):
+        """Rank impoundment sites by storage held per cubic metre of embankment.
+
+        **On the worker, not the GUI thread.** This used to run inline with a manual
+        progress poke, which was affordable only while it was a proxy score over a
+        vectorised width. It now floods a bounded window per candidate per trial wall
+        height, so it costs seconds — and this is the very function that once spent
+        300 s parked on a modal dialog nobody could click offscreen.
+        """
         if not self._state.found_keypoints:
             QMessageBox.warning(self._panel, "No Keypoints",
                                 "Run 'Find Keypoints + Ridgelines' first.")
             return
 
-        self._panel.set_ponds_progress(5, "Finding pond sites…")
-        try:
-            ka = self._state.keyline_analysis
-            if ka is None:
-                from terrainflow_assessment.modules.keypoint_analysis import (
-                    DrainageLineAnalysis,
-                )
-                acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
-                ka = DrainageLineAnalysis(
-                    self._state.dem_path, acc_path,
-                    (self._state.baseline_result or {}).get("pond_flow"),
-                )
+        if not self._claim_worker("Pond site ranking"):
+            return
 
-            self._panel.set_ponds_progress(50, "Finding pond sites…")
-            boundary_mask = self._get_keypoint_boundary_mask(self._state.dem_path)
-            pond_sites = ka.recommend_pond_sites(self._state.found_keypoints,
-                                                 boundary_mask=boundary_mask)
-            self._display_pond_sites(pond_sites)
+        # Every input read here, on the GUI thread.
+        dem_path = self._state.dem_path
+        acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
+        runoff_mm = (self._state.baseline_result or {}).get("runoff_mm")
+        boundary_mask = self._get_keypoint_boundary_mask(dem_path)
+        keypoints = list(self._state.found_keypoints)
+        max_sites = max(1, int(self._panel.keypoint_count))
 
-            self._panel.set_keypoint_results(
-                self._keypoint_result_items(
-                    self._state.found_keypoints, pond_sites=pond_sites)
-            )
-            self._panel.set_ponds_complete(
-                f"{len(self._state.found_keypoints)} valley points | "
-                f"{len(pond_sites)} pond site(s) found."
-            )
-        except Exception:
-            import traceback
-            self._panel.set_ponds_complete("")
-            QMessageBox.critical(self._panel, "Pond Site Error", traceback.format_exc())
+        def work(report):
+            return _rank_pond_sites(dem_path, acc_path, keypoints, boundary_mask,
+                                    runoff_mm, max_sites, report)
+
+        self._start_task(work, "pond sites",
+                         self._panel.set_ponds_progress,
+                         self._on_pond_sites_ready,
+                         lambda: self._panel.set_ponds_complete(""),
+                         "Pond site ranking failed")
+
+    def _on_pond_sites_ready(self, pond_sites):
+        self._state.pond_sites = pond_sites
+        self._display_pond_sites(pond_sites)
+        self._panel.set_keypoint_results(
+            self._keypoint_result_items(
+                self._state.found_keypoints, pond_sites=pond_sites)
+        )
+        usable = [s for s in pond_sites if not s.get("notes")]
+        refused = len(pond_sites) - len(usable)
+        summary = (f"{len(self._state.found_keypoints)} valley points | "
+                   f"{len(usable)} site(s) ranked")
+        if refused:
+            # Named, not dropped: a candidate the user can see was considered and
+            # refused is worth more than a quietly shorter list.
+            summary += f", {refused} refused"
+        self._panel.set_ponds_complete(summary + ".")
 
     @staticmethod
     def _keypoint_result_items(keypoints, ridgelines=None, pond_sites=None):
@@ -1631,23 +1645,37 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         remove_layer(self._project, self._state.pond_sites_layer_id)
         self._state.pond_sites_layer_id = None
 
-        layer = QgsVectorLayer("Point", "Recommended Pond Sites", "memory")
+        layer = QgsVectorLayer("Point", "Ranked Pond Sites", "memory")
         layer.setCrs(crs_object(dem_crs(self._state)))
         pr = layer.dataProvider()
+        # Every column beside the ratio is a trade-off the user reads, not a term in
+        # the rank. A blended score would hide which of them drove the ordering, which
+        # is the failure KPA-20 already demonstrated.
         pr.addAttributes([
-            QgsField("label",        QMetaType.QString),
-            QgsField("elevation",    QMetaType.Double),
-            QgsField("catchment_ha", QMetaType.Double),
-            QgsField("dam_width_m",  QMetaType.Double),
-            QgsField("keypoint",     QMetaType.Int),
+            QgsField("label",          QMetaType.QString),
+            QgsField("rank",           QMetaType.Int),
+            QgsField("storage_ratio",  QMetaType.Double),
+            QgsField("storage_m3",     QMetaType.Double),
+            QgsField("fill_m3",        QMetaType.Double),
+            QgsField("wall_height_m",  QMetaType.Double),
+            QgsField("wall_length_m",  QMetaType.Double),
+            QgsField("elevation",      QMetaType.Double),
+            QgsField("catchment_ha",   QMetaType.Double),
+            QgsField("fills_in",       QMetaType.Double),
+            QgsField("refused",        QMetaType.QString),
         ])
         layer.updateFields()
         feats = []
         for s in sites:
             f = QgsFeature()
             f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(s["x"], s["y"])))
-            f.setAttributes([s["label"], s["elevation"], s["catchment_ha"],
-                             s["dam_width_m"], s["keypoint"]])
+            f.setAttributes([
+                s.get("label", ""), s.get("rank"), s.get("storage_ratio"),
+                s.get("storage_m3"), s.get("fill_m3"),
+                s.get("wall_height_m"), s.get("wall_length_m"),
+                s.get("elevation"), s.get("catchment_ha"),
+                s.get("fills_in_events"), s.get("notes"),
+            ])
             feats.append(f)
         pr.addFeatures(feats)
 
@@ -1668,3 +1696,81 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         layer.updateExtents()
         self.place(layer, G.KEYPOINT)
         self._state.pond_sites_layer_id = layer.id()
+
+
+def _rank_pond_sites(dem_path, acc_path, keypoints, boundary_mask,
+                     runoff_mm, max_sites, report):
+    """Worker body for the impoundment ranking. No Qt beyond the progress callable.
+
+    Candidates are screened before they are measured. The old code scanned a
+    ``(2·search_r + 1)²`` box around every keypoint — thousands of cells — because each
+    was a cheap proxy; measuring storage is not cheap, so this takes a handful of cells
+    down the stream below each keypoint and measures only those. The screen is the whole
+    reason the sweep is affordable, and removing it as "an approximation" would put the
+    run back into minutes.
+    """
+    import numpy as np
+    import rasterio
+
+    from terrainflow_assessment.modules.impoundment_sites import rank_impoundment_sites
+
+    with rasterio.open(dem_path) as src:
+        dem = src.read(1).astype("float64")
+        transform = src.transform
+        nodata = src.nodata
+        cell_w = abs(transform.a)
+        cell_h = abs(transform.e)
+    if nodata is not None:
+        dem = np.where(dem == nodata, np.nan, dem)
+
+    if acc_path and os.path.exists(acc_path):
+        with rasterio.open(acc_path) as src:
+            acc = src.read(1).astype("float64")
+            acc_nodata = src.nodata
+        if acc_nodata is not None:
+            acc = np.where(acc == acc_nodata, 0.0, acc)
+    else:
+        acc = np.zeros_like(dem)
+
+    def rc_to_xy(row, col):
+        # GDAL-consistent cell-centre form, matching keypoint_analysis._rc_to_xy.
+        return (transform.c + (col + 0.5) * transform.a,
+                transform.f + (row + 0.5) * transform.e)
+
+    rows, cols = dem.shape
+    candidates = []
+    seen = set()
+    for kp in keypoints[:max_sites]:
+        r0, c0 = kp.get("_row"), kp.get("_col")
+        if r0 is None or c0 is None:
+            continue
+        # Walk a short way downstream: a dam sits below the keypoint, not on it.
+        r, c = int(r0), int(c0)
+        for _step in range(12):
+            best, best_acc = None, float(acc[r, c])
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = r + dr, c + dc
+                    if not (1 <= nr < rows - 1 and 1 <= nc < cols - 1):
+                        continue
+                    if not np.isfinite(dem[nr, nc]):
+                        continue
+                    if boundary_mask is not None and not boundary_mask[nr, nc]:
+                        continue
+                    if float(acc[nr, nc]) > best_acc:
+                        best, best_acc = (nr, nc), float(acc[nr, nc])
+            if best is None:
+                break
+            r, c = best
+            if (r, c) not in seen:
+                seen.add((r, c))
+                candidates.append((r, c))
+
+    if not candidates:
+        return []
+
+    return rank_impoundment_sites(
+        dem, acc, candidates, cell_w, cell_h, rc_to_xy,
+        runoff_mm=runoff_mm, progress=report)

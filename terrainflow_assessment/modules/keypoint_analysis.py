@@ -377,6 +377,15 @@ class DrainageLineAnalysis:
         For each keypoint, recommend a dam/pond location just downstream where the
         valley is at its narrowest (smallest cross-sectional width at dam crest).
 
+        **Superseded — no longer the production path.** The "Recommend Pond Sites"
+        button now goes through ``modules/impoundment_sites``, which ranks candidates by
+        storage held per cubic metre of embankment: both terms measured off the DEM,
+        dimensionless, and comparable between sites. The score below is
+        ``acc / (width + 1)`` — a cell count over a length, flagged HAZ as KPA-20 — and
+        the width feeding it is measured *along the raster row*, so an east–west valley
+        has its own length read as its width. Kept for now only because its tests
+        exercise several branches of this class; it should go with them.
+
         The trial dam crest used to measure valley width is set 2 m above the
         *candidate cell's own* elevation — not above the keypoint's, as this once
         claimed. The two differ by the fall between keypoint and dam site.
