@@ -1,0 +1,198 @@
+{
+  "probe": "p_smoke",
+  "date": "2026-09-11",
+  "findings": [],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "float32 round-trip preserved the sink count on this fixture (z_max see dem stats) \u2014 save_result's warning is about high-elevation sites and does not bite here. It is still the wrong dtype for the conditioned surface.",
+    "_harness.py:193 says '18 sinks, 180 nodata cells'; this seed gives 30 sinks and 180 nodata cells. The comment is asserted nowhere, so this is a stale comment, not an environment failure \u2014 but the register must not quote the comment as a measurement.",
+    "pure suite:     ax.legend(fontsize=10) | -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html | 2889 passed, 2 xfailed, 5 xpassed, 96 warnings in 39.75s",
+    "CLAUDE.md says ~2,590 tests in ~60 s; project memory says ~2,890 in ~35 s. Measured 42.7 s on this machine \u2014 see 'tail'."
+  ],
+  "stages": {
+    "flow_analysis_run": {
+      "status": "ok",
+      "wall_s": 0.543,
+      "keys": [
+        "conditioned_dem",
+        "crest_cells",
+        "crest_passes",
+        "crest_ponds",
+        "crest_residual",
+        "crest_skipped",
+        "flow_accumulation",
+        "flow_direction",
+        "pond_flow",
+        "unrouted_cells",
+        "unrouted_flow"
+      ],
+      "has_conditioned_dem": true,
+      "routing": "dinf",
+      "flat_eps": 5.994524274553571e-06,
+      "flat_inversions": 0,
+      "conditioned_dtype": "float64",
+      "conditioned_z_min": -0.099988012441567,
+      "conditioned_z_max": 84.77928161621094
+    },
+    "save_result_roundtrip": {
+      "status": "ok",
+      "sinks_in_memory": 65,
+      "float32": {
+        "nodata_tag_present": true,
+        "nodata_tag": -9999.0,
+        "sinks_after_roundtrip": 65,
+        "matches_in_memory": true,
+        "max_abs_delta_m": 3.814697265625e-06
+      },
+      "float64": {
+        "nodata_tag_present": true,
+        "nodata_tag": -9999.0,
+        "sinks_after_roundtrip": 65,
+        "matches_in_memory": true,
+        "max_abs_delta_m": 0.0
+      }
+    },
+    "gdal_contour_on_path": {
+      "status": "ok",
+      "resolved": "F:\\\\bin\\gdal_contour.EXE",
+      "on_path": true
+    },
+    "plugin_harness_baseline": {
+      "status": "ok",
+      "wall_s": 1.748,
+      "baseline_is_none": false,
+      "state_baseline_result_set": true,
+      "baseline_keys": [
+        "area_outflow",
+        "catchment_area_m2",
+        "catchments",
+        "cell_area_m2",
+        "conditioned_dem",
+        "crest_cells",
+        "crest_passes",
+        "crest_ponds",
+        "crest_unplaced_m3",
+        "crest_warning",
+        "domain_area_m2",
+        "domain_cells",
+        "domain_mask",
+        "domain_source",
+        "domain_warning",
+        "effective_cn",
+        "exit_points",
+        "flow_accumulation",
+        "flow_direction",
+        "label",
+        "max_upstream_area_m2",
+        "pond_flow",
+        "pond_retained_m3",
+        "ponded_volume_m3",
+        "ponding",
+        "rainfall_mm",
+        "runoff_coefficient",
+        "runoff_mm",
+        "runoff_volume",
+        "runoff_volume_m3",
+        "sizing_basis",
+        "stream_acc_max",
+        "stream_network",
+        "stream_threshold",
+        "throughflow",
+        "unrouted_cells",
+        "unrouted_diag_path",
+        "unrouted_flow_m3",
+        "unrouted_warning"
+      ],
+      "layer_names": [
+        "Baseline \u2014 Hillshade",
+        "Baseline \u2014 Pond Capacity (full)",
+        "Baseline \u2014 Streams",
+        "Baseline \u2014 Surface Runoff (m\u00b3)",
+        "Site Boundary",
+        "Test DEM"
+      ],
+      "message_bar": {
+        "criticals": 0,
+        "warnings": 0
+      },
+      "assert_no_errors": "clean"
+    },
+    "synthetic_nasty_dem": {
+      "status": "ok",
+      "dem": {
+        "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\smoke\\nasty.tif",
+        "shape": [
+          300,
+          300
+        ],
+        "cell_w_m": 2.0,
+        "cell_h_m": 2.0,
+        "cell_area_m2": 4.0,
+        "crs": "EPSG:2193",
+        "nodata": -9999.0,
+        "nodata_cells": 180,
+        "z_min": 42.12005615234375,
+        "z_max": 126.89409637451172,
+        "default_stream_threshold_cells": 500,
+        "default_stream_threshold_ha": 0.2
+      },
+      "nodata_cells": 180,
+      "sinks_excluding_nodata": 30,
+      "sinks_including_nodata": 210,
+      "comment_claims": {
+        "sinks": 18,
+        "nodata_cells": 180,
+        "at": "_harness.py:193"
+      },
+      "matches_comment": false,
+      "default_surface": {
+        "dem": {
+          "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\smoke\\smooth.tif",
+          "shape": [
+            300,
+            300
+          ],
+          "cell_w_m": 2.0,
+          "cell_h_m": 2.0,
+          "cell_area_m2": 4.0,
+          "crs": "EPSG:2193",
+          "nodata": -9999.0,
+          "nodata_cells": 0,
+          "z_min": 42.2175407409668,
+          "z_max": 126.82029724121094,
+          "default_stream_threshold_cells": 500,
+          "default_stream_threshold_ha": 0.2
+        },
+        "sinks": 2
+      }
+    },
+    "pure_suite": {
+      "status": "ok",
+      "interpreter": "C:\\Users\\Liam\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "wall_s": 42.7,
+      "returncode": 0,
+      "tail": [
+        "    ax.legend(fontsize=10)",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "2889 passed, 2 xfailed, 5 xpassed, 96 warnings in 39.75s"
+      ]
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}

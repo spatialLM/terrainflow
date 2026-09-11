@@ -1,0 +1,449 @@
+{
+  "probe": "p_controllers",
+  "date": "2026-09-11",
+  "findings": [
+    "KPA-48",
+    "SWL-22",
+    "CTL-01",
+    "MHL-01",
+    "IMP-02"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "KPA-48, measured: passing acc_path alone (which is what contour.py:1390 does) takes 0.481 s and returns an accumulation field that is NOT the raster supplied (max difference 65085.9 cells; supplied max 67199, recomputed max 67199). Passing both paths takes 0.022 s and does read the supplied raster (True). The baseline accumulation is crest-split and the recompute is not, so the keyline runs on a pond-uncorrected field.",
+    "SWL-22, measured: suggest_spacing omits infiltration_mm_hr, so the capacity it hands capture_spacing is short by up to 85.7% (Sand / 24 h). A lower capacity gives a TIGHTER advised interval, so the direction is O (over-sizes), not U.",
+    "CTL-01, measured: suggest_spacing calls slope_statistics with no mask (contour.py:168) though the parameter exists and is unit-tested. On this fixture the site-wide median slope is 8.06 deg and the middle-half median is 6.81 deg, a change of -15.5%. The docstring at contour.py:137 says the advice is read 'over the usable area'; it is read site-wide.",
+    "MHL-01, measured: haul_regions over block_m 0.01 -> 1000 m (a 100,000x range) produces 1 distinct output(s). `block` is computed at mass_haul.py:124 and passed to _regions_from, which never reads it. earthworks.py, the only caller, never passes block_m at all, so the parameter is inert in two independent ways.",
+    "IMP-02, measured: transect_cells searches +/-200 m and returns a crest line spanning 400 m, while the refusal compares the TOTAL run against 200 m. Code and message agree with each other; the docstring's 'either side' describes a limit twice as permissive as the one enforced.",
+    "Knob sweep over 9 inputs at 0.1x and 10x, running baseline + find-keypoints + keyline each time. Inert (the value changed and the state did not): keyline_max_grade_n, keyline_max_valleys, min_catchment_ha, max_slope_deg, min_contour_length_m. Demonstrably live: keypoint_count, keyline_runs, keyline_spacing_m, stream_threshold_ha. A knob that is inert here is either unwired or reaching a tool whose output it cannot move on this fixture \u2014 the register must say which."
+  ],
+  "stages": {
+    "kpa48_acc_path_is_inert": {
+      "status": "ok",
+      "acc_raster_written": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\controllers\\baseline_acc.tif",
+      "baseline_was_crest_split": true,
+      "wall_s_with_acc_path": 0.481,
+      "supplied_equals_used": false,
+      "max_abs_difference": 65085.8515625,
+      "supplied_max": 67198.89521613705,
+      "used_max": 67198.8984375,
+      "wall_s_with_both_paths": 0.022,
+      "both_paths_reads_supplied": true
+    },
+    "swl22_omitted_infiltration": {
+      "status": "ok",
+      "section": {
+        "depth_m": 0.6,
+        "width_m": 2.0,
+        "side_slope": 1.0
+      },
+      "rows": [
+        {
+          "soil": "Sand",
+          "infiltration_mm_hr": 15.0,
+          "duration_hr": 1.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.87,
+          "shortfall_fraction": 0.03571428571428575
+        },
+        {
+          "soil": "Sand",
+          "infiltration_mm_hr": 15.0,
+          "duration_hr": 6.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 1.02,
+          "shortfall_fraction": 0.21428571428571436
+        },
+        {
+          "soil": "Sand",
+          "infiltration_mm_hr": 15.0,
+          "duration_hr": 24.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 1.56,
+          "shortfall_fraction": 0.8571428571428573
+        },
+        {
+          "soil": "Loam",
+          "infiltration_mm_hr": 4.0,
+          "duration_hr": 1.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.848,
+          "shortfall_fraction": 0.009523809523809533
+        },
+        {
+          "soil": "Loam",
+          "infiltration_mm_hr": 4.0,
+          "duration_hr": 6.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.888,
+          "shortfall_fraction": 0.0571428571428572
+        },
+        {
+          "soil": "Loam",
+          "infiltration_mm_hr": 4.0,
+          "duration_hr": 24.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 1.032,
+          "shortfall_fraction": 0.22857142857142865
+        },
+        {
+          "soil": "Clay",
+          "infiltration_mm_hr": 1.5,
+          "duration_hr": 1.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.843,
+          "shortfall_fraction": 0.003571428571428575
+        },
+        {
+          "soil": "Clay",
+          "infiltration_mm_hr": 1.5,
+          "duration_hr": 6.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.858,
+          "shortfall_fraction": 0.02142857142857145
+        },
+        {
+          "soil": "Clay",
+          "infiltration_mm_hr": 1.5,
+          "duration_hr": 24.0,
+          "capacity_as_advised_m3_per_m": 0.84,
+          "capacity_with_infiltration_m3_per_m": 0.9119999999999999,
+          "shortfall_fraction": 0.08571428571428566
+        }
+      ],
+      "worst": {
+        "soil": "Sand",
+        "infiltration_mm_hr": 15.0,
+        "duration_hr": 24.0,
+        "capacity_as_advised_m3_per_m": 0.84,
+        "capacity_with_infiltration_m3_per_m": 1.56,
+        "shortfall_fraction": 0.8571428571428573
+      }
+    },
+    "ctl01_unmasked_slope": {
+      "status": "ok",
+      "site_wide": {
+        "n": 160000,
+        "p25": 4.67348039150238,
+        "p25_grade": 0.08174900039880396,
+        "p50": 8.06218957901001,
+        "p50_grade": 0.14164785570033267,
+        "p75": 13.818074941635132,
+        "p75_grade": 0.24595808407364908
+      },
+      "masked_middle_half": {
+        "n": 40000,
+        "p25": 4.816285133361816,
+        "p25_grade": 0.08425858640622945,
+        "p50": 6.809688329696655,
+        "p50_grade": 0.11941428170243731,
+        "p75": 9.612704277038574,
+        "p75_grade": 0.1693654229424175
+      },
+      "mask_cells": 40000,
+      "p50_difference_deg": -1.2525012493133545,
+      "p50_relative_change": -0.15535497361340322
+    },
+    "mhl01_block_m_is_inert": {
+      "status": "ok",
+      "block_m_values": [
+        {
+          "block_m": 0.01,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        },
+        {
+          "block_m": 1.0,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        },
+        {
+          "block_m": 10.0,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        },
+        {
+          "block_m": 100.0,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        },
+        {
+          "block_m": 1000.0,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        },
+        {
+          "block_m": 20.0,
+          "cuts": 1,
+          "fills": 1,
+          "sha256": "9ce0c0cabb079919"
+        }
+      ],
+      "distinct_outputs": 1,
+      "range_swept": 100000.0
+    },
+    "imp02_wall_limit": {
+      "status": "ok",
+      "default_max_wall_m": 200.0,
+      "transect_cells_returned": 400,
+      "transect_reach_each_side_m": 200.0,
+      "transect_total_span_m": 400.0,
+      "refusal_compares": "len(run) * step > max_wall_m  (impoundment_sites.py:335)",
+      "longest_wall_the_search_can_offer_m": 400.0,
+      "longest_wall_the_refusal_allows_m": 200.0
+    },
+    "knob_sweep": {
+      "status": "ok",
+      "fields": [
+        "keypoint_count",
+        "keyline_runs",
+        "keyline_spacing_m",
+        "keyline_max_grade_n",
+        "keyline_max_valleys",
+        "stream_threshold_ha",
+        "min_catchment_ha",
+        "max_slope_deg",
+        "min_contour_length_m"
+      ],
+      "results": {
+        "keypoint_count": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 1,
+              "landed": 1,
+              "fingerprint": "50c6b0ecd9bb22c9",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 50,
+              "landed": 20,
+              "fingerprint": "5ab8094bfb27360a",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 3,
+          "value_actually_changed": true,
+          "inert": false,
+          "live": true
+        },
+        "keyline_runs": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 1,
+              "landed": 1,
+              "fingerprint": "b1ff0d93ccf9f4f9",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 30,
+              "landed": 20,
+              "fingerprint": "1bc1b281f55f6e3f",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 3,
+          "value_actually_changed": true,
+          "inert": false,
+          "live": true
+        },
+        "keyline_spacing_m": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 0.5,
+              "landed": 1.0,
+              "fingerprint": "1d947174e88fc939",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 50.0,
+              "landed": 50.0,
+              "fingerprint": "7770ce8814d7b1d9",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 3,
+          "value_actually_changed": true,
+          "inert": false,
+          "live": true
+        },
+        "keyline_max_grade_n": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 50,
+              "landed": 50,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 5000,
+              "landed": 5000,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 1,
+          "value_actually_changed": true,
+          "inert": true,
+          "live": false
+        },
+        "keyline_max_valleys": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 1,
+              "landed": 1,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 80,
+              "landed": 40,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 1,
+          "value_actually_changed": true,
+          "inert": true,
+          "live": false
+        },
+        "stream_threshold_ha": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 0.5,
+              "landed": 0.5,
+              "fingerprint": "234d5de59f6adf55",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 50.0,
+              "landed": 50.0,
+              "fingerprint": "671aa87654860dc8",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 3,
+          "value_actually_changed": true,
+          "inert": false,
+          "live": true
+        },
+        "min_catchment_ha": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 0.05,
+              "landed": 0.05,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 5.0,
+              "landed": 5.0,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 1,
+          "value_actually_changed": true,
+          "inert": true,
+          "live": false
+        },
+        "max_slope_deg": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 1.8,
+              "landed": 1.8,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 180.0,
+              "landed": 45.0,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 1,
+          "value_actually_changed": true,
+          "inert": true,
+          "live": false
+        },
+        "min_contour_length_m": {
+          "runs": [
+            {
+              "factor": 0.1,
+              "requested": 5.0,
+              "landed": 5.0,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            },
+            {
+              "factor": 10.0,
+              "requested": 500.0,
+              "landed": 500.0,
+              "fingerprint": "29153effc594c45e",
+              "criticals": 0
+            }
+          ],
+          "distinct_fingerprints": 1,
+          "value_actually_changed": true,
+          "inert": true,
+          "live": false
+        }
+      },
+      "baseline_fingerprint": "29153effc594c45e",
+      "control_fingerprint": "29153effc594c45e",
+      "fingerprint_is_deterministic": true,
+      "inert_knobs": [
+        "keyline_max_grade_n",
+        "keyline_max_valleys",
+        "min_catchment_ha",
+        "max_slope_deg",
+        "min_contour_length_m"
+      ],
+      "live_knobs": [
+        "keypoint_count",
+        "keyline_runs",
+        "keyline_spacing_m",
+        "stream_threshold_ha"
+      ],
+      "knobs_the_widget_clamped": []
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}

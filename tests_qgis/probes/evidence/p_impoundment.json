@@ -1,0 +1,195 @@
+{
+  "probe": "p_impoundment",
+  "date": "2026-09-11",
+  "findings": [
+    "IMP-01",
+    "IMP-02",
+    "IMP-03",
+    "IMP-04"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "Production path: 5 heuristic keypoints seeded 4 pond candidate(s). The seed is _state.found_keypoints (DrainageLineAnalysis), not the Yeomans find_keypoints this campaign measures elsewhere.",
+    "IMP-01, measured on 2 ranked site(s): the worst under-statement of crest length is 14.1% (139.0 m counted against 161.8 m on the ground) at a crest bearing 66.1 deg, 23.9 deg off axis. Its fill is understated in the same proportion, so storage_ratio is inflated 1.16x. Rank order changes when corrected: False.",
+    "IMP-01 geometry, independent of whether a wall was found: transect_cells returns between 0.713 and 0.933 distinct cells per map-space step across 4 candidate(s). 1.000 is axis-aligned; 0.707 is 45 deg. Everything below 1.000 is crest length and fill silently lost."
+  ],
+  "stages": {
+    "drive_production_path": {
+      "status": "ok",
+      "found_keypoints": 5,
+      "pond_sites": 4,
+      "runoff_mm": 32.5,
+      "layers": [
+        "Baseline \u2014 Hillshade",
+        "Baseline \u2014 Pond Capacity (full)",
+        "Baseline \u2014 Streams",
+        "Baseline \u2014 Surface Runoff (m\u00b3)",
+        "Keypoints",
+        "Ranked Pond Sites",
+        "Ridgelines (Water Divides)",
+        "Site Boundary",
+        "Test DEM"
+      ],
+      "message_bar": {
+        "criticals": [],
+        "warnings": [],
+        "info_count": 1
+      },
+      "site_labels": [
+        "2.8 m\u00b3 held per m\u00b3 of fill \u2014 2,673 m\u00b3 behind a 4.0 m \u00d7 55 m wall",
+        "1.5 m\u00b3 held per m\u00b3 of fill \u2014 1,111 m\u00b3 behind a 1.5 m \u00d7 139 m wall",
+        "No usable wall here \u2014 the ground upstream of the wall is already above the crest",
+        "No usable wall here \u2014 the wall would run over 200 m \u2014 not a neck"
+      ]
+    },
+    "transect_undercount": {
+      "status": "ok",
+      "cell_w_m": 1.0,
+      "cell_h_m": 1.0,
+      "step_m": 1.0,
+      "sites": [
+        {
+          "rank_as_shipped": 1,
+          "row": 110,
+          "col": 175,
+          "notes": null,
+          "wall_height_m": 4.0,
+          "wall_length_m_as_reported": 55.0,
+          "fill_m3_as_reported": 971.0417239510862,
+          "storage_m3": 2672.7910385131836,
+          "storage_ratio_as_reported": 2.7524986543707146,
+          "bearing_vector": [
+            -0.9203133144618507,
+            -0.391182058924285
+          ],
+          "crest_bearing_deg": 156.97192942712792,
+          "degrees_off_axis": 23.028070572872082,
+          "transect_cells": 304,
+          "transect_steps_requested": 401,
+          "cells_per_step": 0.7581047381546134,
+          "transect_span_m_as_counted": 304.0,
+          "transect_span_m_true": 351.0487732352798,
+          "wall_cells": 55,
+          "wall_length_m_counted": 55.0,
+          "wall_length_m_true": 62.87005768508878,
+          "wall_length_understatement": 0.12517974334474588,
+          "fill_m3_counted": 971.0417239510862,
+          "fill_m3_true": 1109.9899854442338,
+          "storage_ratio_corrected": 2.4079415792598295,
+          "ratio_inflation": 1.1430919579107055,
+          "crosses_max_wall_when_corrected": false
+        },
+        {
+          "rank_as_shipped": 2,
+          "row": 134,
+          "col": 305,
+          "notes": null,
+          "wall_height_m": 1.5,
+          "wall_length_m_as_reported": 139.0,
+          "fill_m3_as_reported": 732.3712701139739,
+          "storage_m3": 1111.350486755371,
+          "storage_ratio_as_reported": 1.5174687103474434,
+          "bearing_vector": [
+            -0.4055534811977412,
+            0.9140713177254789
+          ],
+          "crest_bearing_deg": 66.07418423111115,
+          "degrees_off_axis": 23.925815768888853,
+          "transect_cells": 286,
+          "transect_steps_requested": 401,
+          "cells_per_step": 0.713216957605985,
+          "transect_span_m_as_counted": 286.0,
+          "transect_span_m_true": 332.6345596729066,
+          "wall_cells": 139,
+          "wall_length_m_counted": 139.0,
+          "wall_length_m_true": 161.78174593052026,
+          "wall_length_understatement": 0.14081777767625428,
+          "fill_m3_counted": 732.3712701139739,
+          "fill_m3_true": 852.4050557438228,
+          "storage_ratio_corrected": 1.3037821388630646,
+          "ratio_inflation": 1.1638974527375558,
+          "crosses_max_wall_when_corrected": false
+        },
+        {
+          "rank_as_shipped": 3,
+          "row": 135,
+          "col": 306,
+          "notes": "the ground upstream of the wall is already above the crest",
+          "wall_height_m": null,
+          "wall_length_m_as_reported": 0.0,
+          "fill_m3_as_reported": 0.0,
+          "storage_m3": 0.0,
+          "storage_ratio_as_reported": 0.0,
+          "bearing_vector": [
+            -0.9774002790395325,
+            0.21139700691694724
+          ],
+          "crest_bearing_deg": 12.204232985933487,
+          "degrees_off_axis": 12.204232985933487,
+          "transect_cells": 331,
+          "transect_steps_requested": 401,
+          "cells_per_step": 0.8254364089775561,
+          "transect_span_m_as_counted": 331.0,
+          "transect_span_m_true": 359.4091629284902,
+          "skipped": "refused site \u2014 no winning wall height to reproduce"
+        },
+        {
+          "rank_as_shipped": 4,
+          "row": 109,
+          "col": 176,
+          "notes": "the wall would run over 200 m \u2014 not a neck",
+          "wall_height_m": null,
+          "wall_length_m_as_reported": 0.0,
+          "fill_m3_as_reported": 0.0,
+          "storage_m3": 0.0,
+          "storage_ratio_as_reported": 0.0,
+          "bearing_vector": [
+            0.4424222799221378,
+            -0.8968068500120288
+          ],
+          "crest_bearing_deg": 63.74146544767744,
+          "degrees_off_axis": 26.25853455232256,
+          "transect_cells": 374,
+          "transect_steps_requested": 401,
+          "cells_per_step": 0.9326683291770573,
+          "transect_span_m_as_counted": 374.0,
+          "transect_span_m_true": 438.0315292925771,
+          "skipped": "refused site \u2014 no winning wall height to reproduce"
+        }
+      ],
+      "sites_returned": 4,
+      "sites_ranked": 2,
+      "sites_refused": 2,
+      "refusal_reasons": [
+        "the ground upstream of the wall is already above the crest",
+        "the wall would run over 200 m \u2014 not a neck"
+      ],
+      "rank_as_shipped_in_corrected_order": [
+        1,
+        2
+      ],
+      "rank_order_changes": false,
+      "cells_per_step_range": [
+        0.713216957605985,
+        0.9326683291770573
+      ]
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}
