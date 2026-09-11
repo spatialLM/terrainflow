@@ -2916,7 +2916,10 @@ class DEMBurner:
             reach = ew.buffer_radius_m + berm_width
             coords = list(line.coords)
             caps = Point(coords[0]).buffer(reach).union(Point(coords[-1]).buffer(reach))
-            wrapped = self._rasterize(caps) & ~swale_mask
+            # Cell centres, like every other volumetric burn. The return is fill a
+            # contractor places, so `all_touched`'s ~1.3 m over-claim is a band of
+            # earth nobody moves, priced and levelled. See :meth:`_rasterize`.
+            wrapped = self._rasterize(caps, all_touched=False) & ~swale_mask
         except Exception:
             return berm_mask
         return berm_mask | wrapped if wrapped.any() else berm_mask
@@ -2950,15 +2953,33 @@ class DEMBurner:
     def _burn_berm(self, dem, line, ew):
         # Barrier: raise a flow-blocking ridge (never a cut). Incise-free — the
         # footprint band where resolvable, the nearest-cell path when sub-cell.
+        #
+        # Rasterised on cell centres, like every other volumetric burn. `all_touched`
+        # claims every cell the band so much as brushes — a near-constant ~1.3 m wider
+        # than drawn (:meth:`_rasterize`) — and every one of those cells was then given
+        # the full height, so a berm drawn at 1.0 m³/m of fill placed about 1.65.
         footprint = line.buffer(ew.width / 2)
-        mask = self._rasterize(footprint)
+        mask = self._rasterize(footprint, all_touched=False)
         dem = dem.copy()
+        raised = mask.copy()
         if mask.any():
             dem[mask] += ew.depth
-            self._record_raised(ew, mask)
-        else:
-            for rc in self._line_path_cells(line):
+        # Always, not only when the band claimed nothing, for the reason
+        # :meth:`_burn_dam` gives: this is the seal as well as the sub-cell fallback,
+        # and a barrier with a corner-only join in it is not a barrier. Centre-based
+        # rasterising makes that reachable on an ordinary diagonal alignment, where
+        # `all_touched` had been hiding it.
+        #
+        # **Non-additive, unlike the dam's.** `_burn_dam` seals with `maximum`, which
+        # is idempotent; this burn raises with `+=`, so a path cell already inside the
+        # band would be raised twice and the crest would stand a depth too high right
+        # along the centreline.
+        for rc in self._line_path_cells(line):
+            if not raised[rc]:
                 dem[rc] += ew.depth
+                raised[rc] = True
+        if raised.any():
+            self._record_raised(ew, raised)
         self._record_mask(ew, self._contact_mask(line, ew))
         self._warn_sub_cell(ew.name, ew.width)
         return dem
@@ -3173,7 +3194,15 @@ class DEMBurner:
         # their union is the buffered line, which the mask comment below already noted.
         # So buffer once, rasterise once, and give each cell in the band its own invert
         # from how far along the line it sits.
-        band = self._rasterize(LineString(coords).buffer(ew.width / 2.0))
+        #
+        # Cell centres, like every other volumetric burn. `all_touched` claimed every
+        # cell the band brushed — a near-constant ~1.3 m wider than drawn
+        # (:meth:`_rasterize`), so a 2.0 m drain on a 1 m DEM cut a ~3.3 m band — and
+        # the measured cut is the column the report tells a contractor to price the
+        # job on. The sub-cell fallback immediately below is what `all_touched` was
+        # introduced to provide and is unaffected.
+        band = self._rasterize(LineString(coords).buffer(ew.width / 2.0),
+                               all_touched=False)
         if not band.any():
             # Sub-cell channel: the buffer rasterised to nothing. The centreline's cell
             # path keeps the graded invert carving at least one connected cell, which is

@@ -470,10 +470,18 @@ class TestDiversionBurnEquivalence:
     ``(width/2 + cell) × gradient``, and the new answer is the better one: the old
     bias was an artefact of how the samples were spaced, not a property of the drain.
 
-    **Footprint.** Rasterising many overlapping discs with ``all_touched`` and
-    unioning the result claims marginally more cells than rasterising their union
-    polygon, because a cell merely brushed by any one disc counts. The difference is
-    a couple of cells on the rounded ends.
+    **Footprint.** Rasterising many overlapping discs and unioning the result claims
+    marginally more cells than rasterising their union polygon, because a disc can
+    cover a cell centre that the union polygon's own edge passes just outside of. The
+    difference is a couple of cells on the rounded ends.
+
+    Both sides rasterise on **cell centres**. ``all_touched`` belongs to the
+    cross-section convention, not to the sampling this class is about: it claimed
+    every cell the band so much as brushed — a near-constant ~1.3 m wider than drawn
+    — and the volumetric burns were fixed to stop doing that. Left ``True`` here the
+    reference would pin that bug, in exactly the way an untapered reference would
+    have pinned the rectangular cut, which is the argument the taper note below
+    already makes.
     """
 
     @staticmethod
@@ -495,7 +503,7 @@ class TestDiversionBurnEquivalence:
         # depth model is shared and what stays under test is chainage and footprint.
         # Cells only the discs claim — the rounded ends in the docstring above — sit
         # outside the band and so taper to nothing, which is what they are worth.
-        band = burner._rasterize(line.buffer(ew.width / 2.0))
+        band = burner._rasterize(line.buffer(ew.width / 2.0), all_touched=False)
         reach = taper_reach(band, channel_batter_run(ew),
                             (burner.cell_h, burner.cell_size))
         cum = [0.0]
@@ -516,7 +524,8 @@ class TestDiversionBurnEquivalence:
                 t = step / n_steps
                 x, y = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
                 invert = start_elev - (cum[seg_i] + t * seg) * grad
-                cell_mask = burner._rasterize(Point(x, y).buffer(ew.width / 2))
+                cell_mask = burner._rasterize(Point(x, y).buffer(ew.width / 2),
+                                              all_touched=False)
                 if cell_mask.any():
                     depth = (ew.depth if reach is None
                              else ew.depth * reach[cell_mask])
@@ -540,7 +549,16 @@ class TestDiversionBurnEquivalence:
         return b, got, want
 
     @pytest.mark.parametrize("coords,width,grad", [
-        ([(5.0, 20.0), (35.0, 20.0)], 3.0, 1.0),                # straight, due east
+        # Off the half-metre on purpose. A 3 m band centred on y=20.0 has its
+        # edges at 18.5/21.5 — exactly two cell centres — and shapely buffers a
+        # point into an *inscribed* polygon, so the reference's discs fall a
+        # hair short of a centre the union rectangle claims outright. That is a
+        # disagreement between two test-side approximations of one circle, not
+        # between the two burns; `all_touched` hid it by counting any brush.
+        # (What the burn does at such an alignment — 4 rows for a 3 m band, the
+        # outer two half-depth — is `taper_reach`'s documented quadrature
+        # over-read, which its own docstring says is not fixed there.)
+        ([(5.0, 20.3), (35.0, 20.3)], 3.0, 1.0),                # straight, due east
         ([(5.0, 5.0), (35.0, 35.0)], 3.0, 2.0),                 # diagonal
         ([(5.0, 30.0), (20.0, 20.0), (35.0, 28.0)], 4.0, 0.5),  # dog-leg
         ([(8.0, 12.0), (30.0, 12.0)], 6.0, 0.0),                # wide, flat grade
@@ -560,7 +578,7 @@ class TestDiversionBurnEquivalence:
         assert worst <= tol, f"diverged by {worst:.4f} m, bound {tol:.4f} m"
 
     @pytest.mark.parametrize("coords,width,grad", [
-        ([(5.0, 20.0), (35.0, 20.0)], 3.0, 1.0),
+        ([(5.0, 20.3), (35.0, 20.3)], 3.0, 1.0),   # see the note above
         ([(5.0, 5.0), (35.0, 35.0)], 3.0, 2.0),
         ([(5.0, 30.0), (20.0, 20.0), (35.0, 28.0)], 4.0, 0.5),
         ([(8.0, 12.0), (30.0, 12.0)], 6.0, 0.0),
@@ -1011,3 +1029,103 @@ class TestTaperSamplesPerAxis:
             dist = distance_transform_edt(mask, sampling=(2.0, 2.0))
             want = np.clip((dist - 1.0) / 2.0, 0.0, 1.0)
             assert np.array_equal(got, want), f"square grid moved at {angle}deg"
+
+
+# ---------------------------------------------------------------------------
+# The volumetric burns claim the width they were drawn as
+# ---------------------------------------------------------------------------
+
+class TestVolumetricBurnsClaimTheWidthTheyWereDrawn:
+    """``all_touched`` claims every cell the band so much as brushes — a
+    near-constant ~1.3 m wider than drawn, whatever the length or bearing — and the
+    volumetric burns then level or raise every one of those cells to full depth.
+    ``_rasterize``'s own docstring says the volumetric burns pass ``False`` "for
+    exactly that reason"; three of them did not.
+
+    Measured on a transect across the middle of the alignment, away from the
+    buffer's rounded ends. The alignment sits at y=20.2 so the band's edges fall
+    strictly inside cells: at y=20.0 they land on cell centres, where the count is
+    genuinely ambiguous and the answer is `taper_reach`'s quadrature over-read
+    rather than anything to do with this.
+    """
+
+    @staticmethod
+    def _burn(tmp_path, ew_type, **kw):
+        data = np.full((60, 60), 50.0)
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data))
+        geom = make_mock_line_geom([(10.0, 20.2), (40.0, 20.2)])
+        ew = _mock_ew(ew_type, geom, **kw)
+        return b, b.burn_earthworks([ew]), ew
+
+    def test_a_diversion_cuts_the_band_it_was_drawn_as(self, tmp_path):
+        b, burned, _ = self._burn(tmp_path, "diversion", depth=1.0, width=3.0,
+                                  bottom_width_m=1.0, gradient_pct=0.0)
+        cut = b.original[:, 25] - burned[:, 25]
+        rows = np.nonzero(cut > 1e-9)[0]
+        assert len(rows) == 3, (
+            f"a 3.0 m drain on 1 m cells cut {len(rows)} cells across, not 3 — and "
+            f"the measured cut is the column the report tells a contractor to price "
+            f"the job on")
+
+    def test_a_diversion_cuts_the_section_it_was_drawn_as(self, tmp_path):
+        """The register's check, taken on a transect rather than on the site total.
+
+        The total also carries the buffer's rounded end caps and
+        ``enforce_monotonic_path``'s per-cell step down the alignment — neither of
+        which belongs to the cross-section, and the second of which grows with
+        length, so no fixed tolerance on the total can mean what it looks like.
+        """
+        from terrainflow_assessment.core.sizing.primitives import trapezoid_section
+        from terrainflow_assessment.modules.earthwork_design import channel_batter_run
+
+        b, burned, ew = self._burn(tmp_path, "diversion", depth=1.0, width=3.0,
+                                   bottom_width_m=1.0, gradient_pct=0.0)
+        # One whole cell of batter run, so taper_reach's quadrature is exact — see
+        # its docstring on why a half-cell run is not.
+        assert channel_batter_run(ew) == pytest.approx(1.0)
+
+        section = float(np.clip(b.original[:, 25] - burned[:, 25], 0.0, None).sum())
+        section *= b.cell_size
+        want = trapezoid_section(3.0, 3.0 - 2 * channel_batter_run(ew), 1.0).area
+        assert section == pytest.approx(want, rel=0.02), (
+            f"{section:.2f} m2 per metre against a drawn {want:.2f} m2")
+
+    def test_a_berm_raises_the_band_it_was_drawn_as(self, tmp_path):
+        b, burned, _ = self._burn(tmp_path, "berm", depth=0.5, width=2.0)
+        rise = burned[:, 25] - b.original[:, 25]
+        rows = np.nonzero(rise > 1e-9)[0]
+        assert len(rows) == 2, (
+            f"a 2.0 m berm on 1 m cells raised {len(rows)} cells across, not 2 — "
+            f"so it placed half again the fill it was drawn to place")
+
+    def test_the_centreline_seal_does_not_raise_a_cell_twice(self, tmp_path):
+        """The seal now runs on every alignment, not only a sub-cell one: centre-based
+        rasterising can leave a diagonal band with a corner-only join, and a barrier
+        with one of those in it is not a barrier.
+
+        ``_burn_dam`` seals with ``maximum``, which is idempotent. This burn raises
+        with ``+=``, so a path cell already inside its own band would be raised twice
+        and the crest would stand a whole depth too high right along the centreline.
+        """
+        b, burned, _ = self._burn(tmp_path, "berm", depth=0.5, width=2.0)
+        rise = burned - b.original
+        assert float(np.nanmax(rise)) == pytest.approx(0.5, abs=1e-6), (
+            f"a cell was raised {float(np.nanmax(rise)):.2f} m by a 0.50 m berm — "
+            f"the seal added its depth to a cell the band had already raised")
+
+    def test_a_diagonal_berm_is_still_a_connected_barrier(self, tmp_path):
+        """What the seal is for. Water finds a corner-only join."""
+        from scipy.ndimage import label
+
+        data = np.full((60, 60), 50.0)
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data))
+        ew = _mock_ew("berm", make_mock_line_geom([(12.0, 12.3), (44.0, 44.7)]),
+                      depth=0.5, width=1.2)
+        burned = b.burn_earthworks([ew])
+        raised = (burned - b.original) > 1e-9
+        # 4-connectivity: a diagonal join is exactly what a corner-only touch is,
+        # and water goes through one.
+        _labels, n = label(raised, structure=np.array([[0, 1, 0],
+                                                       [1, 1, 1],
+                                                       [0, 1, 0]]))
+        assert n == 1, f"the berm burned as {n} disconnected pieces"
