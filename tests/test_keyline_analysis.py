@@ -645,7 +645,7 @@ class TestAssessmentKeypointBranches:
         from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
         lines = kl.find_ridgelines(
-            tpi_window=5, min_tpi_m=0.5, min_length_m=5.0
+            tpi_window_m=25.0, min_tpi_m=0.5, min_length_m=5.0
         )
         assert isinstance(lines, list)
         # Should find at least one ridge geometry
@@ -672,7 +672,7 @@ class TestAssessmentKeypointBranches:
 
         from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
         kl = KeylineAnalysis(dem_path, acc_path)
-        lines = kl.find_ridgelines(tpi_window=5, min_tpi_m=0.5, min_length_m=5.0)
+        lines = kl.find_ridgelines(tpi_window_m=25.0, min_tpi_m=0.5, min_length_m=5.0)
         assert isinstance(lines, list)
 
     def test_recommend_pond_sites_exercises_downstream_scan(self, tmp_path):

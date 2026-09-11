@@ -247,7 +247,7 @@ def landform_tpi(dem, cell_w, cell_h, window_m=15.0):
     return np.where(valid, filled - neighbourhood_mean, np.nan).astype("float32")
 
 
-def landform_classes(tpi, slope_deg, sd=DEFAULT_TPI_SD, mask=None):
+def landform_classes(tpi, sd=DEFAULT_TPI_SD, mask=None):
     """TPI → ``{-1 valley, 0 midslope, +1 ridge}``, thresholded in standard deviations.
 
     Weiss's own formulation: the cut is ±*sd* standard deviations of the TPI over the
@@ -259,6 +259,13 @@ def landform_classes(tpi, slope_deg, sd=DEFAULT_TPI_SD, mask=None):
 
     Returns int8, with 0 (midslope) where the TPI is NaN: unknown ground is not a ridge
     and is not a valley, and midslope is the class that claims least.
+
+    **There is deliberately no ``slope_deg`` parameter.** One used to sit second in this
+    signature and was never read — every call site in the tree passed ``None`` for it,
+    which is how it survived unnoticed. Weiss's *fuller* scheme does use slope, but only
+    to split a fourth class out of ``midslope`` (``plains``: flat ground with near-zero
+    TPI). This function returns three classes, not four, so restoring the argument means
+    implementing that split, not re-adding a parameter.
     """
     tpi = np.asarray(tpi, dtype="float64")
     finite = np.isfinite(tpi)

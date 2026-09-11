@@ -307,6 +307,22 @@ EXPECTED_KEYLINE = {
     "stream_cells": 1688,
 }
 
+# Recorded 2026-09-11, after KPA-12 closed (MATHS_AUDIT §9.9). Pinned because the number
+# this replaced was **zero** and nothing noticed for as long as the feature has existed:
+# ridgeline detection asked its TPI question in cells rather than metres and cut at an
+# absolute 1.5 m, so it cleared its own bar on the 2 m synthetic surface the suite runs on
+# and could not clear it on any 1 m DEM. A count taken on real 1 m ground is the only thing
+# that would have caught that, so here it is.
+#
+# One is not many. The fixture is a 16 ha clip whose longest connected, thinned ridge run
+# is 77 m, because `acc <= 2` fragments real ridges at every saddle. But one is the
+# difference between a feature that works and a feature that never has, and if this returns
+# to zero something has regressed.
+EXPECTED_RIDGELINES = {
+    "ridgelines": 1,
+    "longest_ridgeline_m": 77.0,
+}
+
 #: Cells of the channel network at the production threshold, for context in the printout.
 KEYLINE_THRESHOLD_CELLS = 2000
 
@@ -420,4 +436,57 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
         + "\n    These pin CURRENT, PARTLY BROKEN behaviour — see "
           "CLudeDocs/ANALYSIS_DEFECTS.md. A fix is expected to move them; re-record "
           "EXPECTED_KEYLINE in the same commit, and say which finding moved it."
+    )
+
+
+def check_ridgelines_still_fire_on_real_ground(dem_path):
+    """Ridgeline detection finds something on a real 1 m DEM.
+
+    Guards the fix recorded in `MATHS_AUDIT` §9.9. Before it, this number was **0** on
+    every 1 m DEM and the suite could not tell, because the suite runs on a 2 m synthetic
+    surface where a cell-count TPI window happened to ask a question twice as large and
+    cleared the absolute 1.5 m bar. The whole defect lived in the gap between those two
+    resolutions, so the check has to be on the real fixture or it is worthless.
+
+    Driven through the production signals rather than the module, because the thresholds
+    are not exposed anywhere a user can reach and the defaults are the entire subject.
+    """
+    from terrainflow_assessment.modules.keypoint_analysis import DrainageLineAnalysis
+
+    with PluginHarness(FIXTURE_DEM) as h:
+        h.run_baseline()
+        acc_path = (h.state.baseline_result or {}).get("flow_accumulation")
+        assert acc_path, "no accumulation raster from the baseline"
+
+        ka = DrainageLineAnalysis(FIXTURE_DEM, acc_path)
+        ridgelines = ka.find_ridgelines()
+
+    observed = {
+        "ridgelines": len(ridgelines),
+        "longest_ridgeline_m": (
+            max(r["length_m"] for r in ridgelines) if ridgelines else 0.0),
+    }
+
+    print("\n    --- ridgelines on real ground ---")
+    failures = []
+    for key, expected in EXPECTED_RIDGELINES.items():
+        actual = observed[key]
+        ok = (actual == expected if isinstance(expected, int)
+              else abs(actual - expected) <= 1.0)
+        print(f"    {'ok ' if ok else 'MOVED'} {key:26s} {actual!s:>8}  "
+              f"(recorded {expected})")
+        if not ok:
+            failures.append(f"{key}: {actual} against a recorded {expected}")
+
+    assert observed["ridgelines"] > 0, (
+        "ridgeline detection found nothing on the real fixture. That was the state "
+        "before MATHS_AUDIT §9.9, and it held for every 1 m DEM while the synthetic "
+        "suite stayed green. Check the TPI window units and the standard-deviation cut "
+        "in DrainageLineAnalysis.find_ridgelines before re-recording anything."
+    )
+    assert not failures, (
+        "ridgelines moved against the recorded fixture:\n      "
+        + "\n      ".join(failures)
+        + "\n    If the change was intended, re-record EXPECTED_RIDGELINES here and say "
+          "which finding moved it."
     )

@@ -278,7 +278,7 @@ class TestLandformTpi:
 class TestLandformClasses:
     def test_thresholds_in_standard_deviations_not_metres(self):
         tpi = landform_tpi(_ridge_and_hollow(), 1.0, 1.0, window_m=9.0)
-        classes = landform_classes(tpi, None)
+        classes = landform_classes(tpi)
         assert classes[CENTRE, CENTRE] == 1            # the crest
         assert classes[CENTRE, CENTRE + 15] == -1      # the trough
         assert set(np.unique(classes)) <= {-1, 0, 1}
@@ -288,13 +288,13 @@ class TestLandformClasses:
         x, _y, r, _c = _grid()
         gentle = 100.0 - 0.05 * r + 3.0 * np.cos(np.pi * x / 15.0)
         steep = 100.0 - 0.5 * r + 30.0 * np.cos(np.pi * x / 15.0)
-        a = landform_classes(landform_tpi(gentle, 1.0, 1.0, 9.0), None)
-        b = landform_classes(landform_tpi(steep, 1.0, 1.0, 9.0), None)
+        a = landform_classes(landform_tpi(gentle, 1.0, 1.0, 9.0))
+        b = landform_classes(landform_tpi(steep, 1.0, 1.0, 9.0))
         assert np.array_equal(a, b)
 
     def test_unknown_ground_is_midslope_not_a_landform(self):
         tpi = np.full((5, 5), np.nan)
-        assert (landform_classes(tpi, None) == 0).all()
+        assert (landform_classes(tpi) == 0).all()
 
 
 class TestSlopeStatistics:

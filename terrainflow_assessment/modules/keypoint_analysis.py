@@ -281,7 +281,8 @@ class DrainageLineAnalysis:
 
     # ---------------------------------------------------------------------- ridgelines
 
-    def find_ridgelines(self, tpi_window=15, min_tpi_m=1.5, min_length_m=100.0, boundary_mask=None):
+    def find_ridgelines(self, tpi_window_m=15.0, min_tpi_sd=1.0, min_tpi_m=None,
+                        min_length_m=50.0, boundary_mask=None):
         """
         Find watershed divides (ridgelines) using the Topographic Position Index.
 
@@ -289,37 +290,56 @@ class DrainageLineAnalysis:
         Cells with high TPI and very low flow accumulation (acc ≤ 2) are ridge cells.
         These are thinned to centrelines and vectorised into polylines.
 
-        ``tpi_window`` is a **cell** count, so the landform scale it responds to
-        depends on the DEM's resolution — 15 cells is 15 m on a 1 m grid and 75 m on a
-        5 m grid. That is deliberate (it keeps the cost fixed) but it means the ridge
-        set is not comparable between DEMs of different resolution.
+        **The TPI itself comes from ``terrain_indices.landform_tpi``, and the ridge cut
+        from ``terrain_indices.landform_classes``.** This method used to carry its own
+        copy of both — a line-for-line duplicate of the neighbourhood-mean code, down to
+        the comment about the data boundary — and the copy had never picked up two fixes
+        the library version had:
+
+        * **The window is metres, not cells.** A cell count makes the landform scale
+          silently resolution-dependent, which is the fault ``landform_tpi``'s docstring
+          records as already fixed *there*. Measured consequence of the copy: on a 2 m
+          DEM ``tpi_window=15`` asked a 30 m question and cleared the old 1.5 m bar, while
+          the identical call on a 1 m DEM asked a 15 m question and could not — so
+          ridgelines worked on the synthetic test surface and had **never** fired on a 1 m
+          DEM, which is the resolution most farm LiDAR arrives at.
+        * **The cut is in standard deviations of the site's own TPI**, per Weiss, not in
+          absolute metres. A metre bar cannot mean the same thing on a scarp and on
+          rolling pasture: the real 16 ha fixture tops out at 1.20 m of TPI, so the old
+          1.5 m default excluded every cell on it before any ridge was traced.
+
+        ``min_tpi_m`` overrides the standard-deviation rule with an absolute bar when a
+        caller genuinely wants one. It defaults to ``None``, which means "use Weiss".
 
         Parameters
         ----------
-        tpi_window   : int   — neighbourhood window size (cells) for TPI
-        min_tpi_m    : float — minimum TPI (m) for a cell to count as a ridge
+        tpi_window_m : float — neighbourhood window for TPI, in **metres**
+        min_tpi_sd   : float — ridge cut, in standard deviations of this site's TPI
+        min_tpi_m    : float or None — absolute TPI bar (m); overrides *min_tpi_sd*
         min_length_m : float — minimum ridge segment length to keep
 
         Returns list of dicts: {geometry (LineString), length_m, mean_elevation, label}
         """
         from scipy.ndimage import label as nd_label
-        from scipy.ndimage import uniform_filter
 
-        # Neighbourhood mean over the VALID cells only. Substituting the whole-DEM mean
-        # for nodata dragged the local mean toward it for every cell within half a window
-        # of a hole, fabricating a ridge line all the way around the data boundary — the
-        # one place users most often clip to (a property edge).
+        from terrainflow_assessment.modules.terrain_indices import (
+            landform_classes,
+            landform_tpi,
+        )
+
         valid = np.isfinite(self.dem)
-        filled = np.where(valid, self.dem, 0.0).astype("float64")
-        sum_filter = uniform_filter(filled, size=tpi_window)
-        count_filter = uniform_filter(valid.astype("float64"), size=tpi_window)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            neighbourhood_mean = np.where(count_filter > 0,
-                                          sum_filter / count_filter, np.nan)
-        tpi = np.where(valid, filled - neighbourhood_mean, np.nan)
+        tpi = landform_tpi(self.dem, self.cell_w, self.cell_h,
+                           window_m=tpi_window_m)
 
         with np.errstate(invalid="ignore"):
-            ridge_raw = (tpi > min_tpi_m) & (self.acc <= 2) & valid
+            if min_tpi_m is not None:
+                above = tpi > float(min_tpi_m)
+            else:
+                # Weiss's cut, over this site's own relief. `landform_classes` returns
+                # +1 for ridge; the valley class it also finds is not wanted here.
+                above = landform_classes(tpi, sd=min_tpi_sd,
+                                         mask=boundary_mask) == 1
+            ridge_raw = above & (self.acc <= 2) & valid
 
         # Remove 1-cell border (often artefacts)
         ridge_raw[[0, -1], :] = False
