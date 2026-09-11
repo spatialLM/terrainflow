@@ -445,3 +445,13 @@ touching `qgis/`, `panel.py` or `map_tools/`, run `.\run_qgis_tests.ps1` bare an
 ## Docs
 
 `CLudeDocs/` holds the Plugin State and Next Steps (roadmap) documents.
+
+Two of its documents are registers rather than prose, and are the authority on what is
+known to be wrong:
+
+- `MATHS_AUDIT.md` — the maths audit. §9 is the authority on current state; §1 and §2 are
+  left as the record of what was found. §10 maps §2.20's line citations onto the rebuilt
+  `keypoint_analysis.py`.
+- `ANALYSIS_DEFECTS.md` — 31 findings against the analysis tier as rebuilt 2026-09-10,
+  measured on the real fixture. Reproduced by the probes in `tests_qgis/probes/`, which are
+  measurement scripts, never auto-run, and deliberately outside the `checks_*.py` glob.

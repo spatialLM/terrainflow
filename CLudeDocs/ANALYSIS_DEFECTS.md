@@ -1,0 +1,1107 @@
+# Analysis-tier defect register (2026-09-11)
+
+Thirty-one findings against the analysis tier as rebuilt on 2026-09-10
+(`1089c3a` … `d40a2c0`, plus `ccdbcd6`, `8bf319b`, `c288a6a`), measured on a real DEM.
+Companion to `MATHS_AUDIT.md`, in its dialect and under its rules.
+
+**Everything here is documentation. No behaviour was changed.** Where a fix is obvious it
+is named in `root cause` so a later pass does not have to re-derive it, but nothing in this
+register has been applied.
+
+**HEAD at write time:** `c288a6a`, branch `wip/core-qgis-refactor`, tree clean.
+**Fixture:** `tests/fixtures/quail_island_catchment.tif` — 400 × 400 @ 1 m (16 ha), EPSG:2193,
+0 nodata cells, z −0.10 … 84.78 m.
+**Second surface:** `_harness.build_synthetic_dem()` default — 300 × 300 @ 2 m (36 ha).
+
+---
+
+## §0 Method, status, and how to read this document
+
+### §0.1 Legend
+
+Copied verbatim from `MATHS_AUDIT.md:61-69` so the two documents cannot drift apart:
+
+> **Verdict tokens:** OK (correct) · WRONG (incorrect) · DISC (differs from
+> source/intent — explained; deliberate divergence is still DISC) · UNVER
+> (no locatable published source) · UNVER-B (verification blocked mid-audit) ·
+> HAZ (correct today, silently breaks under a stated condition).
+> **Direction:** U = can UNDER-size (dangerous: breached earthwork), O = OVER-size
+> (wasted excavation), n = neutral, i-d = input-dependent.
+> **Severity:** C critical · H high · M medium · L low · I info. Per the audit brief,
+> anything that can under-size in a production sizing path ranks ≥ H.
+> **Confidence:** H/M/L.
+
+Two consequences of that scale are worth stating, because both were got wrong in drafting
+and corrected in review:
+
+- **No finding here is `H`.** The escalator is narrow — *anything that can under-size in a
+  production sizing path ranks ≥ H*. The keyline path emits **geometry, not dimensions**, so
+  it does not fire there. `MATHS_AUDIT` has no `C` rows and three `H` rows
+  (`EWD-32`, `EWD-35`, `EWD-05`), all sizing constants; every confirmed-`WRONG`
+  analysis defect in it sits at `M`. These do too.
+- **Bare `U` is reserved.** The legend spends it on *"can under-size (dangerous: breached
+  earthwork)"*. The register's own practice for other under-reads is a **qualified** `U`
+  (`U(ridge detect)`, `U(warning)`) or `i-d`. So `KPA-41` is `U(drift under-read)`,
+  `KPA-42`/`KPA-46` are `i-d`, and `SWL-22` is **`O`** — omitting infiltration lowers the
+  capacity handed to `capture_spacing`, which **tightens** the advised interval.
+
+### §0.2 New prefixes
+
+Prefixes are keyed to **files**, and the prefix is the module whose function or contract is
+the subject, with the caller cited in `where`. The precedent is `SWL-17` (§1 #27 of
+`MATHS_AUDIT`), which cites `swale_design.py:259` *and*
+`qgis/controllers/earthworks.py:1755` and is filed under `SWL`. Honouring that rule is why
+the inert `acc_path` is `KPA-48` rather than a controller finding, and why the omitted
+`infiltration_mm_hr` is `SWL-22`.
+
+| Prefix | Covers | Note |
+|---|---|---|
+| `CTL` | `qgis/controllers/contour.py`, `core/registry/map_palette.py`, `qgis/controllers/_symbols.py`, `qgis/controllers/terrain.py` | **New.** These four files have no prefix in `MATHS_AUDIT` at all |
+| `IMP` | `modules/impoundment_sites.py` | **New**, and free |
+| `MHL` | `modules/mass_haul.py` | **New**, and free |
+| `RPT` | **extended** to `modules/report_model.py` as well as `modules/reporting.py` (§2.5) | Siblings; inventing a second prefix for one of them buys nothing |
+| `TIX` | `modules/terrain_indices.py` | **Reserved, unused.** Step E may produce findings there; none exist yet. The aspect ramp is `CTL-02`, because the defect is the *pairing* at `terrain.py:43,190`, not anything inside `terrain_indices.py` |
+
+The register already carries a second, non-file ID family (`NEW-W5-01/02`,
+`NEW-W8-01..05`), which is the precedent for adding one.
+
+**Highest number in use per prefix at write time** (`MATHS_AUDIT` §2, verified by grep):
+`ADV 08 · ALG 14 · BRN 09 · CAT 27 · CTA 29 · DEM 05 · EWD 58 · FLA 25 · FLG 17 · FLL 17 ·
+FTP 11 · IDF 14 · INC 24 · KPA 37 · PIO 01 · PKF 09 · PRM 19 · REG 06 · RPT 25 · SIM 29 ·
+SWL 21 · TOC 23 · UNI 18 · WBL 12`. `MHL`, `IMP`, `CTL` and `TIX` appear nowhere. **No
+`EWD` ID is claimed** — the `EWD-59` this campaign drafted was withdrawn (§3), so `EWD`
+stays at 58.
+
+### §0.3 The owner-attestation precedent
+
+`KPA-31` was resolved on a **domain ruling by the repo owner**, which is a kind of grounds
+`MATHS_AUDIT` had never used. §7's rule is *"sources actually fetched and read this audit"*,
+and every §5 resolution to date rests on a §7 entry — `ADV-02` established *"no source
+exists"* by fetching `[FAO-WT]`, `[FAO-WM]` and `[HEC15]` and recording what the named
+chapters lack.
+
+So the ruling was **not** allowed to stand as grounds on its own. Two Yeomans texts were
+fetched and read on 2026-09-11 (`[YEO-WFEF]`, 368 pp.; `[YEO-MKIV]`, 14 pp.) and they
+establish the same absence independently. The ruling is recorded under its own key,
+`[OWNER-2026-09-11]`, explicitly labelled *an owner attestation, not a fetched source*, so
+a later reader cannot mistake it for one. See `MATHS_AUDIT` §9.8 for the resolution and §7
+for the rows.
+
+**This is a new precedent and is labelled as one.** It says: an owner ruling may direct the
+audit's attention and may corroborate, but it does not substitute for a fetch. The owner
+still owes a citation for Doherty (which text, which edition); until then `[DOHERTY]` is not
+added and nothing rests on it.
+
+### §0.4 Rules of entry
+
+- **A finding contradicted by a passing test is `DISC` by default**, and needs an explicit
+  argument in `decided by` to become `WRONG`. Running the grep that establishes this is an
+  entry condition on writing any entry, as is the production-caller screen.
+- `not exercised` is printed as an honest third state, distinct from pass and fail.
+- Every number here was measured by a probe under `tests_qgis/probes/`, and every entry's
+  `reproduce` names the probe and the evidence file. Numbers that Step G pins were measured
+  **twice** — once by the probe, once by the check.
+
+### §0.5 Environment for every measurement
+
+```
+$env:QT_QPA_PLATFORM = 'offscreen'
+& 'F:\bin\python-qgis-ltr.bat' tests_qgis\probes\p_<name>.py
+```
+
+QGIS 3.44 LTR at the root of `F:`; pysheds 0.5; shapely 2.1.2 / GEOS 3.13.1.
+Pure suite at write time: **2,889 passed, 2 xfailed, 5 xpassed in 39.75 s** — so
+`CLAUDE.md`'s *"~2,590 tests, ~60 s"* is stale in both figures.
+
+---
+
+## §1 Findings summary (severity-ranked) — the triage surface
+
+Confirmed findings only. Unconfirmed candidates are in §4; refuted claims are in §3.
+
+| # | ID | Sev | Dir | Where | Finding | Verdict | Conf |
+|---|----|-----|-----|-------|---------|---------|------|
+| 1 | KPA-39 | M | n | keypoint_analysis.py:807-811 | Every `keypoint_on_path` `None` is reported as *"no break in the floor clearing 2% of grade change"*. Traced over 127 real links: `len(thalweg)<5` **78**, guard-window **48**, prominence **0** — the stated reason is false **126/126**. On the 2 m synthetic DEM it is false 2/28 | WRONG | H |
+| 2 | KPA-40 | M | i-d | keypoint_analysis.py:699-722 | No keypoint is possible below `7·min(5·cell,10)` m of thalweg — measured **35.0 m (36 cells) on 1 m**, **70.0 m (36 cells) on 2 m**. Undocumented. Qualifies `KPA-28`'s published `OK` | WRONG | H |
+| 3 | KPA-41 | M | U(drift under-read) | keypoint_analysis.py:911-924 | `drift_1_in_n` is net end-to-end fall. Measured: a ridge guide reporting **1:544.8, `over_limit` False** runs **1:6.3 over its steepest 20 m** — an **86.4×** understatement, so the docstring's promise that steeper-than-`max_grade_n` guides are flagged fails | WRONG | H |
+| 4 | KPA-42 | M | i-d | keypoint_analysis.py:1076-1099 | `_sample_dem` returns the keypoint elevation for any off-grid sample and nothing clips a guide to the data extent. Measured **9/151, 19/146, 27/143** fabricated vertices on the three valley guides; all three report `drift_fall_m` of exactly **0.000**, which is the default, not terrain. **Supersedes `KPA-35`** | WRONG | H |
+| 5 | KPA-38 | M | i-d | keypoint_analysis.py:789 | `find_keypoints` builds D8 pointers from the **raw** DEM while its stream mask comes from conditioned accumulation. Measured at 0.2 ha: **127 order-1 links raw vs 93 conditioned**; **525 sinks vs 65**. Withdraws the precondition warrant under `FLG-06` | WRONG | H |
+| 6 | KPA-46 | M | i-d | contour.py:1398-1404 | The no-keypoint fallback applies **no prominence bar**, and its stated scope is *"a small or single-valley DEM"*. On the 36 ha / 28-link synthetic DEM it fires on **every** run. On the real fixture it does **not** fire — production finds 1 keypoint | WRONG | H |
+| 7 | KPA-48 | M | i-d | contour.py:1390 vs keypoint_analysis.py:1117 | `acc_path` is passed alone but the gate needs **both** paths, so it is an inert parameter: measured **0.48 s recomputing** against **0.022 s** when both are supplied, and the recomputed field differs from the supplied one by up to **65,086 cells**. The supplied field is crest-split and the recompute is not | WRONG | H |
+| 8 | KPA-50 | M | n | keypoint_analysis.py:591, :9 | Two stale docstrings still present the deleted `cross_grade` generator as **step 5 of Yeomans' method**, under a heading reading *"True Yeomans keyline design"* — the closest thing in the repo to an implied attribution, describing a parameter that now only raises `DeprecationWarning` | WRONG | H |
+| 9 | SWL-22 | M | O | contour.py:176-180 vs :806 | `suggest_spacing` calls `capacity_per_metre` without `infiltration_mm_hr` while `find_swale_segments` passes a real soil rate. Measured shortfall up to **85.7 %** (Sand / 24 h, 0.6 × 2.0 m section). Lower capacity ⇒ **tighter** advised interval ⇒ over-sizes | WRONG | H |
+| 10 | CTL-02 | M | n | core/registry/map_palette.py:280 + terrain.py:43,190 | `ASPECT_CLASSES` declares **compass degrees** and is handed to `apply_raster_ramp`, whose contract is *fraction of max*. With `symmetric=False`, `top ≈ 359`, so the nine stops land at −359, 0, 16155 … 113085: every real value sits in the first **2.2 %** of the first interval | WRONG | H |
+| 11 | CTL-03 | M | n | checks_terrain.py:138-150; test_map_palette.py:25-26 | The check that should catch `CTL-02` asserts less than its own name: `check_every_terrain_index_renders` asserts only that a layer id exists. The unit `RAMPS` list excludes `ASPECT_CLASSES`, `CURVATURE`, `WETNESS_INDEX`, `EROSIVE_POWER` | WRONG | H |
+| 12 | CTL-04 | M | n | contour.py:1440-1441, :1608-1616 | **The "only one keypoint shown" symptom.** `_on_keyline_ready` passes `keypoints[0]` to `_display_keylines`, which builds the marker layer with **no loop** and names it in the singular — N keylines, one star — while the panel prints the true count at `:1448`. `_state.keyline_keypoints` has no production reader | WRONG | H |
+| 13 | CTL-05 | M | n | contour.py:1598-1605; earthworks.py:232-233 | `break` on the first keyline run sets `keyline_master_coords`/`_geom`, so **"Convert Keyline → Swale" can only ever convert valley 1** | WRONG | H |
+| 14 | RPT-26 | M | i-d | report_model.py:1608-1609 | `_earthwork_balance_section` reads `earthwork_soil_name`/`soil_name` off `ReportData`, which declares **neither**, so every report resolves to Loam. ≤ **8.0 %** on `bank_needed_for_fill_m3`, **13.6 %** on "Loose to cart"; surplus/deficit can flip | WRONG | H |
+| 15 | IMP-01 | M | O | impoundment_sites.py:119-123, :334, :161-183 | `transect_cells` dedupes cells, so a diagonal crest yields **0.707 cells per map-space step** while `wall_len = len(run)·step` and `embankment_volume` both count one step per cell. Measured on production candidates: **0.713–0.933** cells/step, crest understated **14.1 %** (139.0 m counted vs 161.8 m), `storage_ratio` inflated **1.16×** | WRONG | H |
+| 16 | IMP-03 | M | n | impoundment_sites.py:327-348 | The refusal `reason` is one slot rebound inside the ascending trial-height loop, so only the **last failing height** survives — and wall length grows with height, so the common case reports *"the wall would run over 200 m"* while hiding that every buildable height failed as unenclosed. Sibling of `KPA-39` | WRONG | H |
+| 17 | IMP-04 | M | n | impoundment_sites.py:69-70, :217+ | The "not enclosed within the pond window" refusal names two causes and omits the one that often applies: **the DEM ran out**. Also falsifies `:69-70`'s claim that *"the window is the same size whatever the DEM is"* | WRONG | H |
+| 18 | FLG-18 | M | i-d | flow_graph.py:507-508; keypoint_analysis.py:791 | `stream_links` emits at `min_cells=3` while its only consumer needs ≥5 cells **and** 35 m. Measured at 0.2 ha on the production surface: **127 links emitted, 1 can clear the floor** — 126 are profiled and refused by construction. No integer `min_cells` can express a metric bar when steps vary 1.0–1.414 m | WRONG | H |
+| 19 | KPA-43 | L | n | keypoint_analysis.py:804 | The `break` drops every remaining link from *both* returned lists. Measured at 0.2 ha, `max_valleys=1`: `1 + 2 = 3` against **127** links — **124 never examined and never reported**. At `max_valleys=8` the identity holds only because just one keypoint exists | WRONG | H |
+| 20 | FLG-19 | L | n | flow_graph.py:101-104 | `d8_from_dem`'s docstring claims a conditioned DEM gives an acyclic graph where every interior cell reaches the boundary. Measured on the real conditioned surface: **65 sinks and 72 mask-leaving pointers** survive | WRONG | H |
+| 21 | CTA-30 | L | n | contour_analysis.py:206-207, :787 | `extract_contours` leaks `tempfile.mkdtemp` on every call — no `finally`, `rmtree`, `TemporaryDirectory` or `atexit` anywhere in the file, and both early-return fallbacks leak too. **Measured 2026-09-11: 456 `tfa_contours_*` directories, 138.7 MB**; across all `tfa_*` prefixes, **5,689 directories and 2,365 MB** | WRONG | H |
+| 22 | ADV-09 | L | n | advisories.py (spacing_advisory) | With `capacity_m3_per_m=0.0`, `capture_spacing` returns 0.0, the `v>0` filter discards it, and `governing` reports `"erosion"` — where a section holding nothing is precisely capture-governed. **Unreachable from the UI** behind two guards, so latent | WRONG | H |
+| 23 | KPA-51 | L | n | CLudeDocs/STRETCH_GOALS.md:140; CLudeDocs/USABILITY_WALKTHROUGH.md:87 | Shipped docs still describe the one-keypoint era and match what the code draws: *"finds **the keypoint**"*, *"a **star** keypoint marker"* — both singular. Stage 3c's watch-for list never asks how many keypoints appeared | WRONG | H |
+| 24 | CTL-06 | L | n | contour.py:1601-1603 | The keyline→swale conversion **discards the Z that `keypoint_analysis` went to trouble to sample**: `keyline_master_geom` is built with `QgsGeometry.fromPolylineXY`. Adjacent to `KPA-42`, which is about Z being *fabricated*; here it is measured and then thrown away | WRONG | L |
+| 25 | KPA-44 | L | n | checks_contour.py:487; test_keyline_yeomans.py | The prominence bar's **accept** branch and the `skipped` list have no end-to-end QGIS coverage, and the check that looks like it covers them is **tautologically satisfied** because the fallback sets `keypoints = [one]`. Re-traced: on the synthetic DEM **26 of 28** refusals are the prominence test, not 28 | WRONG | H |
+| 26 | KPA-45 | L | n | keypoint_analysis.py:997-1053 | `offset_parts`' fold guard is **vestigial on this stack** — under shapely 2.1.2 / GEOS 3.13.1 `offset_curve` already removes self-intersections and no fold was constructible. Its test asserts only a 20 m spread on whatever is kept; measured spread **0.02 m**. The 24-sample cap is real but gives 6.37 m spacing at 150 m, biting only from ~600 m | DISC | M |
+| 27 | KPA-49 | L | n | keypoint_analysis.py:822; panel.py:1269-1271; project_io.py:124 | **1:500 is unattributed, not miscited.** Every occurrence is a bare literal; no 1:400 *grade* exists in the repo; the docstring that cites Yeomans deliberately excludes the threshold. The defect is **omission** — nothing says it is a TerrainFlow convention. Sharpened by the source pass: **1 in 500 *does* appear in Yeomans**, as a channel's rate of fall. `MIN_SLOPE_EASE = 0.02` is unattributed on the same footing | DISC | H |
+| 28 | CTL-01 | L | n | contour.py:137 vs :168 | `suggest_spacing`'s docstring says it reads slope *"over the usable area"*; the call passes no mask though the parameter exists and is unit-tested. Measured on the fixture: site-wide median **8.06°** against **6.81°** over a middle-half mask, a **−15.5 %** change | DISC | H |
+| 29 | IMP-02 | L | n | impoundment_sites.py:60-62 vs :335 | `DEFAULT_MAX_WALL_M`'s docstring says *"either side"* and `transect_cells` searches ±200 m — measured span **400 m** — but the refusal compares the **total** run against 200 m. Code and message agree; the docstring describes a limit twice as permissive | DISC | H |
+| 30 | MHL-01 | L | n | mass_haul.py:124; earthworks.py:5050 | `haul_regions` computes `block` from `block_m` and passes it to `_regions_from`, which never reads it: **one distinct output across a 100,000× sweep**. And the only caller never passes `block_m` at all, so it is inert twice over | DISC | H |
+| 31 | KPA-47 | I | n | keypoint_analysis.py:898,907 | `offset_m`'s sign comes from measured elevation, not the geometric offset. **0 duplicates in 168 runs.** `checks_contour.py:499-505` pins the classification this sign is derived from. **Closed — recorded so it is not re-raised** | DISC | H |
+
+**Tally: 31 findings — 25 `WRONG` and 6 `DISC`, one of the six (`KPA-47`) closed on entry.**
+No `C` and no `H`. Severity `M` × 18, `L` × 12, `I` × 1.
+
+---
+
+## §2 Per-file findings
+
+Each entry carries: **tokens · where · decided by** (every `DISC`) **· what was run ·
+observed vs expected · quoted contract · root cause · blast radius · holds while ·
+blocked by / blocks · reproduce · status · supersedes**. Fields that do not apply are
+omitted rather than filled with "n/a".
+
+### 2.1 `modules/keypoint_analysis.py`
+
+#### KPA-38 — the pointer graph is built on the raw DEM while the mask is conditioned
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `keypoint_analysis.py:789` (`d8_from_dem(self.dem, …)`), against `:783` where
+  the stream mask is built from `acc_arr`, and `:1127-1151` where `_ensure_flow_data`
+  builds a conditioned surface and discards it.
+- **What was run:** `p_flow_graph.py`, stage `link_populations`. The full link pipeline —
+  `d8_from_dem` → `strahler_order` → `stream_links` — run twice at each of three
+  thresholds, once over `self.dem` (raw, which is what production does) and once over the
+  conditioned surface, with the same `acc_arr` mask both times.
+- **Observed.** At **0.2 ha, the production threshold**:
+
+  | Surface | order-1 links | sinks on finite ground | stream cells that are sinks | links clearing the 35 m floor |
+  |---|---|---|---|---|
+  | raw (production) | **127** | **525** | **42** | 1 |
+  | conditioned | **93** | **65** | **0** | 2 |
+
+  Sensitivity at 0.5 ha: 77 raw / 52 conditioned. At 1.0 ha: 55 / 38. **Those two rows are
+  sensitivity, not evidence of production behaviour** — `contour.py:1397` passes
+  `max_valleys` alone, so `stream_threshold_cells` takes its `max(20, round(2000/cell_area))`
+  default (`keypoint_analysis.py:781`), which is 0.2 ha on the 1 m fixture **and** on the
+  2 m synthetic DEM.
+- **Expected:** the surface the pointer graph is built on should be the surface the mask
+  was derived from, and `flow_graph.py:101-104` says which one that has to be.
+- **Quoted contract** (`flow_graph.py:101-104`): *"`dem` should be **hydrologically
+  conditioned** (pits filled, depressions filled, flats resolved). On a conditioned DEM the
+  pointer graph is acyclic and every interior cell reaches the boundary."*
+- **Root cause:** `_ensure_flow_data` conditions a surface to get `acc`, returns only
+  `(fdir, acc)`, and the conditioned array goes out of scope. `find_keypoints` then reaches
+  for `self.dem`, which is the raw float32 read in `__init__`. The fix is to return or cache
+  the conditioned surface — and it is genuinely *one dict key away* on the controller side,
+  which `KPA-48` measures.
+- **Blast radius.** **Not the count.** `:800` sorts by `acc_arr[link[-1]]` — a
+  conditioned-accumulation sample taken at a **raw-graph terminus** — so a fragment ending
+  at a mid-valley pit is ranked on under-stated accumulation and can out-rank a real valley.
+  Measured on the fixture: the **rank-1 link on the production path is 4 cells / 4.24 m
+  long** and yields no keypoint, while the rank-1 link on the conditioned surface is 55
+  cells / 54 m and yields one. `keypoints[0]` becomes `keyline_master_geom`
+  (`contour.py:1598-1605`), which *"Convert Keyline → Swale"* turns into a real earthwork,
+  and the `valley` layer attribute **is** that rank. Binds at 2 keypoints. **Not reached:**
+  `valley_cells` is written and never read; `catchment_ha` feeds `label`, which has no
+  production reader.
+- **Why `WRONG`/`M` and not `HAZ`/`L`.** `HAZ` means "correct today". The link set already
+  differs today, 127 against 93. `M` is the band every confirmed-`WRONG` production-analysis
+  defect occupies in `MATHS_AUDIT` (`KPA-21`, `KPA-14`, `DEM-05`, `SIM-26`, `CAT-27`); `H` is
+  reserved for under-sizing in a sizing path; `L` belongs to `HAZ` rows, dead code, and
+  `KPA-33`, which earned `L` for firing **only on a fallback** — this fires on 100 % of
+  keyline runs. `FIELD_TEST_LOG.md:1519` is the reason "no change on the fixture" would have
+  been a bad inference here: the `resolve_flats_safely` fix took real terrain from **516
+  sinks to 0** while moving the fixture's nine pinned figures by 0.00 %.
+- **Not the finding:** `acc` is dinf and `d8_from_dem` is D8 **deliberately**
+  (`flow_graph.py:17-23` — ~90k cells trapped in cycles when dinf angles are rounded). The
+  fix restores a shared **surface**, not a shared **scheme**. And `keypoint_on_path` must
+  keep sampling **raw** ground, because a keypoint is a real elevation.
+- **Holds while** `find_keypoints` reads `self.dem` for its pointer graph.
+- **Blocks:** the `FLG-06` precondition warrant — `MATHS_AUDIT` publishes that row `OK`,
+  and this is the only raw call site in the tree.
+- **Reproduce:** `p_flow_graph.py` → `evidence/p_flow_graph.json`, stage `link_populations`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-48 — `acc_path` is an inert parameter, and the keyline runs on an uncorrected field
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `contour.py:1390` (`YeomansKeylineAnalysis(dem_path, acc_path=acc_path)`)
+  against `keypoint_analysis.py:1117` (`if self._fdir_path and self._acc_path:`).
+- **What was run:** `p_controllers.py`, stage `kpa48_acc_path_is_inert`. A crest-split
+  baseline accumulation was written to disk, handed in exactly as the controller hands it
+  in, and the returned field compared against it — then the same with **both** paths
+  supplied, which is the branch the gate was written for.
+- **Observed:**
+
+  | Call | wall time | reads the supplied raster? |
+  |---|---|---|
+  | `acc_path` only — what production does | **0.48 s** | **no** |
+  | `fdir_path` **and** `acc_path` | **0.022 s** | yes |
+
+  The recomputed field differs from the supplied one by up to **65,086 cells** (both peak at
+  67,199, so the disagreement is in the body of the field, not its scale).
+- **Expected:** a caller that has already computed accumulation and hands it over should not
+  pay for it again, and should get the field it handed over.
+- **Root cause:** the gate is an `and` over two paths, and the caller supplies one. The
+  second consequence is the sharper one: **`fa.acc` is crest-split and this recompute is
+  not**, so the keyline is the only analysis tool in the plugin running on a
+  pond-uncorrected accumulation.
+- **Blast radius:** every keyline press — a full pysheds condition-and-accumulate — plus a
+  silent divergence between the stream network the user sees and the one the keyline used.
+- **Fix note, now measured rather than asserted.** `FlowAnalysis.run(crest_split=False)`
+  does return a `conditioned_dem` key, and the surface `_ensure_flow_data` rebuilds is
+  **bit-identical** to it: max |Δ| = **0.000e+00** over all 160,000 cells, 0 cells differing
+  at all. Dropping `_ensure_flow_data`'s float32 GeoTIFF round-trip changes nothing either
+  (max |Δ| also 0.0 on this fixture, whose z_max is 84.78 m). So *"the input is one dict key
+  away"* is **true as stated**, and handing the key over is numerically free.
+- **Holds while** the gate requires both paths and the controller supplies one.
+- **Blocks:** nothing. **Blocked by:** nothing.
+- **Reproduce:** `p_controllers.py` → `evidence/p_controllers.json`, stages
+  `kpa48_acc_path_is_inert`; the bit-identity is `p_flow_graph.json` →
+  `conditioned_surfaces.replica_vs_run`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-39 — every refusal is reported as the one guard that refused nothing
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `keypoint_analysis.py:807-811` (the `skipped.append(...)` message, built at `:808-810`) against the
+  five `return None` sites in `keypoint_on_path`.
+- **What was run:** `p_keypoints.py`, stage `guard_histogram_*`. `sys.settrace` attributes
+  every `None` to the line it returned from — nothing short of a line tracer can separate
+  five `return None` statements inside one function from outside it.
+- **Observed.** Real fixture, 0.2 ha, 127 order-1 links:
+
+  | Line | Guard | Count |
+  |---|---|---|
+  | `:674` | `thalweg is None or len(thalweg) < 5` | **78** |
+  | `:688` | `total_len <= 0` | 0 |
+  | `:697` | `len(arc) < 5` — too little finite ground | 0 |
+  | `:722` | `n_samp - 2*guard < 3` — profile too short to have an interior | **48** |
+  | `:734` | `slope_ease < MIN_SLOPE_EASE` — **the only one reported** | **0** |
+
+  126 refused, 1 accepted. **The stated reason is false 126 times out of 126.** `:688` and
+  `:697` are dead code on this fixture, which has no nodata.
+
+  Default synthetic DEM (2 m, 28 order-1 links): `:722` **2**, `:734` **26**. All 28
+  refused; the message is false 2/28. **This is the re-trace `KPA-44` needed** — the earlier
+  claim that all 28 were refused on prominence was read off this very message, and is
+  **26/28, not 28/28**.
+- **Expected:** the register's own rule at `keypoint_analysis.py:766` — *"the house style is
+  to say what was refused **and why**, not to return a shorter list."*
+- **Root cause:** one hard-coded message for a function with five exits.
+- **Blast radius:** the message is surfaced verbatim in the panel and the message bar
+  (`contour.py:1459-1463`), so a user tuning `MIN_SLOPE_EASE` on the fixture would be
+  tuning the one guard that never fires. It is pushed as `pushInfo`, and
+  `_harness.py:755-769`'s `assert_no_errors` fails only on **criticals and blocking modal
+  dialogs** — so the message appears on every run and nothing fails.
+- **A test pins the false message.** `test_keyline_yeomans.py:439` is
+  `assert "grade" in skipped[0]`. It pins the **unconditional** string, passes today, and
+  **will fail the moment the reason becomes truthful**. Recorded so a fixer expects it.
+- **Holds while** the message is built outside the function that decided.
+- **Blocks:** `KPA-44`'s attribution, which had to be re-established here.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stages
+  `guard_histogram_fixture` and `guard_histogram_synthetic`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-40 — an undocumented 35 m floor on the shortest valley that can have a keypoint
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `keypoint_analysis.py:699-702` (resample), `:704-710` (savgol window),
+  `:719-722` (the interior test).
+- **What was run:** `p_keypoints.py`, stage `profile_floor_*`. Bisection against the **real
+  function** on a synthetic straight profile carrying a genuine slope break, with
+  `require_prominence=False` so only the length guards can refuse — the answer is the
+  function's, not the algebra's.
+- **Observed:** first pass at **36 cells** on both grids — **35.0 m on the 1 m fixture** and
+  **70.0 m on the 2 m synthetic DEM**. The algebra agrees: `spacing = min(5·cell, 10)`,
+  `n_samp = max(5, int(L/spacing))`, `win ≥ 5` so `guard ≥ 2`, and `n_samp - 2·guard ≥ 3`
+  first holds at `n_samp = 7`, i.e. `L ≥ 7·min(5·cell, 10)`.
+- **Expected:** a limit this sharp should be documented where the resample constant is
+  chosen. Nothing in the module states it.
+- **Root cause:** three constants chosen independently — the 5-cell/10 m resample
+  (`KPA-27`), the 20 % savgol window (`KPA-28`) and the half-window guard — whose product is
+  a metric floor nobody wrote down.
+- **Relation to published rows.** *Related to* `KPA-27`, whose design-constant question
+  survives, so its §5 listing must not be retired. **It qualifies `KPA-28`'s published
+  `OK`**, which reads *"all satisfied for every `n_samp ≥ 5`"*: `n_samp` 5 and 6 satisfy
+  savgol and are still refused at `:722`, so that `OK` is true of the filter and false of
+  the function. `KPA-40` is the joint consequence of the two.
+- **Blast radius:** with `FLG-18`, it is why 126 of 127 links on the fixture are profiled
+  and refused by construction.
+- **Holds while** the resample constant stands. **The 70 m arm is the `holds while` test**,
+  and it passed.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stages
+  `profile_floor_fixture` and `profile_floor_synthetic`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-43 — `max_valleys` drops links from both returned lists
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `keypoint_analysis.py:804` (`if len(keypoints) >= max_valleys: break`).
+- **What was run:** `p_keypoints.py`, stage `accounting_identity_*`; `len(keypoints) +
+  len(skipped)` against `len(links)` at `max_valleys` 1 and 8.
+- **Observed:**
+
+  | DEM | `max_valleys` | keypoints | skipped | sum | links | unaccounted |
+  |---|---|---|---|---|---|---|
+  | fixture (1 m) | 1 | 1 | 2 | **3** | **127** | **124** |
+  | fixture (1 m) | 8 | 1 | 126 | 127 | 127 | 0 |
+  | synthetic (2 m) | 1 | 0 | 28 | 28 | 28 | 0 |
+  | synthetic (2 m) | 8 | 0 | 28 | 28 | 28 | 0 |
+
+  The identity holds at `max_valleys=8` on the fixture **only because just one keypoint
+  exists**, so the `break` never fires. That is a coincidence of this fixture, not a
+  property of the code.
+- **Expected:** `|accepted| + |refused| == |input|` for a screening tool.
+- **Root cause:** the loop stops before examining the remainder, and the remainder is
+  reported nowhere.
+- **Reported as a count, deliberately.** Fabricating reasons for links that were never
+  examined would be `KPA-39` again.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stages
+  `accounting_identity_fixture` / `accounting_identity_synthetic`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-41 — net end-to-end fall is not the drift the docstring promises to flag
+
+- **Tokens:** `WRONG / M / U(drift under-read) / H`
+- **Where:** `keypoint_analysis.py:911-924` (`_run_record`), against the docstring promise
+  at `:848-850`.
+- **Decided by** — this is a `WRONG` that needed an argument, because the metric itself is
+  honestly described. `_run_record:914-917` states plainly that it computes net fall, so by
+  the legend's *"deliberate divergence is still DISC"* the **metric** is `DISC`. What is
+  `WRONG` is the **contract** at `:848-850`: *"`max_grade_n` is a **threshold**: every run
+  reports the drift it actually achieves, and **guides steeper than 1:`max_grade_n` are
+  flagged**."* A ridge guide running 1:6.3 over 20 m is not flagged. With no published
+  definition of drift there is nothing for the *metric* to be `WRONG` against; the promise
+  is a different matter.
+- **What was run:** `p_keypoints.py`, stage `drift_table`. For each of the 7 guides on the
+  fixture's one keypoint, the steepest sustained grade over 10 / 20 / 50 m windows,
+  measured on **real ground only** (windows containing a fabricated vertex are excluded —
+  see `KPA-42`).
+- **Observed,** worst case: `ridge_guide` at offset **+15.0 m** reports
+  `drift_1_in_n = 544.8` and `over_limit = False`, and runs **1:6.3 over its steepest 20 m**
+  — an **86.4×** understatement. The guide at +5.0 m reports 1:432.7 and *is* flagged
+  `over_limit = True`, so the flag is not dead; it simply fires on the wrong guides.
+- **Expected:** a number that a plough actually experiences.
+- **Root cause:** drift varies along the line **by construction** — a parallel offset of a
+  curved contour is not a contour — so near-zero *net* fall can conceal mid-run reversal.
+  Averaging over the whole line is the wrong estimator for a maximum.
+- **Fails on Yeomans' own terms.** `[YEO-WFEF]`: *"any cultivation which is done parallel to
+  any contour line marked in on the land surface, **must inevitably drift off the true
+  contour as the cultivation continues**"* — drift is the **device**, not an error term. So
+  the right shape for a limit is **steepest sustained grade over a window** as the pass/fail,
+  with **fraction-of-length-over-limit as a reporting figure only**, never a gate.
+- **The window is a TerrainFlow convention and is labelled one.** No source supplies it —
+  see `KPA-49` and `MATHS_AUDIT` §9.8 — so it was **sized** rather than chosen, on
+  `_harness.build_synthetic_dem`'s correlated roughness at a fixed seed:
+
+  | Window | spread of steepest grade across `roughness_m` 0.00 → 0.10 | as a multiple of `MIN_SLOPE_EASE` |
+  |---|---|---|
+  | 10 m | 0.0435 | **2.18×** |
+  | 20 m | 0.0488 | **2.44×** |
+  | 50 m | 0.0165 | **0.82×** |
+
+  **50 m is the shortest window whose spread stays inside `MIN_SLOPE_EASE`** and is the
+  recommendation. It is sized on **synthetic** roughness of 0.05–0.10 m, which is the
+  transfer a reader has to judge; the real fixture's own figures are reported beside it in
+  the drift table so they can. **The decision is the owner's and is still owed** — see §6.
+- **Relation:** *related to* `KPA-31`; does **not** supersede it.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stages `drift_table` and
+  `roughness_sweep`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-42 — off-grid samples are given the keypoint's elevation, and nothing clips a guide
+
+- **Tokens:** `WRONG / M / i-d / H` — **supersedes `KPA-35`**
+- **Where:** `keypoint_analysis.py:1088-1094` (`_sample_dem` returns `default`),
+  `:1076-1086` (`_sample_z` passes `base_elev` as that default).
+- **What was run:** `p_keypoints.py`, stage `drift_table`. `_sample_dem`'s own bounds-and-NaN
+  test was **reproduced**, not patched, so the count cannot drift from the function it
+  describes; every vertex of every guide classified real or fabricated.
+- **Observed:** 3 of 7 guides carry fabricated Z —
+
+  | Guide | fabricated / total vertices | `drift_fall_m` as reported |
+  |---|---|---|
+  | `valley_guide` @ −5 m | **9 / 151** | 0.000 |
+  | `valley_guide` @ −10 m | **19 / 146** | 0.000 |
+  | `valley_guide` @ −15 m | **27 / 143** | 0.000 |
+
+  All three report **exactly** `0.000` net fall and `drift_1_in_n = null`. That is not
+  symmetry and not a closed ring: the traced contour runs west-edge → north-edge, so inward
+  offsets leave the grid at **both** ends and both endpoints receive `base_elev`. **The
+  0.000 is the default, not terrain.** The three ridge guides, whose Z is entirely real,
+  report 1:432.7, 1:586.6 and 1:544.8.
+- **Expected:** a sample off the raster is missing data, not an elevation.
+- **Quoted contract** (`:853-856`): *"`geometry` (3D LineString, **Z sampled from the
+  ground** — a plough guide sits *on* the ground…)"*.
+- **Root cause:** a default-valued sampler plus no extent clip. The default is the
+  keypoint's own elevation, which is the one value guaranteed to make a drift computation
+  look clean.
+- **Blast radius:** the Z profile, the `mean_elev` that drives valley/ridge classification
+  (`:898`), `drift_1_in_n`, `over_limit`, and exported 3D geometry.
+- **Superseded row:** `KPA-35` (`MATHS_AUDIT:640`, `HAZ / i-d / L`, *"z-sampling nearest;
+  fallback `base_elev`"*) is literally `_sample_dem`'s description. This raises it to
+  `WRONG / M` with measurement. *Related to* `KPA-26` and `NEW-W8-01` only — the NaN half of
+  `KPA-26` was re-filed as `NEW-W8-01` and **fixed**.
+- **Numbers withdrawn:** an earlier draft reported 3.76–8.60 m of drift and 1:3 grades.
+  Those were artefacts of the fabrication itself. Real ground gives 2.11–2.87 m and roughly
+  1:12–1:14 over 20 m.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stage `drift_table`,
+  field `fabricated_z_vertices`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-44 — the prominence bar's accept branch has no QGIS coverage, and the check that looks like it does is tautological
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `checks_contour.py:487`
+  (`len(by_type["keyline"]) == len(h.state.keyline_keypoints)`).
+- **What was run:** the re-trace under `KPA-39`, plus a grep over `tests_qgis/` for any
+  check that mentions the prominence bar or reads `skipped`.
+- **Observed:** on the harness DEM `find_keypoints` returns empty, so `contour.py:1398`
+  takes the fallback **every time** and sets `keypoints = [one]`. The assertion then compares
+  1 against 1 and is **satisfied by construction** — it would pass on a broken
+  implementation. No `checks_*` module mentions the bar or reads `skipped`.
+- **Attribution, corrected.** The earlier claim that *all 28 links are refused on
+  prominence* was read off the skipped message that `KPA-39` shows is unconditional. Re-traced
+  with `settrace`: **26 of 28** are the prominence test and **2** are the length guard at
+  `:722`. The emptiness, and therefore the fallback, was never in doubt; the attribution was.
+- **The unit layer does cover the bar both ways** — `test_keyline_yeomans.py:413` accept,
+  `:426-439` refuse — so the gap is **QGIS-level only**, and that is the whole finding.
+- **Relation:** *related to* `CTL-04`, whose fix should also assert the marker layer's
+  `featureCount()`.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stage
+  `guard_histogram_synthetic`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-45 — the fold guard is vestigial on this stack, and its test cannot tell
+
+- **Tokens:** `DISC / L / n / M`
+- **Where:** `keypoint_analysis.py:997-1053` (`offset_parts`), and
+  `test_a_fold_is_refused_rather_than_returned`.
+- **Decided by:** a passing test covers this code, so `DISC` is the default and it stays.
+  The guard is not wrong; it is unreachable on the installed stack, and the test that
+  appears to exercise it does not.
+- **Observed:** under shapely 2.1.2 / GEOS 3.13.1, `offset_curve` already removes
+  self-intersections, and no fold was constructible. The test asserts only a 20 m spread on
+  whatever is kept, never `parts == []`; measured spread **0.02 m** — it passes because
+  there is no fold to refuse. The 24-sample cap is real but gives **6.37 m** spacing at
+  150 m, not "tens of metres"; it only bites from ~600 m.
+- **The finding is the guard and its test**, not the cap — the cap needs no probe.
+- **Holds while** GEOS keeps removing self-intersections in `offset_curve`. A GEOS
+  downgrade makes the guard live again, and the test still would not prove it.
+- **Status:** open, documented, not fixed.
+
+#### KPA-46 — the fallback's stated scope is a rare case; it is the ordinary path
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `contour.py:1398-1404`.
+- **What was run:** `p_keypoints.py` on both surfaces, and `p_flow_graph.py` for the link
+  populations.
+- **Observed — and this is where the earlier draft was wrong.**
+  - **Synthetic harness DEM (2 m, 36 ha, 28 order-1 links):** `find_keypoints` returns
+    **empty at the production threshold**, so the fallback fires on **every run**, drawing
+    its one un-prominenced keyline. Neither small nor single-valley.
+  - **Real fixture (1 m, 16 ha):** production finds **1 keypoint**, so **the fallback does
+    not fire**. An earlier draft claimed *"the real fixture also falls back at 2.0 and
+    5.0 ha"* — those thresholds are configurations **production never runs**, because
+    `contour.py:1397` passes `max_valleys` alone and the default is 0.2 ha on both grids.
+    The claim is withdrawn.
+  - The roughness sweep strengthens the synthetic arm considerably: at `roughness_m`
+    0.00 / 0.05 / 0.10 / 0.25 the number of keypoints clearing the 2 % bar is
+    **0 / 0 / 0 / 0**. The fallback is not marginal on that surface; nothing ever clears.
+- **Expected** (`contour.py:1399-1401`): *"on a small or single-valley DEM there may be no
+  order-1 link long enough to profile, and the old answer is still an answer."*
+- **Root cause:** the fallback applies **no prominence bar** — it calls `find_keypoint()`,
+  which is `argmax` over one stem. `MIN_SLOPE_EASE`'s own docstring (`:631-640`) says the
+  un-prominenced `argmax` was *"survivable **while one keypoint was found on one stem**; run
+  per primary valley it fabricates them at scale."* So the fallback hands the user the exact
+  output the same commit declared invented, while `:1459-1463` simultaneously reports that
+  28 valleys had no keypoint clearing 2 % of grade change.
+- **Why `i-d` and not `U`:** an invented keypoint places a pattern on the wrong ground,
+  which is `KPA-21`/`KPA-33` precedent, not an under-sized structure.
+- **Blast radius:** on the synthetic DEM the fallback's single keyline is drawn at **row 4 —
+  the top edge of the DEM**.
+- **Reproduce:** `p_keypoints.py` → `evidence/p_keypoints.json`, stages
+  `guard_histogram_synthetic` and `roughness_sweep`; `p_flow_graph.json` for the fixture's
+  single keypoint.
+- **Status:** open, documented, not fixed.
+
+#### KPA-47 — `offset_m`'s sign is derived from measured elevation, and a green check pins it
+
+- **Tokens:** `DISC / I / n / H` — **closed on entry**
+- **Where:** `keypoint_analysis.py:898` (`above = mean_elev >= keyline_elev`), with its reasoning at `:893-897`.
+- **Decided by:** `checks_contour.py:499-505`. **The citation in the campaign plan was
+  wrong and is corrected here:** that block does **not** assert `offset_m`'s sign —
+  `offset_m` does not occur in `checks_contour.py` at all. It asserts `line_type` against
+  **measured elevation** (a `ridge_guide` must sit at or above the keyline elevation), which
+  is the classification `:898` derives the sign from. The check is therefore still what
+  decides this row; it decides it one step upstream.
+- **Observed:** 0 duplicates in 168 runs.
+- **Recorded so it is not re-raised.** Filing this as a bug would send a fixer to break a
+  green check. The code's own comment at `:893-897` explains the choice: `offset_curve`'s
+  sign means "left of the direction of travel", and the traced contour's winding is not
+  normalised, so measuring is the only stable basis.
+- **Status:** closed.
+
+#### KPA-49 — 1:500 is unattributed, and the source pass makes labelling it urgent
+
+- **Tokens:** `DISC / L / n / H`
+- **Where:** `keypoint_analysis.py:822` (`max_grade_n=500`), `panel.py:1269`
+  (`setValue(500)`) and `:1271` (the tooltip), `project_io.py:124`.
+- **Decided by:** the code is internally consistent and no source is misquoted, so this is
+  `DISC` — a divergence between what a reader will infer and what is actually claimed.
+- **What was run:** a grep over every occurrence of 500 and 400 in a grade context, plus the
+  source pass recorded in `MATHS_AUDIT` §9.8.
+- **Observed:**
+  - Every occurrence is a **bare literal**. No 1:400 *grade* exists anywhere in the repo —
+    the single literal hit, `checks_symbology.py:289`, is a **map scale**. So **no transplant
+    and no sign error was committed.**
+  - The docstring that *does* cite Yeomans deliberately excludes the threshold: `:826`
+    attributes only the keyline definition, and `:848-851` calls the drift *"the number
+    nobody had ever measured"*.
+  - `KEYLINE_GRADE`'s help text **argues the repo's own position** — Yeomans is invoked to
+    explain why **no** grade is imposed.
+- **Sharpened by the source pass, and this is new.** **1 in 500 *does* occur in Yeomans.**
+  `[YEO-WFEF]`, on a channel in flat country: *"According to circumstances, **its rate of
+  fall may be anything from 1 in 500 to 1 in 5,000**."* It is a **channel's rate of fall** —
+  a conveyance minimum — not a drift tolerance, and therefore does not source the repo's
+  constant. But it means a reader who goes looking **will find 1:500 in Yeomans** and may
+  reasonably conclude the constant is attributed. It is not.
+- **Root cause:** omission. Nothing states that 1:500 is a TerrainFlow convention with no
+  published basis. `MIN_SLOPE_EASE = 0.02` is unattributed on exactly the same footing.
+- **Fix:** one line in `KEYLINE_GRADE`, and one beside `MIN_SLOPE_EASE`.
+- **Status:** open, documented, not fixed.
+
+#### KPA-50 — two stale docstrings present the deleted generator as Yeomans' own method
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `keypoint_analysis.py:591` (inside the class docstring headed *"True Yeomans
+  keyline design"*) and `:9`.
+- **Observed,** quoted verbatim from `:591`, given as **step 5 of Yeomans' method**:
+  *"Generate cultivation runs: contour-parallel lines with a deliberate `cross_grade`
+  (default 1/500) so water is gently directed across the slope rather than flowing straight
+  downhill."* That is the generator framing the 2026-09-10 rebuild repudiated, describing a
+  parameter that now only raises `DeprecationWarning` (`:841-846`). `:9` repeats it.
+- **Root cause:** staleness, not citation. But it sits **exactly where a reader would look
+  for provenance**, under a Yeomans heading, which is why it is `M` and not `L`, and why it
+  is the closest thing in the repo to an implied attribution — `KPA-49`'s omission plus this
+  staleness is how a reader ends up believing 1:500 is Yeomans'.
+- **Status:** open, documented, not fixed.
+
+#### KPA-51 — the shipped docs still describe the one-keypoint era
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `CLudeDocs/STRETCH_GOALS.md:140`, `CLudeDocs/USABILITY_WALKTHROUGH.md:87`.
+  **Both are under `CLudeDocs/`** — an earlier draft cited them as repo-root paths.
+- **Observed:** *"finds **the keypoint**"* and *"a **star** keypoint marker"*, both
+  singular, both confirmed stale at HEAD. They match what the code actually **draws**, which
+  is `CTL-04`.
+- **Root cause:** Stage 3c's watch-for list never asks how many keypoints appeared, which is
+  why the walkthrough could not catch `CTL-04` either.
+- **Status:** open, documented, not fixed.
+
+### 2.2 `modules/flow_graph.py`
+
+#### FLG-18 — the link filter is a cell count; its only consumer needs metres
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `flow_graph.py:507-508` (`stream_links(..., min_cells=3)`) against
+  `keypoint_analysis.py:791-792`, where the only production caller never passes it.
+- **What was run:** `p_flow_graph.py`, stage `link_populations`: every emitted link's arc
+  length against the floor `KPA-40` measures.
+- **Observed,** production surface at 0.2 ha:
+
+  | | count |
+  |---|---|
+  | order-1 links emitted at `min_cells=3` | **127** |
+  | of those, shorter than 5 cells (refused at `:674` before any profile) | **78** |
+  | of those, able to clear the 35 m floor | **1** |
+  | profiled and refused by construction | **126** |
+
+  Link lengths: min 2.0 m, median **3.4 m**, mean 5.2 m, max 54.0 m. The median link is an
+  order of magnitude below the floor.
+- **Expected:** the filter and the consumer should express the same bar.
+- **Root cause:** a **unit** mismatch, not a badly chosen number. No integer `min_cells` can
+  express a metric bar when a step is 1.0 m axis-aligned and 1.414 m diagonal. The fix is a
+  `min_length_m = 7 · min(5·cell_size, 10)` parameter, and for `find_keypoints` to pass it.
+- **Quoted contract** (`flow_graph.py:516-517`): *"Links shorter than `min_cells` are
+  dropped: a two-cell stub has no profile to take a second derivative of, and fitting one to
+  it produces a keypoint out of noise."* The intent is exactly right; the unit is wrong, so
+  the guard stops three-cell stubs and passes thirty-cell ones that are equally unprofilable.
+- **Blast radius:** 126 wasted savgol fits per keyline run on this fixture, and — with
+  `KPA-39` — 126 refusals reported under a reason that did not apply.
+- **Corroborated from an unexpected direction.** The roughness sweep (`KPA-41`) shows the
+  failure mode scaling: as `roughness_m` goes 0.00 → 0.25 the order-1 link count rises
+  **28 → 263 → 327 → 356** while the links long enough to profile *fall* **26 → 3 → 1 → 0**.
+  Noise shatters the network into stubs that this floor then refuses.
+- **Reproduce:** `p_flow_graph.py` → `evidence/p_flow_graph.json`, fields
+  `links_clearing_floor` / `links_below_floor`.
+- **Status:** open, documented, not fixed.
+
+#### FLG-19 — sinks and mask-leaving pointers survive real conditioning
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `flow_graph.py:101-104` (the docstring's precondition claim).
+- **What was run:** `p_flow_graph.py`, stage `link_populations`, `pointers` block —
+  `is_sink` and the pointer targets of every stream cell, over both surfaces.
+- **Observed,** on the **conditioned** surface, which is the one the docstring is about:
+  **65 sinks on finite ground** and **72 stream cells whose pointer leaves the stream mask**,
+  out of 1,688 stream cells. Zero stream cells are themselves sinks, and zero point at
+  non-finite ground. On the raw surface — production's actual input — it is **525 sinks** and
+  **42 stream cells that are sinks**.
+- **Quoted contract** (`:101-104`): *"On a conditioned DEM the pointer graph is acyclic and
+  **every interior cell reaches the boundary**."*
+- **Root cause:** the claim is true of acyclicity and false of reachability. `d8_from_dem` is
+  acyclic **by construction** — `best` starts at 0.0 and the test is a strict `>`, so a
+  neighbour must be strictly lower — but pysheds' conditioning leaves cells with no strictly
+  lower neighbour at the resolved-flat epsilon, and those point at themselves.
+- **Not the finding:** acyclicity. Measuring that would measure the construction, not the
+  surface. The number that means something is `is_sink.sum()`.
+- **Severity `L`:** the consumer (`label_direct_catchments`) reports these as `LABEL_SINK`
+  rather than hiding them, so the docstring over-promises but nothing downstream is misled.
+- **Reproduce:** `p_flow_graph.py` → `evidence/p_flow_graph.json`, field `pointers`.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.3 `qgis/controllers/contour.py`
+
+#### CTL-01 — the spacing advice is read site-wide, not over the usable area
+
+- **Tokens:** `DISC / L / n / H`
+- **Where:** `contour.py:137` (docstring) against `:168` (`slope_statistics(slope)`), and
+  `terrain_indices.py:279` (`slope_statistics(slope_deg, mask=None, …)`).
+- **Decided by:** the parameter exists, is unit-tested, and the call simply does not use it.
+  Nothing is computed incorrectly — the advice is a correct answer to a different question —
+  so `DISC`.
+- **Observed** on the fixture: site-wide median slope **8.06°**; over a middle-half mask
+  standing in for a property boundary, **6.81°** — a **−15.5 %** change. The median, the
+  printed quartiles and the advised interval are all affected.
+- **Quoted contract** (`:137`): *"Reads the slope raster **over the usable area**, then asks
+  both spacing rules…"*
+- **Root cause:** an omitted argument, the same shape as `SWL-22` three lines below it.
+- **Reproduce:** `p_controllers.py` → `evidence/p_controllers.json`, stage
+  `ctl01_unmasked_slope`.
+- **Status:** open, documented, not fixed.
+
+#### CTL-04 — N keylines, one star: the count is reported and not drawn
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `contour.py:1440-1441` (`self._state.keyline_keypoints = keypoints`, then
+  `self._display_keylines(runs, keypoints[0])`), `:1608` (`"Keyline Keypoint"`, singular),
+  `:1613-1616` (one feature).
+- **This is the "only one keypoint shown" symptom, and it is live independently of the
+  fallback.** `run_keyline_analysis` loops every keypoint and tags `run["valley"]`, so the
+  **line** layer is correct. The **marker** layer is built from a single dict with no loop.
+  On a multi-keypoint DEM the map shows N keylines and exactly one star, while the panel
+  prints `f"{len(keypoints)} primary valley(s)"` at `:1448`.
+- **Blast radius, folded in from what was briefly filed as a separate `CTL-06`:**
+  `_state.keyline_keypoints` (`:1440`) is written and read by **nothing in the plugin** — its
+  only consumer is `checks_contour.py:487`. That is the same gap, not a second one: a fix
+  that has `_display_keylines` read the plural list closes both. One defect, one ID.
+- **Root cause:** `_display_keypoints` already has the loop this needs (`:1641-1647`).
+- **Relation:** *related to* `KPA-44`, whose coverage gap should also assert the marker
+  layer's `featureCount()`.
+- **Status:** open, documented, not fixed.
+
+#### CTL-05 — "Convert Keyline → Swale" can only ever convert valley 1
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `contour.py:1598-1605` (the `for run in runs: … break`), consumed at
+  `earthworks.py:232-233`.
+- **Observed:** the loop takes the first run whose `line_type == "keyline"` and breaks, so
+  `keyline_master_coords` and `keyline_master_geom` always describe valley 1 whatever the
+  user selected.
+- **Root cause:** a single-valley data model behind a multi-valley producer — the same era
+  as `CTL-04`.
+- **Status:** open, documented, not fixed.
+
+#### CTL-06 — the conversion discards the Z the analysis went to trouble to sample
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `contour.py:1601-1603` (`QgsGeometry.fromPolylineXY`).
+- **Observed:** `get_cultivation_runs` returns a **3D** LineString whose Z is draped on the
+  ground (`keypoint_analysis.py:853-856`), and the conversion rebuilds it from XY alone.
+- **Adjacent to `KPA-42`,** and worth reading beside it: there, Z is *fabricated*; here it is
+  carefully measured and then thrown away.
+- **Note on the ID:** this number previously held the unread-state-field point now folded
+  into `CTL-04`. It was reassigned rather than left as a gap.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.4 `core/registry/map_palette.py`, `qgis/controllers/_symbols.py`, `qgis/controllers/terrain.py`
+
+#### CTL-02 — compass degrees handed to a ramp whose contract is fraction-of-max
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `core/registry/map_palette.py:280` (`ASPECT_CLASSES`), paired at
+  `qgis/controllers/terrain.py:43` (`"aspect": ("Aspect", P.ASPECT_CLASSES, False)`) and
+  applied at `:190` (`if not symmetric:`).
+- **Observed:** `ASPECT_CLASSES` declares **compass degrees**. `apply_raster_ramp`'s contract
+  is *fraction of max*. Because `aspect` is registered `symmetric=False`, `top = band_max ≈
+  359`, so the nine stops land at **−359, 0, 16155 … 113085**. Every real value therefore
+  sits inside the first **2.2 %** of the first interval, so the whole map renders within
+  2.2 % of the north colour, and the `-1` flat sentinel lands at t ≈ 99.7 % — the far end of
+  the ramp.
+- **Root cause:** two correct components with incompatible units at the seam. And the seam
+  cannot be fixed by declaring intent: `_symbols.py:105` sets
+  `QgsColorRampShader.Interpolated` and has **no** `Discrete` or `Exact` path, so
+  `map_palette`'s own "named classes, not a ramp" rule is currently unimplementable through
+  it.
+- **Filed `CTL`, not `TIX`:** the defect is the **pairing** at `terrain.py:43,190`, not
+  anything inside `terrain_indices.py`.
+- **Status:** open, documented, not fixed.
+
+#### CTL-03 — the check that should catch CTL-02 asserts less than its own name
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `tests_qgis/checks_terrain.py:138-150`; `tests/test_map_palette.py:25-26`.
+- **Observed:** `check_every_terrain_index_renders` has the docstring *"a ramp that resolves
+  to one flat colour is indistinguishable from a broken layer"* and a body that asserts only
+  that a layer id exists. It would pass on `CTL-02`. At the unit level, `RAMPS` is built from
+  three ramps and **excludes** `ASPECT_CLASSES`, `CURVATURE`, `WETNESS_INDEX` and
+  `EROSIVE_POWER`.
+- **Cheap fix, and it needs no image:** read
+  `QgsColorRampShader.colorRampItemList()` for each `INDEX_SPECS` layer and assert the stops
+  span `[band_min, band_max]`.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.5 `modules/impoundment_sites.py`
+
+#### IMP-01 — a diagonal crest is measured in cells and paid for in metres
+
+- **Tokens:** `WRONG / M / O / H`
+- **Where:** `impoundment_sites.py:119-123` (the dedupe), `:334` (`wall_len = len(run) *
+  step`), `:161-183` (`embankment_volume`, one prismatic section per surviving cell).
+- **What was run:** `p_impoundment.py`. The harness was driven through the **production
+  path** — baseline, then the find-keypoints signal, then the recommend-ponds signal — and
+  `_state.pond_sites` read back. For each site the bearing was recomputed with
+  `horn_gradient` + `flow_bearing`, `transect_cells` re-run, and the counted crest compared
+  with the centre-to-centre polyline length through the same cells.
+- **Observed:** 5 heuristic keypoints seeded **4** candidates, of which **2** produced a wall.
+
+  | | value |
+  |---|---|
+  | distinct cells per map-space step, across the 4 candidates | **0.713 – 0.933** (1.000 is axis-aligned, 0.707 is 45°) |
+  | worst crest under-statement | **14.1 %** — 139.0 m counted against **161.8 m** on the ground |
+  | crest bearing there | 66.1°, i.e. **23.9° off axis** |
+  | `storage_ratio` inflation from the matching fill under-count | **1.16×** |
+  | rank order changes when corrected | **no**, on this fixture |
+  | corrected crest still inside `max_wall_m` | yes (161.8 m < 200 m) |
+
+- **Expected:** crest length in metres, measured in map space.
+- **Root cause:** `transect_cells` dedupes so that a cell is measured once, which is right for
+  *sampling* and wrong for *length*. Both consumers then treat the surviving list as evenly
+  spaced at `step`.
+- **Blast radius:** `wall_len` gates the `max_wall_m` refusal and is printed in the site
+  label; `fill_m3` is the denominator of the rank. The bias is systematically toward diagonal
+  necks. The theoretical worst case is **29.3 %** (at exactly 45°); the worst *measured* on
+  this fixture is 14.1 %, because no ranked candidate sat at 45° — the 0.713 cells/step
+  candidate produced no wall at any trial height.
+- **The rotation test cannot see this:** it compares north–south against east–west, and both
+  are axis-aligned.
+- **Reproduce:** `p_impoundment.py` → `evidence/p_impoundment.json`, stage
+  `transect_undercount`.
+- **Status:** open, documented, not fixed.
+
+#### IMP-02 — "either side" describes a limit twice as permissive as the one enforced
+
+- **Tokens:** `DISC / L / n / H`
+- **Where:** `impoundment_sites.py:60-62` (*"How far **either side** of the candidate the
+  wall may run before the site is refused"*, `DEFAULT_MAX_WALL_M = 200.0`) against `:334-335`,
+  which compares the **total** run.
+- **Decided by:** the code and the user-facing message agree with each other — the refusal
+  says *"the wall would run over 200 m"*, and 200 m total is what is enforced. Only the
+  docstring diverges, so `DISC`.
+- **Observed:** `transect_cells` searches ±200 m and returns a crest line spanning a measured
+  **400 m**, of which at most 200 m can ever be accepted.
+- **Reproduce:** `p_controllers.py` → `evidence/p_controllers.json`, stage
+  `imp02_wall_limit`.
+- **Status:** open, documented, not fixed.
+
+#### IMP-03 — the refusal reported is the one from the least informative trial height
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `impoundment_sites.py:327-348` — `reason` is a single slot rebound inside the
+  ascending `for height in crest_heights_m` loop.
+- **Observed:** only the **last failing height** survives. Wall length grows with height, so
+  the tallest trial is the one most likely to trip the length test — and the common case
+  therefore reports *"the wall would run over 200 m — not a neck"* while hiding that every
+  buildable height failed as **unenclosed**. Worse, `if not run: continue` sets no reason at
+  all, so a NaN cell falls through to the initial value and reports *"no enclosed pool at any
+  trial wall height"*.
+- **Root cause:** one slot for five answers. **Sibling of `KPA-39`** — the same defect shape
+  in a different module, which is why both are in this register.
+- **Blast radius:** surfaced as the map label (`contour.py:1742` renders `"label"`, and
+  `_refused` writes the reason into it).
+- **Status:** open, documented, not fixed.
+
+#### IMP-04 — a site refused for running out of DEM is reported as a landform judgement
+
+- **Tokens:** `WRONG / M / n / H`
+- **Where:** `impoundment_sites.py:217+` (`impounded_volume`'s refusal text), and the claim
+  at `:69-70`.
+- **Observed:** the "not enclosed within the pond window" refusal names two causes —
+  *"runs round the wall or further upstream than a pond of this height should"* — and omits
+  the one that often applies: **the DEM ran out**. A candidate 150 m from the raster edge is
+  told its landform is wrong.
+- **And it falsifies `:69-70`.** The comment claims *"the window is the same size whatever
+  the DEM is, so a sweep over twenty candidates has a predictable price."* Clipping means
+  neither the size nor the semantics are DEM-independent.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.6 `modules/swale_design.py`
+
+#### SWL-22 — the spacing advisor omits the infiltration the segment finder passes
+
+- **Tokens:** `WRONG / M / O / H`
+- **Where:** `contour.py:176-180` (`capacity_per_metre(...)` with `duration_hr` but no
+  `infiltration_mm_hr`) against `contour.py:806`
+  (`infiltration_mm_hr=get_infiltration_rate(self._panel.earthwork_soil_name)`), filed under
+  `SWL` because the contract is `swale_design.capacity_per_metre`'s.
+- **Decided by** — this is `WRONG`, not `DISC`, because the two callers of one extracted
+  function disagree, and the extraction exists precisely to stop that. `swale_design.py:128-131`:
+  *"Extracted so the spacing advisor can ask the **transposed** question… Two copies of this
+  would be two answers to 'does the swale hold its storm', which is the divergence
+  `core/sizing` exists to stop."* `duration_hr` **is** passed, so infiltration is the sole
+  missing factor — not an oversight of the whole soakage model.
+- **Observed,** 0.6 m × 2.0 m section, side slope 1.0:
+
+  | Soil | infiltration (mm/hr) | 1 h | 6 h | 24 h |
+  |---|---|---|---|---|
+  | Sand | 15.0 | +3.6 % | +21.4 % | **+85.7 %** |
+  | Loam | 4.0 | +1.0 % | +5.7 % | +22.9 % |
+  | Clay | 1.5 | +0.4 % | +2.1 % | +8.6 % |
+
+  These are how much the capacity **rises** when the omitted argument is supplied — the
+  advisory works from 0.840 m³/m in every cell of that table, against 1.560 m³/m for
+  Sand at 24 h.
+- **Direction is `O`, and it is load-bearing.** Omitting infiltration *lowers* the capacity
+  handed to `capture_spacing`, so the advised interval comes out **tighter** — more swales
+  than needed. Had this been `U`, §0's escalator would force `≥ H` on a sizing advisory.
+- **This is `SWL-17`'s exact shape**, one file over: a controller calling a
+  `swale_design` function with an argument omitted. `SWL-17` is the precedent for filing it
+  under `SWL` with the caller cited.
+- **Reproduce:** `p_controllers.py` → `evidence/p_controllers.json`, stage
+  `swl22_omitted_infiltration`.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.7 `modules/report_model.py`
+
+#### RPT-26 — every report resolves the earthwork soil to Loam
+
+- **Tokens:** `WRONG / M / i-d / H`
+- **Where:** `report_model.py:1608-1609` —
+  `soil = (getattr(data, "earthwork_soil_name", None) or getattr(data, "soil_name", None))`,
+  where `ReportData` declares **neither** attribute.
+- **Observed:** both `getattr` calls return `None`, so the lookup falls through to its Loam
+  default on every report, whatever the user selected.
+- **Magnitude for one user:** ≤ **8.0 %** on `bank_needed_for_fill_m3` and **13.6 %** on
+  "Loose to cart". (The 11.8 % figure that appeared in drafting is the Clay-to-Sand
+  *spread*, not the error any single user sees.) Surplus and deficit can flip sign: at
+  `fill = 1000 m³`, `bank_needed` is 1053 on Sand against 1136 on Loam.
+- **Root cause:** the value exists and is reachable — `data.inputs["earthwork_soil_name"]`
+  already carries it. The fix is one line.
+- **Why `getattr` hid it:** a defaulted `getattr` cannot fail, so a missing attribute reads
+  as a legitimate "not supplied".
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.8 `modules/contour_analysis.py`
+
+#### CTA-30 — `extract_contours` leaks a temporary directory on every call
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `contour_analysis.py:206-207`
+  (`output_path = os.path.join(tempfile.mkdtemp(prefix="tfa_contours_"), "contours.gpkg")`).
+  `analyse_contours:787` is the sole production caller and never passes `output_path`.
+- **Observed:** no `finally`, no `rmtree`, no `TemporaryDirectory` and no `atexit` anywhere
+  in the file — grepped, not assumed. Both early-return fallbacks leak too.
+- **Measured on this machine, 2026-09-11:**
+
+  | Prefix | directories | bytes |
+  |---|---|---|
+  | `tfa_contours_*` | **456** | **138.7 MB** |
+  | `tfa_qgis_*` | 65 | — |
+  | all `tfa_*` | **5,689** | **2,365 MB** |
+
+  Every `tfa_contours_*` directory was created between **2026-09-10 16:52** and
+  **2026-09-11 14:45**, i.e. inside this campaign's own test window.
+- **The count is a test-run artefact and must be read as one.** The **finding is the code
+  path** — a `mkdtemp` with no owner. The magnitude is whatever the machine's test history
+  happens to be, and this session's own probe runs added to it. An earlier draft quoted
+  "443 directories ≈ 311 MB"; the byte figure was wrong (it was ~137.8 MB at that moment) and
+  the directory count moves with every run. Quoting a *stable* number here would be the
+  mistake.
+- **The 2.3 GB across all `tfa_*` prefixes is not all CTA-30.** The bulk is the per-run
+  output directory the plugin creates for each session (`_state.output_dir`, `F:/Temp/tfa_*`),
+  which is a **different** leak in test infrastructure. It is filed in §4, not here, because
+  it is not `extract_contours`.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.9 `modules/mass_haul.py`
+
+#### MHL-01 — `block_m` is inert twice over
+
+- **Tokens:** `DISC / L / n / H`
+- **Where:** `mass_haul.py:124` (`block = max(1, int(round(block_m / cell)))`), passed to
+  `_regions_from`, which never reads it; and `earthworks.py:5050`, the only caller, which
+  never passes `block_m` at all.
+- **Decided by:** nothing computes a wrong answer — the regions are correct, they are simply
+  not blocked. The divergence is between `DEFAULT_BLOCK_M`'s docstring and the code, so
+  `DISC`.
+- **Observed:** `block_m` swept over **0.01, 1.0, 10.0, 20.0, 100.0, 1000.0 m** — a
+  **100,000×** range — produces **one distinct output**, by SHA-256 over the returned cut and
+  fill lists.
+- **Quoted contract:** `DEFAULT_BLOCK_M`'s docstring says the 10 m reduction is what keeps
+  matching tractable. No reduction happens.
+- **Inert in two independent ways**, which is why it survived: even a caller that did pass it
+  would see nothing, and no caller passes it.
+- **Reproduce:** `p_controllers.py` → `evidence/p_controllers.json`, stage
+  `mhl01_block_m_is_inert`.
+- **Status:** open, documented, not fixed.
+
+---
+
+### 2.10 `core/sizing/advisories.py`
+
+#### ADV-09 — a section that holds nothing is reported as erosion-governed
+
+- **Tokens:** `WRONG / L / n / H`
+- **Where:** `advisories.py:260` (`spacing_advisory`), with `capacity_m3_per_m=0.0`.
+- **Observed:** `capture_spacing` returns `0.0`, the `v > 0` filter discards it, and
+  `governing` reports `"erosion"` — where a section holding nothing is precisely
+  **capture**-governed.
+- **Latent, and the reason matters.** It is **unreachable from the UI** behind two guards:
+  `capacity or None` coerces `0.0` to `None`, and the spin boxes are floored at 0.1. No other
+  caller exists. So this is a latent defect in a library function, not a live one.
+- **`capacity or None` papers over rather than fixes:** the dict then reports
+  `capture_spacing_m = None`, which is documented as *"no storm or section supplied"* — a
+  different and equally untrue statement.
+- **A test would have caught it, and asserts the opposite.**
+  `tests/test_sizing.py:451-458` (`test_the_recommendation_never_exceeds_either_rule`)
+  asserts `recommended <= both`, an invariant this input would **violate**. It is not
+  exercised with a zero capacity.
+- **Status:** open, documented, not fixed.
+
+---
+
+## §3 Refuted claims — the gate earning its place
+
+Five claims were drafted, verified, and **withdrawn**. They are recorded because a refuted
+claim that is merely deleted gets re-raised, and because one of them would have had a fixer
+break working maps.
+
+| # | Claim as drafted | What verification found |
+|---|---|---|
+| 1 | `_apply_index_ramp` discards `min_value`, so signed indices are mis-anchored | **The consequence is the opposite of the claim.** `CURVATURE`'s fractions are already **signed**, so `floor=0, span=bound` gives exactly the symmetric ±bound anchoring the docs describe. Honouring the floor would put stops at −3·bound … +bound and paint **zero curvature as "gathering"**. Anyone fixing this from the write-up would break working maps. Residue: the argument is dead and misleading. `OK (cleanliness)` |
+| 2 | `event_yield_m3` applies rainfall where it should apply runoff | **REFUTED.** The caller passes a loss-adjusted runoff **depth**: `analysis_worker.py:408` emits `runoff_mm`, computed at `:108-131` by `coefficient_runoff_depth` (C×P) or full SCS-CN, and `impoundment_sites.py:373` applies it. `checks_fixture_regression.py` proves it — `rainfall_mm 120.0`, `runoff_coefficient 0.50`, `EXPECTED["runoff_mm"] == 60.0`. Adding a coefficient inside `impoundment_sites` would **double-count losses**. Residue: one docstring line stating the caller owes a runoff depth. `OK` |
+| 3 | The mechanism behind `KPA-44` — `stream_links` returns ~1 link on the harness DEM | **REFUTED.** It returns **28**. D-infinity disperses flow across a ~2,944-cell band. The *coverage* gap `KPA-44` records is real; this explanation of it was not |
+| 4 | Two `pool_reach_m` sub-claims: "the window is always the whole DEM" and "the refusal can never fire" | **REFUTED, both.** Full-axis only for indices in [149, 250] on a 400-cell axis, and the refusal does fire. The real finding in this area is `IMP-04` |
+| 5 | float64 for the conditioned surface is a live fault on this fixture | **REFUTED, and the drafting arithmetic was wrong.** ε is already measured at **5.99e-06** (`FIELD_TEST_LOG.md:1581` — a document this campaign quotes elsewhere), so there was never a conflict to settle; this campaign re-measured it independently at **5.994524e-06**. And float32 ulp in [64, 128) is 7.63e-06, so 2ε and 3ε both round to 2 ulp: the gradient is **not** monotone above 64 m, i.e. "5.99e-06 survives the round trip" is false at the summit. Production writes float64 anyway (`analysis_worker.py:216-218`, `dtype="float64", nodata=fa.nodata`), so what remains is a `LOW` docstring finding about a stale "near sea level" claim, not a live defect. **Measured directly this pass:** on this fixture (z_max 84.78 m) the float32 round-trip preserves the sink count exactly — 65 either way, max |Δ| 3.8e-06 m |
+
+**And one ID withdrawn entirely.** A drafted `EWD-59` compared TerrainFlow's diversion-drain
+gradient against Yeomans'. The owner's challenge was correct and the code refuses the
+conflation explicitly in two places: TerrainFlow's diversion drain is a **constructed
+channel**, Yeomans' is a **plough-formed line**. Comparing their grades was a category error,
+and `EWD-14` already covers the 1.0 % default. `EWD` stays at **58**.
+
+---
+
+## §4 Candidates, unfiled
+
+Following the audit's own precedent at `MATHS_AUDIT.md:74-75` — candidates that are not yet
+grounded well enough for §1 are listed rather than dropped.
+
+1. **`keypoint_on_path:740` — a NaN keypoint cell reports 0.0 m.**
+   `elev = float(self.dem[kr, kc]) if not np.isnan(...) else 0.0`. Sibling of `NEW-W8-01`,
+   which was fixed in the *profile*; this is the same substitution in the returned
+   **elevation**. Unreachable on the finite fixture, so unmeasured. Needs a nodata DEM to
+   exercise.
+2. **`advisories.py:301` — a tie reports "capture".** The governing test uses `isclose`, so
+   an exact tie between the two rules resolves to capture rather than being reported as a
+   tie. Latent; no magnitude measured.
+3. **`find_keypoints`' 0.2 ha default is decoupled from the panel's 5 ha stream threshold.**
+   The panel's `stream_threshold_ha` defaults to 5.0 and drives every other tool; the keyline
+   silently uses `max(20, round(2000/cell_area))` = 0.2 ha because `contour.py:1397` passes
+   no threshold. `tests_qgis/README.md:278` documents the 5 ha figure. Two thresholds for one
+   user-visible idea. **Not filed** because it is arguably the intended design — a primary
+   valley is *not* a 5 ha stream — but it is undocumented either way, and it is why the
+   knob sweep found `stream_threshold_ha` live and `keyline_max_valleys` inert.
+4. **The QGIS suite leaks its own temp directories.** `run_all.py:131` creates
+   `tfa_qgis_checks_*` and `checks_robustness.py:33` (`tfa_nasty_`) and `:105` (`tfa_seed_`) create more; `_state.output_dir`
+   creates one `F:/Temp/tfa_*` per harness run. Measured 2026-09-11: **65 `tfa_qgis_*`** and
+   **5,689 `tfa_*` totalling 2,365 MB**. This is **test infrastructure, not `CTA-30`**, and
+   it dwarfs `CTA-30`'s own 138.7 MB — which is exactly why the two must not be conflated in
+   one number.
+5. **The nasty synthetic DEM's docstring comment is stale.** `_harness.py:193` says
+   `build_synthetic_dem(p, rough=True, pits=6, voids=2)` gives *"18 sinks, 180 nodata cells"*.
+   Measured: **30 sinks**, 180 nodata cells. The comment is asserted nowhere, so this is a
+   stale comment rather than a regression — but the register must not quote it as a
+   measurement, and something did move it.
+6. **`CLAUDE.md`'s test-suite figures are stale.** It says ~2,590 tests in ~60 s; measured
+   **2,889 passed, 2 xfailed, 5 xpassed in 39.75 s**. Documentation only.
+
+---
+
+## §5 Sources
+
+In §7's four-column shape. The two Yeomans rows and the owner attestation are carried in
+`MATHS_AUDIT.md` §7 as well, since they resolve published rows there.
+
+| Key | Title / edition | URL | Grounds |
+|-----|-----------------|-----|---------|
+| [YEO-WFEF] | Yeomans, K. B. & Yeomans, P. A. (dec.), *Water for Every Farm — Yeomans Keyline Plan*, ISBN 1438225784. Full 368-page PDF fetched and text-extracted 2026-09-11 | cheiodasideia.libertar.org/wp-content/uploads/2022/11/Water-for-Every-Farm-Yeomans-Keyline-Plan-Ken-B.-Yeomans-P.A.dec_.-Yeomans.pdf | KPA-41, KPA-49; and `MATHS_AUDIT` KPA-29/31 |
+| [YEO-MKIV] | Yeomans, *Keyline Design Mark IV — "Soil, Water & Carbon for Every Farm"*, 14 pp., fetched and read 2026-09-11 | agwaterstewards.org/wp-content/uploads/2016/08/KeylineArticle.pdf | KPA-41; and `MATHS_AUDIT` KPA-29/31 |
+| [OWNER-2026-09-11] | Repo owner's domain ruling — **an attestation, not a fetched source**. See §0.3 | — | corroboration only |
+| [CODE] | Source re-read against HEAD `c288a6a` while writing this register; every line citation above re-checked at write time | — | all rows |
+| [PROBE] | `tests_qgis/probes/p_{smoke,flow_graph,keypoints,impoundment,controllers}.py` and `tests_qgis/probes/evidence/*.json`, 2026-09-11 | — | every measured number |
+
+**Failed fetch:** yeomansplow.com.au *"Yeomans Keyline Systems Explained"* — 301 to
+yeomansplow.com, which returned **403 Forbidden**. It is therefore **not cited**, and
+[YEO-MKIV] and [YEO-WFEF] carry the source question on their own.
+
+---
+
+## §6 What Steps B–G still owe
+
+Step A (measure), A1 (probes), A2 (`MATHS_AUDIT` re-anchoring and sources) and A3 (this
+register) are complete, and Step G (pinning) is done for the production-path numbers. What
+follows is scoped and not started.
+
+| Step | Owes | Probe |
+|---|---|---|
+| **B** | Re-run `p_flow_graph` and `p_keypoints` as regressions once any fix lands. The roughness sweep moved **into A1** and is done | existing |
+| **C** | Two invariance arms: **Z + 600 m** (every output identical under a constant elevation offset — the only arm that reaches the float32 regime `save_result`, `earthworks.py:2219` and `KPA-38`'s fix note all reason about) and **mirror / transpose** (catches `KPA-33`'s row→y flip, `CTA-08`'s rc→map asymmetry, `IMP-01`'s diagonal count and `UNI-15`'s convention in one arm — a **regression** guard on shipped fixes, not an investigation). Plus a `routing='d8'` run, currently tested nowhere | `p_invariance.py` |
+| **D** | The reduced battery: **signed witnesses** (plan curvature negative over the top-5 % accumulation network, positive over the top-5 % TPI; `aspect ∈ (90,270)` coincides with `dz_dy > 0` for ≥90 % of cells above 2°), **dimensional identities** (`catchment_ha·10_000 == (acc+1)·cell_area`; `specific_catchment_area(cell 2)/(cell 1) == 2.0` exactly; `erosion_spacing_m == VI(p50)/p50_grade`), and **conservation** (`|accepted| + |refused| == |input|` for every screening tool — which is `KPA-39`, `KPA-43` and `IMP-03` as arithmetic). Honest pass criterion for curvature vs TPI: measured agreement is **64.5 %** at the default 15 m window, so assert `mean(plan[cls==1]) > 0 > mean(plan[cls==-1])` and point-biserial ≥ **+0.25**; a **negative** correlation is the unambiguous failure | `p_battery.py` |
+| **E** | Coverage rows for `strahler_order`, `topographic_wetness_index`, `stream_power_index`, `sediment_transport_index`, `landform_classes`, `slope_statistics`, `terrace_vertical_interval`, `bulking_factor`/`compaction_factor`, `embankment_volume`, `UsableAreaDisjoint`/`_sample_line`/`classify_contour_inflow`, `recommend_swale_length`, `ComparisonResult`, `report_model._earthmoving`, `project_io.INPUT_FIELDS` additions, three `panel` properties, and **`help_text.py` (+126 lines of user-facing claims, zero coverage)** — for which the cheap check is text-versus-constant. **`TIX` may be opened here.** Record separately that **`landform_tpi` has no production caller** (`terrain.py:249-253` writes six bands, TPI not among them) | — |
+| **F** | Four exact-tolerance cross-checks: `haul_regions` totals vs `burn_quantities` (**0.1 %**); `slope_degrees` / `aspect_degrees` / `horn_gradient` from one stencil (**1e-12**); `flow_bearing` vs `aspect_degrees` (**1e-6°**); `stream_links` emitted vs consumable vs `keypoints + skipped` (**exact integers**) | `p_crosscheck.py` |
+| **G** | **Done** for the production path — see `checks_fixture_regression.check_keyline_network_numbers_have_not_moved`. Still out of scope by decision: the conditioned-surface numbers (unreachable from production — that is `KPA-38`), the 35.0 m floor as a pinned value (it is analytic, not a fixture measurement, and the file's 0.5 % relative tolerance is the wrong instrument for it), and the five-threshold keypoint vector | existing |
+
+### Still owed by the owner
+
+1. **Which Doherty text and edition.** Without it `[DOHERTY]` is not added and nothing rests
+   on it.
+2. **Confirmation that an owner attestation may stand as grounds** — a new precedent,
+   labelled as such in §0.3. This pass did not need it to carry a row, because the texts were
+   fetched; the question is whether it may carry one in future.
+3. **The `KPA-41` window decision**, now that the 10/20/50 m table exists. The measurement
+   recommends **50 m** — the shortest window whose steepest-grade spread stays inside
+   `MIN_SLOPE_EASE` across `roughness_m` 0.00 → 0.10. 10 m and 20 m are 2.18× and 2.44×
+   `MIN_SLOPE_EASE` and are not defensible on noisy ground. The window is a **TerrainFlow
+   convention** sized on **synthetic** roughness, and the decision is the owner's.
