@@ -13,7 +13,7 @@ AnalysisWorker        — QThread wrapper for background analysis
 
 import numpy as np
 import rasterio
-from pysheds.grid import Grid
+from terrainflow_assessment.modules.pysheds_compat import Grid
 
 from terrainflow_assessment.modules.footprint import xy_to_rc
 

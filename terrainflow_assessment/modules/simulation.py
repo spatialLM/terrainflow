@@ -562,7 +562,7 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
     correction for exactly that reason. There is no correct fallback without a
     labelling, so a store list arrives with one or the call fails.
     """
-    from pysheds.grid import Grid
+    from terrainflow_assessment.modules.pysheds_compat import Grid
 
     from .catchment import SCSRunoff
 

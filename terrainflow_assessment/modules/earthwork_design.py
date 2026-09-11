@@ -3190,7 +3190,7 @@ class DEMBurner:
         import os
         import tempfile
 
-        from pysheds.grid import Grid
+        from terrainflow_assessment.modules.pysheds_compat import Grid
         from rasterio.transform import Affine
 
         base_transform = transform if transform is not None else self.transform

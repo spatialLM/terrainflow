@@ -46,13 +46,7 @@ def _write_raster(path, data, cell_size=1.0):
 # DEMBurner.get_ponding_layer
 # ---------------------------------------------------------------------------
 
-_PYSHEDS_NUMPY2_COMPAT_PON = pytest.mark.xfail(
-    reason="pysheds 0.5 uses np.in1d removed in NumPy 2.0", strict=False
-)
-
-
 class TestGetPondingLayer:
-    @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_returns_array_same_shape(self, tmp_path):
         from terrainflow_assessment.modules.earthwork_design import DEMBurner
 
@@ -63,7 +57,6 @@ class TestGetPondingLayer:
         result = b.get_ponding_layer(data)
         assert result.shape == data.shape
 
-    @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_ponding_non_negative(self, tmp_path):
         from terrainflow_assessment.modules.earthwork_design import DEMBurner
 
@@ -73,7 +66,6 @@ class TestGetPondingLayer:
         result = b.get_ponding_layer(data)
         assert np.all(result >= 0.0)
 
-    @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_bowl_dem_shows_ponding(self, tmp_path):
         """Bowl-shaped DEM should show ponding at the centre."""
         from terrainflow_assessment.modules.earthwork_design import DEMBurner
@@ -89,7 +81,6 @@ class TestGetPondingLayer:
         result = b.get_ponding_layer(data)
         assert result.max() >= 0.0  # result produced; depth analysis verified by shape
 
-    @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_returns_float32(self, tmp_path):
         from terrainflow_assessment.modules.earthwork_design import DEMBurner
 
@@ -105,7 +96,6 @@ class TestGetPondingLayer:
 # ---------------------------------------------------------------------------
 
 class TestPluginGetPondingLayer:
-    @_PYSHEDS_NUMPY2_COMPAT_PON
     def test_returns_array(self, tmp_path):
         from terrainflow_assessment.modules.earthwork_design import DEMBurner
 
@@ -365,13 +355,6 @@ class TestSamplePeakInflow:
 # earthwork_design.py remaining line coverage
 # ---------------------------------------------------------------------------
 
-_PYSHEDS_NUMPY2_COMPAT = pytest.mark.xfail(
-    reason="pysheds 0.5 uses np.in1d which was removed in NumPy 2.0. "
-           "Upgrade pysheds to run these tests.",
-    strict=False,
-)
-
-
 class TestSimulationRunIntegration:
     """
     Minimal integration test for _run_simulation.
@@ -405,7 +388,6 @@ class TestSimulationRunIntegration:
             dst.write(np.array(fdir).astype("float32"), 1)
         return output_path
 
-    @_PYSHEDS_NUMPY2_COMPAT
     def test_run_simulation_basic(self, tmp_path):
         import numpy as np
         import rasterio
@@ -446,7 +428,6 @@ class TestSimulationRunIntegration:
         assert "peak_outflow_ls" in result
         assert len(result["timestep_table"]) == 2  # n_steps = len-1
 
-    @_PYSHEDS_NUMPY2_COMPAT
     def test_run_simulation_with_stores(self, tmp_path):
         """Run simulation with EarthworkStores to exercise cascade loop."""
         import numpy as np
@@ -475,10 +456,21 @@ class TestSimulationRunIntegration:
         self._make_fdir(dem_path, fdir_path)
 
         store = EarthworkStore(
-            name="Swale1", ew_type="swale",
+            name="Swale1", ew_type="swale", id="ew1",
             capacity_m3=500.0, area_m2=100.0,
             elevation=70.0, centroid_row=6, centroid_col=6,
         )
+
+        # A store list arrives with a direct-catchment labelling or the call fails
+        # (`simulation.py:574-578`), because there is no correct fallback: sampling the
+        # cumulative accumulation raster instead double-counts every upstream feature's
+        # catchment, which is the bug `water_balance.py` removed.
+        #
+        # The labelling holds **indices into `catchment_label_ids`**, negative meaning
+        # "drains to nothing" — see `catchment_partition` and `CatchmentPartition.credit`.
+        # The top half of this DEM is credited to the swale; the bottom half to nothing.
+        labels = np.full(data.shape, -1, dtype="int32")
+        labels[:6, :] = 0
 
         rainfall_data = [(0, 0.0), (30, 25.0), (60, 50.0)]
         result = _run_simulation(
@@ -489,11 +481,17 @@ class TestSimulationRunIntegration:
             rainfall_data=rainfall_data,
             routing="d8",
             earthwork_stores=[store],
+            catchment_labels=labels,
+            catchment_label_ids=["ew1"],
         )
 
         assert "earthwork_summary" in result
         assert len(result["earthwork_summary"]) == 1
         assert result["earthwork_summary"][0]["name"] == "Swale1"
+        # The point of supplying a labelling: the store must actually receive water.
+        # Without this the test passes on a summary row for a feature nothing drains to,
+        # which is what it did for as long as the xfail hid it.
+        assert result["earthwork_summary"][0]["total_inflow_m3"] > 0.0
 
 
 class TestEarthworkDesignRemainingBranches:

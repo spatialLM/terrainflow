@@ -1130,7 +1130,7 @@ class YeomansKeylineAnalysis:
         import os
         import tempfile
 
-        from pysheds.grid import Grid
+        from terrainflow_assessment.modules.pysheds_compat import Grid
 
         from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
 
