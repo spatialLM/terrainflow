@@ -727,8 +727,16 @@ def _run_simulation(dem_path, fdir_path, output_dir, cn, moisture,
         }
         for store in earthwork_stores:
             fill_pct = store.fill_pct()
-            row[f"{store.name}_fill_pct"] = round(fill_pct, 1)
-            row[f"{store.name}_overflow"] = store.overflowed
+            # Keyed by `store.id`, for the reason `frame_fills` is keyed by it
+            # thirty lines below and says so there: the default earthwork name
+            # counts all features, so deleting one and drawing another reproduces a
+            # name already in use, and two stores sharing a key means one silently
+            # overwrites the other's fill state in every frame. This table had the
+            # bug the same file fixes immediately underneath it. Readers join on
+            # `earthwork_summary["id"]`, which is carried for exactly this.
+            key = store.id or store.name
+            row[f"{key}_fill_pct"] = round(fill_pct, 1)
+            row[f"{key}_overflow"] = store.overflowed
         timestep_table.append(row)
 
         # Save rasters. NaN is masked as well as negatives: `data < 0` is False

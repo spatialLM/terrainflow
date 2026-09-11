@@ -115,11 +115,13 @@ class TestCompare:
         result = compare(b, p)
         assert result.peak_delay_hr == pytest.approx(0.4, rel=1e-4)
 
-    def test_peak_delay_zero_when_not_delayed(self):
+    def test_a_peak_that_arrives_earlier_is_reported_as_negative(self):
+        """It used to clamp to 0.0, so a design that brought the peak forward by
+        18 minutes rendered on a "Change" column as an em dash — no change."""
         b = _baseline(peak_outflow_time_hr=0.8)
-        p = _post(peak_outflow_time_hr=0.5)  # earlier — no delay
+        p = _post(peak_outflow_time_hr=0.5)
         result = compare(b, p)
-        assert result.peak_delay_hr == 0.0
+        assert result.peak_delay_hr == pytest.approx(-0.3, rel=1e-4)
 
     def test_captured_pct(self):
         # total_runoff=4000, post_exit=1000 → captured=3000 → 75%
@@ -128,17 +130,22 @@ class TestCompare:
         result = compare(b, p)
         assert result.captured_pct == pytest.approx(75.0, rel=1e-4)
 
-    def test_captured_pct_clamped_to_100(self):
+    def test_captured_pct_still_clamped_to_100(self):
+        """The upper clamp stays: capturing more than fell is unphysical and can
+        only be an accounting defect, so it is not a result worth printing."""
         b = _baseline(total_runoff_m3=100.0)
         p = _post(exit_volume_m3=-500.0)  # impossible but check clamp
         result = compare(b, p)
         assert result.captured_pct <= 100.0
 
-    def test_captured_pct_clamped_to_0(self):
+    def test_a_site_that_exports_more_than_it_received_reports_below_zero(self):
+        """The lower clamp is gone, and the asymmetry with the one above is the
+        point: a negative capture is a real design — one that drained storage
+        that was already there — not an impossible one."""
         b = _baseline(total_runoff_m3=100.0)
         p = _post(exit_volume_m3=200.0)  # more exits than total runoff
         result = compare(b, p)
-        assert result.captured_pct >= 0.0
+        assert result.captured_pct == pytest.approx(-100.0, rel=1e-4)
 
     def test_zero_total_runoff_no_error(self):
         b = _baseline(total_runoff_m3=0.0)
@@ -177,17 +184,29 @@ class TestCompare:
         assert result.baseline is b
         assert result.post is p
 
-    def test_exit_reduction_clamped_non_negative(self):
+    def test_a_design_that_exports_more_reports_a_negative_reduction(self):
+        """Clamped, this read 0% on a page headed "Before and after" — the design
+        made it worse and the report said nothing had changed. Same discipline
+        as `unrouted_flow`: printed and flagged, never clamped."""
         b = _baseline(exit_volume_m3=100.0)
         p = _post(exit_volume_m3=200.0)  # worse than baseline
         result = compare(b, p)
-        assert result.exit_reduction_pct >= 0.0
+        assert result.exit_reduction_pct == pytest.approx(-100.0, rel=1e-4)
 
-    def test_peak_reduction_clamped_non_negative(self):
+    def test_a_design_that_raises_the_peak_reports_a_negative_reduction(self):
         b = _baseline(peak_outflow_ls=50.0)
         p = _post(peak_outflow_ls=100.0)  # worse than baseline
         result = compare(b, p)
-        assert result.peak_reduction_pct >= 0.0
+        assert result.peak_reduction_pct == pytest.approx(-100.0, rel=1e-4)
+
+    def test_the_register_worked_example_reproduces(self):
+        """The two figures R-3 is written around, together: exit volume 100 to
+        130 and a peak 6 hr to 4 hr. Both were 0.0 before this."""
+        b = _baseline(exit_volume_m3=100.0, peak_outflow_time_hr=6.0)
+        p = _post(exit_volume_m3=130.0, peak_outflow_time_hr=4.0)
+        result = compare(b, p)
+        assert result.exit_reduction_pct == pytest.approx(-30.0, rel=1e-4)
+        assert result.peak_delay_hr == pytest.approx(-2.0, rel=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +332,47 @@ class TestBuildFillTimelineChart:
         p = _post(earthwork_summary=[ew])
         result = _build_fill_timeline_chart(p)
         assert result is not None
+
+    def test_two_features_sharing_a_name_each_get_their_own_series(self, monkeypatch):
+        """`timestep_table` is keyed by feature id, so the chart has to join on
+        `earthwork_summary["id"]` and use the name only as the label.
+
+        Keyed by name, the default counter reproduces a deleted feature's name and
+        the column lookup finds one series for two features — so one is drawn from
+        the other's data and the second is missing entirely, on a chart whose
+        legend names both.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        captured = {}
+        real_subplots = plt.subplots
+
+        def spy(*args, **kwargs):
+            fig, ax = real_subplots(*args, **kwargs)
+            captured["ax"] = ax
+            return fig, ax
+
+        monkeypatch.setattr(plt, "subplots", spy)
+
+        base = _post().earthwork_summary[0]
+        p = _post(
+            earthwork_summary=[{**base, "id": "ew-a", "name": "Swale 1"},
+                               {**base, "id": "ew-b", "name": "Swale 1"}],
+            timestep_table=[
+                {"time_hr": 0.25, "ew-a_fill_pct": 10.0, "ew-b_fill_pct": 90.0},
+                {"time_hr": 0.50, "ew-a_fill_pct": 20.0, "ew-b_fill_pct": 95.0},
+            ],
+        )
+        assert _build_fill_timeline_chart(p) is not None
+
+        series = [list(line.get_ydata()) for line in captured["ax"].get_lines()
+                  if line.get_label() == "Swale 1"]
+        assert len(series) == 2, (
+            f"two features must give two series, got {len(series)}")
+        assert sorted(s[0] for s in series) == [10.0, 90.0], (
+            f"the series were not drawn from their own columns: {series}")
 
 
 # ---------------------------------------------------------------------------

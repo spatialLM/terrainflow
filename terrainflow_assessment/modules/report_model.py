@@ -1942,11 +1942,15 @@ def _page_simulation(data):
         ["Water leaving the block",
          fmt_volume(getattr(c.baseline, "exit_volume_m3", 0) if c.baseline else 0),
          fmt_volume(getattr(c.post, "exit_volume_m3", 0) if c.post else 0),
-         fmt_pct(-c.exit_reduction_pct) if c.exit_reduction_pct else "—"],
+         # Signed, because these two can now be adverse: `compare()` no longer
+         # clamps a design that made things worse up to zero, and in a column
+         # headed "Change" a bare "30%" beside a larger post volume has to be
+         # unmistakably an increase. The third row has always printed its sign.
+         fmt_pct(-c.exit_reduction_pct, signed=True) if c.exit_reduction_pct else "—"],
         ["Fastest flow at the boundary",
          f"{getattr(c.baseline, 'peak_outflow_ls', 0):.0f} L/s" if c.baseline else "—",
          f"{getattr(c.post, 'peak_outflow_ls', 0):.0f} L/s" if c.post else "—",
-         fmt_pct(-c.peak_reduction_pct) if c.peak_reduction_pct else "—"],
+         fmt_pct(-c.peak_reduction_pct, signed=True) if c.peak_reduction_pct else "—"],
         ["When that peak arrives",
          f"{getattr(c.baseline, 'peak_outflow_time_hr', 0):.1f} hr" if c.baseline else "—",
          f"{getattr(c.post, 'peak_outflow_time_hr', 0):.1f} hr" if c.post else "—",

@@ -246,3 +246,55 @@ class TestHirdsPaste:
         depths do exceed 1000 mm, so this is reachable, not theoretical."""
         _t, problems = parse_hirds_text("duration, 50\n1440, 1,180.0\n")
         assert any("thousands separator" in p for p in problems)
+
+
+class TestHirdsBlankCorner:
+    """The shape HIRDS actually exports: a header whose top-left corner cell is empty.
+
+    `_split_fields` drops empty fields, so that corner disappears and the first
+    return period lands in field 0 — which `_parse_ari_header` skipped
+    unconditionally. Every depth then shifted one return period to the left, the
+    highest column was discarded, and the only thing the user saw was a complaint
+    about thousands separators telling them to re-paste the table tab-separated,
+    which reproduces it. Every spillway sized off such a table read the next-lower
+    ARI, about 10 % narrow, silently.
+    """
+
+    BLOCK = (
+        ", 2, 5, 10, 20, 50, 100\n"
+        "10, 8.0, 10.0, 12.0, 14.0, 17.0, 19.0\n"
+        "60, 25, 30, 36, 41, 48, 53\n"
+        "1440, 75, 95, 115, 135, 160, 180\n"
+    )
+
+    def test_every_return_period_is_read(self):
+        table, problems = parse_hirds_text(self.BLOCK)
+        assert table.available_aris() == [2, 5, 10, 20, 50, 100]
+        assert problems == []
+
+    def test_depths_are_not_shifted_a_column(self):
+        table, _ = parse_hirds_text(self.BLOCK)
+        assert table.depth_mm(60.0, 2) == pytest.approx(25.0)
+        assert table.depth_mm(60.0, 5) == pytest.approx(30.0)
+        assert table.depth_mm(60.0, 100) == pytest.approx(53.0)
+
+    def test_the_sheet_flow_leg_still_has_its_two_year_row(self):
+        """Tc drops its sheet leg without this and warns about the wrong fault."""
+        table, _ = parse_hirds_text(self.BLOCK)
+        assert table.sheet_flow_p2_mm() == pytest.approx(75.0)
+
+    def test_a_word_in_the_corner_is_still_not_a_return_period(self):
+        """The scan starts at field 0 only when field 0 is itself a whole number,
+        so an ordinary labelled header is unaffected."""
+        table, problems = parse_hirds_text("duration, 2, 5\n60, 25, 30\n")
+        assert table.available_aris() == [2, 5]
+        assert problems == []
+
+    def test_a_row_that_cannot_be_aligned_is_dropped_rather_than_mis_paired(self):
+        """More depths than return periods means the alignment is unknowable — the
+        extra field could be anywhere in the row. Pairing them positionally put a
+        thousands-separated '1,180.0' in as 1 mm; the row is now refused instead,
+        and the count mismatch is still reported."""
+        table, problems = parse_hirds_text("duration, 50\n1440, 1,180.0\n")
+        assert any("thousands separator" in p for p in problems)
+        assert table.depth_mm(1440.0, 50) is None

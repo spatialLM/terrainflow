@@ -239,11 +239,18 @@ def fmt_volume(m3, unit="m³"):
     return f"{rounded:,}{(' ' + unit) if unit else ''}"
 
 
-def fmt_pct(pct, places=0):
-    """A percentage as a whole number by default. None becomes an em dash."""
+def fmt_pct(pct, places=0, signed=False):
+    """A percentage as a whole number by default. None becomes an em dash.
+
+    *signed* forces an explicit ``+`` on positives, for a column where the reader
+    has to tell an improvement from a regression at a glance. Off by default so
+    every existing caller is unchanged; used by the before/after "Change" column,
+    whose third row already prints ``{:+.1f} hr`` and whose other two rows would
+    otherwise show a 30 % reduction as "-30%" and a 30 % *increase* as "30%".
+    """
     if pct is None:
         return "—"
-    return f"{float(pct):.{places}f}%"
+    return f"{float(pct):{'+' if signed else ''}.{places}f}%"
 
 
 def fmt_area_ha(m2):
@@ -1256,24 +1263,38 @@ def compare(baseline: BaselineReport,
     """
     result = ComparisonResult(baseline=baseline, post=post)
 
+    # Nothing below is clamped to zero from beneath, and that is the point of this
+    # block. These quantities were each `max(0.0, ...)`, so a design that made
+    # things *worse* — a diversion delivering water to the boundary faster, a post
+    # exit volume above the baseline's — came out as 0.0 and rendered on a page
+    # headed "Before and after", in a column headed "Change", as "0%" or an em
+    # dash. Reporting no change for an adverse change is worse than reporting
+    # nothing, and it contradicts this project's own rule for the sibling
+    # quantity: `unrouted_flow` is "printed and flagged, never clamped".
+    #
+    # `captured_pct` keeps its *upper* clamp and loses only the lower one. The
+    # asymmetry is deliberate: capturing more than fell is unphysical and could
+    # only be an accounting defect, while a negative capture is a real design —
+    # one that exports more than it received, having drained storage that was
+    # already there.
     total = baseline.total_runoff_m3
     if total > 0:
         captured = total - post.exit_volume_m3
-        result.captured_pct = max(0.0, min(100.0, captured / total * 100.0))
+        result.captured_pct = min(100.0, captured / total * 100.0)
 
     if baseline.exit_volume_m3 > 0:
-        result.exit_reduction_pct = max(
-            0.0,
-            (baseline.exit_volume_m3 - post.exit_volume_m3) / baseline.exit_volume_m3 * 100.0
+        result.exit_reduction_pct = (
+            (baseline.exit_volume_m3 - post.exit_volume_m3)
+            / baseline.exit_volume_m3 * 100.0
         )
 
     if baseline.peak_outflow_ls > 0:
-        result.peak_reduction_pct = max(
-            0.0,
-            (baseline.peak_outflow_ls - post.peak_outflow_ls) / baseline.peak_outflow_ls * 100.0
+        result.peak_reduction_pct = (
+            (baseline.peak_outflow_ls - post.peak_outflow_ls)
+            / baseline.peak_outflow_ls * 100.0
         )
 
-    result.peak_delay_hr = max(0.0, post.peak_outflow_time_hr - baseline.peak_outflow_time_hr)
+    result.peak_delay_hr = post.peak_outflow_time_hr - baseline.peak_outflow_time_hr
 
     result.net_cut_m3 = sum(
         s.get("cut_vol_m3", 0.0) for s in post.earthwork_summary
@@ -1364,7 +1385,13 @@ def _build_fill_timeline_chart(post: PostInterventionReport, dpi=None):
     except ImportError:
         return None
 
+    # Join on identity, label with the name. `timestep_table` is keyed by
+    # `store.id`, because the default name counter reproduces a deleted feature's
+    # name and two features can share one; `earthwork_summary` carries `"id"`
+    # alongside `"name"` for exactly this join. The `or s.get("name")` fallback is
+    # what a summary assembled without ids resolves to, which is the old key.
     ew_names = [s["name"] for s in post.earthwork_summary]
+    ew_keys = [s.get("id") or s.get("name") for s in post.earthwork_summary]
     times = [r["time_hr"] for r in post.timestep_table]
 
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -1376,7 +1403,7 @@ def _build_fill_timeline_chart(post: PostInterventionReport, dpi=None):
     )
 
     for i, name in enumerate(ew_names):
-        col_key = f"{name}_fill_pct"
+        col_key = f"{ew_keys[i]}_fill_pct"
         if col_key in post.timestep_table[0]:
             fill_series = [r.get(col_key, 0.0) for r in post.timestep_table]
             ax.plot(times, fill_series, linewidth=1.8, color=colours[i], label=name)

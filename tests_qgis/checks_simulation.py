@@ -142,6 +142,23 @@ def check_two_features_sharing_a_name_keep_separate_fill_state(dem_path):
         assert all(fd.get("name") == "Swale 1" for fd in fills.values()), (
             "the display name should still travel with the value")
 
+        # The same defect, thirty lines above `frame_fills` in the same file:
+        # `timestep_table` was keyed by `store.name`, so the second Swale 1
+        # overwrote the first's column in every row. The report's fill-timeline
+        # chart and the panel's simulation table both read it, so one feature got
+        # no series at all and the other's was drawn from the wrong data.
+        rows = (h.state.sim_result or {}).get("timestep_table") or []
+        assert rows, "no timestep table"
+        keys = [k for k in rows[0] if k.endswith("_fill_pct")]
+        assert len(keys) == 2, (
+            f"two features must have two fill columns, got {keys}")
+        assert f"{a.id}_fill_pct" in rows[0] and f"{b.id}_fill_pct" in rows[0], (
+            f"the columns are not keyed by feature id: {keys}")
+
+        summary = (h.state.sim_result or {}).get("earthwork_summary") or []
+        assert [s.get("id") for s in summary] == [a.id, b.id], (
+            "the summary carries no ids, so no reader can join to those columns")
+
 
 # ---------------------------------------------------------------------------
 # The simulation and the design tier answer with one network

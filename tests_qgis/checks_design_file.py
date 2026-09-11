@@ -471,11 +471,21 @@ def check_panel_defaults_match_the_persisted_defaults(dem_path):
     # The sentinel group: their persisted default is deliberately "unset" — an empty
     # string or a zero — rather than a duplicate of the panel's opening value. A file
     # that carries no soil name should come back as *no soil name*, not as whichever
-    # soil the combo happens to open on.
+    # soil the combo happens to open on. `exit_flow_ls` qualifies because its spin box
+    # has range (0.0, 10000): the sentinel is inside the widget's range and so it
+    # round-trips exactly.
+    #
+    # `peak_intensity_mm_hr` was here on the same reasoning and did not qualify. Its
+    # spin box has range (0.1, 500), so `apply_inputs` clamped the 0.0 sentinel to
+    # **0.1** against a panel default of 40.0 — every peak flow off an older or
+    # hand-edited .tfd 400x too small, and the "starting value" warning suppressed
+    # exactly when it was needed. A sentinel the widget cannot hold is not a sentinel;
+    # the persisted default is now `DEFAULT_PEAK_INTENSITY_MM_HR`. Check the widget's
+    # *range* before granting this exemption to anything numeric.
     exempt = {
         "swale_depth_m", "swale_width_m", "swale_bottom_width_m",
         "soil_name", "earthwork_soil_name", "moisture",
-        "exit_flow_ls", "peak_intensity_mm_hr",
+        "exit_flow_ls",
     }
 
     # Empty, and meant to stay that way. The two this check found and once held open —

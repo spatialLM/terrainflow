@@ -155,6 +155,29 @@ class TestInputCoercion:
         assert INPUT_FIELDS["rainfall_mm"][1] == 65.0
         assert INPUT_FIELDS["routing"][1] == "dinf"
 
+    def test_the_peak_intensity_default_is_one_the_spin_box_can_hold(self):
+        """The third instance of the same class, and the one an exemption hid.
+
+        0.0 was filed as a deliberate "unset" sentinel, which is right for a combo —
+        an empty soil name should reopen as no soil name — and wrong here, because
+        ``_peak_intensity_spin`` has range (0.1, 500). ``apply_inputs`` runs
+        ``normalise_inputs`` and then ``setValue`` unconditionally, so the sentinel
+        was clamped to **0.1** against a panel default of 40.0: every peak flow off an
+        older or hand-edited .tfd came out 400x too small, every spillway width near
+        zero, and the "you are still on the starting value" warning was suppressed
+        exactly when it was needed, because 0.1 is not the starting value.
+
+        A sentinel a widget cannot store is not a sentinel. Asserted against the range
+        as well as the value, so moving either side without the other fails here.
+        """
+        from terrainflow_assessment.modules.peak_flow import DEFAULT_PEAK_INTENSITY_MM_HR
+
+        default = INPUT_FIELDS["peak_intensity_mm_hr"][1]
+        assert default == DEFAULT_PEAK_INTENSITY_MM_HR == 40.0
+        assert normalise_inputs({})["peak_intensity_mm_hr"] == 40.0
+        # The spin box's own range, restated because tests/ stubs QGIS out.
+        assert 0.1 <= default <= 500.0
+
     def test_the_batter_is_derived_and_therefore_not_stored(self):
         """Three dimensions are entered; the side slope is what they come out as.
 

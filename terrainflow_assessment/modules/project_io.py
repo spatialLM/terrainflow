@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from terrainflow_assessment.modules.peak_flow import DEFAULT_PEAK_INTENSITY_MM_HR
+
 # 2 (2026-08-19): ``Spillway.height_above_floor_m``. The field itself needs no version
 # gate — ``Spillway.from_dict`` probes per field, so an older document simply has none.
 # The bump is for the *other* direction: an older build re-saving one of these designs
@@ -91,7 +93,16 @@ INPUT_FIELDS = {
     "sizing_basis": (str, "coefficient"),
     "runoff_coefficient": (float, 0.5),
     "earthwork_soil_name": (str, ""),
-    "peak_intensity_mm_hr": (float, 0.0),
+    # The third occurrence of the fault recorded above and below, and the one that
+    # hid behind an exemption. 0.0 was filed as a deliberate "unset" sentinel, which
+    # is sound reasoning for a combo — an empty soil name should come back as no soil
+    # name — and unsound for this widget: `_peak_intensity_spin` has range
+    # (0.1, 500), so `apply_inputs` clamps the sentinel to **0.1** against a panel
+    # default of 40.0. Every peak flow off an older or hand-edited .tfd was then 400x
+    # too small, every spillway width came out near zero, and the "starting value"
+    # warning that would have said so is suppressed by a non-default intensity —
+    # exactly when it was needed. A sentinel a widget cannot store is not a sentinel.
+    "peak_intensity_mm_hr": (float, DEFAULT_PEAK_INTENSITY_MM_HR),
     # Off by default, and deliberately so — soakage is derived from a soil-texture
     # lookup rather than a percolation test, so crediting it to capture would inflate
     # every feature's performance on a term the site has not verified.

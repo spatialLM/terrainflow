@@ -2390,7 +2390,14 @@ class AssessmentPanel(QDockWidget):
 
     def _populate_sim_table(self, result):
         table = result.get("timestep_table", [])
-        ew_names = [s["name"] for s in result.get("earthwork_summary", [])]
+        # (key, label): `timestep_table` is keyed by the store's **id**, because
+        # the default name counter reproduces a deleted feature's name and two
+        # features can share one — keyed by name, one of them silently overwrote
+        # the other's fill in every frame. `earthwork_summary` carries "id" beside
+        # "name" for this join; the `or` falls back to the old key for a summary
+        # assembled without ids, so every cell would otherwise read 0 %.
+        ew_cols = [(s.get("id") or s.get("name"), s["name"])
+                   for s in result.get("earthwork_summary", [])]
 
         self._sim_table.setVisible(True)
         self._sim_table.setRowCount(len(table))
@@ -2401,8 +2408,8 @@ class AssessmentPanel(QDockWidget):
             self._sim_table.setItem(i, 2, QTableWidgetItem(f"{row.get('outflow_ls', 0):,.1f}"))
             # Summarise earthwork fill in the last column
             ew_fills = " | ".join(
-                f"{n}: {row.get(f'{n}_fill_pct', 0):.0f}%"
-                for n in ew_names
+                f"{label}: {row.get(f'{key}_fill_pct', 0):.0f}%"
+                for key, label in ew_cols
             )
             self._sim_table.setItem(i, 3, QTableWidgetItem(ew_fills or "—"))
 
@@ -2443,9 +2450,19 @@ class AssessmentPanel(QDockWidget):
             f"<b>Leaves the block:</b> {fmt_volume(balance.site_exit_m3)}",
         ]
         if comparison is not None:
+            # Worded for the sign, not just signed. `compare()` no longer clamps
+            # these two up to zero, so both can be adverse — and "reduction: -30%
+            # (delayed -2.0 hr)" is not a sentence. A design that gets water to the
+            # boundary faster is a real outcome and this line is where the designer
+            # meets it; it used to read "0% (delayed 0.0 hr)".
+            change = comparison.peak_reduction_pct
+            delay = comparison.peak_delay_hr
+            label = "Peak flow reduction" if change >= 0 else "Peak flow increase"
+            timing = (f"delayed {delay:.1f} hr" if delay >= 0
+                      else f"earlier by {abs(delay):.1f} hr")
             lines.append(
-                f"<b>Peak flow reduction:</b> {comparison.peak_reduction_pct:.0f}% "
-                f"(delayed {comparison.peak_delay_hr:.1f} hr) — from the simulation")
+                f"<b>{label}:</b> {abs(change):.0f}% "
+                f"({timing}) — from the simulation")
         cut = (burn or {}).get("cut_m3", balance.total_cut_m3)
         fill = (burn or {}).get("fill_m3", balance.total_fill_m3)
         lines.append(f"<b>Earthmoving:</b> {cut_fill_sentence(cut, fill)}")

@@ -210,6 +210,18 @@ def parse_hirds_text(text):
                 f"if depths use a thousands separator (1,180.0), remove it or paste "
                 f"the table tab-separated."
             )
+            # Reported *and refused*. With more values than columns the extra field
+            # could be anywhere in the row, so there is no alignment to fall back on
+            # and zipping positionally is a guess — the guess that read 1,180.0 mm as
+            # 1 mm. Dropping the row costs the user that line and keeps the table
+            # honest; a short row is different and still zips, because truncating
+            # from the left is the one alignment that *is* known.
+            #
+            # This also catches the blank-corner header family independently of how
+            # field 0 reads: one column short in the header makes every data row
+            # over-long, so the table comes back empty and says so, instead of
+            # answering every query one return period low.
+            continue
         for ari, raw in zip(aris, values):
             value = _parse_number(raw)
             if value is None or value <= 0:
@@ -235,9 +247,24 @@ def _split_fields(line):
 
 
 def _parse_ari_header(fields):
-    """Return periods from a header row, or None when it is not a header."""
+    """Return periods from a header row, or None when it is not a header.
+
+    The scan starts at field **0** when field 0 is itself a positive whole number.
+    HIRDS exports a header whose top-left corner cell is empty, `_split_fields`
+    drops empty fields, and so the first return period lands in field 0 — skipping
+    it unconditionally shifted every depth one return period to the left, discarded
+    the highest column, and reported the fault as a thousands-separator problem.
+
+    Safe because a data row is never read here: the header is consulted only while
+    ``aris is None``, and a data row's field 0 is a duration. A first line of
+    all-whole-number depths was already misread as a header before this change and
+    still is; nothing about the corner makes that worse.
+    """
+    first = _parse_number(fields[0]) if fields else None
+    start = 0 if (first is not None and first > 0 and first == int(first)) else 1
+
     values = []
-    for raw in fields[1:]:
+    for raw in fields[start:]:
         n = _parse_number(raw)
         if n is None or n <= 0 or n != int(n):
             return None
