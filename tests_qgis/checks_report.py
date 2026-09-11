@@ -1228,3 +1228,65 @@ def check_a_simulation_adds_the_timing_lines(dem_path):
         assert "Peak flow reduction" in text, f"no timing line after a run: {text!r}"
         assert "from the simulation" in text, (
             "the timing line does not say where it came from")
+
+
+def check_no_table_title_is_orphaned_at_the_foot_of_a_page(dem_path):
+    """`_table` drew a DataTable's title with `_label`, which reserves room only
+    for itself and commits `_y` as it goes — so the title always fitted and the
+    overflow guard below it then decided, too late, to start a new page, leaving
+    a 10 pt bold heading at the foot of one page and its table overleaf.
+    `_render_heading` already carries one section of lookahead for this class,
+    and a DataTable's title is drawn in `_table`, not by a Heading, so it was not
+    covered.
+
+    Driven at the page boundary rather than hoping a real report lands on one.
+    A fixture that happens to put a title 250 mm down an A4 page is a fixture
+    hunt, and one that stops doing so after an unrelated wording change is a
+    check that quietly stops checking — this sets `_y` to the sliver directly,
+    which is the only state the guard is about.
+    """
+    from qgis.core import (
+        QgsLayoutItemLabel,
+        QgsLayoutItemTextTable,
+        QgsPrintLayout,
+    )
+    from terrainflow_assessment.modules.report_model import Report
+    from terrainflow_assessment.qgis.adapters.layout_pdf import ReportLayoutBuilder
+
+    with PluginHarness(dem_path) as h:
+        builder = ReportLayoutBuilder(h.project, Report(title="T", subtitle="", footer=""))
+        # `render()` builds the layout and then walks every section; this check
+        # wants one section at one cursor position, so it does the first half.
+        builder.layout = QgsPrintLayout(builder.project)
+        builder.layout.initializeDefaults()
+        builder.layout.pageCollection().clear()
+        builder._new_page(landscape=False)
+        # A sliver: enough for the 10 pt title, nowhere near the 30 mm the table
+        # itself asks for. This is exactly the state that produced the orphan.
+        builder._y = builder._page_bottom() - 12.0
+        before = builder._page
+
+        builder._table("Before and after the earthworks",
+                       ["", "As it is now", "With your design"],
+                       [["Water leaving the block", "1,000 m³", "1,300 m³"],
+                        ["Fastest flow at the boundary", "40 L/s", "52 L/s"],
+                        ["When that peak arrives", "6.0 hr", "4.0 hr"]])
+
+        layout = builder.layout
+        titles = [item for item in layout.items()
+                  if isinstance(item, QgsLayoutItemLabel)
+                  and item.text().strip() == "Before and after the earthworks"]
+        assert len(titles) == 1, f"the title was not drawn once: {len(titles)}"
+
+        tables = [m for m in layout.multiFrames()
+                  if isinstance(m, QgsLayoutItemTextTable) and m.frames()]
+        assert tables, "no table was placed"
+
+        title_page = titles[0].page()
+        table_page = tables[0].frames()[0].page()
+        assert title_page == table_page, (
+            f"the title landed on page {title_page} and its table on page "
+            f"{table_page} — an orphaned heading over nothing")
+        assert title_page > before, (
+            "neither the title nor the table moved off the full page, so the "
+            "fixture never reached the boundary this guard is about")

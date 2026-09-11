@@ -88,9 +88,11 @@ def check_spillway_review_renders(dem_path):
         for header in h.panel.findChildren(QPushButton, "tfSectionHeader"):
             header.setChecked(True)
 
-        # Wide enough for all nine columns. Narrower and the table falls back on a
-        # horizontal scrollbar with the Feature column squeezed to an ellipsis, which
-        # renders perfectly and shows nothing about the layout under review.
+        # Wide enough for all ten columns — nine until the Sited cell was split into
+        # separate Outflow and Inlet columns, one placement each. Narrower and the
+        # table falls back on a horizontal scrollbar with the Feature column squeezed
+        # to an ellipsis, which renders perfectly and shows nothing about the layout
+        # under review.
         #
         # Sized and settled before the grab, not only by save_widget: the table sits in
         # the panel's layout, which pulls it back to the dock width on the first settle
@@ -98,9 +100,9 @@ def check_spillway_review_renders(dem_path):
         table = h.panel._spillway_table
         table.window().show()
         table.show()
-        table.resize(660, 320)
+        table.resize(720, 320)
         _settle()
-        path = save_widget(table, "panel_spillway_review", size=(660, 320))
+        path = save_widget(table, "panel_spillway_review", size=(720, 320))
         assert_rendered(path, "spillway review table", min_colours=6)
 
 
@@ -144,9 +146,9 @@ def check_a_sill_limited_width_renders(dem_path):
             header.setChecked(True)
         table.window().show()
         table.show()
-        table.resize(660, 320)
+        table.resize(720, 320)
         _settle()
-        path = save_widget(table, "panel_spillway_sill_limited_width", size=(660, 320))
+        path = save_widget(table, "panel_spillway_sill_limited_width", size=(720, 320))
         assert_rendered(path, "sill-limited spillway widths", min_colours=6)
 
 
@@ -184,7 +186,7 @@ def check_spillway_depth_editor_renders(dem_path):
         # it -- which is exactly the wrong-cell shot this check exists to notice.
         table.window().show()
         table.show()
-        table.resize(660, 320)
+        table.resize(720, 320)
         _settle()
 
         # Placed by hand rather than through the view: an offscreen table will not open
@@ -201,7 +203,7 @@ def check_spillway_depth_editor_renders(dem_path):
         editor.setGeometry(rect)
         editor.show()
         try:
-            path = save_widget(table, "panel_spillway_depth_editor", size=(660, 320))
+            path = save_widget(table, "panel_spillway_depth_editor", size=(720, 320))
             assert_rendered(path, "spillway depth editor", min_colours=6)
         finally:
             editor.deleteLater()
@@ -814,3 +816,210 @@ def check_catchment_coverage_readout(dem_path):
             assert_rendered(path, "catchment coverage readout", min_colours=3)
         finally:
             lbl.setMinimumHeight(0)
+
+
+def check_a_row_with_no_drawn_section_does_not_divide_by_zero(dem_path):
+    """`_row_tooltip` re-derived the resolution gap as `penalty / section * 100`
+    whenever the model handed it `None` — and the model hands it `None` in
+    precisely the case it had already decided the divisor was zero
+    (`gap_pct = penalty / section * 100.0 if section > 0 else None`). So the
+    fallback was a ZeroDivisionError with a guard in front of it, reachable by a
+    non-barrier feature with a non-zero resolution penalty and no drawn section,
+    and it would raise inside a tooltip builder on a Qt paint path.
+
+    The row is synthetic on purpose: producing a zero section with a live penalty
+    from real terrain is a fixture hunt, and what is under test is the guard.
+
+    ``geometric_m3`` has to be zero as well as ``section_m3``, and that is worth
+    knowing rather than discovering: the tooltip reads
+    ``section = row.get("section_m3") or geometric``, so a zero section alone
+    falls back to the geometric figure and divides quite happily. The model's own
+    ``section = float(b.get("section_m3", geometric))`` does not take that
+    fallback, which is how the two came to disagree about whether there was a
+    divisor at all.
+    """
+    from terrainflow_assessment.modules.reporting import VerificationResult
+
+    result = VerificationResult(
+        analytic_total_m3=5.0, terrain_total_m3=5.0,
+        per_feature=[{
+            "name": "Swale 1", "analytic_m3": 5.0, "geometric_m3": 0.0,
+            "section_m3": 0.0, "berm_credit_m3": 0.0,
+            "rasterisable_m3": 5.0, "terrain_m3": 5.0, "delta_pct": 0.0,
+            "resolution_penalty_m3": 5.0, "cut_m3": 5.0,
+            "section_gap_pct": None, "section_overstated": False,
+            "existing_m3": 0.0, "total_m3": 5.0,
+        }])
+
+    with PluginHarness(dem_path) as h:
+        h.panel.set_verification(result, cell_size_m=1.0)
+        h.assert_no_errors("verification table with a zero-section row")
+        table = h.panel._verification_table
+        tip = table._row_tooltip(result.per_feature[0])
+        assert isinstance(tip, str) and tip, "the tooltip came back empty"
+        # And it omits the sentence rather than inventing a percentage for it: the
+        # model said there is no gap to quote, so there is none to quote.
+        assert "to its own rim" not in tip, (
+            f"a resolution gap was narrated for a row with no drawn section: {tip}")
+
+
+def check_the_stale_stage_is_amber(dem_path):
+    """`_STATE_COLOURS` defined an amber for "stale" and nothing read it:
+    `_restyle` hard-coded two greys, so a stale stage rendered in the same faint
+    grey as a never-run one. The ⚠ glyph takes the text colour too, so the whole
+    distinction was invisible — and the module docstring, `panel.py`'s "Amber
+    when an earlier run left usable output behind" and six live
+    `mark_stage(..., "stale")` call sites all promised it.
+    """
+    from terrainflow_assessment.qgis.widgets.stepper import _STATE_COLOURS
+
+    with PluginHarness(dem_path) as h:
+        stepper = h.panel._stepper
+        h.panel.mark_stage("verify", "done")
+        done_sheet = stepper._buttons["verify"][0].styleSheet()
+
+        h.panel.mark_stage("verify", "stale")
+        stale_sheet = stepper._buttons["verify"][0].styleSheet()
+        h.panel.mark_stage("report", "todo")
+        todo_sheet = stepper._buttons["report"][0].styleSheet()
+
+        assert _STATE_COLOURS["stale"] in stale_sheet, (
+            f"a stale stage is not painted {_STATE_COLOURS['stale']}: {stale_sheet}")
+        assert _STATE_COLOURS["stale"] not in todo_sheet, (
+            "a never-run stage is painted amber, so the distinction is the wrong way up")
+        assert stale_sheet != done_sheet != todo_sheet, (
+            "two of the three stage states render identically")
+
+        # The table is the source now, not a second opinion: `done` used to be a
+        # green here that the live UI has never painted.
+        assert _STATE_COLOURS["done"] in done_sheet, (
+            f"the done colour on screen is not the one in _STATE_COLOURS: {done_sheet}")
+
+        h.panel._show_stage("design")
+        path = save_widget(h.panel, "panel_stale_verify", size=PANEL_SIZE)
+        assert_rendered(path, "panel with a stale Verify stage", min_colours=12)
+
+
+def check_the_flow_chart_keeps_every_chip_inside_the_widget(dem_path):
+    """A rank was laid out as one unwrapped row — `x0 + i * (chip + gap)`, with
+    only `setFixedHeight` called and the panel's scroll area holding its
+    horizontal bar off. `layer_nodes` gives rank 0 to every feature nothing
+    spills into, which is the ordinary design of independent swales, so on a
+    ~360 px dock the 4th chip onward sat off-widget — invisible, and unclickable
+    too, because `mousePressEvent` hit-tests the same boxes.
+
+    The chart is built standalone rather than reached through the panel. Sizing
+    it inside the panel's layout does not hold: the layout pulls it back to the
+    dock width on the first settle after a bare resize (the spillway-table shot
+    above carries the same note), and at the dock's real width eight chips may
+    happen to fit — so the check would pass for a reason that has nothing to do
+    with wrapping.
+    """
+    from terrainflow_assessment.qgis.widgets.network_view import _FlowChart
+
+    with PluginHarness(dem_path):
+        nodes = [
+            {"index": i, "id": f"ew-{i}", "name": f"Swale {i + 1}",
+             "ew_type": "swale", "colour": "#7E57C2", "elevation": 100.0,
+             "crest_elevation": None, "capacity_m3": 50.0, "stored_m3": 10.0,
+             "soaked_m3": 0.0, "drain_hours": 4.0, "fill_pct": 20.0,
+             "overflowed": False, "overflow_m3": 0.0, "catchment_m2": 1000.0,
+             "is_terminal": True, "enabled": True, "has_water": True}
+            for i in range(8)
+        ]
+        # Every feature at rank 0 — nothing spills into anything, which is what
+        # `layer_nodes` returns for a set of independent swales and also what the
+        # swallowed-exception fallback produces.
+        layout = {n["id"]: (0, i) for i, n in enumerate(nodes)}
+
+        chart = _FlowChart()
+        chart.resize(360, 400)
+        chart.set_network(nodes, {n["id"]: (None, False) for n in nodes}, 0.0, layout)
+        chart._relayout()
+
+        assert len(chart._boxes) == 8, (
+            f"{len(chart._boxes)} chips were laid out, not 8")
+        overflowing = {nid: box for nid, box in chart._boxes.items()
+                       if box[0] + box[2] > chart.width()}
+        assert not overflowing, (
+            f"{len(overflowing)} of 8 chips run past the {chart.width()} px widget "
+            f"— invisible, and unclickable because mousePressEvent hit-tests the "
+            f"same boxes: {sorted(overflowing)}")
+        # And the height knows about the sub-rows the wrap just created, or it
+        # clips the chips it has only just placed.
+        lowest = max(box[1] + box[3] for box in chart._boxes.values())
+        assert lowest <= chart.height(), (
+            f"the lowest chip ends at {lowest} px in a {chart.height()} px widget")
+
+
+def check_the_spillway_table_places_the_kind_you_clicked(dem_path):
+    """One "Sited" cell held both the ▽ outflow and ▲ inlet glyphs and emitted
+    `"outflow"` for any click in it, so clicking the inlet armed the outflow tool,
+    said "Click where X should OVERFLOW", and sited an outflow — the only kind
+    that gets a notch cut. The signal has always been typed
+    `(int, str)  # 'outflow' | 'inflow'` and no `"inflow"` was ever emitted from
+    this widget.
+    """
+    from terrainflow_assessment.qgis.widgets.spillway_table import (
+        _COL_INLET,
+        _COL_SITED,
+    )
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", geometry=line_across_valley(row=60))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("spillway review built")
+
+        table = h.panel._spillway_table
+        assert table._rows, "no rows to click"
+
+        placed = []
+        table.place_requested.connect(lambda idx, kind: placed.append((idx, kind)))
+
+        table._on_cell_clicked(0, _COL_SITED)
+        table._on_cell_clicked(0, _COL_INLET)
+        assert [kind for _idx, kind in placed] == ["outflow", "inflow"], (
+            f"the column clicked and the kind armed disagree: {placed}")
+
+
+def check_the_intensity_dialog_costs_at_the_selected_features_head(dem_path):
+    """`DesignIntensityDialog` defaults `head_m=0.30` — the *embankment* figure —
+    and `choose_design_intensity` never passed one. The dialog costs against one
+    named feature's catchment, so for a swale (registry head 0.15 m) every width
+    in its table was understated by (0.30/0.15)^1.5, about 2.8x, under a column
+    headed "Spillway @ 0.30 m" stating it as fact.
+    """
+    from terrainflow_assessment.design_intensity_dialog import DesignIntensityDialog
+
+    captured = {}
+    original_exec = DesignIntensityDialog.exec
+
+    def grab_instead_of_exec(self):
+        captured["head"] = self._head_m
+        captured["note"] = self._head_note
+        captured["column"] = self.table.horizontalHeaderItem(
+            self.table.columnCount() - 1).text()
+        return 0
+
+    DesignIntensityDialog.exec = grab_instead_of_exec
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.add_earthwork("swale", geometry=line_across_valley(row=60))
+            h.panel.analysis_inputs_changed.emit()
+            h.panel.select_earthwork(0)
+            h.plugin._earthworks.choose_design_intensity()
+            h.assert_no_errors("design intensity with a swale selected")
+    finally:
+        DesignIntensityDialog.exec = original_exec
+
+    assert captured, "the dialog was never opened"
+    assert captured["head"] == 0.15, (
+        f"a swale was costed at {captured['head']:.2f} m of head, not its "
+        f"registry 0.15 m — every width in the table is ~2.8x narrow")
+    assert "Spillway @ 0.15 m" in captured["column"], (
+        f"the column still states the head as fact at the wrong figure: "
+        f"{captured['column']!r}")
+    assert "swale" in captured["note"].lower(), (
+        f"the head is not attributed to where it came from: {captured['note']!r}")

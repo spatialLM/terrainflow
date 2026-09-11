@@ -313,11 +313,16 @@ class VerificationTable(QWidget):
                 f"At grid {at_grid:,.0f} m³ is what this feature impounds on this "
                 f"hillside, flooded on the DEM on its own — close to the "
                 f"{section:,.0f} m³ you drew, so the ground here is adding little.")
-        if cut is not None and penalty:
-            gap = gap_pct if gap_pct is not None else penalty / section * 100.0
+        # Trust the model. The fallback here was `penalty / section * 100.0`, and it
+        # was reached in precisely the case `build_verification` had already decided
+        # the divisor was zero (`gap_pct = penalty / section * 100.0 if section > 0
+        # else None`) — so the guard was a ZeroDivisionError waiting for a non-barrier
+        # feature with a non-zero resolution penalty and no drawn section. Inside a
+        # tooltip builder, which runs from a Qt paint path.
+        if cut is not None and penalty and gap_pct is not None:
             parts.append(
                 f"The trench holds {cut:,.0f} m³ to its own rim against the "
-                f"{section:,.0f} m³ drawn, {gap:+.0f}%. That is purely whether the grid "
+                f"{section:,.0f} m³ drawn, {gap_pct:+.0f}%. That is purely whether the grid "
                 f"could hold the section — a feature narrower than about three cells "
                 f"cannot reach full depth at any cell size.")
         # Deliberately a separate sentence from the one above, and never folded into it.

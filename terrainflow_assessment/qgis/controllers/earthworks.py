@@ -3463,6 +3463,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """
         from terrainflow_assessment.design_intensity_dialog import DesignIntensityDialog
         from terrainflow_assessment.modules.catchment import SCSRunoff
+        from terrainflow_assessment.modules.earthwork_design import spillway_policy
 
         area_m2, label = 0.0, ""
         # Initialised out here on purpose: both are read below, and scoping them
@@ -3500,11 +3501,25 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if chosen is not None and chosen in by_id:
             tc = self.feature_time_of_concentration(by_id[chosen])
 
+        # The head every width in the table is solved at. The dialog defaults it to
+        # 0.30 m — the *embankment* figure — and nothing passed one, so a swale (whose
+        # registry head is 0.15 m) had every width understated by (0.30/0.15)^1.5, about
+        # 2.8x, under a column headed "Spillway @ 0.30 m" stating it as fact. Where a
+        # feature is chosen the table is costed against its catchment, so it should be
+        # costed at its head too; where none is, the embankment default stands but is
+        # now attributed rather than presented as measured.
+        head_m, head_note = 0.30, "embankment default — no feature selected"
+        if chosen is not None and chosen in by_id:
+            head_m = spillway_policy(by_id[chosen].type)[1]
+            head_note = f"{by_id[chosen].type_label().lower()} default"
+
         scs = SCSRunoff()
         dlg = DesignIntensityDialog(
             parent=self._iface.mainWindow(),
             area_m2=area_m2,
             area_label=label,
+            head_m=head_m,
+            head_note=head_note,
             rainfall_mm=self._panel.rainfall_mm,
             duration_hr=self._panel.duration_hr,
             basis=self._panel.sizing_basis,
@@ -5836,7 +5851,18 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # cannot be overtopped; only built ground can.
         raised = ground > original + 1e-6
 
-        barriers, by_name = [], {}
+        # Keyed by id, and `key` was already being computed two lines down for the
+        # mask lookups while the barrier list went on using the display name. The
+        # default name counter reproduces a deleted feature's name — documented at
+        # `:4465-4469`, `:5311-5318` and `simulation.py:273-276`, each of which keys
+        # by id because of it — so with two dams called "Dam 2" the freeboard
+        # advisory reported `has_spillway` off whichever one `by_name` kept, and the
+        # "(full)" layer's `spillway` attribute was wrong on that row.
+        #
+        # `overtopping_spill` carries the key through untouched as `spill.name`, so
+        # the id travels and `name_by_id` puts the display name back wherever a
+        # person reads it: the advisory text and the layer's `feature` attribute.
+        barriers, by_id, name_by_id = [], {}, {}
         for ew in self._state.earthwork_manager.get_enabled():
             key = getattr(ew, "id", None)
             # ``burned_raised`` is the bank this feature built; ``burned_masks`` is what it
@@ -5863,8 +5889,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 length = float(ew.geometry.length())
             except Exception:
                 length = 0.0
-            barriers.append((ew.name, crest, length))
-            by_name[ew.name] = ew
+            barriers.append((key, crest, length))
+            by_id[key] = ew
+            name_by_id[key] = ew.name
 
         if not barriers:
             return
@@ -5881,9 +5908,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return
 
         for spill in spills:
-            ew = by_name.get(spill.name)
+            # `spill.name` carries the id this method put in; the person reading the
+            # advisory needs the label.
+            ew = by_id.get(spill.name)
             msg = overtopping_warning(
-                spill.name, spill.length_m, spill.pour_level_m,
+                name_by_id.get(spill.name, spill.name),
+                spill.length_m, spill.pour_level_m,
                 alt_saddle_m=spill.alt_saddle_m,
                 has_spillway=getattr(ew, "spillway", None) is not None,
                 reaches_crest=spill.overtops_this_event,
@@ -5914,16 +5944,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # (full) goes down first so (event) lands above it: where both apply, the
         # statement about this storm is the one that should be on top.
         self._place_overtopping_layer(
-            "Earthworks — Overtopping (full)", spills, by_name, ctx,
+            "Earthworks — Overtopping (full)", spills, by_id, name_by_id, ctx,
             fill=OVERTOPPING_CAPACITY_FILL, hatched=True,
             suffix=" when full", priority=3)
         self._place_overtopping_layer(
             "Earthworks — Overtopping (event)",
-            [s for s in spills if s.overtops_this_event], by_name, ctx,
+            [s for s in spills if s.overtops_this_event], by_id, name_by_id, ctx,
             fill=OVERTOPPING_FILL, hatched=False,
             suffix=" this event", priority=8)
 
-    def _place_overtopping_layer(self, name, spills, by_name, ctx,
+    def _place_overtopping_layer(self, name, spills, by_id, name_by_id, ctx,
                                  fill, hatched, suffix, priority):
         """One of the two overtopping band layers. No layer at all when empty.
 
@@ -5963,7 +5993,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         feats = []
         for spill in spills:
-            ew = by_name.get(spill.name)
+            # Id in, label out — see `_build_overtopping_layer`. Keyed by name, two
+            # features sharing one put the wrong feature's spillway in this column.
+            ew = by_id.get(spill.name)
+            label = name_by_id.get(spill.name, spill.name)
             sited = "designed" if getattr(ew, "spillway", None) is not None else "none"
             reaches = spill.overtops_this_event
             state = ("unknown" if reaches is None
@@ -5986,7 +6019,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 merged = merged.combine(extra)
             f = QgsFeature(layer.fields())
             f.setGeometry(merged)
-            f.setAttributes([spill.name, round(spill.length_m, 1),
+            f.setAttributes([label, round(spill.length_m, 1),
                              round(spill.pour_level_m, 2), sited, state,
                              None if spill.event_level_m is None
                              else round(spill.event_level_m, 2)])
@@ -6097,13 +6130,28 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 "TerrainFlow Assessment", "Run baseline analysis first."
             )
             return
-        tool = PondingQueryTool(self._canvas, self._state.ponding_raster_path)
+        # The storm-fill verdict, wired. The tool has always taken
+        # `earthwork_inflows` and documented the shape it wants; the one
+        # construction site passed none, so `_find_nearest_inflow` returned -1.0
+        # on every click, `fill_fraction` was always -1.0, and the checkmark /
+        # warning block in `_on_ponding_selected` never rendered. Silent in both
+        # directions: no verdict, and no word that there was not going to be one.
+        #
+        # The controller already owns the figure — `feature_inflow_m3` is what the
+        # spillway review is sized from — so nothing new is computed here.
+        inflows = [
+            (float(self.feature_inflow_m3(ew) or 0.0), ew.geometry, ew.name)
+            for ew in self._state.earthwork_manager.get_enabled()
+        ]
+        tool = PondingQueryTool(self._canvas, self._state.ponding_raster_path,
+                                earthwork_inflows=inflows)
         tool.ponding_selected.connect(self._on_ponding_selected)
         tool.no_ponding.connect(self._on_no_ponding)
         self.use_tool(tool)
 
     def _on_ponding_selected(self, volume_m3, volume_l, cell_count, area_m2,
-                              outline_geom, inflow_m3, fill_fraction):
+                              outline_geom, inflow_m3, fill_fraction,
+                              inflow_name=""):
         from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
         dlg = QDialog(self._iface.mainWindow())
@@ -6138,8 +6186,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             else:
                 fill_str = f"{fill_pct:.0f}% of design-storm inflow — depression overflows  ⚠"
                 colour = "#cc4400"
+            # Named. The verdict is a comparison against one feature's inflow,
+            # picked by distance from where the user clicked — a decision they
+            # cannot see, so a bare percentage is not checkable.
+            against = f" (against {inflow_name})" if inflow_name else ""
             lbl_fill = QLabel(
                 f"<b>Storm fill:</b>  <span style=\"color:{colour}\">{fill_str}</span>"
+                f"{against}"
             )
             lbl_fill.setToolTip(H.FILL_RATIO)
             layout.addWidget(lbl_fill)

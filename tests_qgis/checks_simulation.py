@@ -387,3 +387,53 @@ def check_the_playback_frame_is_cheap_enough_to_play(dem_path):
         per_frame = (time.perf_counter() - start) / 3.0
         h.assert_no_errors("timed playback")
         assert per_frame < 0.5, f"{per_frame * 1000:.0f} ms per frame is not playback"
+
+
+def check_the_ponding_frame_does_not_rescale_itself_each_frame(dem_path):
+    """`_apply_ponding_ramp` called `apply_raster_ramp` directly — the rule
+    CLAUDE.md states as "never" — and with no `max_value`, so every frame
+    stretched its stops over its own band maximum. The same depth therefore
+    changed colour as the pools filled, in the same Verify group as layers
+    already on the shared `ponding` family. The method's own docstring claimed
+    the mismatch had been fixed.
+
+    Asserted on the renderer and against `state.ramp_scales`, so it fails both
+    if the frame rescales and if it rescales *consistently* on a scale of its own.
+    """
+    from qgis.core import QgsProject
+
+    def top_stop(layer):
+        shader = layer.renderer().shader().rasterShaderFunction()
+        items = shader.colorRampItemList()
+        return items[-1].value if items else None
+
+    with PluginHarness(dem_path) as h:
+        _simulated(h)
+        sim = h.plugin._simulation
+        if h.state.sim_ponding_capacity is None:
+            return          # no pond on this design; nothing to scale
+
+        tops = []
+        for idx in (0, len((h.state.sim_result or {}).get("frames") or []) - 1):
+            sim.show_sim_frame(max(idx, 0))
+            layer_id = h.state.sim_ponding_frame_layer_id
+            if not layer_id:
+                continue
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if layer is not None:
+                tops.append(top_stop(layer))
+        h.assert_no_errors("ponding frame playback")
+
+        if len(tops) < 2:
+            return
+        assert tops[0] == tops[1], (
+            f"the frame ramp restretched between an early and a late frame "
+            f"({tops[0]} then {tops[1]}) — the same depth changes colour as the "
+            f"pools fill")
+        family = (h.state.ramp_scales or {}).get("ponding") or {}
+        assert family.get("top"), (
+            "the frame is not on the shared `ponding` family at all, so it is "
+            "drawn against a scale no other captured-water layer shares")
+        assert tops[0] == family["top"], (
+            f"the frame's top stop is {tops[0]} against the family's "
+            f"{family['top']}")

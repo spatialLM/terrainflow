@@ -32,12 +32,12 @@ from qgis.PyQt.QtGui import QColor
 
 from terrainflow_assessment.modules.catchment import SCSRunoff
 from terrainflow_assessment.qgis.controllers import _groups as G
+from terrainflow_assessment.qgis.controllers import _symbols as S
 from terrainflow_assessment.qgis.controllers._layers import (
     dem_crs,
     remove_layer,
     resolve_layer,
 )
-from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.simulation_worker import SimulationWorker
 
@@ -499,17 +499,34 @@ class SimulationController(G.LayerTreeMixin):
             self._state.sim_ponding_frame_layer_id = layer.id()
 
     def _apply_ponding_ramp(self, layer):
-        """The same ramp Baseline paints its captured water with.
+        """The same ramp Baseline paints its captured water with — and the same
+        *scale*, which is the half this method was missing.
 
-        Water held is water held; the simulation's frame used to carry its own
-        copy of these stops, so a change on one side left the two views of the
-        same quantity in different colours.
+        It called `apply_raster_ramp` directly, which CLAUDE.md states as "never",
+        and with no `max_value` — so every frame stretched the stops over its own
+        band maximum and the same depth changed colour as the pools filled, in the
+        same Verify group as layers already on the shared `ponding` family. This
+        method's docstring already claimed the mismatch was fixed.
+
+        Scaled to the **capacity** raster, not to this frame: that is what
+        `_build_event_pond_layers` does for the event pond against the full pond,
+        and the argument is the same one — a frame is a stage of the pond, so it
+        has to be read against the pond.
         """
+        import numpy as np
+
         from terrainflow_assessment.core.registry.map_palette import (
             WATER_CAPTURED,
         )
 
-        apply_raster_ramp(layer,WATER_CAPTURED)
+        capacity = self._state.sim_ponding_capacity
+        top = None
+        if capacity is not None:
+            finite = np.asarray(capacity, dtype="float64")
+            if np.isfinite(finite).any():
+                top = float(np.nanmax(finite))
+        S.apply_shared_ramp(self._state, self._project, "ponding", layer,
+                            WATER_CAPTURED, top)
 
     # ---------------------------------------------------------------- Fill layer
 
@@ -645,10 +662,19 @@ class SimulationController(G.LayerTreeMixin):
             self._update_sim_ponding_frame(fills)
 
     def _apply_stream_ramp(self, layer, max_acc=None):
-        """The same channel ramp Baseline uses, from ``map_palette``."""
+        """The same channel ramp Baseline uses, on the same shared scale.
+
+        Decision #3: through the `"streams"` family, as `baseline.py` paints its own
+        streams, so the Simulation Frame reads against Baseline's streams on one
+        scale rather than on a global maximum of its own. It does not rescale per
+        frame — `max_acc` is already a whole-run maximum — so this was a decision
+        about comparability, not a defect; but it was also the tree's second direct
+        `apply_raster_ramp` call, and the shared family is where the rule puts it.
+        """
         from terrainflow_assessment.core.registry.map_palette import STREAMS
 
-        apply_raster_ramp(layer,STREAMS, max_acc)
+        S.apply_shared_ramp(self._state, self._project, "streams",
+                            layer, STREAMS, max_acc)
 
     # ---------------------------------------------------------------- Timer
 

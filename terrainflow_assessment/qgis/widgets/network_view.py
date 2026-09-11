@@ -26,6 +26,8 @@ Data contract — ``set_network(nodes, edges, exit_m3)``:
   exit_m3 : total water leaving the site
 """
 
+import logging
+
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 from qgis.PyQt.QtWidgets import (
@@ -37,6 +39,8 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from terrainflow_assessment.qgis import help_text as H
+
+_log = logging.getLogger(__name__)
 
 _WATER = "#1273b5"
 _SOAKED = "#79b8dd"   # same token the scorecard uses for infiltrated water
@@ -293,18 +297,35 @@ class _FlowChart(QWidget):
             by_rank.setdefault(rank, []).append((order, node))
 
         width = max(self.width(), 240)
-        for rank, entries in by_rank.items():
-            entries.sort(key=lambda e: e[0])
-            n = len(entries)
-            span = n * self._CHIP_W + (n - 1) * self._GAP_X
-            x0 = max(self._MARGIN, (width - span) // 2)
-            y = self._MARGIN + rank * (self._CHIP_H + self._GAP_Y)
-            for i, (_order, node) in enumerate(entries):
-                self._boxes[node["id"]] = (
-                    x0 + i * (self._CHIP_W + self._GAP_X), y,
-                    self._CHIP_W, self._CHIP_H)
+        # How many chips fit across before a rank has to wrap. A rank used to be
+        # laid out as one unwrapped row — `x0 + i * (chip + gap)`, with only
+        # `setFixedHeight` called and the panel's scroll area holding its
+        # horizontal bar off — so on a ~360 px dock the 4th chip onward sat
+        # off-widget and invisible, and `mousePressEvent` hit-tests the same boxes,
+        # so it could not be clicked either. `layer_nodes` gives rank 0 to every
+        # feature nothing spills into, which is the ordinary design of independent
+        # swales: every chip on one row.
+        per_row = max(1, (width - 2 * self._MARGIN + self._GAP_X)
+                      // (self._CHIP_W + self._GAP_X))
 
-        depth = max(by_rank) + 1
+        band = 0
+        for rank in sorted(by_rank):
+            entries = sorted(by_rank[rank], key=lambda e: e[0])
+            for start in range(0, len(entries), per_row):
+                chunk = entries[start:start + per_row]
+                n = len(chunk)
+                span = n * self._CHIP_W + (n - 1) * self._GAP_X
+                x0 = max(self._MARGIN, (width - span) // 2)
+                y = self._MARGIN + band * (self._CHIP_H + self._GAP_Y)
+                for i, (_order, node) in enumerate(chunk):
+                    self._boxes[node["id"]] = (
+                        x0 + i * (self._CHIP_W + self._GAP_X), y,
+                        self._CHIP_W, self._CHIP_H)
+                band += 1
+
+        # Sub-rows, not ranks. A wrapped rank is taller than one band, and a height
+        # that does not know it clips the chips this method just placed.
+        depth = max(band, 1)
         # One extra band for the "leaves site" sink at the foot of the chart.
         self.setFixedHeight(
             self._MARGIN * 2 + depth * self._CHIP_H + depth * self._GAP_Y + 18)
@@ -340,6 +361,11 @@ class _FlowChart(QWidget):
                 column += 1
             x = left + column * (self._CHIP_W + self._GAP_X)
             if x + self._CHIP_W > width - self._MARGIN and column > 0:
+                # Drop a band rather than slamming back to column 0, which is the
+                # column the nudge loop above has just proved occupied — so the
+                # overflow guard put the chip straight back on top of another one.
+                # Cosmetic, and only reachable once a row is full.
+                y += self._CHIP_H + 2
                 column = 0
                 x = left
             placed.append((node["id"], y, column))
@@ -575,6 +601,12 @@ class NetworkView(QWidget):
             layout = layer_nodes([n["id"] for n in ordered if n["enabled"]],
                                  plain_edges)
         except Exception:
+            # Logged, not silent. The degenerate result is every node at rank 0 —
+            # one flat row — which is also a perfectly ordinary layout for a design
+            # of independent features, so the failed case and the normal case draw
+            # identically and nothing on screen says which this is.
+            _log.debug("network layout failed; every chip falls to rank 0",
+                       exc_info=True)
             layout = {}
         self._chart.set_network(nodes, edges, exit_m3, layout)
 

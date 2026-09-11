@@ -2844,3 +2844,91 @@ def check_a_dem_swap_drops_the_measured_containment_level(dem_path):
         assert after[3] == CONTAINMENT_LIP, (
             f"the containment source is {after[3]!r} after the terrain changed; with "
             f"nothing measured against the new grid it has to fall back to the lip")
+
+
+def check_two_barriers_sharing_a_name_are_overtopped_apart(dem_path):
+    """The overtopping layer keyed its barriers by display *name*.
+
+    `key = ew.id` was already being computed two lines above for the mask lookups
+    while `barriers` and `by_name` went on using `ew.name`. The default name
+    counter reproduces a deleted feature's name — delete "Dam 1" and draw another
+    and you have two "Dam 2"s — so the freeboard advisory reported `has_spillway`
+    off whichever one the dict happened to keep, and the "(full)" layer's
+    `spillway` attribute was wrong on that row. One of these dams has a spillway
+    and one does not, which is the difference the column exists to show.
+    """
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.modules.earthwork_design import Spillway
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+
+        dams = []
+        for row in (60, 110):
+            geom = line_across_valley(row=row)
+            ew = h.add_earthwork("dam", geometry=geom, name="Dam 2")
+            ew.crest_elevation = float(
+                controller._feature_elevation(geom) or 0) + 2.0
+            ew.key_into_banks = True
+            controller._on_vertex_edit_finished(
+                len(h.state.earthwork_manager) - 1, geom)
+            dams.append(ew)
+
+        assert dams[0].name == dams[1].name == "Dam 2", "the fixture is not the case"
+        assert dams[0].id != dams[1].id, "two features shared an id, which is a worse bug"
+
+        # One of them gets a spillway; the other must not be credited with it.
+        dams[1].spillway = Spillway()
+
+        h.panel.analysis_inputs_changed.emit()
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis")
+
+        layers = [lyr for lyr in QgsProject.instance().mapLayers().values()
+                  if "Overtopping (full)" in lyr.name()]
+        assert layers, "no overtopping layer was built"
+        rows = list(layers[0].getFeatures())
+        assert len(rows) == 2, (
+            f"two barriers, {len(rows)} band(s) — one overwrote the other's key")
+        assert sorted(f["spillway"] for f in rows) == ["designed", "none"], (
+            f"both bands report the same spillway state "
+            f"{[f['spillway'] for f in rows]} — the layer is reading one feature "
+            f"for both rows")
+        assert {f["feature"] for f in rows} == {"Dam 2"}, (
+            "the id leaked into the layer's feature column instead of the label")
+
+
+def check_the_ponding_query_reports_the_storm_fill_verdict(dem_path):
+    """`PondingQueryTool` has always taken `earthwork_inflows` and documented the
+    shape it wants; the one construction site passed none, so
+    `_find_nearest_inflow` returned -1.0 on every click, `fill_fraction` was
+    always -1.0, and the design-storm block in `_on_ponding_selected` never
+    rendered. Silent in both directions — no verdict, and no word that there was
+    not going to be one.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("basin", geometry=line_across_valley(
+            row=60, half_width_m=15.0))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("design tier")
+
+        controller.activate_ponding_query()
+        tool = h.canvas.mapTool()
+        assert getattr(tool, "earthwork_inflows", None), (
+            "the tool was built with no inflows, so the verdict cannot be reached")
+
+        inflow, name = tool._find_nearest_inflow(*_centroid_xy(ew))
+        assert name == ew.name, (
+            f"the nearest feature came back as {name!r}, not {ew.name!r}")
+        assert inflow >= 0.0, (
+            f"no design-storm inflow for the nearest feature: {inflow}")
+
+
+def _centroid_xy(ew):
+    """(x, y) of an earthwork's centroid, for pointing the ponding tool at it."""
+    point = ew.geometry.centroid().asPoint()
+    return point.x(), point.y()

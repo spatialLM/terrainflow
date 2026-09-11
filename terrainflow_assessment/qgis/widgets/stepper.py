@@ -5,8 +5,8 @@ A horizontal row of stage tabs (Terrain → Baseline → Design → Verify → R
 with per-stage state glyphs:
 
     todo   ·   quiet, nothing yet
-    done   ✓   green — stage output exists
-    active ✎   the stage currently shown
+    done   ✓   the tick carries the state; the text stays a settled grey
+    active ✎   the stage currently shown — green, and the only green here
     stale  ⚠   amber — stage output exists but is out of date (e.g. the design
                changed since the last verify burn)
 
@@ -19,7 +19,22 @@ from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 _STATE_GLYPHS = {"todo": "·", "done": "✓", "active": "✎", "stale": "⚠"}
-_STATE_COLOURS = {"todo": "#8fa0a4", "done": "#1e8449", "stale": "#b9770e"}
+
+#: The one source for the stage text colours, and now actually read. Nothing read
+#: it before: ``_restyle`` hard-coded two greys, so a stale stage rendered in the
+#: same faint grey as a never-run one — the ⚠ takes the text colour, so the whole
+#: distinction was invisible and the module docstring, ``panel.py``'s
+#: "Amber when an earlier run left usable output behind" and six live
+#: ``mark_stage(..., "stale")`` call sites all promised something that never
+#: happened.
+#:
+#: ``done`` was ``#1e8449`` here, a green the live UI has never painted; it is now
+#: the grey that is actually drawn, so reading the table is the same as reading the
+#: screen. Green belongs to the *active* stage alone, which is not a state and so
+#: is not in here. A lookup table nothing looks up is documentation, and this one
+#: had drifted.
+_STATE_COLOURS = {"todo": "#8fa0a4", "done": "#5f7176", "stale": "#b9770e"}
+_ACTIVE_COLOUR = "#2e7d55"
 
 
 class StageStepper(QWidget):
@@ -77,10 +92,9 @@ class StageStepper(QWidget):
             state = self._states[key]
             is_active = key == self._current
             glyph = "✎" if is_active and state != "stale" else _STATE_GLYPHS[state]
-            underline = "#2e7d55" if is_active else "transparent"
-            text_colour = "#2e7d55" if is_active else (
-                "#5f7176" if state == "done" else "#8fa0a4"
-            )
+            underline = _ACTIVE_COLOUR if is_active else "transparent"
+            text_colour = (_ACTIVE_COLOUR if is_active
+                           else _STATE_COLOURS.get(state, _STATE_COLOURS["todo"]))
             btn.setText(f"{glyph}\n{label}")
             btn.setStyleSheet(
                 "QPushButton {"

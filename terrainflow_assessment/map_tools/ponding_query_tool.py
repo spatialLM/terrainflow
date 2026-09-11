@@ -23,7 +23,7 @@ class PondingQueryTool(QgsMapTool):
     inflow_m3 and fill_fraction are -1.0 when no earthwork inflow data is
     available (e.g. baseline natural-depressions run).
     """
-    ponding_selected = pyqtSignal(float, float, int, float, object, float, float)
+    ponding_selected = pyqtSignal(float, float, int, float, object, float, float, str)
     no_ponding = pyqtSignal()
 
     MIN_DEPTH = 0.001  # metres — ignore cells shallower than 1 mm (floating-point noise)
@@ -34,10 +34,18 @@ class PondingQueryTool(QgsMapTool):
         ----------
         canvas : QgsMapCanvas
         ponding_raster_path : str
-        earthwork_inflows : list of (inflow_m3: float, QgsGeometry) or None
+        earthwork_inflows : list of (inflow_m3: float, QgsGeometry, name: str) or None
             Per-earthwork design-storm inflow volumes.  When provided the tool
             finds the nearest earthwork to the clicked point and reports fill
             fraction and a sizing verdict.
+
+            The name travels with the pair because the verdict is a comparison
+            *against a particular feature*, and a fill percentage that does not
+            say which one is not checkable: a click between two features is
+            resolved by `geom.distance`, and the user cannot see that decision.
+            This was unwired for its whole life — the one construction site passed
+            nothing, so `_find_nearest_inflow` returned -1.0 on every click and the
+            verdict block never rendered, silently in both directions.
         """
         super().__init__(canvas)
         self.canvas = canvas
@@ -78,7 +86,7 @@ class PondingQueryTool(QgsMapTool):
         volume_l = volume_m3 * 1000.0
 
         # Sizing: find the nearest earthwork and compare inflow to capacity
-        inflow_m3 = self._find_nearest_inflow(map_pt.x(), map_pt.y())
+        inflow_m3, inflow_name = self._find_nearest_inflow(map_pt.x(), map_pt.y())
         if inflow_m3 >= 0 and volume_m3 > 0:
             fill_fraction = inflow_m3 / volume_m3
         else:
@@ -92,7 +100,7 @@ class PondingQueryTool(QgsMapTool):
 
         self.ponding_selected.emit(
             volume_m3, volume_l, cell_count, area_m2, outline_geom,
-            inflow_m3, fill_fraction,
+            inflow_m3, fill_fraction, inflow_name,
         )
 
     def keyPressEvent(self, event):
@@ -140,26 +148,26 @@ class PondingQueryTool(QgsMapTool):
 
     def _find_nearest_inflow(self, x, y):
         """
-        Return the inflow_m3 of the earthwork nearest to map point (x, y).
-        Returns -1.0 if no earthwork inflow data is available.
+        Return ``(inflow_m3, name)`` for the earthwork nearest to map point (x, y).
+        Returns ``(-1.0, "")`` if no earthwork inflow data is available.
         """
         if not self.earthwork_inflows:
-            return -1.0
+            return -1.0, ""
 
         pt_geom = QgsGeometry.fromPointXY(QgsPointXY(x, y))
         min_dist = float("inf")
-        nearest = -1.0
+        nearest, nearest_name = -1.0, ""
 
-        for inflow_m3, geom in self.earthwork_inflows:
+        for inflow_m3, geom, name in self.earthwork_inflows:
             try:
                 dist = geom.distance(pt_geom)
                 if dist < min_dist:
                     min_dist = dist
-                    nearest = inflow_m3
+                    nearest, nearest_name = inflow_m3, name
             except Exception:
                 continue
 
-        return nearest
+        return nearest, nearest_name
 
     def _mask_to_qgs_geometry(self, mask):
         """Convert a boolean numpy mask to a QgsGeometry polygon."""

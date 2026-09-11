@@ -112,8 +112,15 @@ _IN_GLYPH, _IN_COLOUR = "▲", "#2e7d55"
 # is below setting-out resolution on a DEM, so tighter than this is noise.
 _HEAD_TOLERANCE_M = 0.01
 
+# "Outflow" and "Inlet" as two columns, where there was one "Sited" cell holding
+# both glyphs. The cell was the placement affordance and dispatched `"outflow"`
+# for any click in it, whichever marker was under the cursor — so clicking the ▲
+# armed the outflow tool, said "Click where X should OVERFLOW", and sited an
+# outflow, which is the only kind that gets a notch cut. The signal has always
+# been typed `(int, str)  # 'outflow' | 'inflow'` and no `"inflow"` was ever
+# emitted from this widget.
 _HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Sill depth", "Sill",
-            "Storage", "Sited")
+            "Storage", "Outflow", "Inlet")
 
 # Named rather than written out at each use. Three behaviours now key off a column
 # position -- the placement affordance, the editable cell and the double-click guard --
@@ -123,7 +130,11 @@ _HEADERS = ("Feature", "Peak flow", "Head", "Width", "Freeboard", "Sill depth", 
 # to take that number would put the sill a metre down.
 _COL_DEPTH = _HEADERS.index("Sill depth")
 _COL_WIDTH = _HEADERS.index("Width")
-_COL_SITED = len(_HEADERS) - 1
+# By name, which is the reason they are named at all: adding a column shifts
+# positions, and every one of these found its own again. `_COL_SITED` was
+# `len(_HEADERS) - 1` — "the last column" — which is now the inlet.
+_COL_SITED = _HEADERS.index("Outflow")
+_COL_INLET = _HEADERS.index("Inlet")
 
 # The sill depth editor is the dialog's Spillway depth control, to the digit -- see
 # EarthworkPropertiesDialog.spin_spillway_drop. Two controls for one quantity that
@@ -243,6 +254,14 @@ class SpillwayTable(QWidget):
 
         self.table = QTableWidget(0, len(_HEADERS))
         self.table.setHorizontalHeaderLabels(list(_HEADERS))
+        # The two placement columns say what a click on them does, because it is
+        # not the same thing: one arms the outflow tool and one the inlet tool,
+        # and they were a single cell that always armed the first.
+        for column, tip in ((_COL_SITED, H.SPILLWAY_LOCATION),
+                            (_COL_INLET, H.SPILLWAY_INLET)):
+            head = self.table.horizontalHeaderItem(column)
+            if head is not None:
+                head.setToolTip(tip)
         self.table.verticalHeader().setVisible(False)
         # Widened from NoEditTriggers, which was the only thing making this table
         # read-only. Triggers are view-wide, so they are *not* what keeps the other
@@ -463,8 +482,13 @@ class SpillwayTable(QWidget):
         # mean selecting the feature in a different widget first, then finding a row in
         # the tool menu — a coupling nobody discovers. Here the thing you click is the
         # thing you are placing.
-        if col == _COL_SITED and data.get("state") != "disabled":
-            self.place_requested.emit(index, "outflow")
+        # The thing you click is the thing you are placing — which is what the
+        # comment above has always claimed and what one shared cell could not do.
+        if data.get("state") != "disabled":
+            if col == _COL_SITED:
+                self.place_requested.emit(index, "outflow")
+            elif col == _COL_INLET:
+                self.place_requested.emit(index, "inflow")
 
     def _on_cell_double_clicked(self, row, col):
         # Double-click already meant "open the properties dialog" everywhere on this
@@ -495,6 +519,7 @@ class SpillwayTable(QWidget):
             self._sill_cell(row, disabled),
             self._storage_cell(row, disabled),
             self._sited_cell(row, disabled),
+            self._inlet_cell(row, disabled),
         ]
         # Built once per row, not once per cell: it is a ten-paragraph string and there
         # are nine cells and up to thirty-one rows behind every rebuild.
@@ -727,12 +752,27 @@ class SpillwayTable(QWidget):
 
     @staticmethod
     def _sited_cell(row, disabled):
+        """The outflow half. Its own column since the inlet got one of its own —
+        two placements dispatched from one cell could only ever arm one tool."""
         if disabled:
             return ("—", _FAINT, Qt.AlignmentFlag.AlignCenter)
         out = _OUT_GLYPH if row.get("sited") else f"{_OUT_GLYPH}·"
-        inlet = _IN_GLYPH if row.get("inlet_sited") else f"{_IN_GLYPH}·"
         colour = _MUTED if row.get("sited") else _WARN
-        return (f"{out} {inlet}", colour, Qt.AlignmentFlag.AlignCenter)
+        return (out, colour, Qt.AlignmentFlag.AlignCenter)
+
+    @staticmethod
+    def _inlet_cell(row, disabled):
+        """The inlet half, with the same sited/unsited colouring as the outflow.
+
+        Amber for unsited reads the same way here as beside it: nothing has been
+        placed. An inlet is optional, so this is an affordance rather than a
+        shortfall — the tooltip says which.
+        """
+        if disabled:
+            return ("—", _FAINT, Qt.AlignmentFlag.AlignCenter)
+        inlet = _IN_GLYPH if row.get("inlet_sited") else f"{_IN_GLYPH}·"
+        colour = _MUTED if row.get("inlet_sited") else _WARN
+        return (inlet, colour, Qt.AlignmentFlag.AlignCenter)
 
     def _row_tooltip(self, row):
         """Everything the cells had to compress, in words."""

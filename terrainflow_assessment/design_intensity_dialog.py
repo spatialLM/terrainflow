@@ -118,11 +118,18 @@ class DesignIntensityDialog(QDialog):
     *area_m2* is the reference catchment the table is costed against — the selected
     feature's, or the largest on site, so the widths shown are ones the user will
     actually meet. Everything else is the storm and basis context from the panel.
+
+    *head_m* is the design head every width in the table is solved at, and it is the
+    **caller's** to supply: this default is the embankment figure, and applying it to
+    a swale — whose registry head is 0.15 m — understates every width by
+    ``(0.30/0.15)^1.5`` ≈ 2.8x while printing "Spillway @ 0.30 m" as fact.
+    *head_note* is where that figure came from, shown beside it, so a default is
+    never read as a measurement.
     """
 
     def __init__(self, parent=None, area_m2=0.0, area_label="", rainfall_mm=120.0,
                  duration_hr=24.0, basis=BASIS_COEFFICIENT, coefficient=0.5,
-                 cn=61.0, head_m=0.30, current_intensity=None,
+                 cn=61.0, head_m=0.30, head_note="", current_intensity=None,
                  travel_time=None, idf_table=None):
         self._tc = travel_time
         self._idf = idf_table
@@ -134,6 +141,7 @@ class DesignIntensityDialog(QDialog):
         self._coefficient = coefficient
         self._cn = cn
         self._head_m = float(head_m or 0.30)
+        self._head_note = head_note or ""
 
         self.setWindowTitle("Design intensity for overflow sizing")
         self.setMinimumWidth(520)
@@ -176,7 +184,14 @@ class DesignIntensityDialog(QDialog):
             ctx_form.addRow("Catchment:", none_yet)
         ctx_form.addRow("Design storm:", self._value_label(
             f"{self._rainfall_mm:,.0f} mm over {self._duration_hr:,.0f} h"))
-        ctx_form.addRow("Head over crest:", self._value_label(f"{self._head_m:.2f} m"))
+        head_text = f"{self._head_m:.2f} m"
+        if self._head_note:
+            # Attributed, because the same number means different things: the
+            # feature type's registry head is a policy figure for that type, and
+            # the whole-site fallback is the embankment default standing in for a
+            # feature nobody has selected.
+            head_text += f" ({self._head_note})"
+        ctx_form.addRow("Head over crest:", self._value_label(head_text))
 
         # Time of concentration — the duration the rational method actually wants.
         if self._tc is not None:

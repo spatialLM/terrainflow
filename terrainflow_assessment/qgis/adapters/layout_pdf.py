@@ -528,6 +528,18 @@ class ReportLayoutBuilder:
         if not rows:
             return
         if title:
+            # Measure before drawing, exactly as `_render_heading` does. `_label`
+            # reserves room only for itself and commits `_y` as it goes, so the
+            # title always fitted and the overflow guard below then decided — too
+            # late — to start a new page: A4 portrait at _y ~= 250 mm leaves the
+            # 10 pt bold heading at the foot of one page and its table overleaf.
+            # `_render_heading` already carries one section of lookahead for this
+            # class, but a DataTable's title is drawn here rather than by a
+            # Heading, so it was not covered. Same 30 mm sliver rule as below, so
+            # the two decisions cannot disagree.
+            self._room_for(
+                estimate_label_height(title, self._text_width(), 10)
+                + min(table_content_height(len(rows), 7.0), 30.0))
             self._label(title, size_pt=10, bold=True)
 
         table = QgsLayoutItemTextTable(self.layout)
