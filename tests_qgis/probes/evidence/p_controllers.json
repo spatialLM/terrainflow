@@ -10,7 +10,7 @@
   ],
   "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
   "notes": [
-    "KPA-48, measured: passing acc_path alone (which is what contour.py:1390 does) takes 0.009 s and returns an accumulation field that is the same as the raster supplied (max difference 0.0 cells; supplied max 67199, recomputed max 67199). Passing both paths takes 0.028 s and does read the supplied raster (True). The baseline accumulation is crest-split and the recompute is not, so the keyline runs on a pond-uncorrected field.",
+    "KPA-48, measured: passing acc_path alone (which is what contour.py:1390 does) takes 0.008 s and returns an accumulation field that is the same as the raster supplied (max difference 0.0 cells; supplied max 67199, recomputed max 67199). Passing both paths takes 0.034 s and does read the supplied raster (True). The baseline accumulation is crest-split and the recompute is not, so the keyline runs on a pond-uncorrected field.",
     "SWL-22, measured: suggest_spacing omits infiltration_mm_hr, so the capacity it hands capture_spacing is short by up to 85.7% (Sand / 24 h). A lower capacity gives a TIGHTER advised interval, so the direction is O (over-sizes), not U.",
     "CTL-01, measured: suggest_spacing calls slope_statistics with no mask (contour.py:168) though the parameter exists and is unit-tested. On this fixture the site-wide median slope is 8.06 deg and the middle-half median is 6.81 deg, a change of -15.5%. The docstring at contour.py:137 says the advice is read 'over the usable area'; it is read site-wide.",
     "MHL-01, measured: haul_regions over block_m 0.01 -> 1000 m (a 100,000x range) produces 1 distinct output(s). `block` is computed at mass_haul.py:124 and passed to _regions_from, which never reads it. earthworks.py, the only caller, never passes block_m at all, so the parameter is inert in two independent ways.",
@@ -22,12 +22,12 @@
       "status": "ok",
       "acc_raster_written": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\controllers\\baseline_acc.tif",
       "baseline_was_crest_split": true,
-      "wall_s_with_acc_path": 0.009,
+      "wall_s_with_acc_path": 0.008,
       "supplied_equals_used": true,
       "max_abs_difference": 0.003704077549627982,
       "supplied_max": 67198.89521613705,
       "used_max": 67198.8984375,
-      "wall_s_with_both_paths": 0.028,
+      "wall_s_with_both_paths": 0.034,
       "both_paths_reads_supplied": true
     },
     "swl22_omitted_infiltration": {

@@ -310,10 +310,12 @@ EXPECTED_KEYLINE = {
     "links_refused_before_the_fit": 5,
     "links_refused_no_two_slope_break": 8,
     "keypoints_at_every_valley": 10,
-    # KPA-43 — at the panel default the loop stops at 8 keypoints, so 10 valleys go
-    # unexamined and unreported. Still open; pinned so the count is visible.
+    # KPA-43 — at the panel default the loop stops at 8 keypoints; the 10 valleys it
+    # never reached are reported as "not examined", so keypoints + skipped == valleys
+    # at every cap (asserted below as a property).
     "keypoints_at_max_valleys_8": 8,
-    "skipped_at_max_valleys_8": 5,
+    "skipped_at_max_valleys_8": 15,
+    "unexamined_at_max_valleys_8": 10,
 }
 
 # Recorded 2026-09-11, after KPA-12 closed (MATHS_AUDIT §9.9). Pinned because the number
@@ -403,12 +405,15 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
         "links_with_divide_on_the_data_edge": sum(
             1 for v in valleys if v["head_on_boundary"]),
         "links_refused_before_the_fit": sum(
-            1 for s in all_skipped if "grade change" not in s),
+            1 for s in all_skipped if "grade change" not in s
+            and YeomansKeylineAnalysis.NOT_EXAMINED not in s),
         "links_refused_no_two_slope_break": sum(
             1 for s in all_skipped if "grade change" in s),
         "keypoints_at_every_valley": len(all_keypoints),
         "keypoints_at_max_valleys_8": len(keypoints),
         "skipped_at_max_valleys_8": len(skipped),
+        "unexamined_at_max_valleys_8": sum(
+            1 for s in skipped if YeomansKeylineAnalysis.NOT_EXAMINED in s),
     }
 
     print("\n    --- keyline network (production path) ---")
@@ -437,10 +442,12 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
         failures.append(
             f"the refusal classes and the keypoints sum to {partition}, not "
             f"{observed['order1_links']} — they are meant to partition the valley set")
-    if len(all_keypoints) + len(all_skipped) != len(valleys):
-        failures.append(
-            f"uncapped, keypoints + skipped = {len(all_keypoints) + len(all_skipped)} "
-            f"against {len(valleys)} valleys (KPA-43's identity)")
+    for label, kps, sk in (("uncapped", all_keypoints, all_skipped),
+                           ("at the cap of 8", keypoints, skipped)):
+        if len(kps) + len(sk) != len(valleys):
+            failures.append(
+                f"{label}, keypoints + skipped = {len(kps) + len(sk)} against "
+                f"{len(valleys)} valleys (KPA-43's identity)")
     if len(keypoints) > 8:
         failures.append(f"{len(keypoints)} keypoints returned against a cap of 8")
 
@@ -461,7 +468,7 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
 #: can differ. Uncapped, the two keypoint sets are identical.
 EXPECTED_KEYLINE_WITH_BASELINE = {
     "keypoints": 8,
-    "skipped": 5,
+    "skipped": 15,                  # 5 refused + 10 not examined at the cap (KPA-43)
     "keypoints_at_every_valley": 10,
     "valleys": 23,
     # The supplied raster must be used *as supplied*. A single differing cell means the
@@ -568,10 +575,12 @@ def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
         "    That gate was an `and` over two paths and the controller supplies one, "
         "which is KPA-48."
     )
-    if len(all_keypoints) + len(all_skipped) != len(valleys):
-        failures.append(
-            f"uncapped, keypoints + skipped = {len(all_keypoints) + len(all_skipped)} "
-            f"against {len(valleys)} valleys (KPA-43's identity, on the supplied field)")
+    for label, kps, sk in (("uncapped", all_keypoints, all_skipped),
+                           ("at the cap of 8", keypoints, skipped)):
+        if len(kps) + len(sk) != len(valleys):
+            failures.append(
+                f"{label}, keypoints + skipped = {len(kps) + len(sk)} against "
+                f"{len(valleys)} valleys (KPA-43's identity, on the supplied field)")
     if pointer_disagreements:
         failures.append(
             f"{pointer_disagreements} pointer(s) differ between the supplied conditioned "

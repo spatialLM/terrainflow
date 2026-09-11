@@ -759,6 +759,8 @@ class YeomansKeylineAnalysis:
     REFUSED_TOO_LITTLE_GROUND = "too little finite ground along the valley"
     REFUSED_NO_BREAK = ("no break in the floor clearing {ease:.0%} of grade change "
                         "(above {above:.1%}, below {below:.1%})")
+    #: Not a refusal: the valley was never looked at because `max_valleys` was reached.
+    NOT_EXAMINED = "not examined"
 
     def find_keypoint(self):
         """The Yeomans keypoint on the largest stream, or ``None``.
@@ -960,7 +962,7 @@ class YeomansKeylineAnalysis:
                                         allowed_flat=allowed)
             cells = ([(int(i // cols), int(i % cols)) for i in above]
                      + [(int(r), int(c)) for r, c in link])
-            kept, start, end, runs_off_m = self._edge_rule(cells)
+            kept, start, end, runs_off_m = self._edge_rule(cells, boundary)
             n_above = len(above)
             extension_cells = max(0, min(end, n_above) - start)
             channel_cells = max(0, end - max(start, n_above))
@@ -991,22 +993,27 @@ class YeomansKeylineAnalysis:
                      reverse=True)
         return valleys
 
-    def _edge_rule(self, cells):
+    def _edge_rule(self, cells, boundary):
         """Trim a valley to the ground the DEM can vouch for.
 
-        One pass from the top. Find the first cell that is not on the grid edge and keep
-        at most one edge cell above it — a divide on the edge stays as the first cell,
-        and a run *along* the edge is trimmed to that one cell, because a pointer path
-        along a boundary row is an artefact of the row having no outside. From there,
-        cut at the first grid-edge cell (kept, as the foot): the valley left the site.
+        *boundary* is :func:`flow_graph.data_boundary_mask`: the grid edge **and** the
+        cells beside nodata. Both are the edge of the data, and both fabricate channels
+        the same way — a boundary cell has no outside for ``d8_from_dem`` to route into,
+        so the pointers run *along* it. Measured on the fixture bounded by a nodata
+        ellipse: three valleys' channels ran entirely along the rim, 6 of 6, 24 of 24
+        and 8 of 8 cells beside nodata, exactly as they run along a grid row.
+
+        One pass from the top. Find the first cell that is not on the boundary and keep
+        at most one boundary cell above it — a divide on the edge stays as the first
+        cell, and a run *along* the edge is trimmed to that one cell. From there, cut at
+        the first boundary cell (kept, as the foot): the valley left the site.
 
         Returns ``(kept, start, end, runs_off_m)`` — the kept cells, their slice of
         *cells*, and how much valley was discarded below the cut.
         """
-        rows, cols = self.dem.shape
 
         def on_edge(rc):
-            return rc[0] == 0 or rc[0] == rows - 1 or rc[1] == 0 or rc[1] == cols - 1
+            return bool(boundary[rc])
 
         first_inside = next((i for i, rc in enumerate(cells) if not on_edge(rc)), None)
         if first_inside is None:
@@ -1060,14 +1067,20 @@ class YeomansKeylineAnalysis:
 
         cell_area = self.cell_w * self.cell_h
         keypoints, skipped = [], []
-        for valley in valleys:
+
+        def _where(valley):
+            return (f"valley from row {valley['divide_rc'][0]}, "
+                    f"col {valley['divide_rc'][1]} ({valley['length_m']:.0f} m: "
+                    f"{valley['channel_cells']} channel cells, "
+                    f"{valley['extension_cells']} above the channel head)")
+
+        first_unexamined = len(valleys)
+        for index, valley in enumerate(valleys):
             if len(keypoints) >= max_valleys:
+                first_unexamined = index
                 break
             cells = valley["cells"]
-            where = (f"valley from row {valley['divide_rc'][0]}, "
-                     f"col {valley['divide_rc'][1]} ({valley['length_m']:.0f} m: "
-                     f"{valley['channel_cells']} channel cells, "
-                     f"{valley['extension_cells']} above the channel head)")
+            where = _where(valley)
             if not valley["channel_on_map"]:
                 skipped.append(
                     f"{where}: runs off the DEM after {valley['length_m']:.0f} m — "
@@ -1105,6 +1118,15 @@ class YeomansKeylineAnalysis:
                 f"({kp['catchment_ha']:.1f} ha in the valley)"
                 + (" (valley head at data edge)" if kp["head_on_boundary"] else ""))
             keypoints.append(kp)
+
+        # The cap used to drop every remaining valley from *both* lists, so the panel
+        # said "5 had no keypoint" over a network of 23 (`KPA-43`). A valley the cap
+        # stopped short of is reported as exactly that, and `keypoints + skipped ==
+        # valleys` holds at every cap. `NOT_EXAMINED` is the marker a caller counts on.
+        for valley in valleys[first_unexamined:]:
+            skipped.append(
+                f"{_where(valley)}: {self.NOT_EXAMINED} — the cap of {max_valleys} "
+                f"keypoint(s) was reached")
 
         return keypoints, skipped
 

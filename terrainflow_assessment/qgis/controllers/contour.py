@@ -1483,9 +1483,21 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         if skipped:
             # Refusals are named, not swallowed — the house style everywhere else here.
-            self._iface.messageBar().pushInfo(
-                "TerrainFlow Assessment",
-                f"{len(skipped)} valley(s) had no keypoint: {skipped[0]}")
+            # A valley the cap stopped short of is not a refusal and is counted apart
+            # (KPA-43): raising "valleys to key" examines it.
+            from terrainflow_assessment.modules.keypoint_analysis import (
+                YeomansKeylineAnalysis,
+            )
+
+            refused = [s for s in skipped if YeomansKeylineAnalysis.NOT_EXAMINED not in s]
+            unexamined = len(skipped) - len(refused)
+            parts = []
+            if refused:
+                parts.append(f"{len(refused)} valley(s) had no keypoint: {refused[0]}")
+            if unexamined:
+                parts.append(f"{unexamined} valley(s) not examined — raise the number "
+                             "of valleys to key")
+            self._iface.messageBar().pushInfo("TerrainFlow Assessment", "; ".join(parts))
 
     def activate_draw_keyline(self):
         """Let the user draw a keyline plough guide freehand, with the live slope

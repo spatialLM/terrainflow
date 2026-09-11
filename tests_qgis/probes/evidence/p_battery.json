@@ -12,7 +12,7 @@
     "Identity, specific catchment area: a(2 m)/a(1 m) = [2, 2]; exactly 2.0: True.",
     "Identity, catchment_ha: no keypoints found, nothing to compare.",
     "Identity, terrace unit chain: site p50 slope 8.062 deg (14.165%); VI 3.2001 m; erosion spacing reported 22.591630 m against VI/grade 22.591630 m (relative error 0.00e+00, holds True). VI at zero slope 0.609600 m against Y=2.0 ft = 0.609600 m: True.",
-    "Conservation, find_keypoints: max_valleys=1: 1 accepted + 0 refused = 1 of 127 links (126 never examined, conserves False); max_valleys=8: 8 accepted + 5 refused = 13 of 127 links (114 never examined, conserves False); max_valleys=127: 10 accepted + 13 refused = 23 of 127 links (104 never examined, conserves False)",
+    "Conservation, find_keypoints: max_valleys=1: 1 accepted + 22 refused = 23 of 127 links (104 never examined, conserves False); max_valleys=8: 8 accepted + 15 refused = 23 of 127 links (104 never examined, conserves False); max_valleys=127: 10 accepted + 13 refused = 23 of 127 links (104 never examined, conserves False)",
     "Conservation, clip_to_usable_area: 10 in -> 5 kept + 5 dropped = 10 (conserves: True)."
   ],
   "stages": {
@@ -125,16 +125,16 @@
       "by_max_valleys": {
         "1": {
           "accepted": 1,
-          "refused": 0,
-          "accounted_for": 1,
-          "unexamined": 126,
+          "refused": 22,
+          "accounted_for": 23,
+          "unexamined": 104,
           "conserves": false
         },
         "8": {
           "accepted": 8,
-          "refused": 5,
-          "accounted_for": 13,
-          "unexamined": 114,
+          "refused": 15,
+          "accounted_for": 23,
+          "unexamined": 104,
           "conserves": false
         },
         "127": {

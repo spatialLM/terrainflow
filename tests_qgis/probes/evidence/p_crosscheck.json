@@ -9,7 +9,7 @@
     "Cross-check, haul volumes: burn_quantities says cut 497.5 m3 / fill 398.8 m3. haul_regions with no floor sums to 497.5 / 398.8 m3 \u2014 relative error 0.00e+00 and 1.43e-16 against a 0.1% bar (passes: True). At the shipped min_region_m3=5 m3 the haul plan omits 0.80 m3 of fill across 8 regions, which the site total still counts.",
     "Cross-check, one stencil: re-deriving slope and aspect from horn_gradient's own output gives max errors 1.907e-06 deg and 1.526e-05 deg, with 0 flat-sentinel disagreements. Against the plan's 1e-12 bar: False. Against float32's own spacing, which is the tightest either return value can carry: True.",
     "Cross-check, flow_bearing vs aspect_degrees: over 2,000 sampled cells the two encodings of the same downslope vector differ by at most 1.513e-05 deg. Against the plan's 1e-06 deg bar: False \u2014 but aspect_degrees returns float32, whose spacing at 360 deg is 3.052e-05 deg, so that bar asks for more precision than the return value carries. Against what it does carry: True. flow_bearing returned None on 0 genuinely flat cells.",
-    "Cross-check, link accounting at 0.20 ha: 127 links emitted at min_cells=3, of which 1 clear the 35 m profile floor (126 cannot yield a keypoint however good the ground). keypoints + skipped = 13; identity against emitted holds: False.",
+    "Cross-check, link accounting at 0.20 ha: 127 links emitted at min_cells=3, of which 1 clear the 35 m profile floor (126 cannot yield a keypoint however good the ground). keypoints + skipped = 23; identity against emitted holds: False.",
     "After the KPA-52 fix, production walks 23 valleys of median 138 m (divide to foot) on one graph, 0 pointers leave the mask, 7 valleys are cut at the data edge and 10 yield a keypoint. The two rows above are kept as the before picture.",
     "Mask routing vs pointer routing at 0.20 ha. Production (D-infinity mask, D8 pointers): 1,688 stream cells -> 127 order-1 links holding only 717 of them, median link 3.4 m, longest 54 m, 1 clearing the 35 m profile floor, and 125 cells whose D8 pointer leaves the mask. Same pointers, mask from the same graph: 684 stream cells -> 13 links holding 630, median 39.8 m, longest 157 m, 7 clearing the floor, 0 leaving the mask. The shattering is the mixture, not the terrain."
   ],
@@ -85,8 +85,8 @@
       "length_m_min": 2.0,
       "length_m_max": 54.0,
       "keypoints": 8,
-      "skipped": 5,
-      "keypoints_plus_skipped": 13,
+      "skipped": 15,
+      "keypoints_plus_skipped": 23,
       "identity_holds": false,
       "passes": false
     },

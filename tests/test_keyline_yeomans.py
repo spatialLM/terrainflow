@@ -588,6 +588,48 @@ class TestPrimaryValleys:
         assert keypoints == []
         assert skipped and "channel begins on the data edge" in skipped[0]
 
+    def test_a_channel_along_a_nodata_rim_is_cut_like_a_grid_edge(self, tmp_path):
+        """Beside nodata a pointer has no outside either, so it runs along the rim."""
+        n = 80
+        r, c = np.mgrid[0:n, 0:n].astype("float64")
+        z = 200.0 - 0.3 * c + 0.5 * np.abs(r - 40)
+        z[:, 76] = 200.0 - 0.3 * 76 - 0.5 * np.arange(n)     # the last valid column falls south
+        z[:, 77:] = -9999.0                                   # nodata beyond it
+        ya = YeomansKeylineAnalysis(_write_dem(str(tmp_path / "rim.tif"), z))
+        valleys = [v for v in ya.primary_valleys() if v["outlet_rc"][1] == 76]
+        assert len(valleys) == 1
+        v = valleys[0]
+        assert v["outlet_rc"] == (40, 76) and v["runs_off_dem_m"] > 0
+        assert sum(1 for _r, col in v["cells"] if col == 76) == 1
+        assert v["channel_on_map"]
+
+    def test_a_saddle_headed_valley_keys_at_the_saddle(self, tmp_path):
+        """'When the saddle is deep the first steep slope of the primary valley may be
+        gone. The Keypoint of such a primary valley is the saddle.' (WFEF p41) — the walk
+        goes over the saddle up the hill beside it, and the two-slope break is the saddle."""
+        n = 120
+        r, c = np.mgrid[0:n, 0:n].astype("float64")
+        ridge = np.clip(200.0 + 6.0 * np.cos((c - 60) / 40.0 * np.pi), 194.0, 206.0)
+        south = ridge[20] - 0.06 * (r - 20)                   # a uniform 6 % floor
+        north = ridge[20] - 0.30 * (20 - r)
+        z = np.where(r >= 20, south, north) + 0.5 * np.abs(c - 60)
+        ya = YeomansKeylineAnalysis(_write_dem(str(tmp_path / "saddle.tif"), z))
+        south_valleys = [v for v in ya.primary_valleys() if v["outlet_rc"][0] == n - 1]
+        assert len(south_valleys) == 1
+        kp = ya.keypoint_on_path(south_valleys[0]["cells"], require_prominence=True)
+        assert kp is not None
+        assert abs(kp["row"] - 20) <= 3 and abs(kp["col"] - 60) <= 1, kp
+        assert kp["grade_above"] > kp["grade_below"]
+
+    def test_valleys_beyond_the_cap_are_reported_as_unexamined(self, tmp_path):
+        """KPA-43: keypoints + skipped == valleys at every cap, and the cap is named."""
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        keypoints, skipped = ya.find_keypoints(max_valleys=1)
+        assert len(keypoints) == 1 and len(skipped) == 1
+        assert ya.NOT_EXAMINED in skipped[0] and "cap of 1" in skipped[0]
+        keypoints, skipped = ya.find_keypoints(max_valleys=8)
+        assert len(keypoints) == 2 and skipped == []
+
     def test_nothing_reaches_the_threshold_says_so(self, tmp_path):
         ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
         assert ya.primary_valleys(stream_threshold_cells=10 ** 6) == []

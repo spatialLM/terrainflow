@@ -297,8 +297,9 @@ def stage_identity(ev, label, ya, dem_label):
         eight = rec["at_max_valleys"]["8"]
         ev.note(
             f"KPA-43 on {dem_label}: at max_valleys=1, keypoints+skipped = "
-            f"{one['sum']} against {one['links']} links "
-            f"({one['unaccounted']} links never examined and never reported); at "
+            f"{one['sum']} against {one['links']} valleys "
+            f"({one['unaccounted']} unaccounted — since KPA-52 closed, a valley the cap "
+            "stops short of is reported as 'not examined', so this should be 0); at "
             f"max_valleys=8, {eight['sum']} against {eight['links']} "
             f"({eight['unaccounted']} unaccounted).")
 

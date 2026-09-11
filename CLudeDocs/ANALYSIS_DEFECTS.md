@@ -2175,18 +2175,30 @@ drains into. On the fixture the extension is 59–168 cells per valley (median 9
 go from 4–157 m to 90–322 m. `stream_links`' `min_cells=3` still applies to the channel
 part only, which is the point: the threshold says which valleys exist, not where they start.
 
-**The data edge** (`flow_graph.data_boundary_mask`, `_edge_rule`). A boundary row has no
-outside for `d8_from_dem` to route into, so its pointers run *along* the row and fabricate
-a channel there — 455 cells on the fixture, and the largest valley had 128 of its 183 m and
-its keypoint on that run. A valley is now **cut at the first grid-edge cell below its
-divide** ("the creek is the lower boundary"; `flow_graph.LABEL_EXIT`), and a leading run
-*along* the edge is trimmed to the divide. A divide on the edge is kept and **flagged**
-(`head_on_boundary`, in the label and the panel summary), not refused: the break may still
-be on the map. A valley whose channel exists **only** on the boundary row — the row's own
-collecting artefact, nothing of it left after the cut but the edge cell — has no channel
-on the map and is refused with that reason (`channel_on_map`). On the fixture that is 5
-valleys, none of which had a keypoint; on the synthetic harness DEM it is the 2 corner
-"valleys" whose channel began on the bottom row.
+**The data edge** (`flow_graph.data_boundary_mask`, `_edge_rule`). A boundary cell has no
+outside for `d8_from_dem` to route into, so its pointers run *along* the boundary and
+fabricate a channel there — 455 cells along the grid edge of the fixture, and the largest
+valley had 128 of its 183 m and its keypoint on that run. The same happens beside
+**nodata**: on the fixture bounded by a nodata ellipse, three valleys' channels ran
+entirely along the rim (6 of 6, 24 of 24 and 8 of 8 cells beside nodata). So the boundary
+is `data_boundary_mask` — the grid edge and the cells beside nodata — and a valley is
+**cut at the first boundary cell below its divide** ("the creek is the lower boundary";
+`flow_graph.LABEL_EXIT`), with a leading run *along* the boundary trimmed to the divide. A
+divide on the boundary is kept and **flagged** (`head_on_boundary`, in the label and the
+panel summary), not refused: the break may still be on the map; on the ellipse-bounded
+fixture that is 1 divide of 14, so the flag is informative rather than noise. A valley
+whose channel exists **only** on the boundary — the boundary's own collecting artefact,
+nothing of it left after the cut but the edge cell — has no channel on the map and is
+refused with that reason (`channel_on_map`). On the fixture that is 5 valleys, none of
+which had a keypoint; on the synthetic harness DEM it is the 2 corner "valleys" whose
+channel began on the bottom row.
+
+**The cap** (`KPA-43`). `find_keypoints` used to stop at `max_valleys` keypoints and drop
+every remaining valley from both lists, so the panel said "5 had no keypoint" over a
+network of 23. A valley the cap stops short of is now reported as **"not examined"**
+(`NOT_EXAMINED`), the panel counts those apart from refusals and says to raise the number
+of valleys to key, and `keypoints + skipped == valleys` holds at every cap — asserted as a
+property in the regression check.
 
 **The criterion** (`keypoint_on_path_with_reason`; `keypoint_on_path` is now a wrapper).
 The keypoint is the break of a **continuous two-slope least-squares fit** to the cell
@@ -2231,7 +2243,7 @@ keypoint dict's keys (`grade_above`, `grade_below`, `channel_cells`, `extension_
 | cut at the data edge / divide on the edge | — | — | — | 7 / 3 |
 | keypoints, uncapped | 1 | 5 | — | **10** |
 | refused: before the fit / no two-slope break | 122 (all reported as "no break") | 67 | — | 5 / 8, each with its reason |
-| at the panel cap of 8 | 1 keyed, 122 refused | — | — | 8 keyed, 5 refused, 10 unexamined (`KPA-43`) |
+| at the panel cap of 8 | 1 keyed, 122 refused | — | — | 8 keyed, 5 refused, 10 reported as not examined |
 
 **Routing independence, the thing `KPA-52` was about.** With a D-infinity baseline and
 with a D8 baseline the keypoint sets are **identical, 10 of 10**, because the valley network
@@ -2283,7 +2295,7 @@ The owner chose the replacement over keeping argmax with a two-slope gate (decis
 | `KPA-38` | open | **closed** — the raw DEM is no longer walked; the conditioned surface is supplied or kept |
 | `KPA-39` | open | **closed** — every refusal names its guard, and the probe checks line against string |
 | `KPA-40` | open | **no longer binds** — the 35 m floor went with the filter; the only length rule is `2·MIN_REACH_CELLS + 1` cells |
-| `KPA-43` | open | **unchanged and now visible** — at the cap of 8, 10 valleys go unexamined; pinned as a count |
+| `KPA-43` | open | **closed** — valleys beyond the cap are reported as "not examined"; `keypoints + skipped == valleys` at every cap, asserted |
 | `KPA-44` | open | **re-established** — on the synthetic DEM 0 of 6 valleys are refused by prominence, not 28 of 28 |
 | `FLG-18`, `FLG-19` | open | **superseded on the production path** — kept in the probes as the before picture |
 | `KPA-27`, `KPA-28`, `KPA-29` (`MATHS_AUDIT`) | OK | **re-expressed** — see `MATHS_AUDIT` §9.10 |
@@ -2293,38 +2305,62 @@ The owner chose the replacement over keeping argmax with a two-slope gate (decis
 `MIN_REACH_CELLS` is declared a **TerrainFlow convention** under §0.3, like the 50 m window
 and `MIN_SLOPE_EASE`.
 
-### §10.6 Left open, on purpose
+### §10.6 What was measured afterwards, and what is still open
 
-- **Saddle-headed valleys.** "When the saddle is deep the first steep slope of the primary
-  valley may be gone. The Keypoint of such a primary valley is the saddle." (p41) A valley
-  with no steep upper reach refuses on prominence; nothing looks for a saddle. Sourced, and
-  not handled.
-- **A nodata-clipped DEM.** The fixture has no nodata. `data_boundary_mask` flags cells
-  beside a hole as well as the outer ring, and the edge cut keys on the grid edge only, so
-  a catchment clipped to its divide by nodata will flag every valley and cut none. The
-  right behaviour there is unmeasured.
+The owner asked whether the items first listed here mattered and whether they could be
+fixed. Each was measured before anything was changed; two became fixes, one became a
+test, and one stays open with a sharper statement.
+
+- **A nodata-clipped DEM — measured, fixed.** The fixture masked to an inscribed ellipse
+  (119,425 finite cells): 14 valleys, 8 keypoints, **1** divide flagged of 14 — so the flag
+  is not noise on a clipped site — and **3 valleys whose channel ran entirely along the
+  nodata rim**, the grid-edge artefact on a different boundary. `_edge_rule` now keys on
+  `data_boundary_mask` (grid edge and cells beside nodata) rather than the grid edge alone;
+  pinned by `test_a_channel_along_a_nodata_rim_is_cut_like_a_grid_edge`. A cell beside an
+  interior hole counts as boundary too, on the same reasoning `landform_tpi` uses: the data
+  stops there. That means a valley floor passing a void is cut at the void — accepted, and
+  said here.
+- **Saddle-headed valleys — measured, already handled in the usual case.** On a synthetic
+  main ridge with two hills and a saddle between them, and a uniform 6 % floor falling
+  from the saddle ("the first steep slope … gone", p41), the walk did not stop at the
+  saddle: the hills drain along the crest into it, so the main stem continues up the hill
+  beside it, the profile is hillside → saddle → floor, and the two-slope break lands **at
+  the saddle** (row 22 against the ridge at row 20). Pinned by
+  `test_a_saddle_headed_valley_keys_at_the_saddle`. The case that is *not* handled is a
+  saddle nothing drains into along the crest — side slopes steeper than the crest — where
+  the walk stops at the saddle and a uniform floor refuses. Narrower than first stated,
+  still open, and still a safe failure.
+- **`KPA-43` — fixed**; see §10.2.
+- **Noise — measured twice, still open, and not what §10.6 first said.** `p_keypoints`'
+  roughness sweep (synthetic correlated roughness 0.05 / 0.10 / 0.25 m on the 2 m harness
+  DEM) yields 71 / 68 / 62 primary valleys of which 67 / 63 / 59 clear the 2 % bar. Two
+  things were then measured about those keypoints. First, **fit quality does not separate
+  them from real ones**: their two-slope-over-one-slope residual ratio is 0.04–0.70 (median
+  0.06–0.16) against the real fixture's 0.01–0.44 (median 0.06), and their F statistic is
+  34–3,448 against the fixture's 168–11,641 — so a residual-based prominence guard would
+  refuse nothing useful, and none was added. Second, **they are not duplicates of the smooth
+  surface's keypoints**: the distance from each rough keypoint to the nearest smooth one is
+  54–322 m (median 175–212 m) and their elevations span 52–109 m against the smooth
+  surface's 60–65 m. So a rough surface yields many keypoints in many places, and whether
+  a designer would call those primary valleys cannot be settled on a synthetic surface. On
+  the real 1 m fixture the method refuses 8 of 18 fitted valleys. What would settle it is a
+  second real rough DEM and a person at the map — the same thing the keyline field
+  walkthrough has needed since the feature was written.
 - **Symmetric duplicates.** The synthetic harness DEM's central valley floor is two cells
   wide at exactly equal height, so it yields two parallel primary valleys and two coincident
   keypoints (cols 149 and 150). A synthetic artefact; real ground does not tie like that.
+  Not a defect.
 - **The ranking field**, decision 4, is a choice with a measured consequence (20 of 23
-  disagree); reversible in one line if the labels prove confusing.
-- **Noise.** `p_keypoints`' roughness sweep (synthetic correlated roughness 0.00 → 0.25 m
-  on the 2 m harness DEM) now reads: primary valleys 6 → 71 → 68 → 62, and valleys clearing
-  the 2 % bar **6 → 68 → 64 → 59**. Before, the 35 m floor refused every noise fragment and
-  nothing cleared the bar at any roughness; now every fragment reaches its divide and is
-  fitted, and a two-slope fit to a noisy profile usually finds *some* break easing by 2 %.
-  Whether those are valleys or noise is exactly §9.7's worry, unmeasured on real ground
-  (the fixture refuses 8 of 18 fitted valleys, so it is not accepting everything). The
-  natural next guard is a prominence stated against the fit's own residual — a two-slope
-  model has to explain the profile *better* than one slope by a margin — which is a
-  `MIN_SLOPE_EASE`-class convention and an owner decision, not a quiet tweak.
+  disagree); reversible in one line if the labels prove confusing. Not a defect.
 
 ### §10.7 Suites
 
-Pure suite **2,928 passed** (2,897 before; the new tests cover `accumulate`,
+Pure suite **2,931 passed** (2,897 before; the new tests cover `accumulate`,
 `main_stem_to_divide`, `data_boundary_mask`, the divide extension, both halves of the edge
-rule, the channel-on-map refusal, the two-slope fit against a least-squares oracle, the
-convex and uniform refusals, nodata handling, and the supplied conditioned surface).
+rule on the grid edge and on a nodata rim, the channel-on-map refusal, the saddle-headed
+valley, the cap's "not examined" accounting, the two-slope fit against a least-squares
+oracle, the convex and uniform refusals, nodata handling, and the supplied conditioned
+surface).
 `checks_fixture_regression` re-recorded — `EXPECTED_KEYLINE` and
 `EXPECTED_KEYLINE_WITH_BASELINE` — and now asserts zero mask-leaving pointers and the
 uncapped `keypoints + skipped == valleys` identity as properties; `checks_contour`'s

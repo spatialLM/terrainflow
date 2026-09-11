@@ -12,13 +12,13 @@
   ],
   "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
   "notes": [
-    "KPA-39 on real fixture (1 m, Quail Island): 23 primary valleys at 0.20 ha; 13 refused, of which 13 by the prominence test (by line) and 13 (by the reason string) \u2014 agree. Breakdown: 13x :854 (the prominence test)",
-    "KPA-43 on real fixture (1 m, Quail Island): at max_valleys=1, keypoints+skipped = 1 against 23 links (22 links never examined and never reported); at max_valleys=8, 13 against 23 (10 unaccounted).",
+    "KPA-39 on real fixture (1 m, Quail Island): 23 primary valleys at 0.20 ha; 13 refused, of which 13 by the prominence test (by line) and 13 (by the reason string) \u2014 agree. Breakdown: 13x :856 (the prominence test)",
+    "KPA-43 on real fixture (1 m, Quail Island): at max_valleys=1, keypoints+skipped = 23 against 23 valleys (0 unaccounted \u2014 since KPA-52 closed, a valley the cap stops short of is reported as 'not examined', so this should be 0); at max_valleys=8, 23 against 23 (0 unaccounted).",
     "KPA-40 on real fixture (1 m): the shortest axis-aligned valley that can yield a keypoint is 7 cells = 6.0 m (predicted 2 * MIN_REACH_CELLS + 1 = 7 cells). There is no metric floor any more: once a valley starts at its divide it is tens of cells long before it is a channel at all.",
     "KPA-41, measured: the steepest 20 m window on valley_guide at offset -15.0 m runs 1:5.5, while _run_record reports its net drift as 1:None and over_limit True. Understatement factor nanx.",
     "KPA-42, measured: 3 of 7 guides carry vertices whose Z is _sample_dem's default (the keypoint elevation) rather than sampled ground \u2014 valley_guide@-5.0m: 11/826; valley_guide@-10.0m: 24/823; valley_guide@-15.0m: 41/821. A guide whose net fall is computed between two fabricated ends reports a drift that is an artefact of the default, not of terrain.",
     "KPA-39 on default harness DEM (2 m, 36 ha): 6 primary valleys at 0.20 ha; 0 refused, of which 0 by the prominence test (by line) and 0 (by the reason string) \u2014 agree. Breakdown: ",
-    "KPA-43 on default harness DEM (2 m, 36 ha): at max_valleys=1, keypoints+skipped = 1 against 6 links (5 links never examined and never reported); at max_valleys=8, 6 against 6 (0 unaccounted).",
+    "KPA-43 on default harness DEM (2 m, 36 ha): at max_valleys=1, keypoints+skipped = 6 against 6 valleys (0 unaccounted \u2014 since KPA-52 closed, a valley the cap stops short of is reported as 'not examined', so this should be 0); at max_valleys=8, 6 against 6 (0 unaccounted).",
     "KPA-40 on default harness DEM (2 m): the shortest axis-aligned valley that can yield a keypoint is 7 cells = 12.0 m (predicted 2 * MIN_REACH_CELLS + 1 = 7 cells). There is no metric floor any more: once a valley starts at its divide it is tens of cells long before it is a channel at all.",
     "Window sizing (a TerrainFlow convention, sized on SYNTHETIC correlated roughness \u2014 no published source supplies one): spreads across roughness_m 0.00-0.10 on the trunk keyline are 10m 0.0206 (1.03x MIN_SLOPE_EASE); 20m 0.0115 (0.57x MIN_SLOPE_EASE); 50m 0.0111 (0.56x MIN_SLOPE_EASE). Shortest window whose spread stays under MIN_SLOPE_EASE: 20m.",
     "Roughness sweep, roughness_m 0.00 -> 0.25: primary valleys 6 -> 71 -> 68 -> 62; valleys the fit could be run on 6 -> 71 -> 68 -> 62; valleys clearing the 2% bar 6 -> 68 -> 64 -> 59. (Before KPA-52 closed, noise shattered the channel network into stubs that the 35 m floor refused, so nothing cleared the bar at any roughness; the floor is gone and every valley is fitted, so the third series is now the one that says whether noise fabricates keypoints.)"
@@ -35,7 +35,7 @@
         "returned_none": 13,
         "returned_keypoint": 10,
         "by_line": {
-          "854": {
+          "856": {
             "count": 13,
             "test": "require_prominence and slope_ease < self.MIN_SLOPE_EASE",
             "guard": "the prominence test"
@@ -46,13 +46,13 @@
         "no break in the floor clearing 2% of grade change": 13
       },
       "source_lines_seen": {
-        "854": "            return None, self.REFUSED_NO_BREAK.format("
+        "856": "            return None, self.REFUSED_NO_BREAK.format("
       },
       "guard_lines_derived": {
-        "830": "thalweg is None or len(thalweg) < 2 * reach + 1",
-        "838": "arc_all[-1] <= 0",
-        "848": "len(arc) < 2 * reach + 1",
-        "854": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
+        "832": "thalweg is None or len(thalweg) < 2 * reach + 1",
+        "840": "arc_all[-1] <= 0",
+        "850": "len(arc) < 2 * reach + 1",
+        "856": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
       "refusals_from_prominence_by_line": 13,
       "refusals_from_prominence_by_reason_string": 13,
@@ -66,19 +66,19 @@
       "at_max_valleys": {
         "1": {
           "keypoints": 1,
-          "skipped": 0,
-          "sum": 1,
+          "skipped": 22,
+          "sum": 23,
           "links": 23,
-          "unaccounted": 22,
-          "identity_holds": false
+          "unaccounted": 0,
+          "identity_holds": true
         },
         "8": {
           "keypoints": 8,
-          "skipped": 5,
-          "sum": 13,
+          "skipped": 15,
+          "sum": 23,
           "links": 23,
-          "unaccounted": 10,
-          "identity_holds": false
+          "unaccounted": 0,
+          "identity_holds": true
         }
       }
     },
@@ -380,10 +380,10 @@
       "reasons_returned": {},
       "source_lines_seen": {},
       "guard_lines_derived": {
-        "830": "thalweg is None or len(thalweg) < 2 * reach + 1",
-        "838": "arc_all[-1] <= 0",
-        "848": "len(arc) < 2 * reach + 1",
-        "854": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
+        "832": "thalweg is None or len(thalweg) < 2 * reach + 1",
+        "840": "arc_all[-1] <= 0",
+        "850": "len(arc) < 2 * reach + 1",
+        "856": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
       "refusals_from_prominence_by_line": 0,
       "refusals_from_prominence_by_reason_string": 0,
@@ -397,11 +397,11 @@
       "at_max_valleys": {
         "1": {
           "keypoints": 1,
-          "skipped": 0,
-          "sum": 1,
+          "skipped": 5,
+          "sum": 6,
           "links": 6,
-          "unaccounted": 5,
-          "identity_holds": false
+          "unaccounted": 0,
+          "identity_holds": true
         },
         "8": {
           "keypoints": 4,

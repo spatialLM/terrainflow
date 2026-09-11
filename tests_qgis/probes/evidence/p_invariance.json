@@ -11,7 +11,7 @@
     "Z+600 terrain indices after the float32 cast production performs: worst max |delta| 2.248e-03 (slope 2.248e-03 deg; aspect 3.066e+00 deg around the compass over 158,869 cells). Cells the offset turns into the -1 flat sentinel: 0; cells it un-flattens: 0.",
     "Z+600 flow graph on float64: 0 pointer disagreements, sinks 525 vs 525, order-1 links 13 vs 13.",
     "Z+600 through the keyline tier's own float32 conditioning: sinks on the conditioned surface 65 at base vs 65 at +600 m (+0), while 15,622 distinct elevation levels are quantised away. resolve_flats_safely chose eps 5.995e-06 m at base and 6.539e-06 m at +600 m, with 0 and 0 residual inversions. The mechanism save_result warns about is present in this path; on this site it costs resolution without costing pointers.",
-    "Z+600 keypoints through the production call: 8 found at base, 8 lifted; positions identical; skipped 5 vs 5.",
+    "Z+600 keypoints through the production call: 8 found at base, 8 lifted; positions identical; skipped 15 vs 15.",
     "Mirror, terrain indices: slope 0.000e+00, plan 0.000e+00, profile 0.000e+00, tpi 3.638e-12, dz_dx_negated 0.000e+00, dz_dy_unchanged 0.000e+00, aspect_reflected 1.526e-05",
     "Mirror, flow graph: 31 pointer disagreements, of which 31 are exact steepness ties (expected: scan order reverses under a flip) and 0 are not. Sinks 525 vs 525; order-1 links 13 vs 13.",
     "Mirror, keypoints: 8 base -> 8 mirrored; positions mirror: False.",
@@ -266,8 +266,8 @@
           662.9
         ]
       ],
-      "skipped_base": 5,
-      "skipped_lifted": 5,
+      "skipped_base": 15,
+      "skipped_lifted": 15,
       "positions_identical": true,
       "elevation_deltas": [
         600.0,
@@ -442,8 +442,8 @@
           62.8
         ]
       ],
-      "skipped_base": 5,
-      "skipped_mirrored": 5,
+      "skipped_base": 15,
+      "skipped_mirrored": 15,
       "expected_positions": [
         [
           26,
