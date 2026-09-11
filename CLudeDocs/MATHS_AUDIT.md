@@ -732,7 +732,14 @@ verifier. Resume list, grouped by the source that would resolve them:
   ~~EWD-05 freeboard~~ **RESOLVED** ([NRCS378]: code is half the 0.30 m minimum).
   Still blocked: EWD-06/08/09/11 head-band corroboration, EWD-29, REG-01..06, ADV-01.
 - ~~CAT-13/15 Lancaster~~ **RESOLVED** (ranges match; Sonoran-relabel caveat).
-  Still blocked: PKF-02, SWL-01, SIM-01/02, PRM-07, KPA-09/29/31 (Yeomans/FAO).
+  ~~KPA-09/29/31 (Yeomans/FAO)~~ **RESOLVED 2026-09-11** — [YEO-WFEF] and [YEO-MKIV]
+  fetched and read (§7), and the reading is recorded in §9.8. `KPA-29` is **sourced**
+  (Yeomans defines the keypoint qualitatively, and the code's criterion is that
+  definition); `KPA-31` moves to **UNVER (no locatable published source)** — the texts
+  define drift *directionally* and give no tolerance, grade or sampling length;
+  `KPA-09` moves to **UNVER design constant**, below, which it always belonged in
+  because it is self-described as *not* strict Yeomans.
+  Still blocked: PKF-02, SWL-01, SIM-01/02, PRM-07.
 - ~~IDF-07 / PKF-05 method statement~~ **ADJUDICATED** (code correct). Still
   blocked: PKF-07 attenuation refs, IDF-01/02/06 HIRDS corroboration.
 - **pysheds / Tarboton / O'Callaghan-Mark / rasterio / GDAL docs (still blocked):**
@@ -747,8 +754,9 @@ verifier. Resume list, grouped by the source that would resolve them:
 
 **UNVER (no publishable source exists — design constants):** FLA-04/11/23, CAT-01/09/14,
 WBL-05, PKF-03, TOC-08, SWL-13/15, EWD-01/03/14/40/45/54, BRN-06, CTA-16/17/18/21/22/25,
-KPA-06/08/10/17/18/27, FLL-01/13, RPT-01/04/09/22, ADV-02. These are project decisions;
-the audit records them so they are chosen knowingly, not silently.
+KPA-06/08/09/10/17/18/27/31, FLL-01/13, RPT-01/04/09/22, ADV-02. These are project
+decisions; the audit records them so they are chosen knowingly, not silently.
+(`KPA-09` and `KPA-31` added 2026-09-11 — see §9.8.)
 
 ---
 
@@ -800,6 +808,9 @@ section in the assembling session's records; the load-bearing results:
 | [TAUDEM] | TauDEM 5 "D-Infinity Flow Directions" (Tarboton 1997 convention) | hydrology.usu.edu/taudem/taudem5/help53/DInfinityFlowDirections.html | FLA-19 |
 | [PYSHEDS] | pysheds README (default dirmap, dinf) | github.com/mdbartos/pysheds | FLA-20 |
 | [JENNESS] | Jenness (2006) TPI documentation v1.2, citing Weiss (2001) | jennessent.com/downloads/TPI_Documentation_online.pdf | KPA-12 |
+| [YEO-WFEF] | Yeomans, K. B. & Yeomans, P. A. (dec.), *Water for Every Farm — Yeomans Keyline Plan*, ISBN 1438225784 / EAN-13 9781438225784. The edition's own front matter records the material as first published by P. A. Yeomans in 1954 (*The Keyline Plan*), 1958 (*The Challenge of Landscape*), 1964 and 1968 (*Water for Every Farm*), 1971 (*The City Forest*). Full 368-page PDF **fetched and text-extracted 2026-09-11**; the Keyline pattern-cultivation chapter and the channel-construction chapter read in full | cheiodasideia.libertar.org/wp-content/uploads/2022/11/Water-for-Every-Farm-Yeomans-Keyline-Plan-Ken-B.-Yeomans-P.A.dec_.-Yeomans.pdf | KPA-29, KPA-31, KPA-49 |
+| [YEO-MKIV] | Yeomans, *Keyline Design Mark IV — "Soil, Water & Carbon for Every Farm"*, 14-page article PDF hosted by Agricultural Water Stewardship. **Fetched and read in full 2026-09-11** | agwaterstewards.org/wp-content/uploads/2016/08/KeylineArticle.pdf | KPA-29, KPA-31 |
+| [OWNER-2026-09-11] | **Repo owner's domain ruling, 2026-09-11 — an owner attestation, not a fetched source**, and keyed separately so it can never be counted as one. *"Yeomans publishes no drift statistic. Drift is defined directionally… No tolerance, no grade, no sampling length is given. The only Yeomans number is for graded channels: diversion/catchment drains at a fall of 1:400 or flatter — a minimum useful fall for conveyance without scour, opposite in sign to a maximum tolerance. Do not re-express `max_grade_n` against it."* §7's rule is *sources actually fetched and read*, so this row **grounds nothing on its own**. [YEO-WFEF] and [YEO-MKIV] were fetched precisely to establish the same absence independently, and they do — see §9.8. The ruling is recorded because it prompted the fetch and because it is the reading the fetched texts bear out | — | KPA-31 (corroboration only) |
 | [CODE] | Code re-read during this audit (inventory agents' verbatim excerpts + assembling session reads) | — | MAIN rows |
 | [SI] | Definitional unit conversions (SI/metric definitions; international ft/in definitions are exact per the 1959 agreement) | — | conversion rows |
 
@@ -808,6 +819,13 @@ Colorado State CIVE-401 notes (403); nrcs.usda.gov TR-55 mirror (timeout — hyd
 mirror used instead). A directly quotable reproduction of Chow Table 2-1 was not
 obtained; the trapezoid elements were verified against [NASH]'s printed formulas and
 worked example plus [TR55]'s r = a/p_w instead.
+
+**Failed fetches, 2026-09-11 Yeomans pass:** yeomansplow.com.au
+"Yeomans Keyline Systems Explained" — 301 to yeomansplow.com, which then returned
+**403 Forbidden** to an automated fetch; the page is therefore *not* cited, and
+[YEO-MKIV] and [YEO-WFEF] carry KPA-29/31 on their own. A Soil and Health Library copy
+of the 1954 *Keyline Plan* was not needed once [YEO-WFEF]'s front matter was read, since
+that edition states its own descent from the 1954 text.
 
 ---
 
@@ -968,3 +986,103 @@ reload a saved design.
 unverified by pytest — **it wants a manual smoke test in QGIS**: check the combo
 appears under Soil Type, that changing it moves the CN spinner (Loam: 61 → 69 → 79),
 and that a save / reopen restores the choice.
+
+### §9.8 Yeomans source question closed; three §5 rows resolved (2026-09-11)
+
+The `KPA-09/29/31` group had sat at `UNVER-B` since the audit was assembled, listed in §5
+under *"Yeomans/FAO"* — a blocked group, not an answered question. It is now answered, and
+the answer closes all three. **Verdicts only; §1 and §2 rows stay as written, per the
+convention at §0.**
+
+**How it was settled.** The repo owner ruled that Yeomans publishes no drift statistic
+(recorded as `[OWNER-2026-09-11]`). An owner attestation is not grounds under §7's rule —
+*sources actually fetched and read* — and `ADV-02` is the standing precedent for how an
+absence gets established here: fetch the named texts and record what the named chapters
+lack. So two Yeomans texts were fetched and read ([YEO-WFEF], 368 pp.; [YEO-MKIV], 14 pp.),
+and they establish the same absence independently. The attestation corroborates; it does
+not carry the row.
+
+**What the texts say.**
+
+- **The keypoint is defined, qualitatively — this sources `KPA-29`.** [YEO-WFEF]: Yeomans
+  "discovered that a contour line, that ran through **that point of a valley, where the
+  steepness of the valley floor suddenly increased**, had unique properties… He named this
+  contour 'The Keyline'." [YEO-MKIV]: "On a contour map, the Keypoint is apparent, because
+  **the contour lines are closer together above it, and further apart below it**." The
+  code's criterion — the strongest easing of the long profile, `argmax d²E/ds²` — *is* that
+  definition expressed numerically, so `KPA-29` moves `UNVER-B → OK (sourced)`. What
+  remains unsourced is not the criterion but the **prominence threshold** applied to it
+  (`MIN_SLOPE_EASE = 0.02`), which is `KPA-49`'s subject in `ANALYSIS_DEFECTS.md`, not
+  `KPA-29`'s.
+- **Drift is defined directionally, with no number — this resolves `KPA-31`.** [YEO-WFEF]:
+  "**any cultivation which is done parallel to any contour line marked in on the land
+  surface, must inevitably drift off the true contour as the cultivation continues.** This
+  fact is used as a **device** in 'Keyline pattern cultivation' to alter the natural flow
+  pattern of water… and indeed to 'drift' the early flow of run-off rainfall **in whichever
+  direction the operator desires it to go**." [YEO-MKIV]: "Water will drift from the valley
+  shapes toward the ridges." No tolerance, no maximum grade and no sampling length appears
+  in either text. Drift is the **mechanism the method relies on**, not an error to be
+  bounded. `KPA-31` moves `UNVER-B → UNVER (no locatable published source)` and leaves §5's
+  blocked list for §5's design-constant list.
+- **Every Yeomans number is a channel fall, and every one is a minimum.** [YEO-WFEF]: "The
+  gradient is usually 1 in 300"; "1 in 300 has been found **as steep as is necessary** in
+  almost…"; "fall to 1 in 400 or to 1 in 600 to gain the critical height". [YEO-MKIV]:
+  "slopes at 1:400+"; "These channels have to have **a fall of at least 1:300**." These
+  describe constructed diversion and irrigation channels and state the **least** fall that
+  will convey without scour — the opposite role from a maximum tolerance. The owner's
+  instruction not to re-express `max_grade_n` against 1:400 is therefore correct on the
+  texts as well as on the ruling.
+
+**One thing the ruling did not have, found by reading the book.** *1 in 500 does occur in
+Yeomans* — [YEO-WFEF], describing a channel in flat country: "According to circumstances,
+**its rate of fall may be anything from 1 in 500 to 1 in 5,000**." It is a channel's rate of
+fall, not a drift tolerance, so it does **not** source the repo's `1/500`
+(`keypoint_analysis.py:822`, `panel.py:1269`, `project_io.py:124`) — but the coincidence
+turns the labelling job from tidy to urgent. A reader who goes looking will find 1:500 in
+Yeomans and may reasonably conclude the constant is attributed. It is not. See `KPA-49` in
+`ANALYSIS_DEFECTS.md`.
+
+- `KPA-09` (the `DrainageLineAnalysis` proxy score `acc/(slope+1)`, now at
+  `keypoint_analysis.py:230`) never needed a Yeomans source at all: its own docstring
+  (`:170`) says it is *"a heuristic proxy, not the strict Yeomans keypoint"*. It moves
+  `UNVER-B → UNVER` design constant.
+
+**Not closed by this pass.** `PKF-02`, `SWL-01`, `SIM-01/02` and `PRM-07` remain blocked;
+they were grouped with the Yeomans rows in §5 by the source assignment, not by subject.
+
+---
+
+## §10 Line-number mapping appendix (2026-09-11)
+
+`§2.20`'s line citations were written against `keypoint_analysis.py` as it stood before the
+2026-09-10 analysis-tier rebuild (`1089c3a`…`d40a2c0`). The rebuild moved every function in
+that file and the rows were never re-anchored, so **every citation into §2.20 currently
+points at the wrong code**. Per the §0 convention the rows themselves are left as written;
+this appendix is the old→new map.
+
+Only the rows that `CLudeDocs/ANALYSIS_DEFECTS.md` cross-references are mapped. Remapping
+all 42 would be make-work, and a stale citation nobody follows costs nothing.
+
+| Row | §2.20 says | Now at (HEAD `c288a6a`) | Subject |
+|---|---|---|---|
+| `KPA-03` | `44-47` | `keypoint_analysis.py:107-117` | `DrainageLineAnalysis._rc_to_xy` — **and already fixed**: the half-cell offset now follows `transform.e` downward, and the docstring records the fault. §9.2/§9.5 closed this; the §2.20 row still reads "pending confirm" only because remediation was appended rather than the row edited |
+| `KPA-09` | `151-153` | `keypoint_analysis.py:230` | `score = acc / (slope_safe + 1.0)`; the "heuristic proxy, not the strict Yeomans keypoint" docstring is `:170` |
+| `KPA-25` | `516-521` | `keypoint_analysis.py:642` | `find_keypoint` — the single-stem walk, still present, now reached only through `contour.py:1402`'s fallback |
+| `KPA-26` | `526-535` | `keypoint_analysis.py:676-690` | arc length via mean cell size. The NaN→0.0 m half was re-filed as `NEW-W8-01` and **fixed**: `:676-690` now drops non-finite cells and bridges by interpolation rather than substituting 0.0 m |
+| `KPA-27` | `537-541` | `keypoint_analysis.py:699-702` | resample at `min(5·cell, 10 m)` |
+| `KPA-28` | `543-548` | `keypoint_analysis.py:704-710` | savgol 20 % window, poly 3 |
+| `KPA-29` | `550-556` | `keypoint_analysis.py:712-727` | `argmax d²E/ds²`, and the guard band around it |
+| `KPA-31` | `573-647` | `keypoint_analysis.py:822` | `get_cultivation_runs`. `cross_grade` is now a `DeprecationWarning` (`:841-846`) and `max_grade_n` is the threshold |
+| `KPA-33` | `676-692` | `keypoint_analysis.py:970` | `_fallback_keyline` |
+| `KPA-35` | `725-744` | `keypoint_analysis.py:1076-1099` | `_sample_z` / `_sample_dem`. **Superseded by `KPA-42`** in `ANALYSIS_DEFECTS.md` |
+| `FLG-06` | `flow_graph.py:107-119` | `flow_graph.py:101-104` | `d8_from_dem`'s precondition — *"*dem* should be hydrologically conditioned… the pointer graph is acyclic and every interior cell reaches the boundary"*. `KPA-38` withdraws the warrant this row's published `OK` rests on: the only production caller passes the **raw** DEM |
+| `UNI-15` / `KPA-03`-vs-`KPA-24` | §3 convention rows | — | **CLOSED, not open.** §9.2 and §9.5 record `KPA-03` fixed and *"Closes UNI-15's two-versions row"*. The one residue with no remediation entry is the `int()` truncation across ~7 sites |
+| `ADV-02` | `:430` | unchanged | Already covers the unsourced soil-keyed maximum-grade table. The diversion-gradient default is `EWD-14`'s, not a new row |
+| `EWD-14` | `:492` | unchanged | Already covers the 1.0 % diversion gradient default. The residual is an **attribution note** only: `CHANNEL_GRADIENT` calls 1.0 % the *"standard design gradient"* with no cited authority |
+| `SWL-17` | §1 #27 | unchanged | The precedent for filing a controller defect under the module whose contract is the subject. `SWL-22` follows it |
+
+**One pre-existing inconsistency, found while surveying the severity scale and unrelated to
+this campaign.** `EWD-05` is `H` in §1 (`:109`) and `M` in §2.16 (`:483`). With `Dir = U`,
+§0's escalator — *"anything that can under-size in a production sizing path ranks ≥ H"* —
+makes `H` correct, so the §2.16 `M` is the error. Recorded here rather than edited, per the
+same convention.
