@@ -1832,7 +1832,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
     @staticmethod
     def _clear_measured_levels(ew):
         """Drop the measured level, curve, brim volume and sill depth, for when there
-        is none."""
+        is none.
+
+        The containment family only. Its five callers are all "this measurement is
+        unavailable" cases — no DEM, a flood that threw, a dam with no spillway — and
+        each of them must keep what the *site* burn measured, which is a different
+        pass and still valid. For "the terrain itself changed", which invalidates
+        both, see ``Earthwork.clear_terrain_measurements``.
+        """
         ew.terrain_spill_level_m = None
         ew.stage_storage = None
         ew.containment_capacity_m3 = None

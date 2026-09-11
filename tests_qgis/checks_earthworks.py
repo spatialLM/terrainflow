@@ -2774,3 +2774,73 @@ def check_a_basin_ignores_a_width_standard(dem_path):
             )
     finally:
         _set_standard(previous)
+
+
+def check_a_dem_swap_drops_the_measured_containment_level(dem_path):
+    """Per-feature terrain measurements live on the `Earthwork` objects, not on
+    `PluginState`, so `invalidate_results()` never reached them — it clears state
+    attributes and nothing else. The design-file Open path re-measured afterwards
+    and was covered by accident; the DEM picker did not and was not.
+
+    The consequence is not merely a stale number. `_spillway_datums` *prefers*
+    `terrain_spill_level_m` as the containment ceiling, so after a swap the lip and
+    the invert come off the new terrain while the ceiling comes off the old one —
+    and the dialog labels that mixture "measured".
+
+    The clip overlaps the fixture exactly, so a level that survives is surviving
+    because nothing cleared it, not because the two terrains agree. Sits beside the
+    in-session checks above, which pin the opposite: a crest move must *not* discard
+    these.
+    """
+    from qgis.core import QgsProject, QgsRasterLayer
+
+    from _harness import cropped_dem
+    from terrainflow_assessment.modules.earthwork_design import (
+        CONTAINMENT_LIP,
+        CONTAINMENT_MEASURED,
+    )
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        # A swale with a companion berm, because the containment preference only
+        # bites on a feature that holds water *above* natural ground: a plain basin
+        # spills at its own ring minimum, so the measured level equals the lip and
+        # `_spillway_datums` correctly reports the lip either way. The bermed swale
+        # is the case the method's docstring is written about.
+        ew = h.add_earthwork("swale", geometry=line_across_valley())
+        ew.companion_berm = True
+        controller._refresh_terrain_capacity(ew, quiet=True)
+        h.assert_no_errors("terrain capacity")
+
+        assert ew.terrain_spill_level_m is not None, (
+            "the fixture was never measured, so the claim cannot be tested")
+        assert ew.terrain_capacity_m3, "no measured capacity either"
+        before = controller._spillway_datums(
+            ew.geometry, ew.type, top_width_m=ew.width, depth=ew.depth, ew=ew)
+        assert before[3] == CONTAINMENT_MEASURED, (
+            f"the containment source is {before[3]!r}, not the measured level — "
+            f"the preference under test is not being exercised")
+
+        clip = cropped_dem(dem_path, os.path.join(h.state.output_dir, "clipped_dem.tif"))
+        layer = QgsRasterLayer(clip, "Clipped DEM")
+        assert layer.isValid(), "the clipped DEM did not load"
+        QgsProject.instance().addMapLayer(layer)
+        h.panel.dem_changed.emit(layer)
+        h.assert_no_errors("DEM swap")
+
+        assert h.state.dem_info.width == 200, (
+            "the picker did not adopt the clip, so no grid move happened")
+        assert ew.terrain_spill_level_m is None, (
+            "a spill level measured on the previous terrain survived the swap and is "
+            "still the containment ceiling")
+        assert ew.terrain_capacity_m3 is None, (
+            "the measured capacity survived the swap")
+        assert ew.excavation_m3 is None, "the measured excavation survived the swap"
+        assert ew.stage_storage is None, "the stage-storage curve survived the swap"
+
+        after = controller._spillway_datums(
+            ew.geometry, ew.type, top_width_m=ew.width, depth=ew.depth, ew=ew)
+        assert after[3] == CONTAINMENT_LIP, (
+            f"the containment source is {after[3]!r} after the terrain changed; with "
+            f"nothing measured against the new grid it has to fall back to the lip")

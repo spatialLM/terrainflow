@@ -151,7 +151,11 @@ class PluginState:
 
     # ------------------------------------------------------------------ Keypoint analysis
     found_keypoints: list | None = None
-    keyline_analysis: Any | None = None
+    # `keyline_analysis` was here, holding a whole `DrainageLineAnalysis` — DEM,
+    # accumulation and pond arrays, ~70 MB on the reference tile — written once by
+    # `_on_keypoints_ready` and read by nothing. Its comment said it was "held for
+    # Recommend Pond Sites"; `_rank_pond_sites` re-opens both rasters from disk and
+    # always has.
     keyline_layer_id: str | None = None
     drawn_keyline_layer_id: str | None = None
     # The rest of the keypoint group. These used to be found and removed by
@@ -286,3 +290,33 @@ class PluginState:
         self.spillway_context = None
         self.modified_dem_path = None
         self.pond_context = None
+
+        # Five more results that are just as terrain-derived and were surviving the
+        # swap. `ponding_raster_path` is the sharpest: "Query Depression / Ponding"
+        # gates only on the path being set, so after a swap it read the *old* DEM's
+        # raster at the *new* grid's coordinates and answered confidently.
+        # `found_keypoints` carries row/col into `_rank_pond_sites`, which indexes the
+        # new DEM at them with no bounds check. `haul_plan` and `pond_sites` are
+        # tidiness rather than defects — nothing reaches a stale haul plan, because
+        # `report_model._earthmoving` returns [] when `burn_quantities` is None and
+        # that is nulled above — but a terrain result that outlives its terrain has no
+        # business being kept either way.
+        self.ponding_raster_path = None
+        self.haul_plan = None
+        self.found_keypoints = None
+        self.pond_sites = []
+
+        # The per-feature half of the same event. These live on the `Earthwork`
+        # objects, not here, which is the whole reason they survived: this method
+        # clears state attributes and nothing else reached across to them. The design
+        # file's Open path re-measured afterwards and so was covered by accident; the
+        # DEM picker did not re-measure and was not covered at all.
+        #
+        # Visible consequence, and correct: after a picker swap the Live Assessment
+        # drops to the drawn basis (`_drawn_basis_balance` gates on
+        # `terrain_capacity_m3`) until Verify or an edit re-measures. That is the
+        # honest reading — nothing has measured the new terrain yet.
+        manager = self.earthwork_manager
+        if manager is not None:
+            for ew in manager.get_all():
+                ew.clear_terrain_measurements()

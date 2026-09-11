@@ -1374,6 +1374,44 @@ class Earthwork:
     def width(self, value):
         self.top_width_m = value
 
+    def clear_terrain_measurements(self):
+        """Drop every figure measured off a DEM. Call when the terrain changes.
+
+        These are the fields ``__init__`` declares as *derived and never serialised*,
+        and the reason each gives for not being serialised — "a terrain number cached
+        in a project file outlives the terrain that produced it" — is exactly as true
+        of one cached on a live object across a DEM swap. ``invalidate_results()``
+        clears the state-side results but cannot reach these, because they live on the
+        ``Earthwork`` objects rather than on ``PluginState``; the design-file Open path
+        re-measured afterwards and so was covered by accident, the DEM picker did not
+        and was not. The visible symptom was `_spillway_datums` preferring
+        ``terrain_spill_level_m`` — measured on the *old* terrain — as the containment
+        ceiling, and the dialog labelling it "measured".
+
+        Listed here rather than in the controller because this is where the fields are
+        declared: a tenth derived field added above should be added here, and reading
+        both lists side by side is what makes that obvious. Distinct from
+        ``EarthworksController._clear_measured_levels``, which nulls the four
+        *containment* fields for the narrower "there is no measurement" case and is
+        called from five places that must keep the rest.
+        """
+        # The containment family: level, curve, brim volume, sill depth.
+        self.terrain_spill_level_m = None
+        self.stage_storage = None
+        self.containment_capacity_m3 = None
+        self.measured_sill_depth_m = None
+        # What the isolated flood measured: the pond, its diagnostics, and the dig.
+        self.terrain_capacity_m3 = None
+        self.impounded_above_ground_m3 = None
+        self.retained_depth_m = None
+        self.excavation_m3 = None
+        # What the *site* burn measured: the companion berm as built, and the two
+        # spillway levels read off the burned surface.
+        self.berm_crest_elevation = None
+        self.berm_height_m = None
+        self.burned_sill_elevation_m = None
+        self.actual_spill_level_m = None
+
     def type_label(self):
         try:
             return get_type(self.type).label

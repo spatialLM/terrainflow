@@ -201,3 +201,56 @@ def check_an_unwritable_area_layer_says_so(dem_path):
         assert path is None, f"a failed write reported success: {path}"
         assert any("could not save" in text.lower() for _, _, text in h.bar.messages), (
             f"the failed write was silent: {h.bar.messages}")
+
+
+def check_a_dem_swap_clears_the_terrain_results_it_invalidates(dem_path):
+    """`invalidate_results()` cleared the state results but not five of them.
+
+    The sharpest is `ponding_raster_path`: `activate_ponding_query` gates only on the
+    path being set, so after a swap the tool read the *old* DEM's ponding raster at
+    the *new* grid's coordinates and answered confidently. `found_keypoints` is the
+    other reachable one — it carries row/col into `_rank_pond_sites`, which indexes
+    the new DEM at them with no bounds check on the first read.
+
+    The clip overlaps the fixture exactly, so nothing here can pass by the two
+    terrains happening to agree: a value that survives, survives because it was kept.
+    """
+    from qgis.core import QgsProject, QgsRasterLayer
+
+    from _harness import cropped_dem
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.assert_no_errors("baseline run")
+        assert h.state.ponding_raster_path, (
+            "the baseline produced no ponding raster, so nothing could go stale")
+
+        # A keypoint outside the clipped grid entirely: 250 of 300 rows survives the
+        # swap as an index into 200.
+        h.state.found_keypoints = [{"_row": 250, "_col": 250}]
+        h.state.pond_sites = [{"note": "ranked against the old terrain"}]
+        h.state.haul_plan = {"moves": []}
+
+        clip = cropped_dem(dem_path, os.path.join(h.state.output_dir, "clipped_dem.tif"))
+        layer = QgsRasterLayer(clip, "Clipped DEM")
+        assert layer.isValid(), "the clipped DEM did not load"
+        QgsProject.instance().addMapLayer(layer)
+        h.panel.dem_changed.emit(layer)
+        h.assert_no_errors("DEM swap")
+
+        assert h.state.dem_info.width == 200, (
+            "the picker did not adopt the clip, so no grid move happened")
+        assert h.state.ponding_raster_path is None, (
+            "the old DEM's ponding raster survived the swap; Query Depression / "
+            "Ponding would read it at the new grid's coordinates")
+        assert h.state.found_keypoints is None, (
+            "keypoints measured on the old grid survived; Recommend Pond Sites "
+            "indexes the new DEM at their row/col")
+        assert h.state.pond_sites == [], "pond sites ranked on the old terrain survived"
+        assert h.state.haul_plan is None, "the old burn's haul plan survived"
+
+        h.bar.messages.clear()
+        h.plugin._earthworks.activate_ponding_query()
+        assert any("baseline" in text.lower() for _, _, text in h.bar.messages), (
+            f"the ponding query armed itself after the terrain changed: "
+            f"{h.bar.messages}")

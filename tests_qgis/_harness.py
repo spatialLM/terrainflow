@@ -282,6 +282,36 @@ def build_synthetic_dem(path, pond=False, rough=False, pits=0, voids=0,
     return str(path)
 
 
+def cropped_dem(src_path, dst_path, top=20, left=20, rows=200, cols=200):
+    """A window of *src_path* written to *dst_path* — a genuinely different grid.
+
+    `BaselineController._grid_moved` compares shape **and** origin, so two DEMs of
+    the same 300x300 extent are the same grid to it however much their values
+    differ, and swapping one for the other invalidates nothing. A crop moves both at
+    once, which is what a user actually does: clip a survey to the block being
+    designed and point the picker at the clip.
+
+    Deliberately a crop of the fixture rather than a second synthetic surface. The
+    ground under the overlap is *identical*, so a measurement that survives the swap
+    and still looks plausible is surviving because nothing cleared it — not because
+    the two terrains happen to agree.
+    """
+    import rasterio
+    from rasterio.windows import Window
+
+    with rasterio.open(src_path) as src:
+        window = Window(left, top, cols, rows)
+        data = src.read(1, window=window)
+        profile = src.profile.copy()
+        profile.update(height=rows, width=cols,
+                       transform=src.window_transform(window))
+
+    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(dst_path, "w", **profile) as dst:
+        dst.write(data, 1)
+    return str(dst_path)
+
+
 def centreline_x():
     return ORIGIN_X + ((NCOLS - 1) / 2.0) * CELL_M
 

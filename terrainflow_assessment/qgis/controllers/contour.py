@@ -1251,9 +1251,13 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                          "Keypoint analysis failed")
 
     def _on_keypoints_ready(self, result):
-        ka, keypoints, ridgelines = result
-        # Held for "Recommend Pond Sites", which reuses the loaded rasters.
-        self._state.keyline_analysis = ka
+        # The analysis object itself is deliberately dropped. It used to be parked on
+        # `_state.keyline_analysis` "for Recommend Pond Sites, which reuses the loaded
+        # rasters" — but `_rank_pond_sites` re-opens the DEM and the accumulation from
+        # disk and always has, so nothing ever read it and the state held a
+        # `DrainageLineAnalysis` (DEM + accumulation + pond arrays, ~70 MB on the
+        # reference tile) for the rest of the session.
+        _ka, keypoints, ridgelines = result
         self._state.found_keypoints = keypoints
 
         self._display_keypoints(keypoints)
