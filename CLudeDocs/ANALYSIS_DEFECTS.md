@@ -43,6 +43,14 @@ and corrected in review:
   it does not fire there. `MATHS_AUDIT` has no `C` rows and three `H` rows
   (`EWD-32`, `EWD-35`, `EWD-05`), all sizing constants; every confirmed-`WRONG`
   analysis defect in it sits at `M`. These do too.
+
+  **Updated 2026-09-11.** True of §1 and §2 as written, and still the right reading of
+  them. Step C then opened exactly one `H`: `FLA-26` (§8.2), where selecting "D8" in the
+  Routing combo raises out of pysheds and kills the baseline run. It is `H` **not** through
+  the escalator above — nothing is under-sized, because nothing is sized — but because a
+  labelled control in the shipped UI takes the plugin's entry point down with an unhandled
+  exception, after which no sizing question can be asked at all. Filed knowingly, and the
+  paragraph stands for everything it was written about.
 - **Bare `U` is reserved.** The legend spends it on *"can under-size (dangerous: breached
   earthwork)"*. The register's own practice for other under-reads is a **qualified** `U`
   (`U(ridge detect)`, `U(warning)`) or `i-d`. So `KPA-41` is `U(drift under-read)`,
@@ -64,7 +72,7 @@ the inert `acc_path` is `KPA-48` rather than a controller finding, and why the o
 | `IMP` | `modules/impoundment_sites.py` | **New**, and free |
 | `MHL` | `modules/mass_haul.py` | **New**, and free |
 | `RPT` | **extended** to `modules/report_model.py` as well as `modules/reporting.py` (§2.5) | Siblings; inventing a second prefix for one of them buys nothing |
-| `TIX` | `modules/terrain_indices.py` | Reserved when this register was written; **`TIX-01` was opened and closed on 2026-09-11** (§7.3). The aspect ramp is `CTL-02`, because the defect is the *pairing* at `terrain.py:43,190`, not anything inside `terrain_indices.py` |
+| `TIX` | `modules/terrain_indices.py` | Reserved when this register was written; **`TIX-01` was opened and closed on 2026-09-11** (§7.3), and **`TIX-02` opened the same day at `I`** (§8.5). The aspect ramp is `CTL-02`, because the defect is the *pairing* at `terrain.py:43,190`, not anything inside `terrain_indices.py` — and `KPA-52` (§8.1) is filed under `KPA` for the same reason, the pairing being in `find_keypoints` |
 
 The register already carries a second, non-file ID family (`NEW-W5-01/02`,
 `NEW-W8-01..05`), which is the precedent for adding one.
@@ -1032,6 +1040,12 @@ and `EWD-14` already covers the 1.0 % default. `EWD` stays at **58**.
 Following the audit's own precedent at `MATHS_AUDIT.md:74-75` — candidates that are not yet
 grounded well enough for §1 are listed rather than dropped.
 
+> **The coverage rows Step E owed are in §8.9**, measured by `p_coverage.py` over the 30
+> subjects that step named. Short version: two of the thirty are called by neither suite
+> (`bulking_factor`, `UsableAreaDisjoint`), eight are reached only from inside their own
+> module, and `help_text.py`'s 155 tooltips have no test of any kind — four of them quote
+> a value the code holds and all four agree with it.
+
 1. **`keypoint_on_path:740` — a NaN keypoint cell reports 0.0 m.**
    `elev = float(self.dem[kr, kc]) if not np.isnan(...) else 0.0`. Sibling of `NEW-W8-01`,
    which was fixed in the *profile*; this is the same substitution in the returned
@@ -1087,6 +1101,16 @@ yeomansplow.com, which returned **403 Forbidden**. It is therefore **not cited**
 Step A (measure), A1 (probes), A2 (`MATHS_AUDIT` re-anchoring and sources) and A3 (this
 register) are complete, and Step G (pinning) is done for the production-path numbers. What
 follows is scoped and not started.
+
+> **Superseded 2026-09-11 — see §8.** Steps **B, C, D, E and F are now complete**. The
+> table below is left exactly as written, per this document's own convention, and §8 is
+> the authority on what they found. Two of the criteria stated in it were measured and
+> turned out to be **wrong**, which §8.7 records: the aspect witness in row **D** has its
+> sign inverted (`dz_dy > 0` should read `dz_dy < 0` — as written it agrees 0.01 % of the
+> time on correct code), and both tolerances in row **F** ask for more precision than a
+> float32 return value can carry. Row **C**'s `earthworks.py:2219` does not resolve
+> either; the float32 sites in that file are `earthwork_design.py:2137` and `:2250-2266`.
+> What remains open from this table is row **G**'s three deliberate exclusions.
 
 | Step | Owes | Probe |
 |---|---|---|
@@ -1226,3 +1250,515 @@ measurements.
   the visual tier either. `CTL-03`'s strengthened assertion is now the only thing standing
   between that ramp and another flat map.
 - Every other row in §1 is open exactly as written.
+
+---
+
+## §8 Steps B–F (2026-09-11)
+
+Steps B, C, D, E and F are complete. Four new probes (`p_invariance`, `p_battery`,
+`p_coverage`, `p_crosscheck`) and five permanent checks in
+`tests_qgis/checks_fixture_regression.py`.
+
+This section is the authority on what those steps found, exactly as §7 is the authority
+on what was fixed. §1 and §2 are still not edited — that convention is why `MATHS_AUDIT`
+survived a rebuild.
+
+**Four new findings, and one of them explains six published rows.** They are `KPA-52`
+(the mask and the pointers come from different routing schemes), `FLA-26` (`routing='d8'`
+is a two-click crash), `KPA-53` (the routing setting never reaches the keyline tier) and
+`KPA-54` (the keypoint label quotes the wrong catchment). `TIX-02` is opened at `I`.
+
+Everything else these steps ran **passed**, and the passes are recorded too: an
+invariance arm that finds nothing is evidence about the code, not a wasted afternoon.
+
+**A note on the four new IDs, because the campaign has been bitten by this twice now.**
+Two separate mistakes in one draft:
+
+1. **`KPA` was already at 51 in this register, not 48.** §1 rows 8, 23 and 27 are
+   `KPA-50`, `KPA-51` and `KPA-49`. The first draft filed the new findings as 49, 50 and 51
+   and collided with all three. They are `KPA-52`, `KPA-53` and `KPA-54`.
+2. **`FLG` is `flow_graph.py`; the crash is in `flow_analysis.py`.** The first draft filed
+   it as `FLG-20`. `flow_analysis.py`'s prefix is **`FLA`** (`MATHS_AUDIT` §2.1), which runs
+   to 25 — so the crash is `FLA-26`, and, checking the right family for ancestors turned up
+   `FLA-02`, an `UNVER-B` row about *this exact except clause*. Filing under the wrong
+   prefix would have hidden a supersession, not just misnamed a row.
+
+`TIX` was at 01, so `TIX-02` was free. The original plan's own review caught 13 of 24
+proposed IDs colliding; the lesson does not stop applying because the register is now the
+thing being extended rather than the thing being cited.
+
+### §8.1 `KPA-52` — the channel mask and the pointer graph disagree about routing
+
+| Id | Sev | Dir | Where | Claim | Verdict | Conf |
+|---|---|---|---|---|---|---|
+| `KPA-52` | M | U(valley detect) | `keypoint_analysis.py:803,809` | `find_keypoints` builds its stream mask from pysheds **D-infinity** accumulation and then traces links along **D8** pointers. On the fixture that shatters a 1,688-cell network into 127 fragments of median 3.4 m, of which **1** is long enough to profile. Mask taken from the same graph as the pointers: 13 links, median 39.8 m, **7** long enough | WRONG | H |
+
+**Where.** `_ensure_flow_data` asks pysheds for `routing="dinf"` (`:1173`) and returns
+that accumulation. `find_keypoints` thresholds it into `stream` (`:803`), then calls
+`flow_graph.d8_from_dem(self.dem, …)` (`:809`) for the pointers `stream_links` walks. The
+two are different routing schemes over the same ground.
+
+**What was run.** `p_crosscheck.stage_mask_and_pointers_agree`, at the production 0.2 ha
+threshold on the real fixture, holding the pointers fixed and changing only where the mask
+comes from.
+
+| | D-infinity mask (production) | D8 mask, same graph as the pointers |
+|---|---|---|
+| stream cells | 1,688 | 684 |
+| order-1 links | 127 | 13 |
+| stream cells inside a link | 717 | 630 |
+| stream cells in **no** link | **971** | 54 |
+| cells whose D8 pointer leaves the mask | **125** | **0** |
+| median link length | 3.4 m | 39.8 m |
+| longest link | 54 m | 157 m |
+| links clearing the 35 m profile floor | **1** | **7** |
+
+**Root cause.** D-infinity divides a cell's flow between two downslope neighbours, so it
+wets a broader and more diffuse network than D8 concentrates into. A D8 pointer traced
+through that wider mask can leave it — 125 cells do — and `stream_links` ends a link
+wherever that happens. The result is not a channel network; it is the D8 skeleton cut
+into pieces wherever the two schemes disagree, with 971 of the 1,688 masked cells in no
+link at all.
+
+**Blast radius.** This is the mechanism under six published rows, all of which measured a
+*symptom* of it:
+
+- `KPA-39` — the guard histogram. 78 refusals at *"thalweg is None or len(thalweg) < 5"*
+  and 48 at *"profile too short to have an interior"* are both fragment-length refusals.
+- `KPA-40` — the 35 m floor. The floor is correct; almost nothing reaches it because the
+  links are 3.4 m.
+- `FLG-18` — emitted against consumable. 127 against 1.
+- `FLG-19` — mask-leaving pointers. 125 on the raw surface `find_keypoints` actually uses
+  (the register's published 72 is the *conditioned* surface, which production does not
+  reach — that is `KPA-38`). Both figures are in `p_flow_graph.json`; neither is wrong.
+- `KPA-43`, `KPA-44` — the accounting identity and the refusal message, both counted over
+  a link list this produces.
+
+**What this does not say.** It does not say D-infinity is the wrong accumulation. It is
+the more physical of the two and is the default for good reasons. The finding is that
+**mixing** them is what fragments the network, and nothing in the tree says which of the
+two `find_keypoints` means. Either half is a defensible fix; running both at once is not.
+
+**holds while** `_ensure_flow_data` hard-codes `routing="dinf"` and `find_keypoints`
+calls `d8_from_dem`. **blocks** a truthful `KPA-39` refusal message: until the mask and
+the pointers agree, most refusals are about fragmentation, not about the valley.
+**reproduce** `p_crosscheck.py` → `evidence/p_crosscheck.json`,
+`crosscheck_mask_routing_vs_pointer_routing`. **supersedes** nothing; it is the *cause* of
+six rows, not a replacement for them.
+
+### §8.2 `FLA-26` — `routing='d8'` is two clicks from an unhandled crash
+
+> **CLOSED — see §9.1.** Left as written, including its proposed fix, which was **wrong**:
+> widening the `except` clause would have moved the crash one line down, because
+> `Grid.accumulation` defaults to `routing='d8'` and the fallback call re-enters the same
+> function. §9.1 has what the fix actually is and why the proposal failed.
+
+| Id | Sev | Dir | Where | Claim | Verdict | Conf |
+|---|---|---|---|---|---|---|
+| `FLA-26` | H | n | `flow_analysis.py:514-517` | Selecting "D8" in the Routing combo raises `AttributeError: module 'numpy' has no attribute 'in1d'` out of pysheds and kills the baseline run. The same hazard is guarded in the two paths that never request d8 and unguarded in the one whose routing the user controls | WRONG | H |
+
+**Severity.** `H`, and the escalator is not what puts it there — the keyline path emits
+geometry, so §0.1's under-sizing rule does not fire. It is `H` because a labelled option
+in the shipped UI takes the plugin's entry point down with an unhandled exception, and no
+sizing question can be asked at all afterwards. This is the register's first `H` outside
+`MATHS_AUDIT`'s three sizing constants, and it is filed knowingly.
+
+**The path, end to end.** `panel.py:773` — `addItems(["D-infinity (recommended)", "D8"])`.
+`panel.py:2550-2551` — `routing` returns `"d8"` when the combo text contains `D8`.
+`baseline.py:427` passes `routing=self._panel.routing` to the worker;
+`analysis_worker.py:147` calls `fa.run(routing=self.routing, …)`; `flow_analysis.py:515`
+calls `self.grid.accumulation(self.fdir, routing="d8")`; `pysheds/sgrid.py:904` calls
+`np.in1d`, removed in NumPy 2.
+
+**Why the guard does not catch it.** `flow_analysis.py:514-517` is
+`except TypeError`. The raise is an `AttributeError`. Both sibling call sites
+already write the wider clause:
+
+| Call site | Guard | Requests d8? |
+|---|---|---|
+| `catchment.py:223-226` | `except (TypeError, AttributeError)` | never — hard-codes dinf |
+| `keypoint_analysis.py:1178-1182` | `except (TypeError, AttributeError)` | never — hard-codes dinf |
+| **`flow_analysis.py:514-517`** | **`except TypeError`** | **yes — the panel's value** |
+
+**Previously known, never measured.** `project_io.py:85` says in a comment that *"a file
+restoring as d8 can raise outright"*, and the persisted default was set to `"dinf"` on
+that basis. The comment is correct and the default is the right one; what neither did was
+stop the combo from offering d8, or the run from dying when it is chosen. The memory of
+this divergence is recorded as a known-open item — "left alone because it changes every
+assessment" — which is true of the *numerical* difference between the two schemes and not
+true of the crash.
+
+**The fix is the except clause**, one word wider, matching its two siblings — after which
+d8 falls back to whatever pysheds' default accumulation gives, exactly as the other two
+paths already do. Not applied here: this campaign documents and pins.
+
+**`supersedes` — `MATHS_AUDIT` `FLA-02`**, and this is a genuine supersession rather than a
+family resemblance. That row reads *"flowdir+accumulation; **silent routing downgrade on
+TypeError**"* at the pre-rebuild `:90-99`, verdict `UNVER-B` — verification blocked on
+pysheds documentation. Running it answers what reading the docs could not: the downgrade is
+not silent and does not happen at all, because the exception raised is not the one caught.
+`FLA-02` closes to this row.
+
+**holds while** pysheds calls `np.in1d` and NumPy 2 is installed. A pysheds release that
+drops the call would close this without anyone touching TerrainFlow, which is why the
+check pins the *exception*, not the behaviour. **reproduce** `p_invariance.py` →
+`evidence/p_invariance.json`, `routing_dinf_vs_d8`. **pinned by**
+`check_d8_routing_is_still_the_documented_crash`, which asserts the crash on purpose and
+carries instructions to invert it when the fix lands.
+
+### §8.3 `KPA-53` — the routing setting never reaches the keyline tier
+
+| Id | Sev | Dir | Where | Claim | Verdict | Conf |
+|---|---|---|---|---|---|---|
+| `KPA-53` | M | i-d | `keypoint_analysis.py:1173` | `_ensure_flow_data` hard-codes `routing="dinf"`, takes no routing argument, and `find_keypoints` has no parameter to pass one. A user who selects D8 gets D-infinity under every keypoint and keyline regardless | WRONG | H |
+
+Measured by signature, not by reading: `_ensure_flow_data(self)` accepts no `routing`
+argument (`p_invariance.routing_reaches_keyline_tier`), and
+`find_keypoints(self, max_valleys=8, stream_threshold_cells=None, max_order=1,
+boundary_mask=None)` has none to forward.
+
+Today this is masked by `FLA-26`: the run dies before the keyline tier is reached. Fix
+`FLA-26` alone and the plugin acquires a *silent* divergence in its place — the baseline
+raster the user sees routed one way, the keypoints drawn on top of it routed the other.
+Recorded now so that the second defect is not created while removing the first.
+
+`i-d`, not `n`: whether the two disagree at all depends on the terrain.
+
+### §8.4 `KPA-54` — the keypoint label quotes the valley's catchment, not the keypoint's
+
+| Id | Sev | Dir | Where | Claim | Verdict | Conf |
+|---|---|---|---|---|---|---|
+| `KPA-54` | M | O | `keypoint_analysis.py:816-818, 833-837` | `catchment_ha` is read at the **link's outlet cell** and then labelled *"N ha above"* on a keypoint that sits partway up the link. On the rank-1 keypoint that is 5.867 ha against 2.116 ha actually above it — an overstatement of 3.751 ha, **177%** | WRONG | H |
+
+`_catchment(link)` (`:816-818`) returns `acc_arr[link[-1]]`, the accumulation at the bottom of the
+valley link. That is the right figure for **ranking** valleys, which is what
+`links.sort(key=_catchment)` uses it for and why it is computed at all. It is then carried
+onto the keypoint as `kp["catchment_ha"]` and rendered into
+`f"Keypoint at {elevation:.1f} m — {catchment_ha:.1f} ha above"`.
+
+A keypoint is a point on the profile; the ground above it is the ground above *it*. The
+label says "above" and means "above the bottom of the valley this keypoint is on".
+
+`O`, per §0.1's practice: it over-reads the catchment. It is not a sizing path — nothing
+is dimensioned from this number — which is why it is `M` and not higher. What it does is
+tell the user, on the map, that a keypoint commands nearly three times the country it
+commands.
+
+**reproduce** `p_battery.py` → `evidence/p_battery.json`,
+`identity_catchment_ha_plus_one`. The probe pairs each keypoint to its own link by cell
+membership and checks `valley_cells` against the link length, so a mis-pairing would show
+up rather than skew the number quietly.
+
+### §8.5 `TIX-02` — two conventions for whether a cell drains itself
+
+| Id | Sev | Dir | Where | Claim | Verdict | Conf |
+|---|---|---|---|---|---|---|
+| `TIX-02` | I | n | `terrain_indices.py:77` vs `keypoint_analysis.py:833` | `specific_catchment_area` adds `+1` to the accumulation and documents *measuring* that pysheds excludes the cell itself; `find_keypoints` computes `catchment_ha` from the same raster without it. One cell — 1 m² on the fixture | DISC | H |
+
+Filed at `I` because the magnitude is one cell and neither figure is used where that
+matters. Filed at all because the two are the same question answered two ways in one
+tree, and `specific_catchment_area`'s docstring is emphatic about why the `+1` is there
+(*"without it every ridge cell has zero catchment and `ln(a)` is `-inf` along the top of
+every hill"*). A reader who trusts that docstring and then reads `find_keypoints` learns
+the opposite.
+
+### §8.6 What Steps C, D and F ran that **passed**
+
+Recorded because a passing oracle is a measurement. All on the real fixture, 2026-09-11.
+
+**Z + 600 m (Step C).** Slope, plan and profile curvature, TPI, the D8 pointer graph
+(0 disagreements), sink count (525 both), order-1 link count (13 both), keypoint positions
+(`[(70, 51)]` both) and the skipped count (126 both) are all unchanged; the keypoint
+elevation rises by exactly 600. Worst index delta 4.657e-10 on TPI, everything else
+exactly 0.
+
+The interesting half is *why* it passes. At the fixture's 84.78 m float32 spacing is
+7.63e-06 m and `resolve_flats`' 1e-05 m inflation step survives it; at 684.78 m the
+spacing is 6.10e-05 m and it does not — which is exactly the failure
+`flow_analysis.save_result`'s docstring documents. Through the keyline tier's own float32
+temp raster (`keypoint_analysis.py:1147-1171`, which bypasses `save_result` entirely),
+**15,622 distinct elevation levels are quantised away** at +600 m — and the sink count on
+the conditioned surface is **65 at both elevations**. `safe_flat_epsilon` derives its step
+from the surface's own elevation instead of taking pysheds' fixed 1e-5, and that
+derivation is the whole reason the arm passes. The permanent check guards it.
+
+**Mirror (Step C).** Slope, plan curvature, dz_dx (negated), dz_dy (unchanged) all
+exactly 0; TPI 3.6e-12; aspect reflects to within 1.5e-05 deg with **0** flat-sentinel
+flips. Sinks and links identical. D8 pointers: 31 disagreements, **all 31 exact steepness
+ties** — expected, because a flip reverses `_OFFSETS`' scan order
+(`flow_graph.py:106-113`) — and **0** on cells where the two candidates differ in
+steepness. Keypoints mirror. `UNI-15` and its `CTA-08` component stay fixed.
+
+**Signed witnesses (Step D).** Plan curvature averages **-4.357e-02 /m** over the
+top-5 % flow network (hollows converge: must be negative) and **+4.088e-02 /m** over the
+top-5 % TPI (noses diverge: must be positive). Against TPI's own classes: **+3.658e-02**
+on ridge, **-4.401e-02** in valley, point-biserial **+0.489** raw and **+0.680** after a
+15-cell pre-smooth. Aspect in (90, 270) coincides with `dz_dy < 0` on **100.00 %** of
+152,044 cells steeper than 2 deg — 0 disagreements.
+
+**Dimensional identities (Step D).** `specific_catchment_area` at 2 m over 1 m is
+**exactly 2.0** at every accumulation tested. The terrace unit chain closes exactly:
+at the site's p50 slope of 8.062 deg (14.165 %), `spacing_advisory`'s
+`erosion_spacing_m` is 22.591630 m against `VI/grade` = 22.591630 m, relative error
+**0.00e+00**; and `VI` at zero slope is 0.609600 m against `Y = 2.0 ft = 0.609600 m`, so
+the feet-to-metres conversion the rule needs is exact and no slip is hiding in it.
+
+**Conservation (Step D).** `keypoints + skipped == links` holds at `max_valleys` 8 and
+127 (1 + 126 = 127) and fails at `max_valleys=1` with **124 links never examined** —
+`KPA-43` exactly as published. `clip_to_usable_area` conserves 10 = 5 kept + 5 dropped.
+
+**Haul volumes (Step F).** `haul_regions` with `min_region_m3=0` sums to
+**497.50 m³ cut / 398.80 m³ fill** against `burn_quantities`' identical figures —
+relative error 0.00e+00 and 1.43e-16, against a 0.1 % bar. At the shipped
+`min_region_m3=5 m³` the haul plan omits **0.80 m³ of fill across 8 regions**, which the
+site total still counts; that is the threshold working, not an error, and it is now a
+known quantity.
+
+**Link accounting (Step F).** 127 links emitted at `min_cells=3`, **1** clearing the 35 m
+profile floor; `keypoints + skipped = 127` matches emitted exactly. See `KPA-52` for why
+the first two numbers are so far apart.
+
+### §8.7 Two of the plan's own criteria were wrong, and are corrected here
+
+Both were stated in the original plan and repeated in §6 of this register. Both were
+measured rather than assumed, which is how they were caught.
+
+**The aspect witness had its sign inverted.** §6 and the plan both state it as
+*"`aspect ∈ (90,270)` coincides with `dz_dy > 0` for ≥90 % of cells above 2°"*. Measured
+on correct code, that form agrees **0.01 %** of the time. The correct statement is
+`dz_dy < 0`, which agrees **100.00 %**: `horn_gradient`'s `dz_dy` rises toward increasing
+row and row increases southward, so ground *falling* to the south has `dz_dy < 0` — and
+aspect, which points downslope, lands in (90, 270) exactly there. Algebraically
+`aspect = atan2(-dz_dx, dz_dy)` has `dz_dy` as its northward term. The plan carried the
+docstring's "increasing row is southward" through without its negation.
+
+Worth keeping as a pattern: a witness stated backwards fails at *near zero*, not at
+"below the bar". An agreement of 0.01 % is not a marginal result, and reading it as one
+would have filed a defect against `aspect_degrees`.
+
+**Two Step F tolerances ask for more precision than the values carry.** The plan sets
+1e-12 for the shared-stencil check and 1e-6 deg for `flow_bearing` against
+`aspect_degrees`. Both `slope_degrees` and `aspect_degrees` return **float32**, whose
+spacing is 3.05e-05 deg at 360 deg. Measured: the stencil re-derivation agrees to
+1.907e-06 deg (slope) and 1.526e-05 deg (aspect), and `flow_bearing` agrees with
+`aspect_degrees` to 1.513e-05 deg over 2,000 sampled cells. Every one of those is inside
+float32's own spacing and outside the plan's bar. The corrected criterion is
+**"no worse than the cast"**, which all three meet. Filing these as failures would have
+filed a defect against `.astype("float32")`.
+
+**One figure the plan quotes is reproduced with a different denominator.** The plan says
+curvature-versus-TPI agreement is 64.5 % at the default 15 m window. Measured here over
+the cells TPI actually *classes* (ridge or valley, excluding midslope): **73.2 %**. Both
+are descriptions of the same correct behaviour; neither is the pass criterion, for the
+reason §6 already gives.
+
+### §8.8 What this pass corrected in its own instruments
+
+**`p_keypoints.py`'s guard map had rotted, and its evidence file was wrong.** The probe
+carried a hand-written `{lineno: guard}` dict for the five `return None` sites in
+`keypoint_on_path`. The ridgeline fix (`ac2966b`, §7.4) moved all five down 20 lines. The
+tracer went on counting correctly — 78 / 48 / 0 on the fixture, 2 / 26 on the synthetic
+DEM, unchanged — but attributed every one to `"UNKNOWN LINE"`, which inverted the two
+figures derived from that map: `refusals_actually_from_prominence` read 26 → 0 and
+`message_is_false_for` read 2 → 28. The committed evidence would have supported the claim
+that `KPA-44`'s message is false in all 28 synthetic cases, when it is false in 2.
+
+`guard_lines()` now walks the function's AST on every run and labels each `return None`
+by the source of its enclosing `if`. The gloss table is keyed by the **condition**, not
+the line, so a guard that moves keeps its name and a guard that is *rewritten* honestly
+loses it.
+
+This is the whole argument for Step B. Both probes were re-run as regressions;
+`p_flow_graph` reproduced bit-identically, and this is what `p_keypoints` turned up.
+
+**`p_coverage.py`'s first two answers were both artefacts of its own filters.** It
+excluded each subject's defining module when counting production callers, which reported
+`specific_catchment_area`, `transect_cells`, `flow_bearing`, `embankment_volume` and
+`clip_to_usable_area` as having *no production caller* when each is called by its own
+siblings. And its help-text constant parser stopped at the first `)` that ended a line,
+truncating any tooltip containing a parenthetical aside. Both are fixed; the corrected
+run distinguishes "called only from inside its own module" as its own state.
+
+### §8.9 Step E — coverage
+
+Measured by `p_coverage.py` over the 30 subjects Step E named, counting **call sites**
+rather than mentions.
+
+- **Not exercised by either suite: `bulking_factor`, `UsableAreaDisjoint`.** Two of
+  thirty. `compaction_factor`, its sibling one line away, *is* exercised.
+- **Called only from inside their own module (8):** `specific_catchment_area`,
+  `terrace_vertical_interval`, `capture_spacing`, `embankment_volume`, `transect_cells`,
+  `flow_bearing`, `UsableAreaDisjoint`, `clip_to_usable_area`. All are wired — each has a
+  caller in its own file — but none is reached across a module boundary, so a change to
+  any of their signatures is invisible outside one file.
+- **Panel properties:** `keyline_max_grade_n`, `keyline_max_valleys` and
+  `set_spacing_advice` are all exercised. `set_spacing_advice` only by the QGIS suite.
+- **`help_text.py`: 1,475 lines, 155 tooltip constants, zero tests in either suite.**
+  Four numeric claims that quote a value the code holds were checked against it —
+  the swale placement default (0.5 ha), the surface-runoff fade top (2 m³), the analysis
+  max-slope default (18°) and the berm's spoil compaction (75 %) — and **all four agree**.
+  The remaining 151 state geography, method or advice rather than a value, and no
+  mechanical rule separates those from the ones that do; the table in `p_coverage.py` is
+  the honest instrument and it is extended by hand.
+- ~~`landform_tpi` has no production caller~~ — **RESOLVED** in §7.4, and the corrected
+  probe confirms it: `find_ridgelines` calls both it and `landform_classes`.
+
+### §8.10 Five permanent checks, and why they are not recorded numbers
+
+Added to `tests_qgis/checks_fixture_regression.py`. Total added runtime: the module runs
+9 checks in **18 s**.
+
+| Check | Guards |
+|---|---|
+| `check_terrain_answers_do_not_depend_on_absolute_elevation` | Z+600 m over indices, pointers, sinks, links and keypoint positions — the only arm in either suite that reaches the float32 regime, and the guard on `safe_flat_epsilon`'s elevation-derived floor |
+| `check_terrain_answers_mirror_under_a_horizontal_flip` | The whole sign-and-axis class at once, with tied D8 pointers separated from real disagreement |
+| `check_signed_rasters_point_the_right_way` | An inverted sign, which every percentile and finite-fraction check in the suite passes unchanged |
+| `check_haul_volumes_agree_with_the_burn` | `haul_regions` against `burn_quantities`, two routes to one sum |
+| `check_d8_routing_is_still_the_documented_crash` | `FLA-26`, asserted as broken on purpose, with instructions to invert it when fixed — **inverted the same day** to `check_d8_routing_runs_and_differs_from_dinf` (§9.1) |
+
+Everything above them in that file pins a **measurement** and must be re-recorded when the
+maths deliberately changes. These pin a **property** — a relation that holds on any
+terrain at any elevation — so they never need re-recording and a failure is always a
+defect. That is why they can share the file without adding to its maintenance burden.
+
+One number in their output will look wrong beside the recorded constants and is not:
+the invariance arms report **13** order-1 links where `EXPECTED_KEYLINE` records **127**.
+Both are right. The arms derive their stream mask from the same D8 graph the pointers come
+from; production derives it from pysheds' D-infinity accumulation. That gap is `KPA-52`.
+
+### §8.11 What Steps B–F did **not** change
+
+No behaviour was changed in this pass. Everything in §8.1 through §8.5 is open.
+
+*(`FLA-26` was fixed straight afterwards, on the owner's instruction — §9.1. Everything
+else in this paragraph stands.)*
+
+Beyond those: `FLA-26` is a live crash on a labelled UI control and the fix is one word in
+one `except` clause — it is left open only because this campaign documents and pins, and
+the decision to ship a fix is the owner's. The three ridgeline thresholds are still
+unreachable from the panel. The report still has no analysis-tier page. Terrain indices
+still have no screenshot coverage. `bulking_factor` and `UsableAreaDisjoint` still have no
+test. And 151 of `help_text.py`'s 155 tooltips are still unchecked against anything.
+
+---
+
+## §9 Fixed after Steps B–F (2026-09-11)
+
+§8 is left exactly as written; this section is the authority on what has since changed.
+One row closes.
+
+### §9.1 `FLA-26` — D8 routing runs
+
+**Closed.** `routing='d8'` now completes on the real fixture. `check_d8_routing_is_still_the_documented_crash`, which asserted the crash on purpose and carried instructions to invert itself, has been inverted: it is now `check_d8_routing_runs_and_differs_from_dinf`.
+
+**The fix is not the one §8.2 proposed, and §8.2 was wrong about it.** That entry said
+*"The fix is the except clause, one word wider, matching its two siblings"*. It is not, and
+the reason is worth recording because it is the kind of mistake that ships:
+`Grid.accumulation`'s signature defaults to `routing='d8'` (`pysheds/sgrid.py:822`), so the
+fallback call inside that `except` block — `self.grid.accumulation(self.fdir)` — re-enters
+`_d8_accumulation` and raises the identical `AttributeError` one line further down. Widening
+the clause would have **moved** the crash from `flow_analysis.py:515` to `:517` and left a
+check passing for the wrong reason. The proposal was made from reading the guard and not the
+line it guards.
+
+**What the fix actually is.** pysheds 0.5 calls `np.in1d` at **nine** sites in `sgrid.py`,
+not one, and NumPy removed the name in 2.0 (this environment: 2.5.2). Every site is on a D8
+code path, which is why only the D8 option ever met it. A new module,
+`modules/pysheds_compat.py`, restores `np.in1d = np.isin` when the attribute is absent and
+re-exports `Grid`; the **five** modules that build a pysheds `Grid` — `flow_analysis.py`,
+`catchment.py`, `keypoint_analysis.py`, `earthwork_design.py` and `simulation.py` — now
+import `Grid` from there.
+
+Five, not four: `simulation.py:565` was missed by the first grep of this pass, which ran
+under a `head -10` that cut the list. Importing `Grid` **from the compat module** rather
+than applying a shim as a bare side effect is what makes that class of miss visible — a
+sixth pysheds importer added tomorrow either imports from here and is shimmed, or imports
+from `pysheds.grid` and shows up in one grep.
+
+The substitution is exact, not approximate. `np.isin` is NumPy's own documented replacement;
+the two differ only in that `in1d` flattened its result while `isin` preserves shape, and
+every pysheds call site passes `fdir.ravel()` and then calls `.reshape(fdir.shape)` on what
+comes back. The shim **adds** a name rather than replacing one — nothing on NumPy 2 can be
+depending on different behaviour from `np.in1d`, because anything calling it already fails —
+and it is guarded by `hasattr`, not a version test, so a NumPy that restores the name keeps
+its own implementation.
+
+**The `except TypeError` clause is deliberately left narrow.** With the shim in place there
+is nothing for a wider clause to catch, and widening it would mean the *next* removed alias
+produces a silent routing downgrade instead of a traceback — which is precisely what
+`MATHS_AUDIT`'s `FLA-02` was opened about. The guard keeps its documented job: tolerating a
+pysheds too old to accept a `routing=` keyword.
+
+**Measured on the real fixture**, dinf against d8 on the same conditioned surface:
+
+| | dinf | d8 |
+|---|---|---|
+| runs | yes | **yes** — was `AttributeError` |
+| accumulation max | 67,198.9 cells | **105,167.0 cells** |
+| unrouted cells | 0 | 0 |
+| cells where accumulation differs | — | **152,647 of 160,000 (95.4 %)** |
+| conditioned surface | identical, max delta **0.0 m** | |
+
+The two schemes disagree about where water goes on 95 % of the tile, and D8's trunk carries
+**56 % more** than D-infinity's because nothing is divided off it along the way. That
+divergence is the entire reason for offering the option, and it is now reachable.
+
+The conditioned surfaces being bit-identical is not incidental — pit-filling, depression
+filling and flat resolution all run before the routing branch (`flow_analysis.py:503`), so
+anything other than 0.0 would mean the conditioning had silently become
+routing-dependent. The check asserts it.
+
+**`KPA-53` is not closed by this and becomes live because of it.** With the crash gone, a
+user who selects D8 gets a D8 baseline raster and D-infinity accumulation under every
+keypoint and keyline, because `_ensure_flow_data` still hard-codes `routing="dinf"` and
+takes no argument. §8.3 predicted exactly this — *"fix `FLA-26` alone and the plugin
+acquires a silent divergence in its place"* — and it is now the standing state rather than a
+prediction. It is the next thing to fix on this path.
+
+### §9.2 What the fix uncovered in the pure suite
+
+The `np.in1d` breakage was not only worked around in production code. It was worked around
+in **six places** in `tests/`, and restoring the alias turned all of them into statements
+that are no longer true.
+
+**Two `xfail` markers, covering seven tests, are removed.** `_PYSHEDS_NUMPY2_COMPAT_PON`
+(five tests over `DEMBurner.get_ponding_layer` and the plugin's wrapper) and
+`_PYSHEDS_NUMPY2_COMPAT` (two over `_run_simulation`) both carried
+`reason="pysheds 0.5 uses np.in1d removed in NumPy 2.0"`. Six of the seven xpassed the
+moment the shim landed and now assert properly.
+
+**The seventh was never about `np.in1d` at all.** `test_run_simulation_with_stores` failed
+on a deliberate `ValueError` from `simulation.py:574-578` — it passed `earthwork_stores`
+with no `catchment_labels`, which that function refuses outright, because there is no
+correct fallback (sampling the cumulative accumulation raster double-counts every upstream
+feature's catchment — the bug `water_balance.py` removed). The test had been calling the API
+in a way the API explicitly rejects, and **`strict=False` on a marker blaming NumPy hid it**,
+because a non-strict `xfail` accepts a failure for any reason whatsoever.
+
+That is the general lesson and it is worth more than the fix: *an `xfail` whose stated
+reason is wrong does not merely mis-document, it silently accepts a different failure.* This
+one had a test dead in the tree for as long as that guard has existed.
+
+The test now supplies a labelling — indices into `catchment_label_ids`, negative for cells
+that drain to nothing — and gains the assertion it was missing: that the store actually
+**receives water**. Without it the test passed on a summary row for a feature nothing drains
+to, which is all it would ever have checked.
+
+**Four comments and a docstring still route around a bug that no longer exists.**
+`test_flow_analysis_assessment.py:507` runs dinf and then sets `fa.routing = "d8"` by hand
+*"so we run dinf then flip fa.routing to hit the d8 bearing path without running d8
+accumulation"*; `:1341`, `:1359` and `:1377` each carry
+`# pysheds d8 accumulation needs np.in1d (gone in NumPy 2)`; `:1394` says so in a class
+docstring; `test_project_io.py:147` repeats it. These are **left alone** — every one of them
+passes, and rewriting working tests to exercise a newly available path is its own piece of
+work with its own risk. They are recorded here so the next reader knows the comments are
+stale rather than believing them, and so the simplification is a known, scoped task rather
+than a discovery.
+
+**Suite figures.** 2,889 passed / 2 xfailed / 5 xpassed before; **2,897 passed / 0 xfailed /
+0 xpassed** after. The disappearance of every xfail and xpass is the point: nothing in the
+pure suite is now passing *while declared to be failing*.
+
+Collection moved 2,896 → 2,897, which is one test appearing rather than a miscount —
+`test_architecture.py::test_tooltip_copy_lives_in_help_text` is parametrized over the files
+in `modules/`, so `pysheds_compat.py` added a case. It passes.
