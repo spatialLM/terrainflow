@@ -1,0 +1,166 @@
+{
+  "probe": "p_battery",
+  "date": "2026-09-11",
+  "findings": [
+    "STEP-D"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "Signed witness, plan curvature: mean over the top-5% accumulation network -4.357e-02 /m (8,010 cells, must be negative); over the top-5% TPI +4.088e-02 /m (8,000 cells, must be positive). Holds: True.",
+    "Curvature vs TPI: mean plan on ridge +3.658e-02, in valley -4.401e-02 (sign test True); point-biserial +0.489 raw, +0.680 after a 15-cell pre-smooth; cell-wise agreement 73.2%.",
+    "Signed witness, aspect: on 152,044 cells steeper than 2 deg, aspect in (90, 270) coincides with dz_dy < 0 for 100.00% (0 disagree). Passes: True. Stated as the plan has it \u2014 dz_dy > 0 \u2014 the same cells agree only 0.01% of the time, which is the signature of a witness written with the sign inverted, not of a broken aspect: `aspect = atan2(-dz_dx, dz_dy)` has dz_dy as its northward term.",
+    "Identity, specific catchment area: a(2 m)/a(1 m) = [2, 2]; exactly 2.0: True.",
+    "Identity, catchment_ha: the rank-1 keypoint's label quotes 5.867224 ha. That is the accumulation at the link's outlet cell without a +1 (match: True); with the +1 that `specific_catchment_area` documents and measured it would be 5.867324 ha (match: False) \u2014 the two conventions differ by one cell, 1.0 m2, and the tree carries both.",
+    "Separately: the ground actually above the keypoint is 2.116104 ha, so the label \"5.9 ha above\" attached to the keypoint overstates it by 3.751 ha (177.3%). It is the whole valley link's catchment, measured at the link's bottom, presented against a point partway up it.",
+    "Identity, terrace unit chain: site p50 slope 8.062 deg (14.165%); VI 3.2001 m; erosion spacing reported 22.591630 m against VI/grade 22.591630 m (relative error 0.00e+00, holds True). VI at zero slope 0.609600 m against Y=2.0 ft = 0.609600 m: True.",
+    "Conservation, find_keypoints: max_valleys=1: 1 accepted + 2 refused = 3 of 127 links (124 never examined, conserves False); max_valleys=8: 1 accepted + 126 refused = 127 of 127 links (0 never examined, conserves True); max_valleys=127: 1 accepted + 126 refused = 127 of 127 links (0 never examined, conserves True)",
+    "Conservation, clip_to_usable_area: 10 in -> 5 kept + 5 dropped = 10 (conserves: True)."
+  ],
+  "stages": {
+    "signed_witness_plan_curvature": {
+      "status": "ok",
+      "top_accumulation_cut_cells": 190.0,
+      "top_tpi_cut_m": 0.2460780292749405,
+      "mean_plan_over_accumulation_network": -0.043574366718530655,
+      "mean_plan_over_top_tpi": 0.04088446870446205,
+      "network_cells": 8010,
+      "nose_cells": 8000,
+      "witness_holds": true
+    },
+    "signed_witness_curvature_vs_tpi": {
+      "status": "ok",
+      "ridge_cells": 11522,
+      "valley_cells": 10654,
+      "mean_plan_on_ridge": 0.03657560423016548,
+      "mean_plan_in_valley": -0.04400588199496269,
+      "sign_test_holds": true,
+      "point_biserial_raw": 0.48933547116471343,
+      "point_biserial_presmoothed": 0.6800367561991753,
+      "presmooth_window_cells": 15,
+      "agreement_fraction": 0.7320075757575758,
+      "criterion": "sign test must hold; point-biserial >= +0.25 raw and > +0.5 pre-smoothed; a negative correlation is the unambiguous failure",
+      "passes": true
+    },
+    "signed_witness_aspect": {
+      "status": "ok",
+      "cells_tested": 152044,
+      "min_slope_deg": 2.0,
+      "agreement_fraction": 1.0,
+      "disagreeing_cells": 0,
+      "agreement_as_the_plan_stated_it": 9.207860882376154e-05,
+      "criterion": ">= 0.90 against dz_dy < 0",
+      "passes": true
+    },
+    "identity_specific_catchment_area_scales": {
+      "status": "ok",
+      "ratio_min": 2.0,
+      "ratio_max": 2.0,
+      "exactly_two": true,
+      "max_abs_error": 0.0
+    },
+    "identity_catchment_ha_plus_one": {
+      "status": "ok",
+      "keyline_expression": "kp[\"catchment_ha\"] = _catchment(link) * (self.cell_w * self.cell_h) / 10_000.0",
+      "sca_expression": "(acc + 1.0) * cell_area / cell_w",
+      "keypoints": [
+        {
+          "keypoint_rc": [
+            70,
+            51
+          ],
+          "link_outlet_rc": [
+            70,
+            39
+          ],
+          "acc_at_link_outlet_cells": 58672.23828125,
+          "acc_at_keypoint_cells": 21161.04296875,
+          "catchment_ha_reported": 5.867223828125,
+          "valley_cells_reported": 55,
+          "link_length_cells": 55,
+          "pairing_confirmed": true,
+          "ha_from_outlet_without_plus_one": 5.867223828125,
+          "ha_from_outlet_with_plus_one": 5.867323828125,
+          "ha_above_the_keypoint_itself": 2.116104296875
+        }
+      ],
+      "matches_without_plus_one": true,
+      "matches_with_plus_one": false,
+      "plus_one_discrepancy_m2": 1.0,
+      "label_overstates_by_ha": 3.7511195312499996
+    },
+    "identity_terrace_unit_chain": {
+      "status": "ok",
+      "slope_statistics": {
+        "n": 160000,
+        "p25": 4.67348039150238,
+        "p25_grade": 0.08174900039880396,
+        "p50": 8.06218957901001,
+        "p50_grade": 0.14164785570033267,
+        "p75": 13.818074941635132,
+        "p75_grade": 0.24595808407364908
+      },
+      "p50_deg": 8.06218957901001,
+      "p50_pct": 14.164785570033267,
+      "vertical_interval_m": 3.200055985047684,
+      "erosion_spacing_m_reported": 22.591630273723716,
+      "erosion_spacing_m_expected": 22.591630273723716,
+      "relative_error": 0.0,
+      "identity_holds": true,
+      "vi_at_zero_slope_m": 0.6096,
+      "expected_y_feet_in_m": 0.6096,
+      "foot_conversion_exact": true
+    },
+    "conservation_find_keypoints": {
+      "status": "ok",
+      "input_links": 127,
+      "by_max_valleys": {
+        "1": {
+          "accepted": 1,
+          "refused": 2,
+          "accounted_for": 3,
+          "unexamined": 124,
+          "conserves": false
+        },
+        "8": {
+          "accepted": 1,
+          "refused": 126,
+          "accounted_for": 127,
+          "unexamined": 0,
+          "conserves": true
+        },
+        "127": {
+          "accepted": 1,
+          "refused": 126,
+          "accounted_for": 127,
+          "unexamined": 0,
+          "conserves": true
+        }
+      }
+    },
+    "conservation_clip_to_usable_area": {
+      "status": "ok",
+      "input_contours": 10,
+      "kept": 5,
+      "dropped": 5,
+      "accounted_for": 10,
+      "conserves": true
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}

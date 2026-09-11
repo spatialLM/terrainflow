@@ -1,0 +1,136 @@
+{
+  "probe": "p_crosscheck",
+  "date": "2026-09-11",
+  "findings": [
+    "STEP-F"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "Cross-check, haul volumes: burn_quantities says cut 497.5 m3 / fill 398.8 m3. haul_regions with no floor sums to 497.5 / 398.8 m3 \u2014 relative error 0.00e+00 and 1.43e-16 against a 0.1% bar (passes: True). At the shipped min_region_m3=5 m3 the haul plan omits 0.80 m3 of fill across 8 regions, which the site total still counts.",
+    "Cross-check, one stencil: re-deriving slope and aspect from horn_gradient's own output gives max errors 1.907e-06 deg and 1.526e-05 deg, with 0 flat-sentinel disagreements. Against the plan's 1e-12 bar: False. Against float32's own spacing, which is the tightest either return value can carry: True.",
+    "Cross-check, flow_bearing vs aspect_degrees: over 2,000 sampled cells the two encodings of the same downslope vector differ by at most 1.513e-05 deg. Against the plan's 1e-06 deg bar: False \u2014 but aspect_degrees returns float32, whose spacing at 360 deg is 3.052e-05 deg, so that bar asks for more precision than the return value carries. Against what it does carry: True. flow_bearing returned None on 0 genuinely flat cells.",
+    "Cross-check, link accounting at 0.20 ha: 127 links emitted at min_cells=3, of which 1 clear the 35 m profile floor (126 cannot yield a keypoint however good the ground). keypoints + skipped = 127; identity against emitted holds: True.",
+    "Mask routing vs pointer routing at 0.20 ha. Production (D-infinity mask, D8 pointers): 1,688 stream cells -> 127 order-1 links holding only 717 of them, median link 3.4 m, longest 54 m, 1 clearing the 35 m profile floor, and 125 cells whose D8 pointer leaves the mask. Same pointers, mask from the same graph: 684 stream cells -> 13 links holding 630, median 39.8 m, longest 157 m, 7 clearing the floor, 0 leaving the mask. The shattering is the mixture, not the terrain."
+  ],
+  "stages": {
+    "crosscheck_haul_regions_vs_burn_quantities": {
+      "status": "ok",
+      "burn_quantities": {
+        "cut_m3": 497.5,
+        "fill_m3": 398.80000000000564
+      },
+      "cell_area_m2": 1.0,
+      "no_floor": {
+        "min_region_m3": 0.0,
+        "cut_regions": 1,
+        "fill_regions": 9,
+        "cut_m3": 497.5,
+        "fill_m3": 398.8000000000057,
+        "cut_relative_error": 0.0,
+        "fill_relative_error": 1.4253615561887464e-16
+      },
+      "default_floor": {
+        "min_region_m3": 5.0,
+        "cut_regions": 1,
+        "fill_regions": 1,
+        "cut_m3": 497.5,
+        "fill_m3": 398.0000000000057,
+        "cut_relative_error": 0.0,
+        "fill_relative_error": 0.0020060180541623452
+      },
+      "passes": true,
+      "volume_dropped_by_the_default_floor_m3": {
+        "cut": 0.0,
+        "fill": 0.8000000000000114
+      },
+      "regions_dropped_by_the_default_floor": {
+        "cut": 0,
+        "fill": 8
+      }
+    },
+    "crosscheck_one_stencil_three_consumers": {
+      "status": "ok",
+      "slope_max_abs_error_deg": 1.9070110823804498e-06,
+      "aspect_max_abs_error_deg": 1.5258545488450181e-05,
+      "flat_sentinel_disagreements": 0,
+      "float32_spacing_at_360_deg": 3.0517578125e-05,
+      "float32_spacing_at_90_deg": 7.62939453125e-06,
+      "passes_at_float32_precision": true,
+      "passes_at_1e_12": false
+    },
+    "crosscheck_flow_bearing_vs_aspect": {
+      "status": "ok",
+      "cells_tested": 2000,
+      "cells_flow_bearing_refused": 0,
+      "max_abs_error_deg": 1.5130283145481371e-05,
+      "worst_cell": [
+        97,
+        273
+      ],
+      "tolerance_deg": 1e-06,
+      "passes_at_1e_6_deg": false,
+      "float32_spacing_at_360_deg": 3.0517578125e-05,
+      "passes_at_float32_precision": true,
+      "limiting_factor": "aspect_degrees returns float32; flow_bearing is float64"
+    },
+    "crosscheck_link_accounting": {
+      "status": "ok",
+      "min_cells": 3,
+      "emitted": 127,
+      "profile_step_m": 5.0,
+      "floor_m": 35.0,
+      "consumable": 1,
+      "emitted_but_too_short": 126,
+      "length_m_min": 2.0,
+      "length_m_max": 54.0,
+      "keypoints": 1,
+      "skipped": 126,
+      "keypoints_plus_skipped": 127,
+      "identity_holds": true,
+      "passes": true
+    },
+    "crosscheck_mask_routing_vs_pointer_routing": {
+      "status": "ok",
+      "threshold_cells": 2000,
+      "threshold_ha": 0.2,
+      "profile_floor_m": 35.0,
+      "dinf_mask_production": {
+        "stream_cells": 1688,
+        "order1_links": 127,
+        "cells_inside_a_link": 717,
+        "stream_cells_in_no_link": 971,
+        "stream_cells_whose_pointer_leaves_the_mask": 125,
+        "median_link_length_m": 3.414213562373095,
+        "max_link_length_m": 54.0,
+        "links_clearing_the_profile_floor": 1
+      },
+      "d8_mask_same_graph_as_the_pointers": {
+        "stream_cells": 684,
+        "order1_links": 13,
+        "cells_inside_a_link": 630,
+        "stream_cells_in_no_link": 54,
+        "stream_cells_whose_pointer_leaves_the_mask": 0,
+        "median_link_length_m": 39.798989873223334,
+        "max_link_length_m": 157.28427124746187,
+        "links_clearing_the_profile_floor": 7
+      }
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}

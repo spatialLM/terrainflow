@@ -1,0 +1,426 @@
+{
+  "probe": "p_coverage",
+  "date": "2026-09-11",
+  "findings": [
+    "STEP-E"
+  ],
+  "dem": null,
+  "notes": [
+    "Coverage over 30 Step E subjects: 2 are not exercised by either suite (bulking_factor, UsableAreaDisjoint); 0 have no production caller at all (none); 8 are called only from inside their own module (specific_catchment_area, terrace_vertical_interval, capture_spacing, embankment_volume, transect_cells, flow_bearing, UsableAreaDisjoint, clip_to_usable_area).",
+    "Coverage, panel properties: keyline_max_grade_n exercised (1 pure / 2 qgis references); keyline_max_valleys exercised (1 pure / 2 qgis references); set_spacing_advice exercised (0 pure / 2 qgis references)",
+    "help_text.py: 1,475 lines defining 155 tooltip constants, with no test of any kind in either suite. 4 numeric claims were checked against the constant each quotes; 0 disagree (none). 150 constants remain unchecked \u2014 they state geography, method or advice rather than a value the code holds, and no mechanical rule separates those from the ones that do."
+  ],
+  "stages": {
+    "coverage_rows": {
+      "status": "ok",
+      "subjects": {
+        "strahler_order": {
+          "defined_in": "terrainflow_assessment/modules/flow_graph.py",
+          "pure_suite_call_sites": 9,
+          "qgis_suite_call_sites": 7,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/keypoint_analysis.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "stream_links": {
+          "defined_in": "terrainflow_assessment/modules/flow_graph.py",
+          "pure_suite_call_sites": 4,
+          "qgis_suite_call_sites": 7,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/keypoint_analysis.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "topographic_wetness_index": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 8,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/terrain.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "stream_power_index": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 5,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/terrain.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "sediment_transport_index": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 3,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/terrain.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "landform_classes": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 4,
+          "qgis_suite_call_sites": 1,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/keypoint_analysis.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "landform_tpi": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 7,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/keypoint_analysis.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "slope_statistics": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 4,
+          "qgis_suite_call_sites": 3,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/contour.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "specific_catchment_area": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 2,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 3,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "terrace_vertical_interval": {
+          "defined_in": "terrainflow_assessment/core/sizing/advisories.py",
+          "pure_suite_call_sites": 6,
+          "qgis_suite_call_sites": 3,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "bulking_factor": {
+          "defined_in": "terrainflow_assessment/core/sizing/advisories.py",
+          "pure_suite_call_sites": 0,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/mass_haul.py"
+          ],
+          "state": "not exercised by either suite, but shipped and called"
+        },
+        "compaction_factor": {
+          "defined_in": "terrainflow_assessment/core/sizing/advisories.py",
+          "pure_suite_call_sites": 1,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/mass_haul.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "capture_spacing": {
+          "defined_in": "terrainflow_assessment/core/sizing/advisories.py",
+          "pure_suite_call_sites": 2,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "spacing_advisory": {
+          "defined_in": "terrainflow_assessment/core/sizing/advisories.py",
+          "pure_suite_call_sites": 8,
+          "qgis_suite_call_sites": 1,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/contour.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "embankment_volume": {
+          "defined_in": "terrainflow_assessment/modules/impoundment_sites.py",
+          "pure_suite_call_sites": 4,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "transect_cells": {
+          "defined_in": "terrainflow_assessment/modules/impoundment_sites.py",
+          "pure_suite_call_sites": 7,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "flow_bearing": {
+          "defined_in": "terrainflow_assessment/modules/impoundment_sites.py",
+          "pure_suite_call_sites": 2,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "UsableAreaDisjoint": {
+          "defined_in": "terrainflow_assessment/modules/contour_analysis.py",
+          "pure_suite_call_sites": 0,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "not exercised by either suite, but shipped and called"
+        },
+        "clip_to_usable_area": {
+          "defined_in": "terrainflow_assessment/modules/contour_analysis.py",
+          "pure_suite_call_sites": 9,
+          "qgis_suite_call_sites": 1,
+          "production_call_sites": 2,
+          "production_call_sites_outside_its_module": 0,
+          "production_callers": [],
+          "state": "exercised, wired"
+        },
+        "classify_contour_inflow": {
+          "defined_in": "terrainflow_assessment/modules/contour_analysis.py",
+          "pure_suite_call_sites": 10,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 2,
+          "production_call_sites_outside_its_module": 2,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/contour.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "find_swale_segments": {
+          "defined_in": "terrainflow_assessment/modules/contour_analysis.py",
+          "pure_suite_call_sites": 18,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/contour.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "recommend_swale_length": {
+          "defined_in": "terrainflow_assessment/modules/swale_design.py",
+          "pure_suite_call_sites": 19,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 3,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/contour_analysis.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "haul_regions": {
+          "defined_in": "terrainflow_assessment/modules/mass_haul.py",
+          "pure_suite_call_sites": 6,
+          "qgis_suite_call_sites": 2,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/earthworks.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "allocate_haul": {
+          "defined_in": "terrainflow_assessment/modules/mass_haul.py",
+          "pure_suite_call_sites": 7,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/earthworks.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "earthwork_balance": {
+          "defined_in": "terrainflow_assessment/modules/mass_haul.py",
+          "pure_suite_call_sites": 7,
+          "qgis_suite_call_sites": 0,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/report_model.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "burn_quantities": {
+          "defined_in": "terrainflow_assessment/modules/earthwork_design.py",
+          "pure_suite_call_sites": 3,
+          "qgis_suite_call_sites": 1,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/earthworks.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "curvature": {
+          "defined_in": "terrainflow_assessment/modules/terrain_indices.py",
+          "pure_suite_call_sites": 11,
+          "qgis_suite_call_sites": 3,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/terrain.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "horn_gradient": {
+          "defined_in": "terrainflow_assessment/modules/dem_loader.py",
+          "pure_suite_call_sites": 2,
+          "qgis_suite_call_sites": 5,
+          "production_call_sites": 3,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/modules/impoundment_sites.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "aspect_degrees": {
+          "defined_in": "terrainflow_assessment/modules/dem_loader.py",
+          "pure_suite_call_sites": 2,
+          "qgis_suite_call_sites": 4,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/terrain.py"
+          ],
+          "state": "exercised, wired"
+        },
+        "find_ridgelines": {
+          "defined_in": "terrainflow_assessment/modules/keypoint_analysis.py",
+          "pure_suite_call_sites": 9,
+          "qgis_suite_call_sites": 1,
+          "production_call_sites": 1,
+          "production_call_sites_outside_its_module": 1,
+          "production_callers": [
+            "terrainflow_assessment/qgis/controllers/contour.py"
+          ],
+          "state": "exercised, wired"
+        }
+      },
+      "not_exercised_by_either_suite": [
+        "bulking_factor",
+        "UsableAreaDisjoint"
+      ],
+      "no_production_caller": [],
+      "called_only_from_within_their_own_module": [
+        "specific_catchment_area",
+        "terrace_vertical_interval",
+        "capture_spacing",
+        "embankment_volume",
+        "transect_cells",
+        "flow_bearing",
+        "UsableAreaDisjoint",
+        "clip_to_usable_area"
+      ]
+    },
+    "coverage_panel_properties": {
+      "status": "ok",
+      "properties": {
+        "keyline_max_grade_n": {
+          "defined_in_panel": true,
+          "pure_suite_references": 1,
+          "qgis_suite_references": 2,
+          "state": "exercised"
+        },
+        "keyline_max_valleys": {
+          "defined_in_panel": true,
+          "pure_suite_references": 1,
+          "qgis_suite_references": 2,
+          "state": "exercised"
+        },
+        "set_spacing_advice": {
+          "defined_in_panel": true,
+          "pure_suite_references": 0,
+          "qgis_suite_references": 2,
+          "state": "exercised"
+        }
+      }
+    },
+    "help_text_vs_constants": {
+      "status": "ok",
+      "help_text_lines": 1475,
+      "help_constants_defined": 155,
+      "pairs": [
+        {
+          "help_constant": "MIN_CATCHMENT",
+          "what": "the swale placement threshold's default, in hectares",
+          "source": "terrainflow_assessment/panel.py",
+          "constant_value": "0.5",
+          "copy_states": "0.5",
+          "agrees": true,
+          "verdict": "agrees"
+        },
+        {
+          "help_constant": "THROUGHFLOW",
+          "what": "the surface-runoff fade top, in cubic metres",
+          "source": "terrainflow_assessment/core/registry/map_palette.py",
+          "constant_value": "2.0",
+          "copy_states": "2",
+          "agrees": true,
+          "verdict": "agrees"
+        },
+        {
+          "help_constant": "MAX_SLOPE",
+          "what": "the analysis max-slope filter's default, in degrees",
+          "source": "terrainflow_assessment/modules/project_io.py",
+          "constant_value": "18.0",
+          "copy_states": "18",
+          "agrees": true,
+          "verdict": "agrees"
+        },
+        {
+          "help_constant": "COMPANION_BERM",
+          "what": "the spoil compaction factor the berm is built from, as a percentage",
+          "source": "terrainflow_assessment/modules/earthwork_design.py",
+          "constant_value": "0.75",
+          "copy_states": "75",
+          "agrees": true,
+          "verdict": "agrees"
+        },
+        {
+          "help_constant": "KEYLINE_GRADE",
+          "what": "the keyline drift limit \u2014 the copy names it as 1:N, not as a number, so there is nothing here that can drift; recorded to show it was asked",
+          "source": "terrainflow_assessment/panel.py",
+          "constant_value": "500",
+          "copy_states": null,
+          "verdict": "no number in the copy to compare"
+        }
+      ],
+      "mismatches": [],
+      "pairs_checked": 4,
+      "constants_unchecked": 150
+    }
+  }
+}
