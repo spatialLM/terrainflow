@@ -1052,6 +1052,62 @@ they were grouped with the Yeomans rows in §5 by the source assignment, not by 
 
 ---
 
+### §9.9 KPA-12 closed — the ridgeline TPI now asks in metres and cuts in sd (2026-09-11)
+
+`KPA-12` was published `DISC / i-d / L / H` with two halves. §9.2 fixed the first (the
+NaN→whole-DEM-mean contamination that fabricated a ridge line around every data boundary)
+and left the second explicitly open, recording that *"the resolution-dependence of the
+cell-count window is now **documented rather than silent**"*. Documented was as far as it
+got. This closes it.
+
+**What the open half was costing.** `find_ridgelines` carried its own copy of the TPI
+code — a line-for-line duplicate of `terrain_indices.landform_tpi`, down to the comment
+about the data boundary — and the copy had never picked up the two corrections the library
+version had. Measured on 2026-09-11:
+
+| | shipping copy (15 **cells**) | `landform_tpi` (15 **m**) |
+|---|---|---|
+| real fixture, 1 m cells | 15 m window, max TPI **1.20 m** | 15 m window, max TPI 1.20 m |
+| synthetic harness DEM, 2 m cells | **30 m** window, max TPI **2.13 m** | 15 m window, max TPI 1.37 m |
+
+The default bar was an absolute **1.5 m**. So the feature cleared its own threshold on the
+2 m test surface *only because a cell-count window asked a question twice as large there*,
+and on the 1 m fixture nothing could clear it — max TPI 1.20 m against a 1.5 m bar, zero
+qualifying cells out of 160,000. **Ridgeline detection had never once fired on a 1 m DEM**,
+which is the resolution most farm LiDAR arrives at, and the test suite could not see it
+because the suite runs on the 2 m surface.
+
+**The fix uses what the repo already had.** `landform_tpi` and `landform_classes` were
+written correctly, tested, and never called from production — `terrain.py:249-253` writes
+six bands and TPI is not among them. `find_ridgelines` now calls both:
+
+- the window is **metres** (`tpi_window_m=15.0`), which is `landform_tpi`'s own stated fix;
+- the cut is **Weiss's standard-deviation rule** over the site's own TPI
+  (`min_tpi_sd=1.0`), which is what `landform_classes` implements and what its docstring
+  says an absolute metre bar cannot do. `min_tpi_m` survives as an explicit override for a
+  caller that genuinely wants an absolute bar;
+- the boundary mask now also scopes the sd sample, which is what that parameter is for —
+  *"classify a site against its own relief, not against a tile that is mostly harbour"*;
+- `min_length_m` drops 100.0 → 50.0. On real ground the ridge network fragments: at the
+  corrected threshold the fixture's longest connected, thinned run is **77 m**, with the
+  rest at 19 m and below. The synthetic surface gives 592 m runs because a synthetic valley
+  has no saddles. A 100 m bar was set against terrain that does not exist outside the test
+  fixture.
+
+**Result:** the real fixture goes from **0 ridgelines to 1**, with no error either way; the
+synthetic surface is unchanged in the only thing the suite asserts (no error). The
+duplicate TPI implementation is gone, so `KPA-12`'s subject now exists once.
+
+`KPA-12` moves `DISC → OK`. The `thresholds unpublished` clause of its §2.20 row is also
+answered: the threshold is now Weiss's, which *is* published — [JENNESS] is already in §7
+for exactly this row.
+
+**Not claimed.** The `acc <= 2` ridge test is untouched and is the reason real ridges
+fragment. Whether one 77 m spine on a 16 ha clip is a *useful* answer is a design question,
+not a correctness one, and it is not settled here.
+
+---
+
 ## §10 Line-number mapping appendix (2026-09-11)
 
 `§2.20`'s line citations were written against `keypoint_analysis.py` as it stood before the
@@ -1067,6 +1123,7 @@ all 42 would be make-work, and a stale citation nobody follows costs nothing.
 |---|---|---|---|
 | `KPA-03` | `44-47` | `keypoint_analysis.py:107-117` | `DrainageLineAnalysis._rc_to_xy` — **and already fixed**: the half-cell offset now follows `transform.e` downward, and the docstring records the fault. §9.2/§9.5 closed this; the §2.20 row still reads "pending confirm" only because remediation was appended rather than the row edited |
 | `KPA-09` | `151-153` | `keypoint_analysis.py:230` | `score = acc / (slope_safe + 1.0)`; the "heuristic proxy, not the strict Yeomans keypoint" docstring is `:170` |
+| `KPA-12` | `207-233` | `keypoint_analysis.py:284-360` | `find_ridgelines`. **Both halves now fixed** — see §9.9. The TPI itself moved out to `terrain_indices.landform_tpi`, so the duplicate this row described no longer exists |
 | `KPA-25` | `516-521` | `keypoint_analysis.py:642` | `find_keypoint` — the single-stem walk, still present, now reached only through `contour.py:1402`'s fallback |
 | `KPA-26` | `526-535` | `keypoint_analysis.py:676-690` | arc length via mean cell size. The NaN→0.0 m half was re-filed as `NEW-W8-01` and **fixed**: `:676-690` now drops non-finite cells and bridges by interpolation rather than substituting 0.0 m |
 | `KPA-27` | `537-541` | `keypoint_analysis.py:699-702` | resample at `min(5·cell, 10 m)` |

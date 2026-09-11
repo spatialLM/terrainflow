@@ -4,9 +4,13 @@ Thirty-one findings against the analysis tier as rebuilt on 2026-09-10
 (`1089c3a` … `d40a2c0`, plus `ccdbcd6`, `8bf319b`, `c288a6a`), measured on a real DEM.
 Companion to `MATHS_AUDIT.md`, in its dialect and under its rules.
 
-**Everything here is documentation. No behaviour was changed.** Where a fix is obvious it
-is named in `root cause` so a later pass does not have to re-derive it, but nothing in this
-register has been applied.
+**§1 through §6 are documentation, written before anything was changed.** Where a fix is
+obvious it is named in `root cause` so a later pass does not have to re-derive it.
+
+**§7 records what has since been fixed, and is the authority on current state.** Three
+findings are closed and one new one (`TIX-01`) was opened and closed in the same pass. The
+§1 rows are left as written, which is `MATHS_AUDIT`'s convention and this register's: the
+table stays a record of what was found. Read §7 before acting on any row above it.
 
 **HEAD at write time:** `c288a6a`, branch `wip/core-qgis-refactor`, tree clean.
 **Fixture:** `tests/fixtures/quail_island_catchment.tif` — 400 × 400 @ 1 m (16 ha), EPSG:2193,
@@ -60,7 +64,7 @@ the inert `acc_path` is `KPA-48` rather than a controller finding, and why the o
 | `IMP` | `modules/impoundment_sites.py` | **New**, and free |
 | `MHL` | `modules/mass_haul.py` | **New**, and free |
 | `RPT` | **extended** to `modules/report_model.py` as well as `modules/reporting.py` (§2.5) | Siblings; inventing a second prefix for one of them buys nothing |
-| `TIX` | `modules/terrain_indices.py` | **Reserved, unused.** Step E may produce findings there; none exist yet. The aspect ramp is `CTL-02`, because the defect is the *pairing* at `terrain.py:43,190`, not anything inside `terrain_indices.py` |
+| `TIX` | `modules/terrain_indices.py` | Reserved when this register was written; **`TIX-01` was opened and closed on 2026-09-11** (§7.3). The aspect ramp is `CTL-02`, because the defect is the *pairing* at `terrain.py:43,190`, not anything inside `terrain_indices.py` |
 
 The register already carries a second, non-file ID family (`NEW-W5-01/02`,
 `NEW-W8-01..05`), which is the precedent for adding one.
@@ -1089,7 +1093,7 @@ follows is scoped and not started.
 | **B** | Re-run `p_flow_graph` and `p_keypoints` as regressions once any fix lands. The roughness sweep moved **into A1** and is done | existing |
 | **C** | Two invariance arms: **Z + 600 m** (every output identical under a constant elevation offset — the only arm that reaches the float32 regime `save_result`, `earthworks.py:2219` and `KPA-38`'s fix note all reason about) and **mirror / transpose** (catches `KPA-33`'s row→y flip, `CTA-08`'s rc→map asymmetry, `IMP-01`'s diagonal count and `UNI-15`'s convention in one arm — a **regression** guard on shipped fixes, not an investigation). Plus a `routing='d8'` run, currently tested nowhere | `p_invariance.py` |
 | **D** | The reduced battery: **signed witnesses** (plan curvature negative over the top-5 % accumulation network, positive over the top-5 % TPI; `aspect ∈ (90,270)` coincides with `dz_dy > 0` for ≥90 % of cells above 2°), **dimensional identities** (`catchment_ha·10_000 == (acc+1)·cell_area`; `specific_catchment_area(cell 2)/(cell 1) == 2.0` exactly; `erosion_spacing_m == VI(p50)/p50_grade`), and **conservation** (`|accepted| + |refused| == |input|` for every screening tool — which is `KPA-39`, `KPA-43` and `IMP-03` as arithmetic). Honest pass criterion for curvature vs TPI: measured agreement is **64.5 %** at the default 15 m window, so assert `mean(plan[cls==1]) > 0 > mean(plan[cls==-1])` and point-biserial ≥ **+0.25**; a **negative** correlation is the unambiguous failure | `p_battery.py` |
-| **E** | Coverage rows for `strahler_order`, `topographic_wetness_index`, `stream_power_index`, `sediment_transport_index`, `landform_classes`, `slope_statistics`, `terrace_vertical_interval`, `bulking_factor`/`compaction_factor`, `embankment_volume`, `UsableAreaDisjoint`/`_sample_line`/`classify_contour_inflow`, `recommend_swale_length`, `ComparisonResult`, `report_model._earthmoving`, `project_io.INPUT_FIELDS` additions, three `panel` properties, and **`help_text.py` (+126 lines of user-facing claims, zero coverage)** — for which the cheap check is text-versus-constant. **`TIX` may be opened here.** Record separately that **`landform_tpi` has no production caller** (`terrain.py:249-253` writes six bands, TPI not among them) | — |
+| **E** | Coverage rows for `strahler_order`, `topographic_wetness_index`, `stream_power_index`, `sediment_transport_index`, `landform_classes`, `slope_statistics`, `terrace_vertical_interval`, `bulking_factor`/`compaction_factor`, `embankment_volume`, `UsableAreaDisjoint`/`_sample_line`/`classify_contour_inflow`, `recommend_swale_length`, `ComparisonResult`, `report_model._earthmoving`, `project_io.INPUT_FIELDS` additions, three `panel` properties, and **`help_text.py` (+126 lines of user-facing claims, zero coverage)** — for which the cheap check is text-versus-constant. **`TIX` may be opened here** — `TIX-01` already was, on 2026-09-11 (§7.3). ~~Record separately that `landform_tpi` has no production caller~~ **RESOLVED**: `find_ridgelines` now calls it and `landform_classes` (§7.4). `terrain.py:249-253` still writes six bands with no TPI among them, so a TPI *layer* remains unavailable to the user — that part stands | — |
 | **F** | Four exact-tolerance cross-checks: `haul_regions` totals vs `burn_quantities` (**0.1 %**); `slope_degrees` / `aspect_degrees` / `horn_gradient` from one stencil (**1e-12**); `flow_bearing` vs `aspect_degrees` (**1e-6°**); `stream_links` emitted vs consumable vs `keypoints + skipped` (**exact integers**) | `p_crosscheck.py` |
 | **G** | **Done** for the production path — see `checks_fixture_regression.check_keyline_network_numbers_have_not_moved`. Still out of scope by decision: the conditioned-surface numbers (unreachable from production — that is `KPA-38`), the 35.0 m floor as a pinned value (it is analytic, not a fixture measurement, and the file's 0.5 % relative tolerance is the wrong instrument for it), and the five-threshold keypoint vector | existing |
 
@@ -1105,3 +1109,120 @@ follows is scoped and not started.
    `MIN_SLOPE_EASE` across `roughness_m` 0.00 → 0.10. 10 m and 20 m are 2.18× and 2.44×
    `MIN_SLOPE_EASE` and are not defensible on noisy ground. The window is a **TerrainFlow
    convention** sized on **synthetic** roughness, and the decision is the owner's.
+
+---
+
+## §7 Fixed since this register was written (2026-09-11)
+
+Four rows are closed. §1 and §2 are left as written; this section is the authority on
+current state.
+
+Everything here was **measured before and after**, on the real fixture, and every claim
+below is a number from that pair of runs rather than a reading of the diff.
+
+| ID | Was | Now |
+|---|---|---|
+| `CTL-02` | aspect ramp laid at −360 … 113400 over data spanning [−1, 360]; **0.32 %** of the ramp occupied | stops at −1, 0, 45 … 360 over the same data; **100.00 %** occupied |
+| `CTL-03` | the check that should catch it asserted only that a layer id existed | asserts the ramp resolves its band; **verified to fail on the pre-fix code** |
+| `TIX-01` | **new** — `landform_classes(tpi, slope_deg, …)` never read `slope_deg` | parameter removed |
+| `KPA-12` (published, `MATHS_AUDIT` §1 #18) | ridgeline TPI window in **cells**, cut at an absolute **1.5 m** | window in metres, cut in standard deviations — see `MATHS_AUDIT` §9.9 |
+
+### 7.1 `CTL-02` — the aspect map is a gradient again
+
+**Root cause, confirmed:** `ASPECT_CLASSES` is the only palette in `map_palette.py` whose
+first element is a **value** (compass degrees) rather than a **fraction of the band
+maximum**. `apply_raster_ramp` had one path and it multiplied. With `top = band_max ≈ 360`
+the nine stops landed at −360, 0, 16200 … 113400, so every real value fell inside the first
+stop and the layer drew as one wash.
+
+**Fix:** `apply_raster_ramp` gains `absolute=False`. When true, stop values are laid down
+untouched. `INDEX_SPECS` gains a fourth field saying which palette is which, and aspect is
+the only one that sets it. Existing callers are untouched and keep the fractional path, so
+nothing else moved — the 49 screenshot baselines are still pixel-identical.
+
+**And the compass now closes.** A stop was added at 360° carrying the north colour. Aspect
+is circular: a face at 359° is north-facing, and without the closing stop everything from
+315° to 360° clamped flat onto the NW colour. The register's `WRONG` verdict stands as
+written; it is now `WRONG (fixed)`.
+
+**Measured, real fixture:**
+
+| | stops | band | ramp occupied |
+|---|---|---|---|
+| before | −360.0, 0.0, 16200.0 … 129599.9 | [−1.000, 360.000] | **0.32 %** |
+| after | −1.0, 0.0, 45.0 … 360.0 | [−1.000, 360.000] | **100.00 %** |
+
+### 7.2 `CTL-03` — the check now makes the claim its name makes
+
+`check_every_terrain_index_renders` carried the docstring *"a ramp that resolves to one
+flat colour is indistinguishable from a broken layer"* over a body that asserted a layer id
+existed. It would have passed on `CTL-02` — and did, for as long as `CTL-02` was live.
+
+It now measures the ramp against the band it paints and refuses a ramp too wide to resolve
+it. The bar is **10×**; measured ratios at the time of writing are aspect 1.0× (was 360×),
+TWI/SPI/STI ~1.0×, and the two curvature ramps 0.14× and 0.10×. It is deliberately
+one-sided: a ramp *narrower* than its band is the documented, intended behaviour for
+curvature, which anchors on ±p95 so that a couple of cliff-edge cells cannot flatten
+everything else.
+
+**The check was verified against the defect, not just added.** Re-registering aspect as
+non-absolute — the exact pre-fix state — makes it fail with:
+
+```
+aspect: the colour ramp spans 129,959.901 over data spanning 361.000 — 360.0x too wide,
+so the layer resolves to roughly one colour.
+```
+
+A check that would not have caught the bug it is named for is what `CTL-03` *was*.
+
+### 7.3 `TIX-01` — an inert parameter, found while wiring the orphans
+
+- **Tokens:** `DISC / I / n / H` — opened and closed in the same pass
+- **Where:** `terrain_indices.py:250`, `landform_classes(tpi, slope_deg, sd, mask)`
+- **Observed:** `slope_deg` was accepted and never read. Every call site in the tree passed
+  `None` for it — including all four in `tests/test_terrain_indices.py`, which is how it
+  survived: the tests documented the parameter as unused and nobody read them that way.
+- **Fix:** removed, rather than wired. Weiss's *fuller* scheme does use slope, but only to
+  split a fourth class (`plains`) out of `midslope`, and this function returns three
+  classes. Restoring it means implementing that split, not re-adding an argument. The
+  docstring now says so, so the next reader does not re-add it.
+- **Why it matters here:** `landform_classes` was about to gain its first production
+  caller. Wiring a dead parameter into production is how `MHL-01` and `KPA-48` happened.
+
+**This is the first `TIX` row.** §0.2 reserved the prefix for `terrain_indices.py` and
+recorded that none existed yet.
+
+### 7.4 The two orphaned functions now have a caller
+
+§4 and the closing summary of this register recorded `landform_tpi` and `landform_classes`
+as having no production caller: the terrain tool writes six bands and neither is among
+them, while `find_ridgelines` computed its own TPI inline.
+
+Both are now called from `find_ridgelines`, and the inline copy is deleted. The
+consolidation runs in the direction the repo owner set — ridgeline analysis stays where it
+lives, alongside the Yeomans keyline work, and the library functions serve it rather than
+competing with it.
+
+**The orphans were the *corrected* implementations, which is the part worth remembering.**
+`landform_tpi`'s docstring records the cell-count window as a fault it had already fixed;
+the shipping copy still had it. `landform_classes`'s docstring says an absolute metre
+threshold cannot transfer between sites; the shipping copy used one. Someone fixed this
+properly in `terrain_indices.py` and never rewired the caller, so the repo has been running
+the superseded code and testing the replacement. See `MATHS_AUDIT` §9.9 for the
+measurements.
+
+### 7.5 What this pass did **not** change
+
+- **The report still has no analysis-tier page** (§4, item in the closing summary). Eleven
+  pages, and `keyline` does not appear in `report_model.py`. Deferred by the owner.
+- **`acc <= 2`** — the ridge test itself is untouched, and it is why real ridges fragment
+  into short runs where the synthetic surface gives 592 m spines. Whether one 77 m ridgeline
+  on a 16 ha clip is a *useful* answer is a design question, not a correctness one.
+- **`tpi_window_m`, `min_tpi_sd` and `min_length_m` are still not exposed in the panel** or
+  persisted in `project_io.INPUT_FIELDS`. A user on ground the defaults do not suit still
+  cannot reach them. That is feature work, and it is not done.
+- **Terrain indices have no screenshot coverage.** The 49 baseline images cover the baseline
+  layers; none renders a terrain index, which is why `CTL-02` could not have been caught by
+  the visual tier either. `CTL-03`'s strengthened assertion is now the only thing standing
+  between that ramp and another flat map.
+- Every other row in §1 is open exactly as written.
