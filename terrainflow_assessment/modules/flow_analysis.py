@@ -13,9 +13,9 @@ AnalysisWorker        — QThread wrapper for background analysis
 
 import numpy as np
 import rasterio
-from terrainflow_assessment.modules.pysheds_compat import Grid
 
 from terrainflow_assessment.modules.footprint import xy_to_rc
+from terrainflow_assessment.modules.pysheds_compat import Grid
 
 # Below this share of the site's runoff, unrouted cells are not worth interrupting for:
 # a handful of nodata holes on the edge of a tile is normal and says nothing about the

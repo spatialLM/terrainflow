@@ -63,12 +63,12 @@ def fast_contributing_area(dem_path, boundary_path, progress_callback=None):
     import tempfile
 
     import geopandas as gpd
-    from terrainflow_assessment.modules.pysheds_compat import Grid
     from shapely.geometry import box
     from shapely.geometry import shape as shapely_shape
     from shapely.ops import unary_union
 
     from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
+    from terrainflow_assessment.modules.pysheds_compat import Grid
 
     def _p(pct, msg):
         if progress_callback:
