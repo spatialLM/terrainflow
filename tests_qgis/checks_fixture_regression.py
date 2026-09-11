@@ -258,3 +258,166 @@ def check_real_terrain_numbers_have_not_moved(dem_path):
             + "\n      ".join(failures)
             + "\n    If the change was intended, re-record EXPECTED in this file."
         )
+
+
+# ---------------------------------------------------------------------------
+# Keyline network — the production path, pinned as integers
+# ---------------------------------------------------------------------------
+#
+# Recorded 2026-09-11 against the same fixture, from the probes under
+# `tests_qgis/probes/`. Every number here is measured **twice**: once by
+# `p_flow_graph.py` / `p_keypoints.py`, and once by this check. If the two disagree, one
+# of them is wrong and the disagreement is the finding.
+#
+# **These pin currently broken behaviour**, and that is deliberate. Each key names the
+# entry in `CLudeDocs/ANALYSIS_DEFECTS.md` it belongs to, so the first real fix moves the
+# number and the reviewer knows which finding moved it. The file's own rule applies:
+# re-record the constants in the same commit that causes them to move.
+#
+# **Production path only.** `contour.py:1397` calls `find_keypoints(max_valleys=...)` and
+# passes no threshold, so `stream_threshold_cells` takes its
+# `max(20, round(2000 / cell_area))` default — 2,000 cells = 0.20 ha on this 1 m fixture.
+# The 0.5 ha and 1.0 ha figures in the probe evidence are **sensitivity**, not production,
+# and are not pinned. Neither are the conditioned-surface numbers: they are unreachable
+# from production, which is the whole of KPA-38, so pinning them would pin probe code.
+#
+# **Integers, compared exactly.** `TOLERANCE` is 0.5 % relative, which is the right
+# instrument for a capacity in m³ and the wrong one for a count of links — 0.5 % of 127 is
+# 0.6, so a single link appearing or disappearing would pass. These are counts; they are
+# compared with `==`.
+#
+# The 35.0 m profile floor is **not** pinned as a value. It is analytic — it falls out of
+# `7 · min(5·cell, 10)` — not a property of this fixture, so a fixture check is the wrong
+# home for it. What is pinned is how many links clear it.
+EXPECTED_KEYLINE = {
+    # FLG-18 — links emitted at min_cells=3 against links long enough to profile.
+    "order1_links": 127,
+    "links_clearing_profile_floor": 1,
+    # KPA-39 — the guard histogram, derived here from link geometry alone (no settrace),
+    # and equal to what p_keypoints.py traced. Two independent routes to 78 / 48 / 0.
+    "links_refused_too_few_cells": 78,
+    "links_refused_profile_too_short": 48,
+    # KPA-43 — keypoints, skipped, and whether they account for the input.
+    "keypoints_at_max_valleys_8": 1,
+    "skipped_at_max_valleys_8": 126,
+    "links_unaccounted_at_max_valleys_8": 0,
+    # FLG-19 — the raw surface production actually walks, and what survives on it.
+    "raw_sinks_on_finite_ground": 525,
+    "raw_stream_cells_that_are_sinks": 42,
+    "stream_cells": 1688,
+}
+
+#: Cells of the channel network at the production threshold, for context in the printout.
+KEYLINE_THRESHOLD_CELLS = 2000
+
+
+def _arc_length_m(link, cell_size):
+    """Map-space length of an ordered run of cells, centre to centre."""
+    total = 0.0
+    for i in range(1, len(link)):
+        dr = link[i][0] - link[i - 1][0]
+        dc = link[i][1] - link[i - 1][1]
+        total += (dr * dr + dc * dc) ** 0.5 * cell_size
+    return total
+
+
+def check_keyline_network_numbers_have_not_moved(dem_path):
+    """The keyline network on real terrain, as integers, on the production path.
+
+    `check_fixture_numbers_have_not_moved` asks whether the *sizing* answers still hold.
+    This asks the same question of the **keyline network** — how many primary valleys the
+    analysis finds, how many it refuses, and why — because that tier had no numeric
+    regression at all and every finding in `ANALYSIS_DEFECTS.md` rests on these counts.
+
+    Runs `YeomansKeylineAnalysis` directly rather than through the panel: the controller
+    adds a worker, a progress callback and four map layers, none of which changes a
+    number, and going straight at the module makes a moved figure point at the maths
+    rather than at the plumbing. The **arguments** are production's — `max_valleys=8` is
+    the panel default (`project_io.INPUT_FIELDS`), and no threshold is passed, exactly as
+    `contour.py:1397` does it.
+    """
+    import numpy as np
+
+    from terrainflow_assessment.modules.flow_graph import (
+        d8_from_dem,
+        strahler_order,
+        stream_links,
+    )
+    from terrainflow_assessment.modules.keypoint_analysis import YeomansKeylineAnalysis
+
+    ya = YeomansKeylineAnalysis(FIXTURE_DEM)
+    cell_area = ya.cell_w * ya.cell_h
+    threshold = max(20, int(round(2_000.0 / cell_area)))
+
+    # The floor `keypoint_on_path` cannot return a keypoint below: `spacing = min(5·cell,
+    # 10)`, `win >= 5` so `guard >= 2`, and `n_samp - 2·guard >= 3` first holds at
+    # `n_samp = 7`. Derived here rather than hard-coded so the arithmetic stays visible
+    # next to the count it produces, and so the 2 m arm gets 70 m without an edit.
+    spacing = min(5.0 * ya.cell_size, 10.0)
+    profile_floor_m = 7.0 * spacing
+
+    _fdir, acc_arr = ya._ensure_flow_data()
+    stream = (acc_arr >= threshold) & np.isfinite(ya.dem)
+
+    # d8 on the RAW DEM — which is what `find_keypoints:789` does, and is KPA-38.
+    next_flat, is_sink = d8_from_dem(ya.dem, ya.cell_w, ya.cell_h)
+    order = strahler_order(next_flat, stream.ravel())
+    links = stream_links(next_flat, stream.ravel(), order, ya.dem.shape[1], max_order=1)
+
+    lengths = [_arc_length_m(lk, ya.cell_size) for lk in links]
+    finite_flat = np.isfinite(ya.dem).ravel()
+    stream_flat = stream.ravel()
+
+    keypoints, skipped = ya.find_keypoints(max_valleys=8)
+
+    observed = {
+        "order1_links": len(links),
+        "links_clearing_profile_floor": sum(1 for m in lengths if m >= profile_floor_m),
+        "links_refused_too_few_cells": sum(1 for lk in links if len(lk) < 5),
+        "links_refused_profile_too_short": sum(
+            1 for lk, m in zip(links, lengths)
+            if len(lk) >= 5 and m < profile_floor_m),
+        "keypoints_at_max_valleys_8": len(keypoints),
+        "skipped_at_max_valleys_8": len(skipped),
+        "links_unaccounted_at_max_valleys_8": (
+            len(links) - (len(keypoints) + len(skipped))),
+        "raw_sinks_on_finite_ground": int(np.count_nonzero(is_sink & finite_flat)),
+        "raw_stream_cells_that_are_sinks": int(
+            np.count_nonzero(stream_flat & is_sink)),
+        "stream_cells": int(stream.sum()),
+    }
+
+    print("\n    --- keyline network (production path) ---")
+    print(f"    threshold {threshold} cells = {threshold * cell_area / 1e4:.2f} ha; "
+          f"profile floor {profile_floor_m:.1f} m")
+
+    failures = []
+    for key, expected in EXPECTED_KEYLINE.items():
+        actual = observed[key]
+        marker = "ok " if actual == expected else "MOVED"
+        print(f"    {marker} {key:38s} {actual!s:>8}  (recorded {expected})")
+        if actual != expected:
+            failures.append(f"{key}: {actual} against a recorded {expected}")
+
+    # Two things the arithmetic must satisfy whatever the recorded numbers are, so that a
+    # re-recorded EXPECTED_KEYLINE cannot quietly encode nonsense.
+    guard_total = (observed["links_refused_too_few_cells"]
+                   + observed["links_refused_profile_too_short"]
+                   + observed["links_clearing_profile_floor"])
+    if guard_total != observed["order1_links"]:
+        failures.append(
+            f"the three link classes sum to {guard_total}, not "
+            f"{observed['order1_links']} — they are meant to partition the link set")
+
+    if observed["links_clearing_profile_floor"] < len(keypoints):
+        failures.append(
+            f"{len(keypoints)} keypoint(s) were found on only "
+            f"{observed['links_clearing_profile_floor']} link(s) long enough to profile")
+
+    assert not failures, (
+        "the keyline network moved against the recorded fixture:\n      "
+        + "\n      ".join(failures)
+        + "\n    These pin CURRENT, PARTLY BROKEN behaviour — see "
+          "CLudeDocs/ANALYSIS_DEFECTS.md. A fix is expected to move them; re-record "
+          "EXPECTED_KEYLINE in the same commit, and say which finding moved it."
+    )
