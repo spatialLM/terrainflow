@@ -277,6 +277,19 @@ CURVATURE = (
 #: aspect at all. Opposing faces are the contrast that matters on a NZ hill farm — a
 #: north face dry and warm, a south face cool and damp — so those two are the strongest
 #: pair here and the side slopes are deliberately muted between them.
+#:
+#: **These are degrees, not fractions, and the renderer has to be told so.** Every other
+#: palette in this file is a fraction of the band maximum; this one is not. Passed
+#: through the fractional path it multiplied each bound by the band max (~360) and laid
+#: the stops at −360, 0, 16200 … 113400 against data that only ever spans [−1, 360] — so
+#: every real value fell inside the first stop and the whole map drew as one flat wash,
+#: measured at **0.32 % of the ramp occupied**. Its caller passes ``absolute=True``; see
+#: ``qgis/controllers/_symbols.apply_raster_ramp``.
+#:
+#: **Aspect is circular, so the ramp closes.** North appears twice, at 0° and again at
+#: 360°, because a face at 359° is north-facing and must not be drawn as the far end of a
+#: linear scale. Without the closing stop, everything from 315° to 360° clamped flat onto
+#: the NW colour.
 ASPECT_CLASSES = (
     (-1.0, (235, 235, 232, 255), "flat"),
     (0.0, (214, 96, 45, 255), "N"),
@@ -287,6 +300,7 @@ ASPECT_CLASSES = (
     (225.0, (108, 158, 182, 255), "SW"),
     (270.0, (168, 196, 206, 255), "W"),
     (315.0, (208, 168, 120, 255), "NW"),
+    (360.0, (214, 96, 45, 255), "N"),
 )
 
 

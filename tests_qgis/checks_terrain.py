@@ -9,6 +9,7 @@ import os
 
 from _harness import PluginHarness
 from _shots import assert_rendered, save_widget
+from qgis.core import QgsProject
 
 from terrainflow_assessment.qgis.controllers.terrain import INDEX_SPECS
 
@@ -137,7 +138,25 @@ def check_terrain_index_layers_are_placed_not_loose(dem_path):
 
 def check_every_terrain_index_renders(dem_path):
     """Each of the six paints something — a ramp that resolves to one flat colour is
-    indistinguishable from a broken layer until someone opens the map."""
+    indistinguishable from a broken layer until someone opens the map.
+
+    The docstring said that for a long time while the body asserted only that a layer id
+    existed, which is a weaker claim than the name makes. It would have passed on the
+    aspect ramp, whose stops were laid at −360 … 113400 against data spanning [−1, 360]:
+    every real value fell inside the first stop, the map drew as one wash, and a layer id
+    existed the whole time.
+
+    So the ramp is now measured against the data it is painting. A ramp far wider than
+    its band cannot resolve that band into colours. The test is deliberately loose in the
+    other direction — a ramp *narrower* than its band is the documented, intended
+    behaviour for curvature, which anchors on ±p95 so a couple of cliff-edge cells cannot
+    flatten everything else.
+    """
+    #: How much wider than its own data a ramp may be before it cannot resolve it.
+    #: Measured at the time of writing: aspect was 315x (broken), TWI/SPI/STI ~1.0x,
+    #: and the two curvature ramps 0.14x and 0.10x (narrower, deliberately).
+    MAX_RAMP_TO_DATA_SPAN = 10.0
+
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.panel.run_terrain_indices_requested.emit()
@@ -146,7 +165,36 @@ def check_every_terrain_index_renders(dem_path):
         for key in INDEX_SPECS:
             h.panel.terrain_index_toggled.emit(key, True)
             h.assert_no_errors(f"show {key}")
-            assert h.state.terrain_index_layer_ids.get(key), f"{key} built no layer"
+            layer_id = h.state.terrain_index_layer_ids.get(key)
+            assert layer_id, f"{key} built no layer"
+
+            layer = QgsProject.instance().mapLayer(layer_id)
+            assert layer is not None, f"{key}'s layer id resolves to nothing"
+
+            items = (layer.renderer().shader().rasterShaderFunction()
+                     .colorRampItemList())
+            assert len(items) >= 2, f"{key} has {len(items)} ramp stop(s)"
+
+            values = [item.value for item in items]
+            ramp_span = max(values) - min(values)
+            stats = layer.dataProvider().bandStatistics(1)
+            data_span = stats.maximumValue - stats.minimumValue
+
+            if data_span <= 0:
+                continue        # a constant band has no span to resolve; not this test
+
+            ratio = ramp_span / data_span
+            assert ratio <= MAX_RAMP_TO_DATA_SPAN, (
+                f"{key}: the colour ramp spans {ramp_span:,.3f} over data spanning "
+                f"{data_span:,.3f} — {ratio:,.1f}x too wide, so the layer resolves to "
+                f"roughly one colour.\n"
+                f"      ramp stops: {[round(v, 3) for v in values]}\n"
+                f"      band range: [{stats.minimumValue:.3f}, "
+                f"{stats.maximumValue:.3f}]\n"
+                f"      A palette in the band's own units must be registered "
+                f"`absolute` in INDEX_SPECS, not scaled by the band maximum."
+            )
+
             h.panel.terrain_index_toggled.emit(key, False)
 
 

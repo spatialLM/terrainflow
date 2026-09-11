@@ -55,13 +55,22 @@ def band_max(layer, band=1):
 
 
 def apply_raster_ramp(layer, stops, max_value=None, min_value=None,
-                      fade_from=0.0):
+                      fade_from=0.0, absolute=False):
     """Paint ``layer`` with a ``core.registry.map_palette`` ramp.
 
     ``stops`` are ``(fraction_of_max, (r, g, b, a), label)``. Baseline and the
     simulation both draw the same quantities — captured water, the channel
     network — and each used to carry its own copy of the stops, so a change on
     one side left two views of one thing in different colours.
+
+    ``absolute=True`` says the first element of each stop is **already a value in the
+    band's own units**, not a fraction, and lays the stops down untouched. Aspect is the
+    case that needs it: ``ASPECT_CLASSES`` declares compass degrees, and scaling those by
+    the band maximum put the nine stops at −360, 0, 16200 … 113400 against data that only
+    ever spans [−1, 360]. Every real value then landed inside the first stop's colour and
+    the whole map drew as one flat wash — measured at **0.32 % of the ramp occupied**.
+    A palette whose values mean something absolute has no business being multiplied by
+    whatever the brightest cell happens to be.
 
     ``min_value`` moves the **bottom of the colour ramp** to an absolute value:
     the stops are laid out over ``[min_value, top]`` rather than ``[0, top]``,
@@ -81,21 +90,28 @@ def apply_raster_ramp(layer, stops, max_value=None, min_value=None,
         QgsSingleBandPseudoColorRenderer,
     )
 
-    top = band_max(layer) if max_value is None else max_value
-    if not top or top <= 0:
-        top = 1.0
-    try:
-        floor = float(min_value or 0.0)
-    except (TypeError, ValueError):
+    if absolute:
+        items = [
+            QgsColorRampShader.ColorRampItem(float(value), QColor(*rgba), label)
+            for value, rgba, label in stops
+        ]
         floor = 0.0
-    if floor <= 0.0 or floor >= top:
-        floor = 0.0
-    span = top - floor
-    items = [
-        QgsColorRampShader.ColorRampItem(floor + span * fraction,
-                                         QColor(*rgba), label)
-        for fraction, rgba, label in stops
-    ]
+    else:
+        top = band_max(layer) if max_value is None else max_value
+        if not top or top <= 0:
+            top = 1.0
+        try:
+            floor = float(min_value or 0.0)
+        except (TypeError, ValueError):
+            floor = 0.0
+        if floor <= 0.0 or floor >= top:
+            floor = 0.0
+        span = top - floor
+        items = [
+            QgsColorRampShader.ColorRampItem(floor + span * fraction,
+                                             QColor(*rgba), label)
+            for fraction, rgba, label in stops
+        ]
     if floor and stops:
         clear = QColor(*stops[0][1])
         clear.setAlpha(0)

@@ -28,19 +28,25 @@ from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
 from terrainflow_assessment.qgis.workers._lifecycle import worker_is_running
 from terrainflow_assessment.qgis.workers.task_worker import TaskWorker
 
-#: key → (layer title, palette stops, whether the ramp is anchored symmetrically).
+#: key → (layer title, palette stops, symmetric anchoring, stops are absolute values).
 #:
 #: The symmetric flag is not decoration: curvature is signed and its zero is a real
 #: boundary, so anchoring on the raw min and max would let one tail's spike flatten the
 #: other and the eye would read an asymmetry the terrain does not have. See the
 #: signed-quantity rule in ``map_palette``.
+#:
+#: The absolute flag says the palette's first element is a **value in the band's units**
+#: rather than a fraction of its maximum. Exactly one palette is like that —
+#: ``ASPECT_CLASSES``, which is in compass degrees — and treating it as fractions is what
+#: drew the aspect map as a single flat colour. The two flags are mutually exclusive: a
+#: palette is either fractional (optionally symmetric) or absolute.
 INDEX_SPECS = {
-    "twi": ("Wetness Index (TWI)", P.WETNESS_INDEX, False),
-    "spi": ("Stream Power Index", P.EROSIVE_POWER, False),
-    "sti": ("Sediment Transport Index", P.EROSIVE_POWER, False),
-    "plan_curvature": ("Plan Curvature", P.CURVATURE, True),
-    "profile_curvature": ("Profile Curvature", P.CURVATURE, True),
-    "aspect": ("Aspect", P.ASPECT_CLASSES, False),
+    "twi": ("Wetness Index (TWI)", P.WETNESS_INDEX, False, False),
+    "spi": ("Stream Power Index", P.EROSIVE_POWER, False, False),
+    "sti": ("Sediment Transport Index", P.EROSIVE_POWER, False, False),
+    "plan_curvature": ("Plan Curvature", P.CURVATURE, True, False),
+    "profile_curvature": ("Profile Curvature", P.CURVATURE, True, False),
+    "aspect": ("Aspect", P.ASPECT_CLASSES, False, True),
 }
 
 
@@ -168,25 +174,33 @@ class TerrainController(G.LayerTreeMixin):
                 "Compute the terrain indices first.")
             return
 
-        title, stops, symmetric = INDEX_SPECS[key]
+        title, stops, symmetric, absolute = INDEX_SPECS[key]
         layer = QgsRasterLayer(path, title)
         if not layer.isValid():
             self._iface.messageBar().pushWarning(
                 "TerrainFlow Assessment", f"Could not load {title}.")
             return
 
-        self._apply_index_ramp(key, layer, stops, symmetric)
+        self._apply_index_ramp(key, layer, stops, symmetric, absolute)
         self.place(layer, G.ANALYSIS)
         self._state.terrain_index_layer_ids[key] = layer.id()
 
-    def _apply_index_ramp(self, key, layer, stops, symmetric):
+    def _apply_index_ramp(self, key, layer, stops, symmetric, absolute=False):
         """Paint the layer, anchoring a signed index symmetrically about zero.
 
         The bound is the 95th percentile of the absolute value, computed when the index
         was — **not** the band maximum. Curvature's extremes are a handful of cells on a
         cliff edge or a building footprint; letting them set the scale paints the entire
         rest of the map as "planar" and the layer says nothing at all.
+
+        An *absolute* palette skips all of that: its stops are already in the band's own
+        units and are laid down untouched. Scaling them by anything is what made the
+        aspect map a single flat colour.
         """
+        if absolute:
+            apply_raster_ramp(layer, stops, absolute=True)
+            return
+
         if not symmetric:
             apply_raster_ramp(layer, stops)
             return
