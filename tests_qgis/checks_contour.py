@@ -496,13 +496,19 @@ def check_keyline_analysis(dem_path):
                     if f["drift_1_in_n"] is not None]
         assert measured, "no guide reported the drift it achieves"
 
-        # Guides sit on the right side of the keyline by MEASURED elevation.
-        keyline_elev = by_type["keyline"][0]["elevation"]
+        # Guides sit on the right side of THEIR OWN valley's keyline by MEASURED
+        # elevation. Per valley, because since KPA-52 closed the synthetic DEM keys
+        # several valleys and their keylines sit at different heights — comparing every
+        # guide against the first keyline drawn failed on a correct layer.
+        keyline_elev = {f["valley"]: f["elevation"] for f in by_type["keyline"]}
         for feat in guides:
+            own = keyline_elev[feat["valley"]]
             if feat["line_type"] == "ridge_guide":
-                assert feat["elevation"] >= keyline_elev - 1e-6
+                assert feat["elevation"] >= own - 1e-6, (
+                    f"ridge guide at {feat['elevation']} below its keyline at {own}")
             else:
-                assert feat["elevation"] <= keyline_elev + 1e-6
+                assert feat["elevation"] <= own + 1e-6, (
+                    f"valley guide at {feat['elevation']} above its keyline at {own}")
 
         assert rows
 

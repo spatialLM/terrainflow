@@ -11,6 +11,11 @@ mutually exclusive and exhaustive and the balance closes.
     label_direct_catchments — per-earthwork direct catchments (the headline function)
     walk_downslope         — bounded walk used to resolve a feature's overflow target
     topological_order      — cascade order for the overflow graph (cycle-safe)
+    strahler_order         — channel order over a stream mask (order 1 = a primary valley)
+    stream_links           — channel links, top-down, split at junctions
+    accumulate             — the pointer graph's own contributing-cell count
+    main_stem_to_divide    — the valley centreline above a channel head, to the divide
+    data_boundary_mask     — cells on the grid edge or beside nodata
 
 Design rules baked in
 ---------------------
@@ -555,3 +560,141 @@ def stream_links(next_flat, stream_mask_flat, order_flat, cols, max_order=1,
             links.append(path)
 
     return links
+
+
+def accumulate(next_flat, valid_flat=None):
+    """Cells draining through each cell, itself included — an int64 flat array.
+
+    The pointer graph's **own** contributing-cell count. A stream mask thresholded on it
+    can be walked by the same pointers without a single cell leaving the mask: along a
+    single-successor path the count can only grow, so everything downstream of a channel
+    cell is a channel cell too. A mask taken from one routing scheme and walked by
+    pointers from another has no such guarantee, and that mixture is what shattered the
+    keyline network into 3 m fragments (`KPA-52`).
+
+    Kahn's pass, vectorised per level. The cells with no inflow hand their count to the
+    cell they drain into; a target whose last inflow has arrived joins the next level;
+    and so on down to the sinks. No elevation is read, so the order is the graph's and
+    nothing else — the same reasoning :func:`longest_flow_path` uses. On the 400x400
+    fixture this is 603 levels in 0.04 s, against 0.15 s for an elevation-sorted loop.
+
+    A cell on a cycle never sees its last inflow arrive and keeps a partial count rather
+    than hanging. A conditioned DEM has no cycles; a caller that wants to know can compare
+    the count at the sinks against ``valid_flat.sum()``.
+
+    Cells outside *valid_flat* weigh 0 and pass nothing on: a nodata hole contributes no
+    area, and neither does anything that was routed into it.
+    """
+    next_flat = np.asarray(next_flat, dtype=np.int64).ravel()
+    n = next_flat.size
+    idx = np.arange(n, dtype=np.int64)
+    if valid_flat is None:
+        valid = np.ones(n, dtype=bool)
+    else:
+        valid = np.asarray(valid_flat, dtype=bool).ravel()
+
+    moves = next_flat != idx
+    indeg = np.bincount(next_flat[moves], minlength=n)
+    acc = valid.astype(np.int64)
+
+    frontier = np.flatnonzero(indeg == 0)
+    while frontier.size:
+        target = next_flat[frontier]
+        moving = target != frontier
+        src = frontier[moving]
+        if src.size == 0:
+            break
+        dst, inverse = np.unique(target[moving], return_inverse=True)
+        acc[dst] += np.rint(np.bincount(inverse, weights=acc[src])).astype(np.int64)
+        indeg[dst] -= np.bincount(inverse)
+        frontier = dst[indeg[dst] == 0]
+    return acc
+
+
+def main_stem_to_divide(next_flat, acc_flat, head_flat, cols: int,
+                        allowed_flat=None, max_steps=None):
+    """The valley centreline above *head_flat*, up to the divide — flat indices, top-down.
+
+    Yeomans' primary valley "starts as a more or less sudden steepening of the side slope
+    of a main ridge" (*Water for Every Farm*, p58) — at the divide, well above any point a
+    channel-area threshold would call a channel head — and its keypoint sits in the short
+    steep reach just below that. A link that begins at the channel head has already
+    dropped the reach the keypoint is defined against, so it is walked back up here.
+
+    From the head, step to the 8-neighbour that drains **into** the current cell and
+    carries the most accumulation — the main stem — and repeat until a cell nothing
+    drains into: the divide. Ties go to the first offset scanned in :data:`_OFFSETS`,
+    the same rule :func:`d8_from_dem` uses, so the answer is deterministic on a resolved
+    flat. A cell outside *allowed_flat* ends the walk below it.
+
+    No index of inflows is needed: a cell's inflows are among its eight neighbours, so
+    each step is eight pointer reads. *max_steps* defaults to the grid size and is only a
+    guard against a malformed graph.
+
+    Returns the cells **above** the head only, so the caller prepends them to the link.
+    Empty when the head is itself a divide.
+    """
+    next_flat = np.asarray(next_flat, dtype=np.int64).ravel()
+    acc = np.asarray(acc_flat).ravel()
+    n = next_flat.size
+    rows = n // cols
+    allowed = (None if allowed_flat is None
+               else np.asarray(allowed_flat, dtype=bool).ravel())
+    if max_steps is None:
+        max_steps = n
+
+    path = []
+    cur = int(head_flat)
+    seen = {cur}
+    for _ in range(max_steps):
+        r, c = divmod(cur, cols)
+        best = -1
+        best_acc = None
+        for dr, dc in _OFFSETS:
+            nr, nc = r + dr, c + dc
+            if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+                continue
+            j = nr * cols + nc
+            if j == cur or int(next_flat[j]) != cur or j in seen:
+                continue
+            if allowed is not None and not allowed[j]:
+                continue
+            a = acc[j]
+            if best_acc is None or a > best_acc:
+                best, best_acc = j, a
+        if best < 0:
+            break
+        path.append(best)
+        seen.add(best)
+        cur = best
+
+    path.reverse()
+    return path
+
+
+def data_boundary_mask(valid2d):
+    """True on valid cells that sit on the grid edge or touch a cell that is not valid.
+
+    Where the data stops, so does what can be said about the ground beyond it. A valley
+    whose divide lands here may have its steep upper reach off the map; a channel that
+    reaches here has left the site, because a boundary row has no outside for
+    :func:`d8_from_dem` to route into and the pointers run *along* it instead. Both are
+    decisions for the caller — this only says where the edge of the data is.
+
+    The same neighbourhood drift `terrain_indices.landform_tpi` warns about — a window
+    hanging off the data edge — is the reason the mask includes cells *beside* nodata and
+    not only the outer ring.
+    """
+    valid = np.asarray(valid2d, dtype=bool)
+    if valid.ndim != 2:
+        raise ValueError("valid2d must be 2-D")
+    rows, cols = valid.shape
+    out = np.zeros_like(valid)
+    out[0, :] = True
+    out[-1, :] = True
+    out[:, 0] = True
+    out[:, -1] = True
+    for dr, dc in _OFFSETS:
+        src, nbr = _window(dr, dc, rows, cols)
+        out[src] |= ~valid[nbr]
+    return out & valid

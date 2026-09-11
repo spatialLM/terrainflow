@@ -662,3 +662,139 @@ class TestStreamLinks:
         links = stream_links(nxt, mask, order, cols=1, max_order=1, min_cells=3)
         flat = {r for link in links for r, _c in link}
         assert 7 not in flat, "the order-2 trunk was returned as a primary valley"
+
+
+# ---------------------------------------------------------------------------
+# The graph's own accumulation, the walk to the divide, and the data edge (KPA-52)
+# ---------------------------------------------------------------------------
+
+class TestAccumulate:
+    def test_a_tilted_plane_counts_the_rows_above(self):
+        from terrainflow_assessment.modules.flow_graph import accumulate
+
+        z = _tilted(6, 4)
+        nxt, _ = d8_from_dem(z, 1.0, 1.0)
+        acc = accumulate(nxt).reshape(z.shape)
+        for r in range(6):
+            assert (acc[r] == r + 1).all(), acc
+
+    def test_a_y_network_sums_its_tributaries(self):
+        from terrainflow_assessment.modules.flow_graph import accumulate
+
+        nxt = np.arange(4, dtype=np.int32)
+        nxt[0], nxt[1], nxt[2] = 2, 2, 3
+        assert list(accumulate(nxt)) == [1, 1, 3, 4]
+
+    def test_a_cycle_keeps_a_partial_count_rather_than_hanging(self):
+        from terrainflow_assessment.modules.flow_graph import accumulate
+
+        nxt = np.array([1, 0, 0], dtype=np.int32)   # 0 <-> 1, fed by 2
+        acc = accumulate(nxt)
+        assert acc[2] == 1
+        # 2 hands its count to 0; 0 and 1 never see their last inflow arrive.
+        assert acc[0] == 2 and acc[1] == 1
+
+    def test_invalid_cells_weigh_nothing(self):
+        from terrainflow_assessment.modules.flow_graph import accumulate
+
+        nxt = np.array([1, 2, 2], dtype=np.int32)
+        valid = np.array([False, True, True])
+        assert list(accumulate(nxt, valid)) == [0, 1, 2]
+
+    def test_agrees_with_an_elevation_sorted_pass_on_real_pointers(self):
+        """Two routes to one number: Kahn's levels against a high-to-low sweep."""
+        from terrainflow_assessment.modules.flow_graph import accumulate
+
+        rng = np.random.default_rng(7)
+        z = _tilted(30, 25, fall=0.5) + rng.normal(0.0, 0.05, (30, 25))
+        z += 0.3 * np.abs(np.arange(25) - 12)          # a valley down the middle
+        nxt, _ = d8_from_dem(z, 1.0, 1.0)
+        # Valid because a pointer always goes strictly lower.
+        expect = np.ones(z.size, dtype=np.int64)
+        for i in np.argsort(-z.ravel(), kind="stable"):
+            j = int(nxt[i])
+            if j != i:
+                expect[j] += expect[i]
+        assert np.array_equal(accumulate(nxt), expect)
+
+
+class TestMainStemToDivide:
+    def test_a_single_chain_returns_everything_above_the_head_top_down(self):
+        from terrainflow_assessment.modules.flow_graph import main_stem_to_divide
+
+        nxt = np.array([1, 2, 3, 4, 4], dtype=np.int32)      # a 5x1 column
+        acc = np.array([1, 2, 3, 4, 5])
+        assert main_stem_to_divide(nxt, acc, head_flat=3, cols=1) == [0, 1, 2]
+
+    def test_the_larger_tributary_is_the_stem(self):
+        from terrainflow_assessment.modules.flow_graph import (
+            accumulate,
+            main_stem_to_divide,
+        )
+
+        # 3x3: (0,0)=0 and (0,2)=2 both drain into the head (1,1)=4; 0 is fed by (1,0)=3.
+        nxt = np.arange(9, dtype=np.int32)
+        nxt[0], nxt[2], nxt[3] = 4, 4, 0
+        acc = accumulate(nxt)
+        assert acc[0] == 2 and acc[2] == 1
+        assert main_stem_to_divide(nxt, acc, 4, cols=3) == [3, 0]
+
+    def test_an_exact_tie_goes_to_the_first_offset_scanned(self):
+        """Pinned like d8_from_dem's tie-break: NW is scanned before NE."""
+        from terrainflow_assessment.modules.flow_graph import (
+            accumulate,
+            main_stem_to_divide,
+        )
+
+        nxt = np.arange(9, dtype=np.int32)
+        nxt[0], nxt[2] = 4, 4
+        assert main_stem_to_divide(nxt, accumulate(nxt), 4, cols=3) == [0]
+
+    def test_a_head_that_is_a_divide_gives_nothing(self):
+        from terrainflow_assessment.modules.flow_graph import (
+            accumulate,
+            main_stem_to_divide,
+        )
+
+        nxt = np.arange(9, dtype=np.int32)
+        nxt[4] = 7
+        assert main_stem_to_divide(nxt, accumulate(nxt), 4, cols=3) == []
+
+    def test_the_walk_stops_at_the_allowed_mask(self):
+        from terrainflow_assessment.modules.flow_graph import (
+            accumulate,
+            main_stem_to_divide,
+        )
+
+        nxt = np.array([1, 2, 3, 4, 4], dtype=np.int32)
+        allowed = np.array([False, True, True, True, True])
+        assert main_stem_to_divide(nxt, accumulate(nxt), 3, cols=1,
+                                   allowed_flat=allowed) == [1, 2]
+
+    def test_a_cycle_terminates(self):
+        from terrainflow_assessment.modules.flow_graph import (
+            accumulate,
+            main_stem_to_divide,
+        )
+
+        nxt = np.array([1, 0, 0], dtype=np.int32)             # 0 <-> 1 in a 3x1 column
+        path = main_stem_to_divide(nxt, accumulate(nxt), 0, cols=1)
+        assert path == [1]
+
+
+class TestDataBoundaryMask:
+    def test_the_outer_ring_is_the_boundary_of_a_full_grid(self):
+        from terrainflow_assessment.modules.flow_graph import data_boundary_mask
+
+        m = data_boundary_mask(np.ones((4, 5), dtype=bool))
+        assert m[0].all() and m[-1].all() and m[:, 0].all() and m[:, -1].all()
+        assert not m[1:-1, 1:-1].any()
+
+    def test_ground_beside_a_hole_is_boundary_and_the_hole_is_not(self):
+        from terrainflow_assessment.modules.flow_graph import data_boundary_mask
+
+        valid = np.ones((7, 7), dtype=bool)
+        valid[3, 3] = False
+        m = data_boundary_mask(valid)
+        assert m[2:5, 2:5].sum() == 8 and not m[3, 3]
+        assert not m[1, 1] and not m[5, 5]

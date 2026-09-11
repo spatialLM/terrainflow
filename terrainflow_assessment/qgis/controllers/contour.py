@@ -1370,7 +1370,14 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                 "TerrainFlow Assessment", "Load a DEM first."
             )
             return
-        acc_path = (self._state.baseline_result or {}).get("flow_accumulation")
+        baseline = self._state.baseline_result or {}
+        acc_path = baseline.get("flow_accumulation")
+        # The surface the valley pointers are traced on. The analysis worker writes it
+        # float64 with the DEM's nodata, exactly as `earthworks._ensure_flow_graph`
+        # reads it; without one, the keyline tier conditions the DEM itself.
+        cond_path = baseline.get("conditioned_dem")
+        if cond_path and not os.path.exists(cond_path):
+            cond_path = None
 
         if not self._claim_worker("Keyline analysis"):
             return
@@ -1390,12 +1397,15 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         def work(report):
             report(10, "Finding primary valleys…")
-            ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path, routing=routing)
+            ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path, routing=routing,
+                                        conditioned_path=cond_path)
 
-            # One keypoint per PRIMARY valley — a Strahler order-1 link, which is what
-            # Yeomans means by a primary valley. The single largest stream is the trunk
-            # of the catchment and is not one, so the old pass applied the right
-            # criterion to the wrong feature.
+            # One keypoint per PRIMARY valley — traced from its divide on the main
+            # ridge down to the junction or the data edge, on one steepest-descent
+            # graph, which is what Yeomans means by a primary valley (see
+            # `primary_valleys`). The single largest stream is the trunk of the
+            # catchment and is not one, so the old pass applied the right criterion to
+            # the wrong feature.
             report(40, "Locating keypoints…")
             keypoints, skipped = ya.find_keypoints(max_valleys=max_valleys)
             if not keypoints:
@@ -1464,6 +1474,11 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
                         + (f" over {window:.0f} m" if window else ""))
         if flagged:
             summary += f" | {len(flagged)} steeper than the limit"
+        # A valley whose divide sits on the edge of the data may have its steep upper
+        # reach off the map. It is keyed, and said so, rather than dropped.
+        at_edge = sum(1 for kp in keypoints if kp.get("head_on_boundary"))
+        if at_edge:
+            summary += f" | {at_edge} valley head(s) at the data edge"
         self._panel.set_keyline_complete(summary + ".")
 
         if skipped:

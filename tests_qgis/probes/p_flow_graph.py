@@ -310,10 +310,42 @@ def stage_link_populations(ev, ya, conditioned):
                       f"sinks={stats['pointers']['sinks_on_finite_ground']:5d}",
                       flush=True)
 
+        # The rows above are the *before* picture — a D-infinity mask walked by D8
+        # pointers on two surfaces. Production since KPA-52 closed: one graph on the
+        # conditioned surface, each valley walked back to its divide and cut at the
+        # data edge. Recorded beside them so the change is one file apart.
+        valleys = ya.primary_valleys()
+        all_kps, all_skipped = ya.find_keypoints(max_valleys=len(valleys) + 1)
+        rec["production_after_fix"] = {
+            "conditioned_source": ya.conditioned_source,
+            "order1_links": len(valleys),
+            "link_length_m": describe([v["length_m"] for v in valleys]),
+            "extension_cells": describe([v["extension_cells"] for v in valleys]),
+            "links_cut_at_the_data_edge": sum(
+                1 for v in valleys if v["runs_off_dem_m"] > 0),
+            "links_with_divide_on_the_data_edge": sum(
+                1 for v in valleys if v["head_on_boundary"]),
+            "keypoints": len(all_kps),
+            "refused": len(all_skipped),
+            "refusal_reasons": sorted({s.split("): ", 1)[-1].split(" (")[0]
+                                       for s in all_skipped}),
+        }
+        after = rec["production_after_fix"]
+        print(f"    {'after fix':12s} {'production_0.2ha':18s} "
+              f"links={after['order1_links']:4d} keypoints={after['keypoints']:4d} "
+              f"cut at edge={after['links_cut_at_the_data_edge']:3d}", flush=True)
+
         prod = rec["surfaces"]["raw"]["production_0.2ha"]
         cond = rec["surfaces"]["conditioned"]["production_0.2ha"]
         ev.note(
-            "FLG-19, measured on the production path: the stream mask comes from "
+            f"After the KPA-52 fix: {after['order1_links']} primary valleys of median "
+            f"{after['link_length_m']['median']:.0f} m, divide to foot, "
+            f"{after['keypoints']} keypoints and {after['refused']} refusals "
+            f"({', '.join(after['refusal_reasons'])}). The FLG-18/19 figures below are "
+            "the before picture and are kept as such.")
+        ev.note(
+            "FLG-19, measured on the production path BEFORE the fix: the stream mask "
+            "came from "
             "D-infinity accumulation over the conditioned surface, but the pointer graph "
             "comes from d8_from_dem over the RAW DEM. Raw gives "
             f"{prod['pointers']['sinks_on_finite_ground']} sinks on finite ground and "

@@ -12,16 +12,16 @@
   ],
   "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
   "notes": [
-    "KPA-39 on real fixture (1 m, Quail Island): 127 order-1 links at 0.20 ha; 126 refused, of which 0 were refused by the prominence test. find_keypoints reports all 126 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 126/126 times. Breakdown: 78x :694 (no thalweg, or fewer than 5 cells), 48x :742 (profile too short to have an interior)",
-    "KPA-43 on real fixture (1 m, Quail Island): at max_valleys=1, keypoints+skipped = 3 against 127 links (124 links never examined and never reported); at max_valleys=8, 127 against 127 (0 unaccounted).",
-    "KPA-40 on real fixture (1 m): the shortest axis-aligned thalweg that can yield a keypoint is 36 cells = 35.0 m (predicted floor 7 x min(5*cell, 10) = 35 m). Every shorter link is still emitted by stream_links and still profiled.",
-    "KPA-41, measured: the steepest 20 m window on ridge_guide at offset 15.0 m runs 1:6.3, while _run_record reports its net drift as 1:544.8 and over_limit False. Understatement factor 86.4x.",
-    "KPA-42, measured: 3 of 7 guides carry vertices whose Z is _sample_dem's default (the keypoint elevation) rather than sampled ground \u2014 valley_guide@-5.0m: 9/151; valley_guide@-10.0m: 19/146; valley_guide@-15.0m: 27/143. A guide whose net fall is computed between two fabricated ends reports a drift that is an artefact of the default, not of terrain.",
-    "KPA-39 on default harness DEM (2 m, 36 ha): 28 order-1 links at 0.20 ha; 28 refused, of which 26 were refused by the prominence test. find_keypoints reports all 28 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 2/28 times. Breakdown: 2x :742 (profile too short to have an interior), 26x :754 (the prominence test)",
-    "KPA-43 on default harness DEM (2 m, 36 ha): at max_valleys=1, keypoints+skipped = 28 against 28 links (0 links never examined and never reported); at max_valleys=8, 28 against 28 (0 unaccounted).",
-    "KPA-40 on default harness DEM (2 m): the shortest axis-aligned thalweg that can yield a keypoint is 36 cells = 70.0 m (predicted floor 7 x min(5*cell, 10) = 70 m). Every shorter link is still emitted by stream_links and still profiled.",
-    "Window sizing (a TerrainFlow convention, sized on SYNTHETIC correlated roughness \u2014 no published source supplies one): spreads across roughness_m 0.00-0.10 on the trunk keyline are 10m 0.0435 (2.18x MIN_SLOPE_EASE); 20m 0.0488 (2.44x MIN_SLOPE_EASE); 50m 0.0165 (0.82x MIN_SLOPE_EASE). Shortest window whose spread stays under MIN_SLOPE_EASE: 50m.",
-    "The sweep's own result contradicts the hypothesis it was written to test. Correlated roughness does NOT push slope_ease over MIN_SLOPE_EASE spuriously \u2014 it does the opposite. As roughness_m goes 0.00 -> 0.25 the order-1 link count rises 28 -> 263 -> 327 -> 356 while the links that are long enough to profile at all fall 26 -> 3 -> 1 -> 0, and the number clearing the 2% bar stays 0 throughout. Noise shatters the channel network into stubs that FLG-18's floor then refuses, so the failure mode is KPA-39's length guards, not a false positive on prominence."
+    "KPA-39 on real fixture (1 m, Quail Island): 23 primary valleys at 0.20 ha; 13 refused, of which 13 by the prominence test (by line) and 13 (by the reason string) \u2014 agree. Breakdown: 13x :854 (the prominence test)",
+    "KPA-43 on real fixture (1 m, Quail Island): at max_valleys=1, keypoints+skipped = 1 against 23 links (22 links never examined and never reported); at max_valleys=8, 13 against 23 (10 unaccounted).",
+    "KPA-40 on real fixture (1 m): the shortest axis-aligned valley that can yield a keypoint is 7 cells = 6.0 m (predicted 2 * MIN_REACH_CELLS + 1 = 7 cells). There is no metric floor any more: once a valley starts at its divide it is tens of cells long before it is a channel at all.",
+    "KPA-41, measured: the steepest 20 m window on valley_guide at offset -15.0 m runs 1:5.5, while _run_record reports its net drift as 1:None and over_limit True. Understatement factor nanx.",
+    "KPA-42, measured: 3 of 7 guides carry vertices whose Z is _sample_dem's default (the keypoint elevation) rather than sampled ground \u2014 valley_guide@-5.0m: 11/826; valley_guide@-10.0m: 24/823; valley_guide@-15.0m: 41/821. A guide whose net fall is computed between two fabricated ends reports a drift that is an artefact of the default, not of terrain.",
+    "KPA-39 on default harness DEM (2 m, 36 ha): 6 primary valleys at 0.20 ha; 0 refused, of which 0 by the prominence test (by line) and 0 (by the reason string) \u2014 agree. Breakdown: ",
+    "KPA-43 on default harness DEM (2 m, 36 ha): at max_valleys=1, keypoints+skipped = 1 against 6 links (5 links never examined and never reported); at max_valleys=8, 6 against 6 (0 unaccounted).",
+    "KPA-40 on default harness DEM (2 m): the shortest axis-aligned valley that can yield a keypoint is 7 cells = 12.0 m (predicted 2 * MIN_REACH_CELLS + 1 = 7 cells). There is no metric floor any more: once a valley starts at its divide it is tens of cells long before it is a channel at all.",
+    "Window sizing (a TerrainFlow convention, sized on SYNTHETIC correlated roughness \u2014 no published source supplies one): spreads across roughness_m 0.00-0.10 on the trunk keyline are 10m 0.0206 (1.03x MIN_SLOPE_EASE); 20m 0.0115 (0.57x MIN_SLOPE_EASE); 50m 0.0111 (0.56x MIN_SLOPE_EASE). Shortest window whose spread stays under MIN_SLOPE_EASE: 20m.",
+    "Roughness sweep, roughness_m 0.00 -> 0.25: primary valleys 6 -> 71 -> 68 -> 62; valleys the fit could be run on 6 -> 71 -> 68 -> 62; valleys clearing the 2% bar 6 -> 68 -> 64 -> 59. (Before KPA-52 closed, noise shattered the channel network into stubs that the 35 m floor refused, so nothing cleared the bar at any roughness; the floor is gone and every valley is fitted, so the third series is now the one that says whether noise fabricates keypoints.)"
   ],
   "stages": {
     "guard_histogram_fixture": {
@@ -29,60 +29,56 @@
       "dem": "real fixture (1 m, Quail Island)",
       "threshold_cells": 2000,
       "threshold_ha": 0.2,
-      "order1_links": 127,
+      "order1_links": 23,
       "histogram": {
-        "calls": 127,
-        "returned_none": 126,
-        "returned_keypoint": 1,
+        "calls": 23,
+        "returned_none": 13,
+        "returned_keypoint": 10,
         "by_line": {
-          "694": {
-            "count": 78,
-            "test": "thalweg is None or len(thalweg) < 5",
-            "guard": "no thalweg, or fewer than 5 cells"
-          },
-          "742": {
-            "count": 48,
-            "test": "n_samp - 2 * guard < 3",
-            "guard": "profile too short to have an interior"
+          "854": {
+            "count": 13,
+            "test": "require_prominence and slope_ease < self.MIN_SLOPE_EASE",
+            "guard": "the prominence test"
           }
         }
       },
+      "reasons_returned": {
+        "no break in the floor clearing 2% of grade change": 13
+      },
       "source_lines_seen": {
-        "694": "            return None",
-        "742": "            return None"
+        "854": "            return None, self.REFUSED_NO_BREAK.format("
       },
       "guard_lines_derived": {
-        "694": "thalweg is None or len(thalweg) < 5",
-        "708": "total_len <= 0",
-        "717": "len(arc) < 5",
-        "742": "n_samp - 2 * guard < 3",
-        "754": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
+        "830": "thalweg is None or len(thalweg) < 2 * reach + 1",
+        "838": "arc_all[-1] <= 0",
+        "848": "len(arc) < 2 * reach + 1",
+        "854": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
-      "refusals_the_message_blames_on_prominence": 126,
-      "refusals_actually_from_prominence": 0,
-      "message_is_false_for": 126
+      "refusals_from_prominence_by_line": 13,
+      "refusals_from_prominence_by_reason_string": 13,
+      "line_and_reason_agree": true
     },
     "accounting_identity_fixture": {
       "status": "ok",
       "dem": "real fixture (1 m, Quail Island)",
-      "order1_links": 127,
+      "order1_links": 23,
       "threshold_cells": 2000,
       "at_max_valleys": {
         "1": {
           "keypoints": 1,
-          "skipped": 2,
-          "sum": 3,
-          "links": 127,
-          "unaccounted": 124,
+          "skipped": 0,
+          "sum": 1,
+          "links": 23,
+          "unaccounted": 22,
           "identity_holds": false
         },
         "8": {
-          "keypoints": 1,
-          "skipped": 126,
-          "sum": 127,
-          "links": 127,
-          "unaccounted": 0,
-          "identity_holds": true
+          "keypoints": 8,
+          "skipped": 5,
+          "sum": 13,
+          "links": 23,
+          "unaccounted": 10,
+          "identity_holds": false
         }
       }
     },
@@ -90,10 +86,10 @@
       "status": "ok",
       "dem": "real fixture (1 m)",
       "cell_size_m": 1.0,
-      "resample_spacing_m": 5.0,
-      "predicted_floor_m": 35.0,
-      "first_passing_cells": 36,
-      "first_passing_length_m": 35.0,
+      "predicted_floor_cells": 7,
+      "predicted_floor_m": 6.0,
+      "first_passing_cells": 7,
+      "first_passing_length_m": 6.0,
       "matches_prediction": true
     },
     "drift_table": {
@@ -107,263 +103,265 @@
         {
           "line_type": "keyline",
           "offset_m": 0.0,
-          "elevation": 25.71,
-          "vertices": 151,
+          "elevation": 64.3,
+          "vertices": 864,
           "fabricated_z_vertices": 0,
           "fabricated_fraction": 0.0,
-          "net_drift_fall_m": 0.05,
-          "net_drift_1_in_n": 3031.8,
-          "over_limit_as_reported": false,
+          "net_drift_fall_m": -0.085,
+          "net_drift_1_in_n": 9998.1,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 141,
-              "steepest_grade": 0.05581464454132888,
-              "steepest_1_in_n": 17.916444836615117,
-              "at_arc_m": 49.08131474435794,
-              "fraction_over_1_in_500": 0.9219858156028369
+              "windows_measured": 853,
+              "steepest_grade": 0.039258626121092204,
+              "steepest_1_in_n": 25.472108904563452,
+              "at_arc_m": 181.9358183246553,
+              "fraction_over_1_in_500": 0.7045720984759671
             },
             "20m": {
-              "windows_measured": 131,
-              "steepest_grade": 0.02862512866190769,
-              "steepest_1_in_n": 34.934340795845216,
-              "at_arc_m": 59.11451428444857,
-              "fraction_over_1_in_500": 0.816793893129771
+              "windows_measured": 843,
+              "steepest_grade": 0.01763571415848315,
+              "steepest_1_in_n": 56.70311908060604,
+              "at_arc_m": 191.93736010912,
+              "fraction_over_1_in_500": 0.4970344009489917
             },
             "50m": {
-              "windows_measured": 101,
-              "steepest_grade": 0.00993016300375504,
-              "steepest_1_in_n": 100.70328146898044,
-              "at_arc_m": 8.99874320488829,
-              "fraction_over_1_in_500": 0.693069306930693
+              "windows_measured": 813,
+              "steepest_grade": 0.007115365756398977,
+              "steepest_1_in_n": 140.5409130374896,
+              "at_arc_m": 15.003961335149704,
+              "fraction_over_1_in_500": 0.2066420664206642
             },
-            "line_length_m": 150.32296296821877
+            "line_length_m": 854.4099183237847
           },
-          "understatement_factor": 86.78566507717174
+          "understatement_factor": 176.3236337279304
         },
         {
           "line_type": "valley_guide",
           "offset_m": -5.0,
-          "elevation": 23.46,
-          "vertices": 151,
-          "fabricated_z_vertices": 9,
-          "fabricated_fraction": 0.059602649006622516,
+          "elevation": 63.42,
+          "vertices": 826,
+          "fabricated_z_vertices": 11,
+          "fabricated_fraction": 0.013317191283292978,
           "net_drift_fall_m": 0.0,
           "net_drift_1_in_n": null,
-          "over_limit_as_reported": false,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 132,
-              "steepest_grade": 0.12556176608329406,
-              "steepest_1_in_n": 7.964207825307497,
-              "at_arc_m": 49.99399805504709,
-              "fraction_over_1_in_500": 0.9696969696969697
+              "windows_measured": 804,
+              "steepest_grade": 0.1143468556032633,
+              "steepest_1_in_n": 8.745321370878706,
+              "at_arc_m": 117.02715599010048,
+              "fraction_over_1_in_500": 0.8868159203980099
             },
             "20m": {
-              "windows_measured": 122,
-              "steepest_grade": 0.06694159392955376,
-              "steepest_1_in_n": 14.938395417538963,
-              "at_arc_m": 26.925679408297334,
-              "fraction_over_1_in_500": 0.9426229508196722
+              "windows_measured": 794,
+              "steepest_grade": 0.046823919807503035,
+              "steepest_1_in_n": 21.356605856815957,
+              "at_arc_m": 106.01792650303429,
+              "fraction_over_1_in_500": 0.8425692695214105
             },
             "50m": {
-              "windows_measured": 92,
-              "steepest_grade": 0.03798406871939072,
-              "steepest_1_in_n": 26.326826843842134,
-              "at_arc_m": 10.020555053263204,
-              "fraction_over_1_in_500": 0.9456521739130435
+              "windows_measured": 764,
+              "steepest_grade": 0.032421971149407806,
+              "steepest_1_in_n": 30.843282025999372,
+              "at_arc_m": 158.02934539288142,
+              "fraction_over_1_in_500": 0.7264397905759162
             },
-            "line_length_m": 150.27847307637424
+            "line_length_m": 821.9410726438209
           }
         },
         {
           "line_type": "ridge_guide",
           "offset_m": 5.0,
-          "elevation": 28.29,
-          "vertices": 151,
+          "elevation": 65.11,
+          "vertices": 818,
           "fabricated_z_vertices": 0,
           "fabricated_fraction": 0.0,
-          "net_drift_fall_m": -0.347,
-          "net_drift_1_in_n": 432.7,
+          "net_drift_fall_m": 0.418,
+          "net_drift_1_in_n": 1947.6,
           "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 141,
-              "steepest_grade": 0.14497732590272605,
-              "steepest_1_in_n": 6.897630327869061,
-              "at_arc_m": 56.022956369996436,
-              "fraction_over_1_in_500": 0.9645390070921985
+              "windows_measured": 807,
+              "steepest_grade": 0.06978387688070216,
+              "steepest_1_in_n": 14.329957644937569,
+              "at_arc_m": 117.04694323389685,
+              "fraction_over_1_in_500": 0.8946716232961586
             },
             "20m": {
-              "windows_measured": 131,
-              "steepest_grade": 0.07323303468773004,
-              "steepest_1_in_n": 13.655039754450415,
-              "at_arc_m": 46.0197668322125,
-              "fraction_over_1_in_500": 0.9694656488549618
+              "windows_measured": 797,
+              "steepest_grade": 0.05202216605728184,
+              "steepest_1_in_n": 19.222575217242888,
+              "at_arc_m": 105.03958897520556,
+              "fraction_over_1_in_500": 0.8506900878293601
             },
             "50m": {
-              "windows_measured": 101,
-              "steepest_grade": 0.03045371003344506,
-              "steepest_1_in_n": 32.836721663855535,
-              "at_arc_m": 31.002048819832808,
-              "fraction_over_1_in_500": 0.9207920792079208
+              "windows_measured": 767,
+              "steepest_grade": 0.023142948007593502,
+              "steepest_1_in_n": 43.20970689092362,
+              "at_arc_m": 145.9787681729509,
+              "fraction_over_1_in_500": 0.741851368970013
             },
-            "line_length_m": 150.1201482400557
+            "line_length_m": 813.8569818329916
           },
-          "understatement_factor": 31.687934109380787
+          "understatement_factor": 101.3183706131621
         },
         {
           "line_type": "valley_guide",
           "offset_m": -10.0,
-          "elevation": 21.56,
-          "vertices": 146,
-          "fabricated_z_vertices": 19,
-          "fabricated_fraction": 0.13013698630136986,
+          "elevation": 62.54,
+          "vertices": 823,
+          "fabricated_z_vertices": 24,
+          "fabricated_fraction": 0.02916160388821385,
           "net_drift_fall_m": 0.0,
           "net_drift_1_in_n": null,
-          "over_limit_as_reported": false,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 117,
-              "steepest_grade": 0.14105999488017607,
-              "steepest_1_in_n": 7.089182165712211,
-              "at_arc_m": 20.055657318353774,
-              "fraction_over_1_in_500": 0.9487179487179487
+              "windows_measured": 788,
+              "steepest_grade": 0.16907208983657204,
+              "steepest_1_in_n": 5.914636773973854,
+              "at_arc_m": 119.00566960841923,
+              "fraction_over_1_in_500": 0.9225888324873096
             },
             "20m": {
-              "windows_measured": 107,
-              "steepest_grade": 0.07560076848027718,
-              "steepest_1_in_n": 13.227378770109741,
-              "at_arc_m": 14.026908491514078,
-              "fraction_over_1_in_500": 0.9532710280373832
+              "windows_measured": 778,
+              "steepest_grade": 0.09933260970748273,
+              "steepest_1_in_n": 10.06718743164834,
+              "at_arc_m": 110.00176773468806,
+              "fraction_over_1_in_500": 0.8868894601542416
             },
             "50m": {
-              "windows_measured": 77,
-              "steepest_grade": 0.04505008170487791,
-              "steepest_1_in_n": 22.197518010088814,
-              "at_arc_m": 63.63410498791381,
-              "fraction_over_1_in_500": 0.974025974025974
+              "windows_measured": 748,
+              "steepest_grade": 0.054270504336382704,
+              "steepest_1_in_n": 18.426215348981096,
+              "at_arc_m": 166.97662501367574,
+              "fraction_over_1_in_500": 0.8957219251336899
             },
-            "line_length_m": 144.98476806506233
+            "line_length_m": 820.5155580672144
           }
         },
         {
           "line_type": "ridge_guide",
           "offset_m": 10.0,
-          "elevation": 31.01,
-          "vertices": 152,
+          "elevation": 65.89,
+          "vertices": 796,
           "fabricated_z_vertices": 0,
           "fabricated_fraction": 0.0,
-          "net_drift_fall_m": -0.259,
-          "net_drift_1_in_n": 586.6,
-          "over_limit_as_reported": false,
+          "net_drift_fall_m": 0.773,
+          "net_drift_1_in_n": 1025.6,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 142,
-              "steepest_grade": 0.21142578063640352,
-              "steepest_1_in_n": 4.729792161532731,
-              "at_arc_m": 21.10538832426451,
-              "fraction_over_1_in_500": 0.9929577464788732
+              "windows_measured": 785,
+              "steepest_grade": 0.09699380432545288,
+              "steepest_1_in_n": 10.30993687642771,
+              "at_arc_m": 776.769582771885,
+              "fraction_over_1_in_500": 0.9184713375796179
             },
             "20m": {
-              "windows_measured": 132,
-              "steepest_grade": 0.12835123146492514,
-              "steepest_1_in_n": 7.791121196007165,
-              "at_arc_m": 31.1601029175329,
-              "fraction_over_1_in_500": 0.9621212121212122
+              "windows_measured": 775,
+              "steepest_grade": 0.06950983234532253,
+              "steepest_1_in_n": 14.386453919670434,
+              "at_arc_m": 105.95193003367376,
+              "fraction_over_1_in_500": 0.8993548387096775
             },
             "50m": {
-              "windows_measured": 102,
-              "steepest_grade": 0.0477753751766694,
-              "steepest_1_in_n": 20.93128512967365,
-              "at_arc_m": 17.08189658577967,
-              "fraction_over_1_in_500": 0.9705882352941176
+              "windows_measured": 745,
+              "steepest_grade": 0.03803822301497413,
+              "steepest_1_in_n": 26.28934584053361,
+              "at_arc_m": 203.74637324873382,
+              "fraction_over_1_in_500": 0.8939597315436242
             },
-            "line_length_m": 151.68669211862615
+            "line_length_m": 792.765182122336
           },
-          "understatement_factor": 75.29083237732509
+          "understatement_factor": 71.28928405336278
         },
         {
           "line_type": "valley_guide",
           "offset_m": -15.0,
-          "elevation": 19.83,
-          "vertices": 143,
-          "fabricated_z_vertices": 27,
-          "fabricated_fraction": 0.1888111888111888,
+          "elevation": 61.69,
+          "vertices": 821,
+          "fabricated_z_vertices": 41,
+          "fabricated_fraction": 0.049939098660170524,
           "net_drift_fall_m": 0.0,
           "net_drift_1_in_n": null,
-          "over_limit_as_reported": false,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 106,
-              "steepest_grade": 0.146754872637274,
-              "steepest_1_in_n": 6.814083798577819,
-              "at_arc_m": 77.27335531767076,
-              "fraction_over_1_in_500": 0.9716981132075472
+              "windows_measured": 769,
+              "steepest_grade": 0.28914644179020677,
+              "steepest_1_in_n": 3.4584551475323377,
+              "at_arc_m": 116.93130583133517,
+              "fraction_over_1_in_500": 0.9375812743823146
             },
             "20m": {
-              "windows_measured": 96,
-              "steepest_grade": 0.07965986502338777,
-              "steepest_1_in_n": 12.553373015462737,
-              "at_arc_m": 66.21532770530071,
-              "fraction_over_1_in_500": 0.96875
+              "windows_measured": 759,
+              "steepest_grade": 0.18030770705070046,
+              "steepest_1_in_n": 5.546074631844836,
+              "at_arc_m": 109.93215922226729,
+              "fraction_over_1_in_500": 0.9183135704874835
             },
             "50m": {
-              "windows_measured": 66,
-              "steepest_grade": 0.052841231506174584,
-              "steepest_1_in_n": 18.9246157119398,
-              "at_arc_m": 72.25016313527944,
-              "fraction_over_1_in_500": 0.9696969696969697
+              "windows_measured": 729,
+              "steepest_grade": 0.08319830758598183,
+              "steepest_1_in_n": 12.019475263562825,
+              "at_arc_m": 109.93215922226729,
+              "fraction_over_1_in_500": 0.9451303155006858
             },
-            "line_length_m": 142.6297407679027
+            "line_length_m": 818.5500144849177
           }
         },
         {
           "line_type": "ridge_guide",
           "offset_m": 15.0,
-          "elevation": 33.71,
-          "vertices": 154,
+          "elevation": 66.66,
+          "vertices": 778,
           "fabricated_z_vertices": 0,
           "fabricated_fraction": 0.0,
-          "net_drift_fall_m": -0.282,
-          "net_drift_1_in_n": 544.8,
-          "over_limit_as_reported": false,
+          "net_drift_fall_m": 1.139,
+          "net_drift_1_in_n": 680.9,
+          "over_limit_as_reported": true,
           "sustained": {
             "10m": {
-              "windows_measured": 144,
-              "steepest_grade": 0.28146508674378623,
-              "steepest_1_in_n": 3.552838512118152,
-              "at_arc_m": 23.119874117306946,
-              "fraction_over_1_in_500": 0.9930555555555556
+              "windows_measured": 767,
+              "steepest_grade": 0.1251192746825055,
+              "steepest_1_in_n": 7.992373697318296,
+              "at_arc_m": 306.5156509739945,
+              "fraction_over_1_in_500": 0.9256844850065189
             },
             "20m": {
-              "windows_measured": 134,
-              "steepest_grade": 0.15861752113067892,
-              "steepest_1_in_n": 6.304473760979647,
-              "at_arc_m": 34.17914666404563,
-              "fraction_over_1_in_500": 0.9925373134328358
+              "windows_measured": 757,
+              "steepest_grade": 0.08022573701444888,
+              "steepest_1_in_n": 12.464827837230056,
+              "at_arc_m": 153.774850246091,
+              "fraction_over_1_in_500": 0.9220607661822986
             },
             "50m": {
-              "windows_measured": 104,
-              "steepest_grade": 0.07672684489262883,
-              "steepest_1_in_n": 13.03324802941389,
-              "at_arc_m": 30.15789830511591,
-              "fraction_over_1_in_500": 0.9903846153846154
+              "windows_measured": 727,
+              "steepest_grade": 0.04732994939979126,
+              "steepest_1_in_n": 21.128271056305213,
+              "at_arc_m": 197.7493742454108,
+              "fraction_over_1_in_500": 0.9105914718019257
             },
-            "line_length_m": 153.6479974773958
+            "line_length_m": 775.3857993075521
           },
-          "understatement_factor": 86.41482551199387
+          "understatement_factor": 54.62570433313824
         }
       ],
       "keypoint": {
-        "x": 1574612.5,
-        "y": 5169561.5,
-        "elevation": 25.7,
-        "row": 70,
-        "col": 51,
-        "arc_length_m": 42.0,
-        "slope_ease": 0.159
+        "x": 1574904.5,
+        "y": 5169524.5,
+        "elevation": 64.3,
+        "row": 107,
+        "col": 343,
+        "arc_length_m": 95.5,
+        "slope_ease": 0.0209,
+        "grade_above": 0.0578,
+        "grade_below": 0.0369
       },
-      "link_cells": 55,
+      "link_cells": 151,
       "runs_returned": 7,
       "guides_with_fabricated_z": 3
     },
@@ -372,58 +370,44 @@
       "dem": "default harness DEM (2 m, 36 ha)",
       "threshold_cells": 500,
       "threshold_ha": 0.2,
-      "order1_links": 28,
+      "order1_links": 6,
       "histogram": {
-        "calls": 28,
-        "returned_none": 28,
-        "returned_keypoint": 0,
-        "by_line": {
-          "742": {
-            "count": 2,
-            "test": "n_samp - 2 * guard < 3",
-            "guard": "profile too short to have an interior"
-          },
-          "754": {
-            "count": 26,
-            "test": "require_prominence and slope_ease < self.MIN_SLOPE_EASE",
-            "guard": "the prominence test"
-          }
-        }
+        "calls": 6,
+        "returned_none": 0,
+        "returned_keypoint": 6,
+        "by_line": {}
       },
-      "source_lines_seen": {
-        "742": "            return None",
-        "754": "            return None"
-      },
+      "reasons_returned": {},
+      "source_lines_seen": {},
       "guard_lines_derived": {
-        "694": "thalweg is None or len(thalweg) < 5",
-        "708": "total_len <= 0",
-        "717": "len(arc) < 5",
-        "742": "n_samp - 2 * guard < 3",
-        "754": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
+        "830": "thalweg is None or len(thalweg) < 2 * reach + 1",
+        "838": "arc_all[-1] <= 0",
+        "848": "len(arc) < 2 * reach + 1",
+        "854": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
-      "refusals_the_message_blames_on_prominence": 28,
-      "refusals_actually_from_prominence": 26,
-      "message_is_false_for": 2
+      "refusals_from_prominence_by_line": 0,
+      "refusals_from_prominence_by_reason_string": 0,
+      "line_and_reason_agree": true
     },
     "accounting_identity_synthetic": {
       "status": "ok",
       "dem": "default harness DEM (2 m, 36 ha)",
-      "order1_links": 28,
+      "order1_links": 6,
       "threshold_cells": 500,
       "at_max_valleys": {
         "1": {
-          "keypoints": 0,
-          "skipped": 28,
-          "sum": 28,
-          "links": 28,
-          "unaccounted": 0,
-          "identity_holds": true
+          "keypoints": 1,
+          "skipped": 0,
+          "sum": 1,
+          "links": 6,
+          "unaccounted": 5,
+          "identity_holds": false
         },
         "8": {
-          "keypoints": 0,
-          "skipped": 28,
-          "sum": 28,
-          "links": 28,
+          "keypoints": 4,
+          "skipped": 2,
+          "sum": 6,
+          "links": 6,
           "unaccounted": 0,
           "identity_holds": true
         }
@@ -433,10 +417,10 @@
       "status": "ok",
       "dem": "default harness DEM (2 m)",
       "cell_size_m": 2.0,
-      "resample_spacing_m": 10.0,
-      "predicted_floor_m": 70.0,
-      "first_passing_cells": 36,
-      "first_passing_length_m": 70.0,
+      "predicted_floor_cells": 7,
+      "predicted_floor_m": 12.0,
+      "first_passing_cells": 7,
+      "first_passing_length_m": 12.0,
       "matches_prediction": true
     },
     "roughness_sweep": {
@@ -450,214 +434,320 @@
       ],
       "runs": {
         "0.00": {
-          "order1_links": 28,
+          "order1_links": 6,
           "threshold_cells": 500,
-          "first_keypoint_clearing_prominence": null,
-          "keypoints_found": 0,
-          "candidates_before_prominence": 26,
+          "first_keypoint_clearing_prominence": {
+            "x": 1750299.0,
+            "y": 5899701.0,
+            "elevation": 60.3,
+            "row": 149,
+            "col": 149,
+            "arc_length_m": 298.0,
+            "slope_ease": 0.0598,
+            "grade_above": 0.1203,
+            "grade_below": 0.0605
+          },
+          "keypoints_found": 6,
+          "candidates_before_prominence": 6,
           "slope_ease_values": [
-            0.0165,
-            0.0165,
-            0.0091,
-            0.0091,
-            0.0091,
-            0.0091,
-            0.0088,
-            0.0088,
-            0.0087,
-            0.0087
+            0.0598,
+            0.0598,
+            0.0598,
+            0.0598,
+            0.0556,
+            0.0556
           ],
           "trunk_keypoint": {
-            "x": 1750201.0,
-            "y": 5899991.0,
-            "elevation": 101.7,
-            "row": 4,
-            "col": 100,
-            "arc_length_m": 263.5,
-            "slope_ease": 0.0207
+            "x": 1750299.0,
+            "y": 5899597.0,
+            "elevation": 52.0,
+            "row": 201,
+            "col": 149,
+            "arc_length_m": 766.7,
+            "slope_ease": 0.0501,
+            "grade_above": 0.1,
+            "grade_below": 0.0498
           },
           "trunk_displacement_from_smooth_m": 0.0,
           "trunk_elevation_shift_m": 0.0,
           "keyline_sustained": {
             "10m": {
-              "windows_measured": 146,
-              "steepest_grade": 0.04409396970657937,
-              "steepest_1_in_n": 22.678838096330157,
-              "at_arc_m": 210.88316320441098,
-              "fraction_over_1_in_500": 0.8767123287671232
+              "windows_measured": 255,
+              "steepest_grade": 0.06846795047203758,
+              "steepest_1_in_n": 14.605373654472126,
+              "at_arc_m": 224.35859571749194,
+              "fraction_over_1_in_500": 0.7843137254901961
             },
             "20m": {
-              "windows_measured": 141,
-              "steepest_grade": 0.01937879203098514,
-              "steepest_1_in_n": 51.60280364230546,
-              "at_arc_m": 114.47936436919197,
-              "fraction_over_1_in_500": 0.8156028368794326
+              "windows_measured": 250,
+              "steepest_grade": 0.052441866260320415,
+              "steepest_1_in_n": 19.068734034674115,
+              "at_arc_m": 232.37390069272746,
+              "fraction_over_1_in_500": 0.636
             },
             "50m": {
-              "windows_measured": 126,
-              "steepest_grade": 0.007321189656592865,
-              "steepest_1_in_n": 136.58982308967802,
-              "at_arc_m": 210.88316320441098,
-              "fraction_over_1_in_500": 0.5396825396825397
+              "windows_measured": 235,
+              "steepest_grade": 0.021256535951758228,
+              "steepest_1_in_n": 47.044353899878274,
+              "at_arc_m": 232.37390069272746,
+              "fraction_over_1_in_500": 0.3404255319148936
             },
-            "line_length_m": 301.261804126251
+            "line_length_m": 518.8475764070838
           },
-          "keyline_net_drift_1_in_n": 15688.1
+          "keyline_net_drift_1_in_n": null
         },
         "0.05": {
-          "order1_links": 263,
+          "order1_links": 71,
           "threshold_cells": 500,
-          "first_keypoint_clearing_prominence": null,
-          "keypoints_found": 0,
-          "candidates_before_prominence": 3,
+          "first_keypoint_clearing_prominence": {
+            "x": 1750301.0,
+            "y": 5899817.0,
+            "elevation": 72.2,
+            "row": 91,
+            "col": 150,
+            "arc_length_m": 182.0,
+            "slope_ease": 0.0365,
+            "grade_above": 0.1319,
+            "grade_below": 0.0954
+          },
+          "keypoints_found": 68,
+          "candidates_before_prominence": 71,
           "slope_ease_values": [
-            0.0153,
-            0.0121,
-            0.0096
+            0.0883,
+            0.0835,
+            0.0829,
+            0.0821,
+            0.0815,
+            0.0807,
+            0.08,
+            0.0799,
+            0.0793,
+            0.0793
           ],
           "trunk_keypoint": {
-            "x": 1750199.0,
-            "y": 5899993.0,
-            "elevation": 102.1,
-            "row": 3,
-            "col": 99,
-            "arc_length_m": 244.1,
-            "slope_ease": 0.042
+            "x": 1750301.0,
+            "y": 5899603.0,
+            "elevation": 52.5,
+            "row": 198,
+            "col": 150,
+            "arc_length_m": 776.2,
+            "slope_ease": 0.0482,
+            "grade_above": 0.0964,
+            "grade_below": 0.0483
           },
-          "trunk_displacement_from_smooth_m": 2.8284271247461903,
-          "trunk_elevation_shift_m": 0.3999999999999915,
+          "trunk_displacement_from_smooth_m": 6.324555320336759,
+          "trunk_elevation_shift_m": 0.5,
           "keyline_sustained": {
             "10m": {
-              "windows_measured": 141,
-              "steepest_grade": 0.04385004594457502,
-              "steepest_1_in_n": 22.80499320944763,
-              "at_arc_m": 106.65972454395676,
-              "fraction_over_1_in_500": 0.9290780141843972
+              "windows_measured": 267,
+              "steepest_grade": 0.08661940945747905,
+              "steepest_1_in_n": 11.54475661128692,
+              "at_arc_m": 252.13968292737667,
+              "fraction_over_1_in_500": 0.797752808988764
             },
             "20m": {
-              "windows_measured": 136,
-              "steepest_grade": 0.019958963154443832,
-              "steepest_1_in_n": 50.10280304953374,
-              "at_arc_m": 243.49046296967722,
-              "fraction_over_1_in_500": 0.8382352941176471
+              "windows_measured": 262,
+              "steepest_grade": 0.051281377723615795,
+              "steepest_1_in_n": 19.500256123959126,
+              "at_arc_m": 228.0821256377326,
+              "fraction_over_1_in_500": 0.5648854961832062
             },
             "50m": {
-              "windows_measured": 121,
-              "steepest_grade": 0.007156747378540825,
-              "steepest_1_in_n": 139.72827977671164,
-              "at_arc_m": 189.16600985596358,
-              "fraction_over_1_in_500": 0.47107438016528924
+              "windows_measured": 247,
+              "steepest_grade": 0.024010207820885292,
+              "steepest_1_in_n": 41.64895228979024,
+              "at_arc_m": 246.12520958352417,
+              "fraction_over_1_in_500": 0.3643724696356275
             },
-            "line_length_m": 291.78977784800804
+            "line_length_m": 541.6277915658424
           },
-          "keyline_net_drift_1_in_n": 3752.9
+          "keyline_net_drift_1_in_n": 110666.0
         },
         "0.10": {
-          "order1_links": 327,
+          "order1_links": 68,
           "threshold_cells": 500,
-          "first_keypoint_clearing_prominence": null,
-          "keypoints_found": 0,
-          "candidates_before_prominence": 1,
+          "first_keypoint_clearing_prominence": {
+            "x": 1750169.0,
+            "y": 5899597.0,
+            "elevation": 60.9,
+            "row": 201,
+            "col": 84,
+            "arc_length_m": 153.4,
+            "slope_ease": 0.066,
+            "grade_above": 0.1347,
+            "grade_below": 0.0687
+          },
+          "keypoints_found": 64,
+          "candidates_before_prominence": 68,
           "slope_ease_values": [
-            0.0104
+            0.086,
+            0.0818,
+            0.0808,
+            0.0803,
+            0.0781,
+            0.0772,
+            0.0771,
+            0.0755,
+            0.0751,
+            0.0735
           ],
           "trunk_keypoint": {
-            "x": 1750351.0,
-            "y": 5899469.0,
-            "elevation": 49.5,
-            "row": 265,
-            "col": 175,
-            "arc_length_m": 752.6,
-            "slope_ease": -0.0523
+            "x": 1750421.0,
+            "y": 5899559.0,
+            "elevation": 57.8,
+            "row": 220,
+            "col": 210,
+            "arc_length_m": 605.9,
+            "slope_ease": 0.0587,
+            "grade_above": 0.1122,
+            "grade_below": 0.0535
           },
-          "trunk_displacement_from_smooth_m": 543.1242951664011,
-          "trunk_elevation_shift_m": -52.2,
+          "trunk_displacement_from_smooth_m": 127.7810627597063,
+          "trunk_elevation_shift_m": 5.799999999999997,
           "keyline_sustained": {
             "10m": {
-              "windows_measured": 214,
-              "steepest_grade": 0.08735877127671235,
-              "steepest_1_in_n": 11.44704745024928,
-              "at_arc_m": 186.05150794132084,
-              "fraction_over_1_in_500": 0.8130841121495327
+              "windows_measured": 362,
+              "steepest_grade": 0.08910081471486123,
+              "steepest_1_in_n": 11.223241933310952,
+              "at_arc_m": 374.52832334727253,
+              "fraction_over_1_in_500": 0.8370165745856354
             },
             "20m": {
-              "windows_measured": 209,
-              "steepest_grade": 0.06821850026539146,
-              "steepest_1_in_n": 14.658780185868714,
-              "at_arc_m": 190.0541139405075,
-              "fraction_over_1_in_500": 0.6555023923444976
+              "windows_measured": 357,
+              "steepest_grade": 0.04097646025584304,
+              "steepest_1_in_n": 24.40425536408809,
+              "at_arc_m": 372.52479038735635,
+              "fraction_over_1_in_500": 0.6610644257703081
             },
             "50m": {
-              "windows_measured": 194,
-              "steepest_grade": 0.02360802339658911,
-              "steepest_1_in_n": 42.358480555575866,
-              "at_arc_m": 194.05688739771242,
-              "fraction_over_1_in_500": 0.42783505154639173
+              "windows_measured": 341,
+              "steepest_grade": 0.012874625674009413,
+              "steepest_1_in_n": 77.67216114242025,
+              "at_arc_m": 345.4843898693613,
+              "fraction_over_1_in_500": 0.3460410557184751
             },
-            "line_length_m": 434.63820806389685
+            "line_length_m": 730.1612143741175
           },
-          "keyline_net_drift_1_in_n": 9088.8
+          "keyline_net_drift_1_in_n": 13331.1
         },
         "0.25": {
-          "order1_links": 356,
+          "order1_links": 62,
           "threshold_cells": 500,
-          "first_keypoint_clearing_prominence": null,
-          "keypoints_found": 0,
-          "candidates_before_prominence": 0,
-          "slope_ease_values": [],
-          "trunk_keypoint": null
+          "first_keypoint_clearing_prominence": {
+            "x": 1750507.0,
+            "y": 5899633.0,
+            "elevation": 70.7,
+            "row": 183,
+            "col": 253,
+            "arc_length_m": 114.2,
+            "slope_ease": 0.0583,
+            "grade_above": 0.158,
+            "grade_below": 0.0997
+          },
+          "keypoints_found": 59,
+          "candidates_before_prominence": 62,
+          "slope_ease_values": [
+            0.0726,
+            0.0707,
+            0.0691,
+            0.0686,
+            0.0637,
+            0.0637,
+            0.0613,
+            0.0593,
+            0.0583,
+            0.0564
+          ],
+          "trunk_keypoint": {
+            "x": 1750309.0,
+            "y": 5899411.0,
+            "elevation": 46.0,
+            "row": 294,
+            "col": 154,
+            "arc_length_m": 24.1,
+            "slope_ease": -0.2135,
+            "grade_above": 0.0631,
+            "grade_below": 0.2766
+          },
+          "trunk_displacement_from_smooth_m": 186.26862323000083,
+          "trunk_elevation_shift_m": -6.0,
+          "keyline_sustained": {
+            "10m": {
+              "windows_measured": 100,
+              "steepest_grade": 0.10826020282017997,
+              "steepest_1_in_n": 9.237004679004698,
+              "at_arc_m": 131.11831842860286,
+              "fraction_over_1_in_500": 0.95
+            },
+            "20m": {
+              "windows_measured": 95,
+              "steepest_grade": 0.05338595400040512,
+              "steepest_1_in_n": 18.73151878099643,
+              "at_arc_m": 141.163857002583,
+              "fraction_over_1_in_500": 0.9368421052631579
+            },
+            "50m": {
+              "windows_measured": 80,
+              "steepest_grade": 0.019807799295378018,
+              "steepest_1_in_n": 50.48516420667396,
+              "at_arc_m": 61.95405714302876,
+              "fraction_over_1_in_500": 0.8875
+            },
+            "line_length_m": 209.04267746000733
+          },
+          "keyline_net_drift_1_in_n": 16621.0
         }
       },
       "window_stability_0_to_0.10": {
         "10m": {
           "grades": [
-            0.04409396970657937,
-            0.04385004594457502,
-            0.08735877127671235
+            0.06846795047203758,
+            0.08661940945747905,
+            0.08910081471486123
           ],
-          "spread": 0.04350872533213733,
-          "spread_as_fraction_of_min_slope_ease": 2.1754362666068663
+          "spread": 0.02063286424282365,
+          "spread_as_fraction_of_min_slope_ease": 1.0316432121411825
         },
         "20m": {
           "grades": [
-            0.01937879203098514,
-            0.019958963154443832,
-            0.06821850026539146
+            0.052441866260320415,
+            0.051281377723615795,
+            0.04097646025584304
           ],
-          "spread": 0.04883970823440632,
-          "spread_as_fraction_of_min_slope_ease": 2.441985411720316
+          "spread": 0.011465406004477374,
+          "spread_as_fraction_of_min_slope_ease": 0.5732703002238687
         },
         "50m": {
           "grades": [
-            0.007321189656592865,
-            0.007156747378540825,
-            0.02360802339658911
+            0.021256535951758228,
+            0.024010207820885292,
+            0.012874625674009413
           ],
-          "spread": 0.016451276018048286,
-          "spread_as_fraction_of_min_slope_ease": 0.8225638009024143
+          "spread": 0.01113558214687588,
+          "spread_as_fraction_of_min_slope_ease": 0.556779107343794
         }
       },
-      "shortest_stable_window": "50m",
+      "shortest_stable_window": "20m",
       "network_collapse": {
         "0.00": [
-          28,
-          26,
-          0
+          6,
+          6,
+          6
         ],
         "0.05": [
-          263,
-          3,
-          0
+          71,
+          71,
+          68
         ],
         "0.10": [
-          327,
-          1,
-          0
+          68,
+          68,
+          64
         ],
         "0.25": [
-          356,
-          0,
-          0
+          62,
+          62,
+          59
         ]
       }
     }

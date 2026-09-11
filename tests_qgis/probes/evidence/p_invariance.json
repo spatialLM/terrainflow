@@ -10,14 +10,14 @@
     "Z+600 terrain indices on float64: worst max |delta| 4.657e-10 across slope, aspect, dz_dx, dz_dy, plan, profile, TPI.",
     "Z+600 terrain indices after the float32 cast production performs: worst max |delta| 2.248e-03 (slope 2.248e-03 deg; aspect 3.066e+00 deg around the compass over 158,869 cells). Cells the offset turns into the -1 flat sentinel: 0; cells it un-flattens: 0.",
     "Z+600 flow graph on float64: 0 pointer disagreements, sinks 525 vs 525, order-1 links 13 vs 13.",
-    "Z+600 through the keyline tier's own float32 conditioning: sinks on the conditioned surface 65 at base vs 65 at +600 m (+0). The mechanism save_result warns about is present in this path; whether it bites is a question about the site's elevation, and this is what it costs on this one.",
-    "Z+600 keypoints through the production call: 1 found at base, 1 lifted; positions identical; skipped 126 vs 126.",
+    "Z+600 through the keyline tier's own float32 conditioning: sinks on the conditioned surface 65 at base vs 65 at +600 m (+0), while 15,622 distinct elevation levels are quantised away. resolve_flats_safely chose eps 5.995e-06 m at base and 6.539e-06 m at +600 m, with 0 and 0 residual inversions. The mechanism save_result warns about is present in this path; on this site it costs resolution without costing pointers.",
+    "Z+600 keypoints through the production call: 8 found at base, 8 lifted; positions identical; skipped 5 vs 5.",
     "Mirror, terrain indices: slope 0.000e+00, plan 0.000e+00, profile 0.000e+00, tpi 3.638e-12, dz_dx_negated 0.000e+00, dz_dy_unchanged 0.000e+00, aspect_reflected 1.526e-05",
     "Mirror, flow graph: 31 pointer disagreements, of which 31 are exact steepness ties (expected: scan order reverses under a flip) and 0 are not. Sinks 525 vs 525; order-1 links 13 vs 13.",
-    "Mirror, keypoints: 1 base -> 1 mirrored; positions mirror: True.",
-    "routing='d8' does not run at all on the real fixture: AttributeError: module 'numpy' has no attribute 'in1d', raised at __init__.py:792 in __getattr__. `FlowAnalysis.run` wraps that call in `except TypeError` (flow_analysis.py:514-517), which does not catch it. The same pysheds hazard is caught as `except (TypeError, AttributeError)` in catchment.py:224 and keypoint_analysis.py:1181 \u2014 the two paths that never request d8. The one path whose routing the panel controls is the one without the guard.",
+    "Mirror, keypoints: 8 base -> 8 mirrored; positions mirror: False.",
+    "routing dinf vs d8: accumulation differs on 152,647 of 160,000 cells, max |delta| 104544.3; acc max 67198.9 vs 105167.0.",
     "'D8' is a selectable entry in the Routing combo (\"D-infinity (recommended)\", \"D8\") and `panel.routing` maps it to 'd8' (return \"d8\" if \"D8\" in self._routing_combo.currentText() else \"dinf\"), which baseline.py:427 hands to the worker and analysis_worker.py:147 passes to `FlowAnalysis.run`. Two clicks from the UI to the AttributeError above.",
-    "routing setting and the keyline tier: _ensure_flow_data(self) hard-codes routing=\"dinf\" (True) and takes no routing argument (False), so a user who selects d8 in the panel still gets D-infinity accumulation under every keypoint and keyline. find_keypoints(self, max_valleys=8, stream_threshold_cells=None, max_order=1, boundary_mask=None) has no routing parameter to pass one through either."
+    "routing setting and the keyline tier: _ensure_flow_data(self) hard-codes routing=\"dinf\" (False) and takes no routing argument (False), so a user who selects d8 in the panel still gets D-infinity accumulation under every keypoint and keyline. find_keypoints(self, max_valleys=8, stream_threshold_cells=None, max_order=1, boundary_mask=None) has no routing parameter to pass one through either."
   ],
   "stages": {
     "z_offset_float32_cost": {
@@ -168,30 +168,115 @@
       "mechanism": "keypoint_analysis._ensure_flow_data writes its own float32 temp raster and conditions that, bypassing save_result and its float64 advice",
       "base_conditioned_sinks": 65,
       "base_conditioned_distinct_values": 147997,
+      "base_flat_epsilon_m": 5.994524274553571e-06,
+      "base_residual_inversions": 0,
+      "base_float32_spacing_m": 7.62939453125e-06,
       "plus600_conditioned_sinks": 65,
       "plus600_conditioned_distinct_values": 132375,
-      "sink_increase_from_offset": 0
+      "plus600_flat_epsilon_m": 6.539481026785714e-06,
+      "plus600_residual_inversions": 0,
+      "plus600_float32_spacing_m": 6.103515625e-05,
+      "sink_increase_from_offset": 0,
+      "elevation_levels_lost_to_float32": 15622,
+      "epsilon_below_float32_spacing_at_offset": true
     },
     "z_offset_keypoints": {
       "status": "ok",
       "keypoints_base": [
         [
-          70,
-          51,
-          25.7
+          26,
+          310,
+          65.4
+        ],
+        [
+          41,
+          367,
+          65.4
+        ],
+        [
+          107,
+          343,
+          64.3
+        ],
+        [
+          110,
+          364,
+          65.1
+        ],
+        [
+          161,
+          194,
+          62.5
+        ],
+        [
+          207,
+          200,
+          65.2
+        ],
+        [
+          215,
+          197,
+          65.6
+        ],
+        [
+          216,
+          152,
+          62.9
         ]
       ],
       "keypoints_lifted": [
         [
-          70,
-          51,
-          625.7
+          26,
+          310,
+          665.4
+        ],
+        [
+          41,
+          367,
+          665.4
+        ],
+        [
+          107,
+          343,
+          664.3
+        ],
+        [
+          110,
+          364,
+          665.1
+        ],
+        [
+          161,
+          194,
+          662.5
+        ],
+        [
+          207,
+          200,
+          665.2
+        ],
+        [
+          215,
+          197,
+          665.6
+        ],
+        [
+          216,
+          152,
+          662.9
         ]
       ],
-      "skipped_base": 126,
-      "skipped_lifted": 126,
+      "skipped_base": 5,
+      "skipped_lifted": 5,
       "positions_identical": true,
       "elevation_deltas": [
+        600.0,
+        600.0,
+        600.0,
+        600.0,
+        600.0,
+        600.0,
+        600.0,
         600.0
       ],
       "elevation_offset_exact": true
@@ -275,49 +360,187 @@
       "status": "ok",
       "keypoints_base": [
         [
-          70,
-          51,
-          25.7
+          26,
+          310,
+          65.4
+        ],
+        [
+          41,
+          367,
+          65.4
+        ],
+        [
+          107,
+          343,
+          64.3
+        ],
+        [
+          110,
+          364,
+          65.1
+        ],
+        [
+          161,
+          194,
+          62.5
+        ],
+        [
+          207,
+          200,
+          65.2
+        ],
+        [
+          215,
+          197,
+          65.6
+        ],
+        [
+          216,
+          152,
+          62.9
         ]
       ],
       "keypoints_mirrored": [
         [
-          70,
-          348,
-          25.7
+          26,
+          89,
+          65.4
+        ],
+        [
+          41,
+          32,
+          65.4
+        ],
+        [
+          107,
+          56,
+          64.3
+        ],
+        [
+          110,
+          35,
+          65.1
+        ],
+        [
+          161,
+          205,
+          62.5
+        ],
+        [
+          207,
+          199,
+          65.2
+        ],
+        [
+          215,
+          202,
+          65.6
+        ],
+        [
+          215,
+          247,
+          62.8
         ]
       ],
-      "skipped_base": 126,
-      "skipped_mirrored": 127,
+      "skipped_base": 5,
+      "skipped_mirrored": 5,
       "expected_positions": [
         [
-          70,
-          348
+          26,
+          89
+        ],
+        [
+          41,
+          32
+        ],
+        [
+          107,
+          56
+        ],
+        [
+          110,
+          35
+        ],
+        [
+          161,
+          205
+        ],
+        [
+          207,
+          199
+        ],
+        [
+          215,
+          202
+        ],
+        [
+          216,
+          247
         ]
       ],
       "observed_positions": [
         [
-          70,
-          348
+          26,
+          89
+        ],
+        [
+          41,
+          32
+        ],
+        [
+          107,
+          56
+        ],
+        [
+          110,
+          35
+        ],
+        [
+          161,
+          205
+        ],
+        [
+          207,
+          199
+        ],
+        [
+          215,
+          202
+        ],
+        [
+          215,
+          247
         ]
       ],
-      "positions_mirror": true
+      "positions_mirror": false
     },
     "routing_dinf_vs_d8": {
       "status": "ok",
-      "failures": {
-        "d8": {
-          "exception": "AttributeError: module 'numpy' has no attribute 'in1d'",
-          "raised_at": "__init__.py:792 in __getattr__",
-          "traceback": "Traceback (most recent call last):\n  File \"F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\p_invariance.py\", line 508, in arm_routing\n    out = fa.run(routing=routing, crest_split=False)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\Terrain Flow Design\\TerrainFlow\\terrainflow_assessment\\modules\\flow_analysis.py\", line 515, in run\n    self.acc = self.grid.accumulation(self.fdir, routing=self.routing)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\apps\\Python312\\Lib\\site-packages\\pysheds\\sgrid.py\", line 886, in accumulation\n    acc = self._d8_accumulation(fdir, weights=weights, dirmap=dirmap,\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\apps\\Python312\\Lib\\site-packages\\pysheds\\sgrid.py\", line 904, in _d8_accumulation\n    invalid_cells = ~np.in1d(fdir.ravel(), dirmap).reshape(fdir.shape)\n                     ^^^^^^^\n  File \"F:\\apps\\Python312\\Lib\\site-packages\\numpy\\__init__.py\", line 792, in __getattr__\n    raise AttributeError(f\"module {__name__!r} has no attribute {attr!r}\")\nAttributeError: module 'numpy' has no attribute 'in1d'\n"
-        }
-      },
+      "failures": {},
       "routing_requested_vs_used": {
-        "dinf": "dinf"
+        "dinf": "dinf",
+        "d8": "d8"
       },
       "dinf_unrouted_cells": 0,
       "dinf_unrouted_flow_m3": 0.0,
-      "dinf_acc_max": 67198.89521613708
+      "dinf_acc_max": 67198.89521613708,
+      "d8_unrouted_cells": 0,
+      "d8_unrouted_flow_m3": 0.0,
+      "d8_acc_max": 105167.0,
+      "conditioned_surfaces_identical": {
+        "max_abs_delta": 0.0,
+        "mean_abs_delta": 0.0,
+        "compared_cells": 160000,
+        "differing_cells": 0,
+        "finite_disagreement": 0
+      },
+      "accumulation_delta": {
+        "max_abs_delta": 104544.33165849016,
+        "mean_abs_delta": 155.91008047326656,
+        "compared_cells": 160000,
+        "differing_cells": 152647,
+        "finite_disagreement": 0
+      }
     },
     "routing_d8_is_offered_by_the_ui": {
       "status": "ok",
@@ -328,7 +551,7 @@
     "routing_reaches_keyline_tier": {
       "status": "ok",
       "signature": "(self)",
-      "mentions_dinf_literal": true,
+      "mentions_dinf_literal": false,
       "accepts_routing_argument": false,
       "find_keypoints_signature": "(self, max_valleys=8, stream_threshold_cells=None, max_order=1, boundary_mask=None)",
       "routing_reachable_from_keyline_tier": false

@@ -269,42 +269,51 @@ def check_real_terrain_numbers_have_not_moved(dem_path):
 # `p_flow_graph.py` / `p_keypoints.py`, and once by this check. If the two disagree, one
 # of them is wrong and the disagreement is the finding.
 #
-# **These pin currently broken behaviour**, and that is deliberate. Each key names the
-# entry in `CLudeDocs/ANALYSIS_DEFECTS.md` it belongs to, so the first real fix moves the
-# number and the reviewer knows which finding moved it. The file's own rule applies:
-# re-record the constants in the same commit that causes them to move.
+# **Re-recorded 2026-09-11 when KPA-52 closed** (ANALYSIS_DEFECTS §10). Until then these
+# pinned deliberately broken behaviour — 127 links of median 3.4 m, one keypoint — because
+# the stream mask came from pysheds' D-infinity accumulation while the pointers came from
+# `d8_from_dem` on the raw DEM, and links ended wherever the two disagreed. Now the mask,
+# the pointers and the accumulation are one graph on the conditioned surface, every valley
+# is walked back up to its divide and cut at the data edge, and the keypoint is the break
+# of a two-slope fit. Each key still names the finding it belongs to. The file's own rule
+# applies: re-record the constants in the same commit that causes them to move.
 #
-# **Production path only.** `contour.py:1397` calls `find_keypoints(max_valleys=...)` and
+# **Production path only.** `contour.py` calls `find_keypoints(max_valleys=...)` and
 # passes no threshold, so `stream_threshold_cells` takes its
 # `max(20, round(2000 / cell_area))` default — 2,000 cells = 0.20 ha on this 1 m fixture.
 # The 0.5 ha and 1.0 ha figures in the probe evidence are **sensitivity**, not production,
-# and are not pinned. Neither are the conditioned-surface numbers: they are unreachable
-# from production, which is the whole of KPA-38, so pinning them would pin probe code.
+# and are not pinned.
 #
 # **Integers, compared exactly.** `TOLERANCE` is 0.5 % relative, which is the right
-# instrument for a capacity in m³ and the wrong one for a count of links — 0.5 % of 127 is
-# 0.6, so a single link appearing or disappearing would pass. These are counts; they are
+# instrument for a capacity in m³ and the wrong one for a count of links — 0.5 % of 23 is
+# 0.1, so a single link appearing or disappearing would pass. These are counts; they are
 # compared with `==`.
 #
-# The 35.0 m profile floor is **not** pinned as a value. It is analytic — it falls out of
-# `7 · min(5·cell, 10)` — not a property of this fixture, so a fixture check is the wrong
-# home for it. What is pinned is how many links clear it.
+# There is no longer a 35 m profile floor to pin against: the two-slope fit needs
+# `2 · MIN_REACH_CELLS + 1` cells and nothing else, and every valley on this fixture has
+# at least 74 once it starts at its divide.
 EXPECTED_KEYLINE = {
-    # FLG-18 — links emitted at min_cells=3 against links long enough to profile.
-    "order1_links": 127,
-    "links_clearing_profile_floor": 1,
-    # KPA-39 — the guard histogram, derived here from link geometry alone (no settrace),
-    # and equal to what p_keypoints.py traced. Two independent routes to 78 / 48 / 0.
-    "links_refused_too_few_cells": 78,
-    "links_refused_profile_too_short": 48,
-    # KPA-43 — keypoints, skipped, and whether they account for the input.
-    "keypoints_at_max_valleys_8": 1,
-    "skipped_at_max_valleys_8": 126,
-    "links_unaccounted_at_max_valleys_8": 0,
-    # FLG-19 — the raw surface production actually walks, and what survives on it.
-    "raw_sinks_on_finite_ground": 525,
-    "raw_stream_cells_that_are_sinks": 42,
-    "stream_cells": 1688,
+    # KPA-52 — the network, on one graph. 23 primary valleys, not 127 fragments.
+    "order1_links": 23,
+    "stream_cells": 1571,
+    "conditioned_sinks_on_finite_ground": 65,
+    # KPA-52 — the divide and the data edge. Half the cells of a typical valley lie
+    # above the old channel head; 7 valleys reach the grid edge and are cut there; 3
+    # have their divide on it and are keyed with a flag.
+    "median_extension_cells": 91,
+    "links_cut_at_the_data_edge": 7,
+    "links_with_divide_on_the_data_edge": 3,
+    # KPA-39 — the refusal classes, now read off the reasons `find_keypoints` gives.
+    # Five valleys are refused before the fit because their channel exists only on the
+    # boundary row (the row's own collecting artefact — no channel is on the map); the
+    # fit refuses 8 for having no two-slope break.
+    "links_refused_before_the_fit": 5,
+    "links_refused_no_two_slope_break": 8,
+    "keypoints_at_every_valley": 10,
+    # KPA-43 — at the panel default the loop stops at 8 keypoints, so 10 valleys go
+    # unexamined and unreported. Still open; pinned so the count is visible.
+    "keypoints_at_max_valleys_8": 8,
+    "skipped_at_max_valleys_8": 5,
 }
 
 # Recorded 2026-09-11, after KPA-12 closed (MATHS_AUDIT §9.9). Pinned because the number
@@ -358,62 +367,54 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
     number, and going straight at the module makes a moved figure point at the maths
     rather than at the plumbing. The **arguments** are production's — `max_valleys=8` is
     the panel default (`project_io.INPUT_FIELDS`), and no threshold is passed, exactly as
-    `contour.py:1397` does it.
+    `contour.py` does it. The valleys come from `primary_valleys()` itself rather than a
+    hand-built copy of its construction, so this cannot drift from what production walks.
+
+    Two properties are asserted whatever the recorded numbers say: **no stream cell's
+    pointer leaves the stream mask** (the mask and the pointers are one graph — the whole
+    of KPA-52), and **keypoints + skipped == valleys** when the cap is lifted (KPA-43's
+    identity, which only the cap breaks).
     """
     import numpy as np
 
-    from terrainflow_assessment.modules.flow_graph import (
-        d8_from_dem,
-        strahler_order,
-        stream_links,
-    )
     from terrainflow_assessment.modules.keypoint_analysis import YeomansKeylineAnalysis
 
     ya = YeomansKeylineAnalysis(FIXTURE_DEM)
     cell_area = ya.cell_w * ya.cell_h
     threshold = max(20, int(round(2_000.0 / cell_area)))
 
-    # The floor `keypoint_on_path` cannot return a keypoint below: `spacing = min(5·cell,
-    # 10)`, `win >= 5` so `guard >= 2`, and `n_samp - 2·guard >= 3` first holds at
-    # `n_samp = 7`. Derived here rather than hard-coded so the arithmetic stays visible
-    # next to the count it produces, and so the 2 m arm gets 70 m without an edit.
-    spacing = min(5.0 * ya.cell_size, 10.0)
-    profile_floor_m = 7.0 * spacing
-
-    _fdir, acc_arr = ya._ensure_flow_data()
-    stream = (acc_arr >= threshold) & np.isfinite(ya.dem)
-
-    # d8 on the RAW DEM — which is what `find_keypoints:789` does, and is KPA-38.
-    next_flat, is_sink = d8_from_dem(ya.dem, ya.cell_w, ya.cell_h)
-    order = strahler_order(next_flat, stream.ravel())
-    links = stream_links(next_flat, stream.ravel(), order, ya.dem.shape[1], max_order=1)
-
-    lengths = [_arc_length_m(lk, ya.cell_size) for lk in links]
+    valleys = ya.primary_valleys()
+    next_flat, own_acc = ya._primary_graph()
     finite_flat = np.isfinite(ya.dem).ravel()
-    stream_flat = stream.ravel()
+    stream_flat = (own_acc >= threshold) & finite_flat
+    is_sink = next_flat == np.arange(next_flat.size)
+    leaving = int(sum(1 for i in np.flatnonzero(stream_flat)
+                      if next_flat[i] != i and not stream_flat[next_flat[i]]))
 
     keypoints, skipped = ya.find_keypoints(max_valleys=8)
+    all_keypoints, all_skipped = ya.find_keypoints(max_valleys=len(valleys) + 1)
 
     observed = {
-        "order1_links": len(links),
-        "links_clearing_profile_floor": sum(1 for m in lengths if m >= profile_floor_m),
-        "links_refused_too_few_cells": sum(1 for lk in links if len(lk) < 5),
-        "links_refused_profile_too_short": sum(
-            1 for lk, m in zip(links, lengths)
-            if len(lk) >= 5 and m < profile_floor_m),
+        "order1_links": len(valleys),
+        "stream_cells": int(stream_flat.sum()),
+        "conditioned_sinks_on_finite_ground": int(np.count_nonzero(is_sink & finite_flat)),
+        "median_extension_cells": int(np.median([v["extension_cells"] for v in valleys])),
+        "links_cut_at_the_data_edge": sum(1 for v in valleys if v["runs_off_dem_m"] > 0),
+        "links_with_divide_on_the_data_edge": sum(
+            1 for v in valleys if v["head_on_boundary"]),
+        "links_refused_before_the_fit": sum(
+            1 for s in all_skipped if "grade change" not in s),
+        "links_refused_no_two_slope_break": sum(
+            1 for s in all_skipped if "grade change" in s),
+        "keypoints_at_every_valley": len(all_keypoints),
         "keypoints_at_max_valleys_8": len(keypoints),
         "skipped_at_max_valleys_8": len(skipped),
-        "links_unaccounted_at_max_valleys_8": (
-            len(links) - (len(keypoints) + len(skipped))),
-        "raw_sinks_on_finite_ground": int(np.count_nonzero(is_sink & finite_flat)),
-        "raw_stream_cells_that_are_sinks": int(
-            np.count_nonzero(stream_flat & is_sink)),
-        "stream_cells": int(stream.sum()),
     }
 
     print("\n    --- keyline network (production path) ---")
     print(f"    threshold {threshold} cells = {threshold * cell_area / 1e4:.2f} ha; "
-          f"profile floor {profile_floor_m:.1f} m")
+          f"conditioned surface {ya.conditioned_source}; "
+          f"{leaving} pointer(s) leave the mask")
 
     failures = []
     for key, expected in EXPECTED_KEYLINE.items():
@@ -423,41 +424,51 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
         if actual != expected:
             failures.append(f"{key}: {actual} against a recorded {expected}")
 
-    # Two things the arithmetic must satisfy whatever the recorded numbers are, so that a
-    # re-recorded EXPECTED_KEYLINE cannot quietly encode nonsense.
-    guard_total = (observed["links_refused_too_few_cells"]
-                   + observed["links_refused_profile_too_short"]
-                   + observed["links_clearing_profile_floor"])
-    if guard_total != observed["order1_links"]:
+    # Properties, not recorded numbers: these hold on any terrain, so a failure here is a
+    # defect and never a re-record.
+    if leaving != 0:
         failures.append(
-            f"the three link classes sum to {guard_total}, not "
-            f"{observed['order1_links']} — they are meant to partition the link set")
-
-    if observed["links_clearing_profile_floor"] < len(keypoints):
+            f"{leaving} stream cell(s) have a pointer that leaves the stream mask — the "
+            "mask and the pointers are no longer one graph (KPA-52)")
+    partition = (observed["links_refused_before_the_fit"]
+                 + observed["links_refused_no_two_slope_break"]
+                 + observed["keypoints_at_every_valley"])
+    if partition != observed["order1_links"]:
         failures.append(
-            f"{len(keypoints)} keypoint(s) were found on only "
-            f"{observed['links_clearing_profile_floor']} link(s) long enough to profile")
+            f"the refusal classes and the keypoints sum to {partition}, not "
+            f"{observed['order1_links']} — they are meant to partition the valley set")
+    if len(all_keypoints) + len(all_skipped) != len(valleys):
+        failures.append(
+            f"uncapped, keypoints + skipped = {len(all_keypoints) + len(all_skipped)} "
+            f"against {len(valleys)} valleys (KPA-43's identity)")
+    if len(keypoints) > 8:
+        failures.append(f"{len(keypoints)} keypoints returned against a cap of 8")
 
     assert not failures, (
         "the keyline network moved against the recorded fixture:\n      "
         + "\n      ".join(failures)
-        + "\n    These pin CURRENT, PARTLY BROKEN behaviour — see "
-          "CLudeDocs/ANALYSIS_DEFECTS.md. A fix is expected to move them; re-record "
-          "EXPECTED_KEYLINE in the same commit, and say which finding moved it."
+        + "\n    See CLudeDocs/ANALYSIS_DEFECTS.md §10. If the maths changed on purpose, "
+          "re-record EXPECTED_KEYLINE in the same commit, and say which finding moved it."
     )
 
 
 #: The same network, reached the way a user reaches it: Baseline, then Keyline. Recorded
-#: 2026-09-11 against the fixture, after `KPA-48`/`KPA-53` were fixed. These differ from
-#: `EXPECTED_KEYLINE` above because the supplied field is **crest-split** and the
-#: recompute is not — that difference is the whole of `KPA-48`.
+#: 2026-09-11 against the fixture, after `KPA-48`/`KPA-53` were fixed and re-recorded the
+#: same day when `KPA-52` closed. The valley *network* is now the same on both branches —
+#: it comes from the conditioned surface, which the baseline hands over and the recompute
+#: reproduces cell for cell — but the supplied accumulation is **crest-split** and the
+#: recompute is not, so the valleys *rank* differently and the eighth keypoint at the cap
+#: can differ. Uncapped, the two keypoint sets are identical.
 EXPECTED_KEYLINE_WITH_BASELINE = {
-    "keypoints": 1,
-    "skipped": 122,
-    "links_accounted_for": 123,
+    "keypoints": 8,
+    "skipped": 5,
+    "keypoints_at_every_valley": 10,
+    "valleys": 23,
     # The supplied raster must be used *as supplied*. A single differing cell means the
     # gate has closed again and the tier is back on its own recompute.
     "cells_differing_from_the_supplied_raster": 0,
+    # And the supplied conditioned surface must be the one the graph is built on.
+    "conditioned_source": "supplied",
 }
 
 
@@ -470,31 +481,27 @@ def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
     press threw the supplied field away and spent 0.48 s recomputing a different one,
     uncorrected for ponds. This pins the corrected behaviour.
 
-    Three things are asserted and each fails differently:
+    Four things are asserted and each fails differently:
 
     1. **The supplied raster is used as supplied** — zero differing cells. This is the
        direct regression guard on the gate. If someone restores the `and`, this is the
        assertion that says so, rather than a count drifting for no visible reason.
-    2. **The counts.** 122 refused rather than the no-baseline branch's 126: the
-       crest-split field yields a slightly different channel network, which is the point
-       of using it.
-    3. **`keypoints + skipped == links`** on this branch too, so `KPA-43`'s accounting
-       identity is checked against the field production actually uses.
+    2. **The supplied conditioned surface is the one the valley graph is built on**
+       (`conditioned_source == "supplied"`), and it yields the same pointers as the
+       recompute would — zero pointer disagreements — so the two branches cannot drift
+       into two networks.
+    3. **The counts**, at the cap and uncapped.
+    4. **`keypoints + skipped == valleys`** uncapped, so `KPA-43`'s accounting identity
+       is checked against the field production actually uses.
 
-    Not asserted: wall time. The measured speed-up is 25x (0.0196 s against 0.5000 s) and
-    it is the *reason* for the fix, but a timing assertion on a shared machine is a
-    flake generator. The zero-differing-cells assertion catches the same regression
-    deterministically — a reopened gate cannot pass it.
+    Not asserted: wall time. A keyline press with a baseline is now 0.14 s against 0.81 s
+    without one, and that is the *reason* the surface is handed over, but a timing
+    assertion on a shared machine is a flake generator.
     """
     import numpy as np
     import rasterio
 
     from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
-    from terrainflow_assessment.modules.flow_graph import (
-        d8_from_dem,
-        strahler_order,
-        stream_links,
-    )
     from terrainflow_assessment.modules.keypoint_analysis import YeomansKeylineAnalysis
 
     import tempfile
@@ -503,14 +510,20 @@ def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
         import os as _os
 
         # Crest-split, as production's baseline is — that is what makes the supplied
-        # field differ from a plain recompute.
+        # field differ from a plain recompute. The conditioned surface is written the way
+        # the analysis worker writes it: float64, with the DEM's own nodata.
         fa = FlowAnalysis()
         fa.load_dem(FIXTURE_DEM)
         fa.run(routing="dinf")
         acc_path = _os.path.join(tmp, "baseline_acc.tif")
         fa.save_result(fa.acc, acc_path, nodata=np.nan)
+        cond_path = _os.path.join(tmp, "baseline_conditioned.tif")
+        fa.save_result(np.array(fa.conditioned, dtype="float64"), cond_path,
+                       "hydrologically conditioned DEM", dtype="float64",
+                       nodata=fa.nodata)
 
-        ya = YeomansKeylineAnalysis(FIXTURE_DEM, acc_path=acc_path)
+        ya = YeomansKeylineAnalysis(FIXTURE_DEM, acc_path=acc_path,
+                                    conditioned_path=cond_path)
         _fdir, acc_arr = ya._ensure_flow_data()
 
         with rasterio.open(acc_path) as src:
@@ -519,22 +532,23 @@ def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
         both = np.isfinite(used) & np.isfinite(on_disk)
         differing = int((used[both] != on_disk[both]).sum())
 
-        # The link population the supplied field implies, built exactly as
-        # `find_keypoints` builds it.
-        threshold = max(20, int(round(2_000.0 / (ya.cell_w * ya.cell_h))))
-        stream = (acc_arr >= threshold) & np.isfinite(ya.dem)
-        next_flat, _sink = d8_from_dem(ya.dem, ya.cell_w, ya.cell_h)
-        order = strahler_order(next_flat, stream.ravel())
-        links = stream_links(next_flat, stream.ravel(), order, ya.dem.shape[1],
-                             max_order=1)
-
+        valleys = ya.primary_valleys()
         keypoints, skipped = ya.find_keypoints(max_valleys=8)
+        all_keypoints, all_skipped = ya.find_keypoints(max_valleys=len(valleys) + 1)
+
+        # The graph the supplied surface gives against the graph a recompute gives.
+        supplied_next, _acc = ya._primary_graph()
+        recomputed = YeomansKeylineAnalysis(FIXTURE_DEM)
+        recomputed_next, _acc = recomputed._primary_graph()
+        pointer_disagreements = int((supplied_next != recomputed_next).sum())
 
     observed = {
         "keypoints": len(keypoints),
         "skipped": len(skipped),
-        "links_accounted_for": len(keypoints) + len(skipped),
+        "keypoints_at_every_valley": len(all_keypoints),
+        "valleys": len(valleys),
         "cells_differing_from_the_supplied_raster": differing,
+        "conditioned_source": ya.conditioned_source,
     }
 
     print("\n    --- keyline after baseline (the supplied field) ---")
@@ -554,10 +568,14 @@ def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
         "    That gate was an `and` over two paths and the controller supplies one, "
         "which is KPA-48."
     )
-    if observed["links_accounted_for"] != len(links):
+    if len(all_keypoints) + len(all_skipped) != len(valleys):
         failures.append(
-            f"keypoints + skipped = {observed['links_accounted_for']} against "
-            f"{len(links)} order-1 links (KPA-43's identity, on the supplied field)")
+            f"uncapped, keypoints + skipped = {len(all_keypoints) + len(all_skipped)} "
+            f"against {len(valleys)} valleys (KPA-43's identity, on the supplied field)")
+    if pointer_disagreements:
+        failures.append(
+            f"{pointer_disagreements} pointer(s) differ between the supplied conditioned "
+            "surface and a recompute — the two branches are walking two graphs")
 
     assert not failures, (
         "the keyline network moved on the branch production actually takes:\n      "
@@ -705,6 +723,7 @@ def _flow_bits(z, cell_w, cell_h):
     import numpy as np
 
     from terrainflow_assessment.modules.flow_graph import (
+        accumulate,
         d8_from_dem,
         strahler_order,
         stream_links,
@@ -712,6 +731,10 @@ def _flow_bits(z, cell_w, cell_h):
 
     next_flat, is_sink = d8_from_dem(z, cell_w, cell_h)
     acc = _accumulate(z, next_flat)
+    # Two routes to one count: the elevation-sorted oracle above against the level-
+    # synchronous pass production uses. They must agree cell for cell.
+    assert np.array_equal(acc, accumulate(next_flat, np.isfinite(z).ravel())), (
+        "flow_graph.accumulate disagrees with the elevation-sorted oracle")
     threshold = max(20, int(round(2_000.0 / (cell_w * cell_h))))
     stream = (acc >= threshold) & np.isfinite(z).ravel()
     order = strahler_order(next_flat, stream)

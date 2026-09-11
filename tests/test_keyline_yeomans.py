@@ -470,6 +470,249 @@ class TestKeypointsPerPrimaryValley:
         assert kp["slope_ease"] > 0
 
 
+# ---------------------------------------------------------------------------
+# Primary valleys — one graph, the divide, and the data edge (KPA-52)
+# ---------------------------------------------------------------------------
+
+def _steepening_valley_dem(path, n=100):
+    """A valley that steepens downhill — Yeomans' 'nosed over' ridge, not a valley."""
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    fall = np.where(r < 50, 0.05 * r, 0.05 * 50 + 0.30 * (r - 50))
+    return _write_dem(path, 200.0 - fall + 0.5 * np.abs(c - 50))
+
+
+def _interior_ridge_dem(path, n=120):
+    """A ridge across row 20 inside the grid, with a two-slope valley falling south of it."""
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    fall = np.where(r < 20, 0.20 * (20 - r),
+                    np.where(r < 70, 0.30 * (r - 20), 0.30 * 50 + 0.05 * (r - 70)))
+    return _write_dem(path, 200.0 - fall + 0.5 * np.abs(c - 60))
+
+
+def _edge_run_dem(path, n=80):
+    """A valley that falls east into the grid edge, where the edge column falls south."""
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    z = 200.0 - 0.3 * c + 0.5 * np.abs(r - 40)
+    z[:, -1] = 200.0 - 0.3 * (n - 1) - 0.5 * np.arange(n)
+    return _write_dem(path, z)
+
+
+def _crest_run_dem(path, n=120):
+    """Every row drains along itself into the axis at col 30, so the walk above the
+    channel head would run along row 0 rather than stop at (0, 30)."""
+    r, c = np.mgrid[0:n, 0:n].astype("float64")
+    fall = np.where(r < 60, 0.30 * r, 0.30 * 60 + 0.05 * (r - 60))
+    return _write_dem(path, 200.0 - fall + 1.0 * np.abs(c - 30))
+
+
+class TestPrimaryValleys:
+    def test_a_valley_is_profiled_from_its_divide(self, tmp_path):
+        """The primary valley 'starts as a more or less sudden steepening of the side
+        slope of a main ridge' (WFEF p58) — at the divide, not at the channel head."""
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        valleys = ya.primary_valleys()
+        assert len(valleys) == 2
+        for v in valleys:
+            assert v["cells"][0][0] == 0, "the valley starts on the top row, the divide"
+            assert v["extension_cells"] > 0 and v["channel_cells"] > 0
+            assert v["head_rc"][0] > 0, "the channel head lies below the divide"
+            rows = [r for r, _c in v["cells"]]
+            assert rows == sorted(rows), "the profile runs downhill"
+            for (r0, c0), (r1, c1) in zip(v["cells"][:-1], v["cells"][1:]):
+                assert max(abs(r1 - r0), abs(c1 - c0)) == 1, "cells are 8-contiguous"
+
+    def test_no_pointer_leaves_the_stream_mask(self, tmp_path):
+        """The property KPA-52 was about: mask and pointers from one graph."""
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        next_flat, own_acc = ya._primary_graph()
+        threshold = max(20, int(round(2_000.0 / (ya.cell_w * ya.cell_h))))
+        stream = (own_acc >= threshold) & np.isfinite(ya.dem).ravel()
+        leaving = [i for i in np.flatnonzero(stream)
+                   if next_flat[i] != i and not stream[next_flat[i]]]
+        assert leaving == []
+
+    def test_a_divide_on_the_data_edge_is_flagged_not_refused(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        keypoints, _ = ya.find_keypoints(max_valleys=8)
+        assert len(keypoints) == 2
+        assert all(kp["head_on_boundary"] for kp in keypoints)
+        assert all("data edge" in kp["label"] for kp in keypoints)
+
+    def test_an_interior_divide_is_not_flagged(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_interior_ridge_dem(str(tmp_path / "ridge.tif")))
+        south = [v for v in ya.primary_valleys() if v["outlet_rc"][0] == 119]
+        assert south, "the valley south of the ridge was not found"
+        v = south[0]
+        assert v["divide_rc"][0] in (20, 21), v["divide_rc"]
+        assert not v["head_on_boundary"]
+        kp = ya.keypoint_on_path(v["cells"], require_prominence=True)
+        assert kp is not None and abs(kp["row"] - 70) <= 1, kp
+
+    def test_a_valley_that_reaches_the_edge_is_cut_there(self, tmp_path):
+        """A boundary column has no outside, so pointers run along it; the valley left
+        the site where it arrived."""
+        ya = YeomansKeylineAnalysis(_edge_run_dem(str(tmp_path / "edge.tif")))
+        valleys = [v for v in ya.primary_valleys() if v["outlet_rc"][1] == 79]
+        assert len(valleys) == 1
+        v = valleys[0]
+        assert v["outlet_rc"] == (40, 79)
+        assert v["runs_off_dem_m"] > 0
+        assert sum(1 for _r, c in v["cells"] if c == 79) == 1
+        # The divide is on the west edge (three edge cells tie as inflows to the first
+        # interior cell, so which row wins is the scan order's business).
+        assert v["cells"][0][1] == 0 and abs(v["cells"][0][0] - 40) <= 1
+        assert v["head_on_boundary"]
+
+    def test_a_leading_run_along_the_edge_is_trimmed_to_the_divide(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_crest_run_dem(str(tmp_path / "crest.tif")))
+        valleys = ya.primary_valleys()
+        assert len(valleys) == 1
+        v = valleys[0]
+        assert v["cells"][0] == (0, 30) and v["head_on_boundary"]
+        assert sum(1 for r, _c in v["cells"] if r == 0) == 1
+        assert v["cells"][-1][0] == 119 and v["channel_cells"] > 0
+        kp = ya.keypoint_on_path(v["cells"], require_prominence=True)
+        assert kp is not None and kp["row"] == 60, kp
+
+    def test_a_channel_that_exists_only_on_the_edge_row_is_refused(self, tmp_path):
+        """A boundary row collects everything that reaches it, so a 'channel' can cross
+        the threshold there and nowhere else. No channel is on the map; say so."""
+        n = 120
+        r, c = np.mgrid[0:n, 0:n].astype("float64")
+        z = 200.0 - 0.3 * r                      # a plain slope, no valley anywhere
+        z[-1, :] = 200.0 - 0.3 * (n - 1) - 0.5 * np.arange(n)   # the bottom row falls east
+        ya = YeomansKeylineAnalysis(_write_dem(str(tmp_path / "edgerow.tif"), z))
+        valleys = ya.primary_valleys()
+        assert valleys and all(not v["channel_on_map"] for v in valleys)
+        keypoints, skipped = ya.find_keypoints()
+        assert keypoints == []
+        assert skipped and "channel begins on the data edge" in skipped[0]
+
+    def test_nothing_reaches_the_threshold_says_so(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        assert ya.primary_valleys(stream_threshold_cells=10 ** 6) == []
+        keypoints, skipped = ya.find_keypoints(stream_threshold_cells=10 ** 6)
+        assert keypoints == [] and skipped == ["no channel network at this threshold"]
+
+
+class TestTwoSlopeCriterion:
+    def test_the_break_is_found_exactly_on_a_two_slope_valley(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        kp = ya.keypoint_on_path([(r, 30) for r in range(120)])
+        assert kp["row"] == 60
+        assert abs(kp["grade_above"] - 0.30) < 1e-6
+        assert abs(kp["grade_below"] - 0.05) < 1e-6
+        assert abs(kp["slope_ease"] - (kp["grade_above"] - kp["grade_below"])) < 1e-3
+
+    def test_a_valley_that_steepens_downhill_is_refused(self, tmp_path):
+        """'The primary ridge had nosed over' (WFEF p44) is a ridge shape, not a valley."""
+        ya = YeomansKeylineAnalysis(_steepening_valley_dem(str(tmp_path / "convex.tif")))
+        axis = [(r, 50) for r in range(100)]
+        kp, reason = ya.keypoint_on_path_with_reason(axis, require_prominence=True)
+        assert kp is None and "grade change" in reason
+        kp, _ = ya.keypoint_on_path_with_reason(axis)
+        assert kp["grade_above"] < kp["grade_below"] and kp["slope_ease"] < 0
+        keypoints, skipped = ya.find_keypoints()
+        assert keypoints == [] and "above 5.0%" in skipped[0]
+
+    def test_too_few_cells_is_named(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        kp, reason = ya.keypoint_on_path_with_reason([(0, 30), (1, 30)])
+        assert kp is None and reason == ya.REFUSED_TOO_FEW_CELLS
+        kp, reason = ya.keypoint_on_path_with_reason(
+            [(r, 30) for r in range(2 * ya.MIN_REACH_CELLS)])
+        assert kp is None and reason == ya.REFUSED_TOO_FEW_CELLS
+
+    def test_nodata_along_the_valley_is_dropped_not_zeroed(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        ya.dem[30:35, 30] = np.nan
+        kp = ya.keypoint_on_path([(r, 30) for r in range(120)])
+        assert kp["row"] == 60 and kp["elevation"] > 100
+        ya.dem[:, 30] = np.nan
+        kp, reason = ya.keypoint_on_path_with_reason([(r, 30) for r in range(120)])
+        assert kp is None and reason == ya.REFUSED_TOO_LITTLE_GROUND
+
+    def test_a_uniform_valley_is_refused_with_both_grades_quoted(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_uniform_valley_dem(str(tmp_path / "uniform.tif")))
+        keypoints, skipped = ya.find_keypoints()
+        assert keypoints == [] and len(skipped) == 1
+        assert "grade change" in skipped[0]
+        assert "above 20.0%" in skipped[0] and "below 20.0%" in skipped[0]
+
+    def test_the_closed_form_matches_least_squares(self):
+        from terrainflow_assessment.modules.keypoint_analysis import _two_slope_break
+
+        rng = np.random.default_rng(3)
+        s = np.cumsum(rng.uniform(1.0, 1.5, 80))
+        fall = np.where(s < s[30], 0.20 * s, 0.20 * s[30] + 0.05 * (s - s[30]))
+        z = 100.0 - fall + rng.normal(0.0, 0.05, 80)
+        k, above, below = _two_slope_break(s, z, 3)
+
+        best = None
+        for cand in range(3, 77):
+            design = np.column_stack([np.ones(80), s, np.maximum(0.0, s - s[cand])])
+            coef = np.linalg.lstsq(design, z, rcond=None)[0]
+            rss = float(((design @ coef - z) ** 2).sum())
+            if best is None or rss < best[0]:
+                best = (rss, cand, coef)
+        assert k == best[1]
+        assert abs(above - (-best[2][1])) < 1e-6
+        assert abs(below - (-(best[2][1] + best[2][2]))) < 1e-6
+
+
+class TestConditionedSurface:
+    @staticmethod
+    def _conditioned_copy(dem_path, out_path, shape=None):
+        with rasterio.open(dem_path) as src:
+            data = src.read(1).astype("float64")
+            profile = src.profile
+        if shape is not None:
+            data = data[:shape[0], :shape[1]]
+            profile.update(height=shape[0], width=shape[1])
+        profile.update(dtype="float64", nodata=-9999.0)
+        with rasterio.open(out_path, "w", **profile) as dst:
+            dst.write(data, 1)
+        return out_path
+
+    def test_a_supplied_conditioned_raster_is_used_as_supplied(self, tmp_path,
+                                                               monkeypatch):
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        cond_path = self._conditioned_copy(dem_path, str(tmp_path / "cond.tif"))
+        acc_path = _make_acc(str(tmp_path / "acc.tif"), (120, 120))
+        ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path,
+                                    conditioned_path=cond_path)
+
+        def boom(self):
+            raise AssertionError("conditioned the DEM despite being handed a surface")
+
+        monkeypatch.setattr(YeomansKeylineAnalysis, "_condition_surface", boom)
+        keypoints, _ = ya.find_keypoints(max_valleys=8)
+        assert len(keypoints) == 2
+        assert ya.conditioned_source == "supplied"
+
+    def test_a_conditioned_raster_of_the_wrong_shape_falls_back(self, tmp_path):
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        cond_path = self._conditioned_copy(dem_path, str(tmp_path / "small.tif"),
+                                           shape=(20, 20))
+        ya = YeomansKeylineAnalysis(dem_path, conditioned_path=cond_path)
+        assert len(ya.primary_valleys()) == 2
+        assert ya.conditioned_source == "recomputed"
+
+    def test_a_missing_conditioned_raster_falls_back(self, tmp_path):
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path,
+                                    conditioned_path=str(tmp_path / "absent.tif"))
+        assert len(ya.primary_valleys()) == 2
+        assert ya.conditioned_source == "recomputed"
+
+    def test_the_recomputed_surface_is_kept_and_has_no_holes_the_dem_lacks(self, tmp_path):
+        ya = YeomansKeylineAnalysis(_two_valley_dem(str(tmp_path / "two.tif")))
+        ya.find_keypoint()                       # the no-baseline branch
+        assert ya.conditioned_source == "recomputed"
+        assert ya._conditioned.dtype == np.float64
+        assert np.isfinite(ya._conditioned).all()
+
+
 class TestOffsetParts:
     def test_a_fold_is_refused_rather_than_returned(self, tmp_path):
         """`offset_curve` self-intersects wherever the offset exceeds the local radius

@@ -10,10 +10,9 @@
     "Curvature vs TPI: mean plan on ridge +3.658e-02, in valley -4.401e-02 (sign test True); point-biserial +0.489 raw, +0.680 after a 15-cell pre-smooth; cell-wise agreement 73.2%.",
     "Signed witness, aspect: on 152,044 cells steeper than 2 deg, aspect in (90, 270) coincides with dz_dy < 0 for 100.00% (0 disagree). Passes: True. Stated as the plan has it \u2014 dz_dy > 0 \u2014 the same cells agree only 0.01% of the time, which is the signature of a witness written with the sign inverted, not of a broken aspect: `aspect = atan2(-dz_dx, dz_dy)` has dz_dy as its northward term.",
     "Identity, specific catchment area: a(2 m)/a(1 m) = [2, 2]; exactly 2.0: True.",
-    "Identity, catchment_ha: the rank-1 keypoint's label quotes 5.867224 ha. That is the accumulation at the link's outlet cell without a +1 (match: True); with the +1 that `specific_catchment_area` documents and measured it would be 5.867324 ha (match: False) \u2014 the two conventions differ by one cell, 1.0 m2, and the tree carries both.",
-    "Separately: the ground actually above the keypoint is 2.116104 ha, so the label \"5.9 ha above\" attached to the keypoint overstates it by 3.751 ha (177.3%). It is the whole valley link's catchment, measured at the link's bottom, presented against a point partway up it.",
+    "Identity, catchment_ha: no keypoints found, nothing to compare.",
     "Identity, terrace unit chain: site p50 slope 8.062 deg (14.165%); VI 3.2001 m; erosion spacing reported 22.591630 m against VI/grade 22.591630 m (relative error 0.00e+00, holds True). VI at zero slope 0.609600 m against Y=2.0 ft = 0.609600 m: True.",
-    "Conservation, find_keypoints: max_valleys=1: 1 accepted + 2 refused = 3 of 127 links (124 never examined, conserves False); max_valleys=8: 1 accepted + 126 refused = 127 of 127 links (0 never examined, conserves True); max_valleys=127: 1 accepted + 126 refused = 127 of 127 links (0 never examined, conserves True)",
+    "Conservation, find_keypoints: max_valleys=1: 1 accepted + 0 refused = 1 of 127 links (126 never examined, conserves False); max_valleys=8: 8 accepted + 5 refused = 13 of 127 links (114 never examined, conserves False); max_valleys=127: 10 accepted + 13 refused = 23 of 127 links (104 never examined, conserves False)",
     "Conservation, clip_to_usable_area: 10 in -> 5 kept + 5 dropped = 10 (conserves: True)."
   ],
   "stages": {
@@ -60,33 +59,43 @@
     },
     "identity_catchment_ha_plus_one": {
       "status": "ok",
-      "keyline_expression": "kp[\"catchment_ha\"] = _catchment(link) * (self.cell_w * self.cell_h) / 10_000.0",
+      "keyline_expression": "kp[\"catchment_ha\"] = valley[\"catchment_cells\"] * cell_area / 10_000.0",
       "sca_expression": "(acc + 1.0) * cell_area / cell_w",
-      "keypoints": [
-        {
-          "keypoint_rc": [
-            70,
-            51
-          ],
-          "link_outlet_rc": [
-            70,
-            39
-          ],
-          "acc_at_link_outlet_cells": 58672.23828125,
-          "acc_at_keypoint_cells": 21161.04296875,
-          "catchment_ha_reported": 5.867223828125,
-          "valley_cells_reported": 55,
-          "link_length_cells": 55,
-          "pairing_confirmed": true,
-          "ha_from_outlet_without_plus_one": 5.867223828125,
-          "ha_from_outlet_with_plus_one": 5.867323828125,
-          "ha_above_the_keypoint_itself": 2.116104296875
-        }
+      "keypoints_not_on_any_link": [
+        [
+          107,
+          343
+        ],
+        [
+          110,
+          364
+        ],
+        [
+          216,
+          152
+        ],
+        [
+          207,
+          200
+        ],
+        [
+          215,
+          197
+        ],
+        [
+          41,
+          367
+        ],
+        [
+          161,
+          194
+        ],
+        [
+          26,
+          310
+        ]
       ],
-      "matches_without_plus_one": true,
-      "matches_with_plus_one": false,
-      "plus_one_discrepancy_m2": 1.0,
-      "label_overstates_by_ha": 3.7511195312499996
+      "keypoints": []
     },
     "identity_terrace_unit_chain": {
       "status": "ok",
@@ -116,24 +125,24 @@
       "by_max_valleys": {
         "1": {
           "accepted": 1,
-          "refused": 2,
-          "accounted_for": 3,
-          "unexamined": 124,
+          "refused": 0,
+          "accounted_for": 1,
+          "unexamined": 126,
           "conserves": false
         },
         "8": {
-          "accepted": 1,
-          "refused": 126,
-          "accounted_for": 127,
-          "unexamined": 0,
-          "conserves": true
+          "accepted": 8,
+          "refused": 5,
+          "accounted_for": 13,
+          "unexamined": 114,
+          "conserves": false
         },
         "127": {
-          "accepted": 1,
-          "refused": 126,
-          "accounted_for": 127,
-          "unexamined": 0,
-          "conserves": true
+          "accepted": 10,
+          "refused": 13,
+          "accounted_for": 23,
+          "unexamined": 104,
+          "conserves": false
         }
       }
     },

@@ -4,9 +4,9 @@ Keyline Analysis — Yeomans Keyline Design computation.
 Provides:
   - DrainageLineAnalysis  (was KeylineAnalysis): drainage-line detection, pond sites,
     cultivation elevation list.  ``KeylineAnalysis`` is a deprecated alias.
-  - YeomansKeylineAnalysis: true Yeomans keyline design — extracts the primary
-    thalweg, detects the steep-to-gentle inflection (keypoint), and generates
-    cultivation runs with a configurable cross-grade (default 1:500).
+  - YeomansKeylineAnalysis: true Yeomans keyline design — traces each primary
+    valley from its divide, fits the two slopes Yeomans describes to find the
+    keypoint at their change, and generates cultivation runs with the drift measured.
 
 All geometry returned as shapely objects (or plain dicts with x/y for points).
 Display is handled by terrain_flow.py.
@@ -20,6 +20,65 @@ from shapely.affinity import translate
 from shapely.geometry import LineString
 
 from terrainflow_assessment.modules.footprint import xy_to_rc
+
+
+def _two_slope_break(s, z, min_reach):
+    """Least-squares break of a continuous two-slope fit to the profile ``(s, z)``.
+
+    Fits ``z = a + b·s + c·max(0, s − s_k)`` for every candidate ``k`` with at least
+    *min_reach* samples strictly above it and strictly below it, and returns
+    ``(k, grade_above, grade_below)`` for the ``k`` with the smallest residual — grades
+    as fall per metre, positive downhill. Ties go to the uppermost candidate.
+
+    Closed form through the normal equations with suffix sums, so every candidate costs
+    O(1) after one pass and the whole search is one batched 3×3 solve rather than a
+    least-squares call per cell. A 300-cell profile is a few hundred microseconds, which
+    matters because every valley on the DEM is fitted, not only the ones that pass.
+    """
+    s = np.asarray(s, dtype="float64")
+    z = np.asarray(z, dtype="float64")
+    n = s.size
+    ks = np.arange(min_reach, n - min_reach)
+
+    # Whole-profile sums, then sums over the cells strictly below each candidate.
+    s_sum, ss_sum = s.sum(), (s * s).sum()
+    z_sum, sz_sum, zz_sum = z.sum(), (s * z).sum(), (z * z).sum()
+    below_s = s_sum - np.cumsum(s)[ks]
+    below_ss = ss_sum - np.cumsum(s * s)[ks]
+    below_z = z_sum - np.cumsum(z)[ks]
+    below_sz = sz_sum - np.cumsum(s * z)[ks]
+    m = (n - 1 - ks).astype("float64")
+    sk = s[ks]
+
+    # The hinge column h = max(0, s - s_k) is s - s_k on the cells below and 0 above.
+    h_sum = below_s - m * sk
+    hh_sum = below_ss - 2.0 * sk * below_s + m * sk * sk
+    hs_sum = below_ss - sk * below_s
+    hz_sum = below_sz - sk * below_z
+
+    count = ks.size
+    xtx = np.empty((count, 3, 3), dtype="float64")
+    xtx[:, 0, 0] = float(n)
+    xtx[:, 0, 1] = xtx[:, 1, 0] = s_sum
+    xtx[:, 0, 2] = xtx[:, 2, 0] = h_sum
+    xtx[:, 1, 1] = ss_sum
+    xtx[:, 1, 2] = xtx[:, 2, 1] = hs_sum
+    xtx[:, 2, 2] = hh_sum
+    xtz = np.column_stack([np.full(count, z_sum), np.full(count, sz_sum), hz_sum])
+
+    try:
+        beta = np.linalg.solve(xtx, xtz[..., None])[..., 0]
+    except np.linalg.LinAlgError:
+        # A degenerate profile (repeated arc lengths) — fall back to the slow exact form.
+        beta = np.empty((count, 3), dtype="float64")
+        for i, k in enumerate(ks):
+            design = np.column_stack([np.ones(n), s, np.maximum(0.0, s - s[k])])
+            beta[i] = np.linalg.lstsq(design, z, rcond=None)[0]
+
+    residual = zz_sum - (beta * xtz).sum(axis=1)
+    best = int(np.argmin(residual))
+    _a, b, c = beta[best]
+    return int(ks[best]), float(-b), float(-(b + c))
 
 
 def _thin_to_centreline(mask):
@@ -599,17 +658,21 @@ class YeomansKeylineAnalysis:
     """
     True Yeomans keyline design.
 
-    1. Extract the primary thalweg (highest-accumulation path from source to
-       outlet, walked on elevation + accumulation rather than on the flow-direction
-       codes — see :meth:`_trace_thalweg`).
-    2. Sample DEM elevations along the thalweg at even spacing.
-    3. Smooth the long-profile with a Savitzky–Golay filter.
-    4. Detect the keypoint = location of maximum positive second derivative
-       (where the slope magnitude decreases most rapidly — the steep-to-gentle
-       inflection).
-    5. Generate cultivation runs: contour-parallel lines with a deliberate
-       ``cross_grade`` (default 1/500) so water is gently directed across
-       the slope rather than flowing straight downhill.
+    1. Find every **primary valley** — :meth:`primary_valleys`. One steepest-descent
+       graph on the conditioned DEM, thresholded on its own accumulation, cut into
+       order-1 links, and each link walked back up its main stem to the divide, because
+       a primary valley "starts as a more or less sudden steepening of the side slope of
+       a main ridge" (*Water for Every Farm*, p58), not at a channel head.
+    2. Along each, fit Yeomans' **two slopes** — :meth:`keypoint_on_path_with_reason`.
+       The keypoint is "the point of change in the two slopes of the primary valley"
+       (p60–61): the break of a continuous two-reach straight-line fit, accepted when
+       the grade above exceeds the grade below by :data:`MIN_SLOPE_EASE`.
+    3. Generate cultivation runs parallel to the keyline, with the drift measured
+       rather than imposed — :meth:`get_cultivation_runs`.
+
+    :meth:`find_keypoint` is the older single-stem walk (highest-accumulation path
+    from the outlet, see :meth:`_trace_thalweg`) and is kept as the controller's
+    fallback; it shares the criterion.
 
     Parameters
     ----------
@@ -623,10 +686,21 @@ class YeomansKeylineAnalysis:
         If None the flow direction is computed internally from the DEM.
     acc_path : str or None
         Pre-computed flow accumulation raster.  If None it is computed
-        together with the flow direction.
+        together with the flow direction. Ranks the valleys and labels the
+        "N ha above" figures; the valley *network* comes from the graph below.
+    routing : str
+        Only consulted when no accumulation is supplied.
+    conditioned_path : str or None
+        The baseline's hydrologically conditioned DEM (``conditioned_dem`` in the
+        baseline result — float64, carrying the DEM's own nodata). The steepest-
+        descent pointer graph every valley is traced on is built from this surface.
+        If None, or unreadable, or the wrong shape, the DEM is conditioned here the
+        same way (`fill_pits`, `fill_depressions`, `resolve_flats_safely`) — see
+        :meth:`_ensure_conditioned`, and ``conditioned_source`` afterwards.
     """
 
-    def __init__(self, dem_path, fdir_path=None, acc_path=None, routing="dinf"):
+    def __init__(self, dem_path, fdir_path=None, acc_path=None, routing="dinf",
+                 conditioned_path=None):
         with rasterio.open(dem_path) as src:
             self.dem = src.read(1).astype("float32")
             self.transform = src.transform
@@ -639,28 +713,52 @@ class YeomansKeylineAnalysis:
         self.cell_h = abs(self.transform.e)
         self.cell_size = (self.cell_w + self.cell_h) / 2.0
         self._dem_path = dem_path
+        self._nodata = nodata
         self._fdir_path = fdir_path
         self._acc_path = acc_path
+        self._conditioned_path = conditioned_path
         # Only consulted when no accumulation is supplied — see `_ensure_flow_data`.
         # When one is, its routing is already baked into the raster and this is ignored.
         self._routing = routing
         self._fdir_arr = None
         self._acc_arr = None
+        #: The conditioned surface the pointer graph is built on (float64, NaN where
+        #: the DEM is NaN) and where it came from: "supplied" or "recomputed".
+        self._conditioned = None
+        self.conditioned_source = None
+        self._graph = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     #: Minimum easing of the valley floor, in metres of fall per metre, for a break to
-    #: count as a keypoint.
+    #: count as a keypoint: the grade of the reach **above** the break must exceed the
+    #: grade of the reach **below** it by at least this much.
     #:
-    #: ``argmax`` always returns something. On a uniform-gradient valley there is *no*
-    #: keypoint — Yeomans' break from steeper above to gentler below simply is not there
-    #: — and the old single-keypoint code invented one anyway. That was survivable while
-    #: one keypoint was found on one stem; run per primary valley it fabricates them at
-    #: scale. So the peak in ``d²E/ds²`` must clear a prominence expressed in terms a
-    #: reader can judge: the slope has to ease by at least this much across the break.
+    #: A least-squares fit always returns a best break, just as an ``argmax`` always
+    #: returned a peak. On a uniform-gradient valley there is *no* keypoint — Yeomans'
+    #: break from steeper above to gentler below simply is not there — and on a valley
+    #: that steepens downhill (a "nosed over" ridge, *Water for Every Farm* p44) the two
+    #: slopes are the wrong way round. Both fit with an easing at or below zero and are
+    #: refused. The 2 % value is a TerrainFlow convention (`KPA-49`), unchanged when the
+    #: criterion moved from a local second derivative to the two-slope fit on 2026-09-11.
     MIN_SLOPE_EASE = 0.02          # 2 % — a 1:50 change in grade
+
+    #: Fewest cells a reach may have on either side of a candidate break. A one-cell
+    #: reach has no slope to fit; three is the smallest count that gives the line a
+    #: residual to be judged by. A TerrainFlow convention (ANALYSIS_DEFECTS §0.3), not a
+    #: Yeomans number.
+    MIN_REACH_CELLS = 3
+
+    #: Why a valley was refused, as constants so a caller can match on them rather than
+    #: parse a sentence. `KPA-39` measured the one message the old loop emitted as false
+    #: 126 times out of 126, because every guard shared it.
+    REFUSED_TOO_FEW_CELLS = "too few cells to fit two slopes to"
+    REFUSED_ZERO_LENGTH = "zero-length path"
+    REFUSED_TOO_LITTLE_GROUND = "too little finite ground along the valley"
+    REFUSED_NO_BREAK = ("no break in the floor clearing {ease:.0%} of grade change "
+                        "(above {above:.1%}, below {below:.1%})")
 
     def find_keypoint(self):
         """The Yeomans keypoint on the largest stream, or ``None``.
@@ -677,109 +775,267 @@ class YeomansKeylineAnalysis:
         return self.keypoint_on_path(thalweg)
 
     def keypoint_on_path(self, thalweg, require_prominence=False):
+        """The keypoint on one ordered run of valley-floor cells, or ``None``.
+
+        The wrapper every existing caller uses. The criterion, and the reason a valley
+        is refused, live in :meth:`keypoint_on_path_with_reason`.
+        """
+        kp, _reason = self.keypoint_on_path_with_reason(
+            thalweg, require_prominence=require_prominence)
+        return kp
+
+    def keypoint_on_path_with_reason(self, thalweg, require_prominence=False):
         """Run the keypoint criterion along one ordered run of valley-floor cells.
 
-        Lifted out of ``find_keypoint`` so the criterion is written once and applied N
-        times. The maths is unchanged and is the *verified* one: Yeomans places the
-        keypoint where "the lower and more level portion of the primary valley floor
-        suddenly steepens higher", which is the strongest easing of the profile, and a
-        second derivative is invariant to which way the profile is walked.
+        Returns ``(keypoint, None)`` or ``(None, reason)``. A refusal always names the
+        guard that refused, because `KPA-39` measured the old single message as false
+        126 times out of 126: every guard shared it.
 
-        With *require_prominence*, a break that does not ease the slope by at least
-        :data:`MIN_SLOPE_EASE` returns ``None`` rather than the best available noise.
+        **The criterion is Yeomans' two slopes, fitted.** "The primary valley has two
+        slopes; the upper slope is steep and changes to a much flatter slope at the
+        Keyline of the valley" (*Water for Every Farm*, p44). The keypoint is "the point
+        of change in the two slopes of the primary valley" (p60–61), and on a contour map
+        "the contour lines are closer together above it, and further apart below it"
+        (*Keyline Design Mark IV*). So the profile is fitted with one break and two
+        straight reaches — ``z = a + b·s + c·max(0, s − s_k)``, continuous at the break —
+        at every candidate cell with at least :data:`MIN_REACH_CELLS` cells on each side,
+        and the break with the least residual is the keypoint. The grade above it is
+        ``−b``, the grade below is ``−(b + c)``, and ``slope_ease`` is their difference.
+
+        This replaced the argmax of a smoothed second derivative on 2026-09-11. That
+        found the *sharpest* local easing rather than *the* change between two slopes,
+        and once valleys were profiled from the divide (`KPA-52`) it put 3 of 15
+        keypoints at its own smoothing guard, 10–16 m below the divide on under 3 m of
+        fall, and 4 more on valleys that steepen downhill overall — the "nosed over"
+        shape p44 says is a ridge, not a valley. A whole-valley fit can do neither: a
+        valley that steepens downhill fits with the grade above *less* than the grade
+        below and is refused, and there is no filter for a guard to sit at. On the
+        synthetic test valleys it lands on the built-in break exactly. `MATHS_AUDIT`
+        §9.10 has the measurement; the resampling, the Savitzky–Golay window and the
+        35 m profile floor went with the derivative.
+
+        With *require_prominence*, a break whose grade above does not exceed the grade
+        below by :data:`MIN_SLOPE_EASE` is refused rather than returned as the best
+        available noise.
+
+        Nodata cells are dropped from the profile, never substituted with 0.0 m: a
+        single sea-level stand-in on a 300 m hillside would be a cliff the fit has to
+        explain, and it would explain it with the break.
 
         Returns a dict with ``x``, ``y``, ``elevation``, ``row``, ``col``,
-        ``arc_length_m`` and ``slope_ease`` — or ``None``.
+        ``arc_length_m``, ``slope_ease``, ``grade_above`` and ``grade_below``.
         """
-        from scipy.signal import savgol_filter
+        reach = self.MIN_REACH_CELLS
+        if thalweg is None or len(thalweg) < 2 * reach + 1:
+            return None, self.REFUSED_TOO_FEW_CELLS
 
-        if thalweg is None or len(thalweg) < 5:
-            return None
-
-        # Elevation profile and arc-length vector along thalweg. Nodata cells are
-        # dropped and bridged by interpolation, never substituted with 0.0 m: a single
-        # sea-level stand-in on a 300 m hillside is a 300 m cliff in the profile, and
-        # the keypoint is the argmax of its *second* derivative — so one nodata cell
-        # could capture the answer outright.
         arc_all = [0.0]
         for i in range(1, len(thalweg)):
             dr = thalweg[i][0] - thalweg[i - 1][0]
             dc = thalweg[i][1] - thalweg[i - 1][1]
             arc_all.append(arc_all[-1] + (dr ** 2 + dc ** 2) ** 0.5 * self.cell_size)
-        total_len = arc_all[-1]
-        if total_len <= 0:
-            return None
+        if arc_all[-1] <= 0:
+            return None, self.REFUSED_ZERO_LENGTH
 
-        arc, elevs = [], []
-        for s, (r, c) in zip(arc_all, thalweg):
+        arc, elevs, kept = [], [], []
+        for i, (s, (r, c)) in enumerate(zip(arc_all, thalweg)):
             z = float(self.dem[r, c])
             if np.isfinite(z):
                 arc.append(s)
                 elevs.append(z)
-        if len(arc) < 5:
-            return None            # too little real ground along the thalweg to read
+                kept.append(i)
+        if len(arc) < 2 * reach + 1:
+            return None, self.REFUSED_TOO_LITTLE_GROUND
 
-        # Resample to regular spacing: min(5×cell_size, 10 m)
-        spacing = min(5.0 * self.cell_size, 10.0)
-        n_samp = max(5, int(total_len / spacing))
-        s_uni = np.linspace(0.0, total_len, n_samp)
-        elev_uni = np.interp(s_uni, arc, elevs)
-
-        # Savitzky–Golay smoothing — window scaled to ~20 % of profile length
-        win = max(5, int(n_samp * 0.20) | 1)
-        win = min(win, n_samp - (1 if n_samp % 2 == 0 else 0))
-        if win % 2 == 0:
-            win += 1
-        elev_smooth = savgol_filter(elev_uni, window_length=win, polyorder=3)
-
-        # Second derivative along arc length
-        ds = total_len / max(n_samp - 1, 1)
-        slope = np.gradient(elev_smooth, ds)
-        d2 = np.gradient(slope, ds)
-
-        # The ends are fitting the boundary of the smoothing window rather than the
-        # terrain, so a peak there is an artefact of the filter. Half a window in from
-        # each end is the region where the second derivative means something.
-        guard = max(1, win // 2)
-        if n_samp - 2 * guard < 3:
-            return None
-        interior = slice(guard, n_samp - guard)
-
-        kp_idx = int(np.argmax(d2[interior])) + guard
-        kp_s = float(s_uni[kp_idx])
-
-        # How much the floor actually eases across the break, as a change in grade —
-        # a number a reader can judge, unlike a raw 1/m curvature.
-        lo = max(0, kp_idx - guard)
-        hi = min(n_samp - 1, kp_idx + guard)
-        slope_ease = float(slope[hi] - slope[lo])
+        k, grade_above, grade_below = _two_slope_break(
+            np.asarray(arc, dtype="float64"), np.asarray(elevs, dtype="float64"), reach)
+        slope_ease = grade_above - grade_below
         if require_prominence and slope_ease < self.MIN_SLOPE_EASE:
-            return None
+            return None, self.REFUSED_NO_BREAK.format(
+                ease=self.MIN_SLOPE_EASE, above=grade_above, below=grade_below)
 
-        # Map back to the nearest thalweg cell
-        kp_thalweg_idx = int(np.argmin(np.abs(np.array(arc) - kp_s)))
-        kr, kc = thalweg[kp_thalweg_idx]
+        kr, kc = thalweg[kept[k]]
         x, y = self._rc_to_xy(kr, kc)
-        elev = float(self.dem[kr, kc]) if not np.isnan(self.dem[kr, kc]) else 0.0
-
         return {
             "x": x,
             "y": y,
-            "elevation": round(elev, 1),
+            "elevation": round(float(self.dem[kr, kc]), 1),
             "row": kr,
             "col": kc,
-            "arc_length_m": round(kp_s, 1),
+            "arc_length_m": round(float(arc[k]), 1),
             "slope_ease": round(slope_ease, 4),
-        }
+            "grade_above": round(grade_above, 4),
+            "grade_below": round(grade_below, 4),
+        }, None
+
+    def primary_valleys(self, stream_threshold_cells=None, max_order=1,
+                        boundary_mask=None):
+        """Every primary valley on the DEM, each as an ordered run of cells, divide to foot.
+
+        **What a primary valley is.** Yeomans: valleys that "form into the side of the
+        main ridge… the smallest of the three shapes of land… the first valley and the
+        only true valley shape in the landscape" (*Water for Every Farm*, p40). One
+        "generally starts as a more or less sudden steepening of the side slope of a
+        main ridge. Further down, the valley changes to a flatter sloping floor which
+        continues more or less uniformly to the stream course below it" (p58), and it
+        "does not usually have a washed out or channelled water course down the middle"
+        (p58). Its floor is where runoff goes "by the steepest path and the fastest
+        route" (p45), "at right angles to the contours" (p43).
+
+        **How that is read off a DEM here.**
+
+        * The *line* is single-successor steepest descent — :func:`flow_graph.d8_from_dem`
+          on the **conditioned** surface (:meth:`_ensure_conditioned`). D-infinity is an
+          area partition, not a line, and the raw DEM has pits (525 on the fixture) that
+          end a walk where the valley does not (`KPA-38`).
+        * The *network* is that graph's **own** accumulation (:func:`flow_graph.accumulate`)
+          thresholded at *stream_threshold_cells*, so no pointer can leave the mask. The
+          old mask came from pysheds' D-infinity while the pointers were D8, and links
+          ended wherever the two disagreed — 3 m fragments, 1 keypoint where there are
+          many (`KPA-52`). The threshold does **not** say where a valley starts; it is
+          only the smallest catchment that counts as a valley at all.
+        * A *primary* valley is an order-1 link (:func:`flow_graph.stream_links`), which
+          runs to "the creek (or valley junction) below" (p40) — **extended upstream**
+          along its main stem to the divide (:func:`flow_graph.main_stem_to_divide`),
+          because the short steep reach the keypoint is defined against lies above the
+          channel head, and a link that starts at the channel head has dropped it.
+        * **The data edge.** A boundary row has no outside for ``d8_from_dem`` to route
+          into, so the pointers run *along* it and fabricate a channel there — 455 cells
+          on the fixture, and the largest valley's keypoint sat on that run. The valley
+          left the site where it reached the edge ("the creek is the lower boundary",
+          p45; ``flow_graph.LABEL_EXIT``), so it is **cut** at the first grid-edge cell
+          below the divide. A divide that sits on the edge is kept and **flagged**
+          (``head_on_boundary``) rather than refused: the break may still be on the map,
+          and a designer with a truncated sheet notes it rather than discarding the
+          valley. See :meth:`_edge_rule`.
+
+        **Ranking.** Largest catchment first, on the *supplied* accumulation — the
+        baseline's, pond-corrected — which is also what the "N ha" labels quote, so the
+        list order and the numbers agree. ``own_catchment_cells`` carries this graph's
+        count beside it so the two can be compared.
+
+        Returns a list of dicts: ``cells`` (row, col) top-down, ``channel_cells``,
+        ``extension_cells``, ``length_m``, ``head_rc`` (the channel head), ``divide_rc``,
+        ``outlet_rc``, ``head_on_boundary``, ``runs_off_dem_m``, ``channel_on_map``,
+        ``catchment_cells``, ``own_catchment_cells``. Empty when nothing reaches the
+        threshold. A valley with ``channel_on_map`` False is returned so the caller can
+        say why it was refused; :meth:`find_keypoints` does not key it.
+        """
+        from terrainflow_assessment.modules.flow_graph import (
+            data_boundary_mask,
+            main_stem_to_divide,
+            strahler_order,
+            stream_links,
+        )
+
+        _fdir, acc_arr = self._ensure_flow_data()
+        next_flat, own_acc = self._primary_graph()
+        rows, cols = self.dem.shape
+
+        if stream_threshold_cells is None:
+            # A modest default in CELLS derived from the grid, not a bare constant:
+            # KPA-05 is the standing lesson that a cell threshold means a different
+            # catchment on every resolution.
+            stream_threshold_cells = max(20, int(round(2_000.0 / (self.cell_w * self.cell_h))))
+
+        finite = np.isfinite(self.dem)
+        stream = (own_acc.reshape(rows, cols) >= stream_threshold_cells) & finite
+        allowed = None
+        if boundary_mask is not None:
+            allowed2d = np.asarray(boundary_mask, dtype=bool)
+            stream &= allowed2d
+            allowed = allowed2d.ravel()
+        if not stream.any():
+            return []
+
+        order = strahler_order(next_flat, stream.ravel())
+        links = stream_links(next_flat, stream.ravel(), order, cols,
+                             max_order=max_order)
+        boundary = data_boundary_mask(finite)
+
+        valleys = []
+        for link in links:
+            head_flat = link[0][0] * cols + link[0][1]
+            above = main_stem_to_divide(next_flat, own_acc, head_flat, cols,
+                                        allowed_flat=allowed)
+            cells = ([(int(i // cols), int(i % cols)) for i in above]
+                     + [(int(r), int(c)) for r, c in link])
+            kept, start, end, runs_off_m = self._edge_rule(cells)
+            n_above = len(above)
+            extension_cells = max(0, min(end, n_above) - start)
+            channel_cells = max(0, end - max(start, n_above))
+            foot = kept[-1]
+            catchment = float(acc_arr[foot])
+            valleys.append({
+                "cells": kept,
+                "channel_cells": channel_cells,
+                "extension_cells": extension_cells,
+                "length_m": self._arc_length_m(kept),
+                "head_rc": (int(link[0][0]), int(link[0][1])),
+                "divide_rc": kept[0],
+                "outlet_rc": foot,
+                "head_on_boundary": bool(boundary[kept[0]]),
+                "runs_off_dem_m": runs_off_m,
+                # A channel that only reaches the threshold *on* the boundary row is
+                # the row's own collecting artefact, not a channel the map shows: the
+                # cut leaves nothing of it but the edge cell. Such a valley has no
+                # channel on the map and cannot be vouched for.
+                "channel_on_map": not (runs_off_m > 0 and channel_cells <= 1),
+                "catchment_cells": catchment if np.isfinite(catchment) else 0.0,
+                "own_catchment_cells": int(own_acc[foot[0] * cols + foot[1]]),
+            })
+
+        # Largest catchment first — if only some valleys get a keyline, they should be
+        # the ones carrying the most water.
+        valleys.sort(key=lambda v: (v["catchment_cells"], v["own_catchment_cells"]),
+                     reverse=True)
+        return valleys
+
+    def _edge_rule(self, cells):
+        """Trim a valley to the ground the DEM can vouch for.
+
+        One pass from the top. Find the first cell that is not on the grid edge and keep
+        at most one edge cell above it — a divide on the edge stays as the first cell,
+        and a run *along* the edge is trimmed to that one cell, because a pointer path
+        along a boundary row is an artefact of the row having no outside. From there,
+        cut at the first grid-edge cell (kept, as the foot): the valley left the site.
+
+        Returns ``(kept, start, end, runs_off_m)`` — the kept cells, their slice of
+        *cells*, and how much valley was discarded below the cut.
+        """
+        rows, cols = self.dem.shape
+
+        def on_edge(rc):
+            return rc[0] == 0 or rc[0] == rows - 1 or rc[1] == 0 or rc[1] == cols - 1
+
+        first_inside = next((i for i, rc in enumerate(cells) if not on_edge(rc)), None)
+        if first_inside is None:
+            # Nothing inside at all: keep the divide alone so the caller can refuse it
+            # with the length it lost, rather than silently dropping the valley.
+            return cells[:1], 0, 1, self._arc_length_m(cells)
+        start = max(0, first_inside - 1)
+        cut = next((i for i in range(first_inside, len(cells)) if on_edge(cells[i])),
+                   None)
+        end = len(cells) if cut is None else cut + 1
+        runs_off_m = 0.0 if cut is None else self._arc_length_m(cells[cut:])
+        return cells[start:end], start, end, runs_off_m
+
+    def _arc_length_m(self, cells):
+        """Map-space length of an ordered run of cells, centre to centre."""
+        total = 0.0
+        for (r0, c0), (r1, c1) in zip(cells[:-1], cells[1:]):
+            total += ((r1 - r0) ** 2 + (c1 - c0) ** 2) ** 0.5 * self.cell_size
+        return total
 
     def find_keypoints(self, max_valleys=8, stream_threshold_cells=None,
                        max_order=1, boundary_mask=None):
         """One keypoint per **primary valley**, which is what Yeomans' method asks for.
 
         ``find_keypoint`` walks the single largest stream. The trunk of a catchment is
-        not a primary valley — Yeomans' primary valley is the small upland valley at the
-        head of a ridge-and-valley pair, which is a Strahler order-1 link — so the old
-        answer was the right criterion applied to the wrong feature, once.
+        not a primary valley, so that answer was the right criterion applied to the
+        wrong feature, once. :meth:`primary_valleys` says what a primary valley is and
+        how it is traced; :meth:`keypoint_on_path_with_reason` says how the keypoint is
+        located on it.
 
         Valleys are ranked by contributing area and capped at *max_valleys*: a fine DEM
         with a low stream threshold has thousands of order-1 links, and drawing a keyline
@@ -789,75 +1045,65 @@ class YeomansKeylineAnalysis:
         the house style is to say what was refused and why, not to return a shorter list.
 
         **Two catchment figures, and they are not interchangeable.** ``catchment_ha`` is
-        the *valley's* — accumulation at the link's outlet — which is what ranks the
-        valleys and what the map layer's attribute of that name has always held.
+        the *valley's* — accumulation at its foot — which is what ranks the valleys and
+        what the map layer's attribute of that name has always held.
         ``keypoint_catchment_ha`` is the ground above the keypoint itself, which sits
-        partway up the link and therefore commands less. The label quotes the second and
-        names the first, because "N ha above" attached to a point means the ground above
-        *that point*.
+        partway down the valley and therefore commands less. The label quotes the second
+        and names the first, because "N ha above" attached to a point means the ground
+        above *that point*.
         """
-        from terrainflow_assessment.modules.flow_graph import (
-            d8_from_dem,
-            strahler_order,
-            stream_links,
-        )
-
         _fdir, acc_arr = self._ensure_flow_data()
-        rows, cols = self.dem.shape
-
-        if stream_threshold_cells is None:
-            # A modest default in CELLS derived from the grid, not a bare constant:
-            # KPA-05 is the standing lesson that a cell threshold means a different
-            # catchment on every resolution.
-            stream_threshold_cells = max(20, int(round(2_000.0 / (self.cell_w * self.cell_h))))
-
-        stream = (acc_arr >= stream_threshold_cells) & np.isfinite(self.dem)
-        if boundary_mask is not None:
-            stream &= boundary_mask
-        if not stream.any():
+        valleys = self.primary_valleys(stream_threshold_cells=stream_threshold_cells,
+                                       max_order=max_order, boundary_mask=boundary_mask)
+        if not valleys:
             return [], ["no channel network at this threshold"]
 
-        next_flat, _sink = d8_from_dem(self.dem, self.cell_w, self.cell_h)
-        order = strahler_order(next_flat, stream.ravel())
-        links = stream_links(next_flat, stream.ravel(), order, cols,
-                             max_order=max_order)
-
-        # Largest catchment first — if only some valleys get a keyline, they should be
-        # the ones carrying the most water.
-        def _catchment(link):
-            r, c = link[-1]
-            return float(acc_arr[r, c])
-
-        links.sort(key=_catchment, reverse=True)
-
+        cell_area = self.cell_w * self.cell_h
         keypoints, skipped = [], []
-        for link in links:
+        for valley in valleys:
             if len(keypoints) >= max_valleys:
                 break
-            kp = self.keypoint_on_path(link, require_prominence=True)
-            if kp is None:
+            cells = valley["cells"]
+            where = (f"valley from row {valley['divide_rc'][0]}, "
+                     f"col {valley['divide_rc'][1]} ({valley['length_m']:.0f} m: "
+                     f"{valley['channel_cells']} channel cells, "
+                     f"{valley['extension_cells']} above the channel head)")
+            if not valley["channel_on_map"]:
                 skipped.append(
-                    f"valley at row {link[0][0]}, col {link[0][1]}: no break in the "
-                    f"floor clearing {self.MIN_SLOPE_EASE:.0%} of grade change")
+                    f"{where}: runs off the DEM after {valley['length_m']:.0f} m — "
+                    "its channel begins on the data edge, so no channel is on the map")
                 continue
-            kp["valley_cells"] = len(link)
-            cell_area = self.cell_w * self.cell_h
-            # The valley's catchment, measured at the link's **outlet**. This is the
-            # ranking basis (`links.sort(key=_catchment)`) and what the map layer's
-            # `catchment_ha` attribute has always carried, so it keeps the name.
-            kp["catchment_ha"] = _catchment(link) * cell_area / 10_000.0
+            if (valley["runs_off_dem_m"] > 0
+                    and len(cells) < 2 * self.MIN_REACH_CELLS + 1):
+                skipped.append(
+                    f"{where}: runs off the DEM after {valley['length_m']:.0f} m")
+                continue
+            kp, reason = self.keypoint_on_path_with_reason(cells, require_prominence=True)
+            if kp is None:
+                skipped.append(f"{where}: {reason}")
+                continue
+            kp["valley_cells"] = len(cells)
+            kp["channel_cells"] = valley["channel_cells"]
+            kp["extension_cells"] = valley["extension_cells"]
+            kp["head_on_boundary"] = valley["head_on_boundary"]
+            kp["runs_off_dem_m"] = round(valley["runs_off_dem_m"], 1)
+            # The valley's catchment, measured at its **foot**. This is the ranking basis
+            # and what the map layer's `catchment_ha` attribute has always carried, so it
+            # keeps the name.
+            kp["catchment_ha"] = valley["catchment_cells"] * cell_area / 10_000.0
             kp["_row"], kp["_col"] = kp["row"], kp["col"]
             # The ground above the keypoint **itself**, which is a different and usually
-            # much smaller number — the keypoint sits partway up the link, not at its
-            # foot. On the Quail Island fixture the rank-1 keypoint reads 2.1 ha here
-            # against 5.9 ha for its valley, so a label saying "5.9 ha above" over-states
+            # much smaller number — the keypoint sits partway down the valley, not at its
+            # foot. On the Quail Island fixture the rank-1 keypoint once read 2.1 ha here
+            # against 5.9 ha for its valley, so a label saying "5.9 ha above" over-stated
             # what that point commands by 177%. That was `KPA-54`.
             kp["keypoint_catchment_ha"] = (
                 float(acc_arr[kp["_row"], kp["_col"]]) * cell_area / 10_000.0)
             kp["label"] = (
                 f"Keypoint at {kp['elevation']:.1f} m — "
                 f"{kp['keypoint_catchment_ha']:.1f} ha above "
-                f"({kp['catchment_ha']:.1f} ha in the valley)")
+                f"({kp['catchment_ha']:.1f} ha in the valley)"
+                + (" (valley head at data edge)" if kp["head_on_boundary"] else ""))
             keypoints.append(kp)
 
         return keypoints, skipped
@@ -1275,13 +1521,6 @@ class YeomansKeylineAnalysis:
         if self._acc_arr is not None:
             return self._fdir_arr, self._acc_arr
 
-        import os
-        import tempfile
-
-        from terrainflow_assessment.modules.pysheds_compat import Grid
-
-        from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
-
         if self._acc_path:
             # float32, not int32: a supplied raster may be dinf radians as easily as
             # D8 codes, and truncating the former loses the direction entirely.
@@ -1292,61 +1531,140 @@ class YeomansKeylineAnalysis:
                     self._fdir_arr = src.read(1).astype("float32")
             return self._fdir_arr, self._acc_arr
 
-        # Compute from DEM
+        # Compute from DEM — and keep the conditioned surface, which the valley graph
+        # is built on (`_primary_graph`), rather than throwing it away as this used to.
+        grid, inflated = self._condition_surface()
+        try:
+            # `self._routing`, not a literal "dinf". This branch only runs when no
+            # accumulation was supplied — no baseline, nothing to inherit — and a
+            # user who chose D8 should not silently get D-infinity here either.
+            # That literal was half of `KPA-53`.
+            fdir = grid.flowdir(inflated, routing=self._routing)
+            _routing = self._routing
+        except TypeError:
+            fdir = grid.flowdir(inflated)
+            _routing = None
+        try:
+            acc = (grid.accumulation(fdir, routing=_routing)
+                   if _routing else grid.accumulation(fdir))
+        except (TypeError, AttributeError):
+            acc = grid.accumulation(fdir)
+
+        # Keep the flow direction in its native encoding. Under "dinf" this is a
+        # continuous angle in radians, and casting it to int32 collapsed every
+        # direction to 0–6 while turning NaN into a garbage integer (a warning at
+        # every call). Nothing reads it today — _trace_thalweg walks elevation and
+        # accumulation — but a future consumer must get the real values, and must
+        # check `dinf_routing` before treating them as D8 codes.
+        self._fdir_arr = np.asarray(fdir, dtype="float32")
+        self.dinf_routing = _routing == "dinf"
+        self._acc_arr = np.array(acc, dtype="float32")
+
+        return self._fdir_arr, self._acc_arr
+
+    def _condition_surface(self):
+        """Condition the DEM the way the baseline does, and keep the surface.
+
+        ``fill_pits`` → ``fill_depressions`` → ``resolve_flats_safely``, on a temporary
+        GeoTIFF because pysheds reads from a file. (A fill, not a breach:
+        ``breach_depressions`` does not exist in pysheds 0.5, so the except branch is
+        the one that has always run — Round 14. The flat step is derived from this
+        surface, not pysheds' fixed default: on a big flat the default lifts cells over
+        neighbours that were genuinely lower — see ``flow_analysis.safe_flat_epsilon``.)
+
+        The temp raster is written float64. Measured, that changes nothing here — the
+        input is already float32 and ``resolve_flats_safely`` builds its surface in
+        memory — but the surface is now *kept*, as float64, and is what the valley
+        pointers are built on, so it is not going through a float32 hop on the way.
+
+        Returns ``(grid, inflated)`` for a caller that goes on to route on it, and sets
+        ``self._conditioned`` (float64, NaN where the DEM is NaN).
+        """
+        import os
+        import tempfile
+
+        from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
+        from terrainflow_assessment.modules.pysheds_compat import Grid
+
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tif")
         os.close(tmp_fd)
         try:
             with rasterio.open(
-                tmp_path, "w", driver="GTiff", dtype="float32",
+                tmp_path, "w", driver="GTiff", dtype="float64",
                 crs=self.crs, transform=self.transform,
                 width=self.dem.shape[1], height=self.dem.shape[0],
                 count=1, nodata=-9999.0,
             ) as dst:
                 data = np.where(np.isnan(self.dem), -9999.0, self.dem)
-                dst.write(data.astype("float32"), 1)
+                dst.write(data.astype("float64"), 1)
 
             grid = Grid.from_raster(tmp_path)
             dem_r = grid.read_raster(tmp_path)
             pit_filled = grid.fill_pits(dem_r)
-            # A fill, not a breach: ``breach_depressions`` does not exist in pysheds 0.5,
-            # so the except branch is the one that has always run (Round 14).
             try:
                 filled = grid.breach_depressions(pit_filled)
             except AttributeError:
                 filled = grid.fill_depressions(pit_filled)
-            # The step is derived from this surface, not pysheds' fixed default: on a
-            # big flat the default lifts cells over neighbours that were genuinely
-            # lower. See ``flow_analysis.safe_flat_epsilon``.
             inflated, _eps, _inv = resolve_flats_safely(grid, filled)
-            try:
-                # `self._routing`, not a literal "dinf". This branch only runs when no
-                # accumulation was supplied — no baseline, nothing to inherit — and a
-                # user who chose D8 should not silently get D-infinity here either.
-                # That literal was half of `KPA-53`.
-                fdir = grid.flowdir(inflated, routing=self._routing)
-                _routing = self._routing
-            except TypeError:
-                fdir = grid.flowdir(inflated)
-                _routing = None
-            try:
-                acc = (grid.accumulation(fdir, routing=_routing)
-                       if _routing else grid.accumulation(fdir))
-            except (TypeError, AttributeError):
-                acc = grid.accumulation(fdir)
-
-            # Keep the flow direction in its native encoding. Under "dinf" this is a
-            # continuous angle in radians, and casting it to int32 collapsed every
-            # direction to 0–6 while turning NaN into a garbage integer (a warning at
-            # every call). Nothing reads it today — _trace_thalweg walks elevation and
-            # accumulation — but a future consumer must get the real values, and must
-            # check `dinf_routing` before treating them as D8 codes.
-            self._fdir_arr = np.asarray(fdir, dtype="float32")
-            self.dinf_routing = _routing == "dinf"
-            self._acc_arr = np.array(acc, dtype="float32")
         finally:
             os.unlink(tmp_path)
 
-        return self._fdir_arr, self._acc_arr
+        surface = np.array(inflated, dtype="float64")
+        surface[~np.isfinite(self.dem)] = np.nan
+        self._conditioned = surface
+        self.conditioned_source = "recomputed"
+        return grid, inflated
+
+    def _ensure_conditioned(self):
+        """The conditioned surface the valley graph is traced on, float64.
+
+        The supplied raster when there is one and it fits — read the way
+        ``earthworks._ensure_flow_graph`` reads it: as float64, because it carries
+        ``resolve_flats``' synthetic gradient in multiples of 1e-5 m, and with the
+        DEM's own nodata sentinel as the fallback for an untagged file, because a hole
+        read as ground at -9999 is a ten-kilometre pit. Otherwise conditioned here.
+        """
+        if self._conditioned is not None:
+            return self._conditioned
+        if self._conditioned_path:
+            surface = self._read_conditioned(self._conditioned_path)
+            if surface is not None:
+                self._conditioned = surface
+                self.conditioned_source = "supplied"
+                return surface
+        self._condition_surface()
+        return self._conditioned
+
+    def _read_conditioned(self, path):
+        """A supplied conditioned raster as float64 with NaN holes, or ``None``."""
+        try:
+            with rasterio.open(path) as src:
+                surface = src.read(1).astype("float64")
+                nodata = src.nodata
+        except OSError:
+            return None                 # rasterio's IO errors are OSErrors
+        if surface.shape != self.dem.shape:
+            return None
+        if nodata is None:
+            nodata = self._nodata
+        if nodata is not None and np.isfinite(nodata):
+            surface[surface == nodata] = np.nan
+        surface[~np.isfinite(self.dem)] = np.nan
+        return surface
+
+    def _primary_graph(self):
+        """``(next_flat, own_acc)`` — the one graph every valley is traced on. Cached."""
+        if self._graph is None:
+            from terrainflow_assessment.modules.flow_graph import (
+                accumulate,
+                d8_from_dem,
+            )
+
+            surface = self._ensure_conditioned()
+            next_flat, _sink = d8_from_dem(surface, self.cell_w, self.cell_h)
+            own_acc = accumulate(next_flat, np.isfinite(self.dem).ravel())
+            self._graph = (next_flat, own_acc)
+        return self._graph
 
     def _trace_thalweg(self, fdir_arr, acc_arr, outlet_r, outlet_c,
                        max_steps=10_000):

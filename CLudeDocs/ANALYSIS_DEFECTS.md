@@ -110,7 +110,8 @@ Darren Doherty's published material is Regrarians course handbooks and recorded 
 which are weak as citations — typically undated, revised per delivery, and not pinnable to
 an edition. Nothing in the tree rested on it. Any constant that would have been attributed
 to him is instead declared a **TerrainFlow convention**, which is what the 50 m drift window
-(§9.6) and `MIN_SLOPE_EASE` already are.
+(§9.6) and `MIN_SLOPE_EASE` already are — and, since §10, `MIN_REACH_CELLS`, the fewest
+cells a reach may have on either side of a two-slope break.
 
 #### §0.3.1 The rule an attestation is admitted under (ratified 2026-09-11)
 
@@ -2105,3 +2106,229 @@ is fragile wherever the line comes from.
 **Status: `KPA-52` stays open.** The routing-free path is demonstrated and the probe is
 committed so the numbers can be re-run, but the decision now has a third option and two new
 prerequisites rather than a resolution.
+
+*(Closed later the same day — §10.)*
+
+---
+
+## §10 `KPA-52` closed — a primary valley that starts at the divide, traced on one graph (2026-09-11)
+
+`KPA-52` is **closed**, on six owner decisions taken before and during the work, and the
+fix went further than any of §9.5's three options because the sources asked it to. §1 and
+§2 stay as written; this section is the authority on what changed.
+
+### §10.1 What the texts say a primary valley is
+
+The owner asked for a fix "based in reality as to how keylines are determined in the real
+world", so the two Yeomans texts already in §7 were re-fetched and read for the definition
+of the *valley*, which §9.7 had found was the word carrying the damage. Page-cited, from
+[YEO-WFEF] unless marked:
+
+- "Valleys form into the side of the main ridge. They are named primary valleys… The primary
+  valley is the smallest of the three shapes of land. It is the first valley and the only
+  true valley shape in the landscape." (p40)
+- "A primary valley head generally starts as a more or less sudden steepening of the side
+  slope of a main ridge. Further down, the valley changes to a flatter sloping floor which
+  continues more or less uniformly to the stream course below it. The primary valley … does
+  not usually have a washed out or channelled water course down the middle of it." (p58)
+- "The steepest slopes in the landscape usually occur in the centre of the valley above the
+  Keypoint. This first steep slope at the head of the valley is short, then the slope
+  changes to a more gradual and longer slope that extends to the creek (or valley junction)
+  below." (p40)
+- "The primary valley has two slopes; the upper slope is steep and changes to a much flatter
+  slope at the Keyline of the valley." (p44) "The Keypoint of the valley is the point of
+  change in the two slopes of the primary valley." (p60–61)
+- "A primary valley, bounded by the portion of the water divide of the main ridge above it
+  and by the water-divides of the primary ridges on either side of it, is the primary, the
+  smallest, or the first catchment area." (p61)
+- Runoff reaches the floor "by the steepest path and the fastest route" (p45), "at right
+  angles to the contours" (p43). "The creek is the lower boundary of its tributary primary
+  valleys." (p45)
+- [YEO-MKIV]: "On a contour map, the Keypoint is apparent, because the contour lines are
+  closer together above it, and further apart below it."
+
+Against the code as it stood, that is three disagreements, not one:
+
+| Yeomans | The code before |
+|---|---|
+| The valley starts at the divide, above any channel | A link started at the 0.2 ha **channel head** |
+| The keypoint is the change between **two slopes**, the short steep upper reach and the long gentle lower one | The short steep reach was above the link and never profiled; the criterion was the sharpest local easing of a smoothed profile |
+| The floor is the steepest-descent line — a *line* | The mask was a D-infinity *area partition* walked by D8 pointers on the raw DEM (`KPA-38`, `KPA-52`) |
+
+### §10.2 What changed
+
+**One graph** (`modules/flow_graph.py`, `modules/keypoint_analysis.py`). Steepest-descent
+pointers from `d8_from_dem` on the **conditioned** surface — the baseline's
+`conditioned_dem` raster when there is one (`YeomansKeylineAnalysis(conditioned_path=…)`,
+which `contour.py` now passes, read float64 with the DEM's nodata exactly as
+`earthworks._ensure_flow_graph` reads it), else conditioned in place and **kept**
+(`_condition_surface`, `_ensure_conditioned`). The stream mask is that graph's **own**
+accumulation (new `flow_graph.accumulate`: Kahn's pass vectorised per level, 603 levels in
+0.04 s on the fixture, equal cell for cell to the elevation-sorted oracle
+`checks_fixture_regression._accumulate`). Mask-leaving pointers are therefore **zero by
+construction**, which the regression check now asserts as a property.
+
+**The divide** (`flow_graph.main_stem_to_divide`, `YeomansKeylineAnalysis.primary_valleys`).
+Each order-1 link is walked back up its main stem — the inflowing neighbour with the most
+accumulation, ties to the first offset scanned as in `d8_from_dem` — to a cell nothing
+drains into. On the fixture the extension is 59–168 cells per valley (median 91); profiles
+go from 4–157 m to 90–322 m. `stream_links`' `min_cells=3` still applies to the channel
+part only, which is the point: the threshold says which valleys exist, not where they start.
+
+**The data edge** (`flow_graph.data_boundary_mask`, `_edge_rule`). A boundary row has no
+outside for `d8_from_dem` to route into, so its pointers run *along* the row and fabricate
+a channel there — 455 cells on the fixture, and the largest valley had 128 of its 183 m and
+its keypoint on that run. A valley is now **cut at the first grid-edge cell below its
+divide** ("the creek is the lower boundary"; `flow_graph.LABEL_EXIT`), and a leading run
+*along* the edge is trimmed to the divide. A divide on the edge is kept and **flagged**
+(`head_on_boundary`, in the label and the panel summary), not refused: the break may still
+be on the map. A valley whose channel exists **only** on the boundary row — the row's own
+collecting artefact, nothing of it left after the cut but the edge cell — has no channel
+on the map and is refused with that reason (`channel_on_map`). On the fixture that is 5
+valleys, none of which had a keypoint; on the synthetic harness DEM it is the 2 corner
+"valleys" whose channel began on the bottom row.
+
+**The criterion** (`keypoint_on_path_with_reason`; `keypoint_on_path` is now a wrapper).
+The keypoint is the break of a **continuous two-slope least-squares fit** to the cell
+profile — `z = a + b·s + c·max(0, s − s_k)` at every candidate with at least
+`MIN_REACH_CELLS = 3` cells on each side, closed form through suffix sums, one batched 3×3
+solve — accepted when `grade_above − grade_below ≥ MIN_SLOPE_EASE` (2 %, value unchanged).
+Why it replaced the argmax of a smoothed second derivative is a measurement, in §10.4.
+The resampling (`KPA-27`), the Savitzky–Golay window (`KPA-28`), the argmax with its guard
+band (`KPA-29`) and the 35 m profile floor (`KPA-40`) are gone with it. `MATHS_AUDIT` §9.10
+records the re-expression against the rows.
+
+**Truthful refusals** (`KPA-39`). Every refusal names its guard — too few cells, zero
+length, too little finite ground, no two-slope break (quoting both grades), runs off the
+DEM, channel begins on the data edge — as class constants a caller can match on.
+`p_keypoints` traces the returning line *and* reads the reason string and asserts they
+agree: on the fixture 13 refused, 13 by line, 13 by string.
+
+**Ranking and labels** stay on the *supplied* accumulation (owner decision 4): the
+baseline's pond-corrected field ranks the valleys and quotes the "N ha" figures, so the list
+order and the numbers agree, `acc_path` stays live and the with-baseline check's
+zero-differing-cells assertion keeps its meaning. `own_catchment_cells` is carried beside
+it: on the fixture the two disagree by more than 10 % at the foot of **20 of 23** valleys,
+because D-infinity divides flow at every cell and a D8 count does not. Nothing here is
+wrong; the two fields answer different questions and the register now says which is used
+for what.
+
+**Not changed.** The 0.2 ha default threshold; `MIN_SLOPE_EASE`'s 2 % value (`KPA-49`);
+`find_keypoint`'s single-stem walk and `_trace_thalweg` (the controller's fallback, which
+inherits the criterion through the wrapper); `strahler_order` and `stream_links`; the
+keypoint dict's keys (`grade_above`, `grade_below`, `channel_cells`, `extension_cells`,
+`head_on_boundary`, `runs_off_dem_m` are added); every caller's interface; `panel.py`.
+
+### §10.3 Before and after, on the fixture at the production threshold
+
+| | dinf mask, D8 pointers, raw DEM (§9.5, was production) | D8 mask, same (§9.5) | own-graph mask, raw DEM (§9.5 option 3) | **production now** |
+|---|---|---|---|---|
+| primary valleys | 123 | 72 | 13 | **23** |
+| stream cells | 1,638 | 1,533 | 684 | 1,571 |
+| pointers leaving the mask | 108 | 35 | 0 | **0** (asserted) |
+| median valley length | 3.4 m | 9.2 m | 39.8 m | **138 m**, divide to foot |
+| valleys long enough to fit | 1 | 8 | 7 | 23 |
+| cut at the data edge / divide on the edge | — | — | — | 7 / 3 |
+| keypoints, uncapped | 1 | 5 | — | **10** |
+| refused: before the fit / no two-slope break | 122 (all reported as "no break") | 67 | — | 5 / 8, each with its reason |
+| at the panel cap of 8 | 1 keyed, 122 refused | — | — | 8 keyed, 5 refused, 10 unexamined (`KPA-43`) |
+
+**Routing independence, the thing `KPA-52` was about.** With a D-infinity baseline and
+with a D8 baseline the keypoint sets are **identical, 10 of 10**, because the valley network
+no longer reads the baseline's routing at all — only its accumulation for ranking. Before,
+the two shared none.
+
+**Invariance.** Under +600 m the 8 keypoint positions are identical (so the constructor's
+float32 cast, owner decision 3, did not need changing and was not). Under a horizontal flip
+7 of 8 mirror exactly and one lands one row off, on one of the 31 pointers that are exact
+steepness ties and reverse with the scan order; the mirror check does not assert keypoints
+and this is recorded here rather than tuned.
+
+**Against §9.7's topographic set.** Re-run with the new criterion the TPI extraction finds 2
+keypoints; 0 are within 3 cells of the 10. That comparison is between different *valleys*
+and stays where §9.7 left it.
+
+**Cost.** A keyline press with a baseline: 0.14 s (the conditioned surface is read, not
+recomputed). Without one: 0.81 s, of which 0.47 s is pysheds conditioning the DEM, as before.
+
+### §10.4 Why the argmax criterion was replaced — measured, not argued
+
+Before approval the plan was reviewed fresh and its assumptions measured on the fixture
+with the proposed extraction and the **unchanged** argmax criterion. Two of the numbers
+changed the plan:
+
+- With the edge cut, argmax accepted **15** of 23 valleys — but **3** of the 15 sat at or one
+  sample inside its own smoothing guard, 10–16 m below the divide on 0.7–3 m of fall, and
+  **4** more were on valleys whose grade *increases* downhill (above 0.08–0.16, below
+  0.28–0.38 — the "nosed over" ridge p44 says is a ridge shape, not a valley), where the
+  argmax had found a kink at the foot. That is §9.7's fragility exposed by longer profiles:
+  the sharpest local easing is not the change between two slopes.
+- The two-slope fit accepted **9** of the same 23 (10 once the edge rule was finalised),
+  every one with grade above greater than grade below, none within 1 m of the divide; **8**
+  of its 9 were within 15 cells of the argmax point on the same valleys, and it refused all
+  4 convex valleys and the uniform one. On the synthetic test DEMs it lands **exactly** on
+  the built-in break rows — 22 on the single-stem valley (argmax: 22), 60 and 60 on the two
+  parallel valleys (argmax: 60 and 62) — and refuses the uniform valley with an easing of
+  0.000.
+
+The owner chose the replacement over keeping argmax with a two-slope gate (decision 6).
+`test_keypoint_on_synthetic_valley`'s ±1-cell bar and
+`test_keypoint_on_path_keeps_the_verified_criterion` pass unchanged.
+
+### §10.5 Rows moved
+
+| Row | Was | Now |
+|---|---|---|
+| `KPA-52` | open, owner decision | **closed** — mask, pointers and accumulation are one graph; the network cannot read the routing setting |
+| `KPA-38` | open | **closed** — the raw DEM is no longer walked; the conditioned surface is supplied or kept |
+| `KPA-39` | open | **closed** — every refusal names its guard, and the probe checks line against string |
+| `KPA-40` | open | **no longer binds** — the 35 m floor went with the filter; the only length rule is `2·MIN_REACH_CELLS + 1` cells |
+| `KPA-43` | open | **unchanged and now visible** — at the cap of 8, 10 valleys go unexamined; pinned as a count |
+| `KPA-44` | open | **re-established** — on the synthetic DEM 0 of 6 valleys are refused by prominence, not 28 of 28 |
+| `FLG-18`, `FLG-19` | open | **superseded on the production path** — kept in the probes as the before picture |
+| `KPA-27`, `KPA-28`, `KPA-29` (`MATHS_AUDIT`) | OK | **re-expressed** — see `MATHS_AUDIT` §9.10 |
+| `KPA-49` | open | unchanged — 2 % is still a convention, now over two reaches rather than ±guard |
+| `KPA-54` | fixed | unchanged in meaning; the keypoint now sits on the extension, so "ha above" is small by construction |
+
+`MIN_REACH_CELLS` is declared a **TerrainFlow convention** under §0.3, like the 50 m window
+and `MIN_SLOPE_EASE`.
+
+### §10.6 Left open, on purpose
+
+- **Saddle-headed valleys.** "When the saddle is deep the first steep slope of the primary
+  valley may be gone. The Keypoint of such a primary valley is the saddle." (p41) A valley
+  with no steep upper reach refuses on prominence; nothing looks for a saddle. Sourced, and
+  not handled.
+- **A nodata-clipped DEM.** The fixture has no nodata. `data_boundary_mask` flags cells
+  beside a hole as well as the outer ring, and the edge cut keys on the grid edge only, so
+  a catchment clipped to its divide by nodata will flag every valley and cut none. The
+  right behaviour there is unmeasured.
+- **Symmetric duplicates.** The synthetic harness DEM's central valley floor is two cells
+  wide at exactly equal height, so it yields two parallel primary valleys and two coincident
+  keypoints (cols 149 and 150). A synthetic artefact; real ground does not tie like that.
+- **The ranking field**, decision 4, is a choice with a measured consequence (20 of 23
+  disagree); reversible in one line if the labels prove confusing.
+- **Noise.** `p_keypoints`' roughness sweep (synthetic correlated roughness 0.00 → 0.25 m
+  on the 2 m harness DEM) now reads: primary valleys 6 → 71 → 68 → 62, and valleys clearing
+  the 2 % bar **6 → 68 → 64 → 59**. Before, the 35 m floor refused every noise fragment and
+  nothing cleared the bar at any roughness; now every fragment reaches its divide and is
+  fitted, and a two-slope fit to a noisy profile usually finds *some* break easing by 2 %.
+  Whether those are valleys or noise is exactly §9.7's worry, unmeasured on real ground
+  (the fixture refuses 8 of 18 fitted valleys, so it is not accepting everything). The
+  natural next guard is a prominence stated against the fit's own residual — a two-slope
+  model has to explain the profile *better* than one slope by a margin — which is a
+  `MIN_SLOPE_EASE`-class convention and an owner decision, not a quiet tweak.
+
+### §10.7 Suites
+
+Pure suite **2,928 passed** (2,897 before; the new tests cover `accumulate`,
+`main_stem_to_divide`, `data_boundary_mask`, the divide extension, both halves of the edge
+rule, the channel-on-map refusal, the two-slope fit against a least-squares oracle, the
+convex and uniform refusals, nodata handling, and the supplied conditioned surface).
+`checks_fixture_regression` re-recorded — `EXPECTED_KEYLINE` and
+`EXPECTED_KEYLINE_WITH_BASELINE` — and now asserts zero mask-leaving pointers and the
+uncapped `keypoints + skipped == valleys` identity as properties; `checks_contour`'s
+keyline check compared every guide against the *first* keyline's elevation and was fixed to
+compare per valley, which the synthetic DEM's six keypoints exposed. Probe evidence re-run
+and committed for `p_flow_graph`, `p_keypoints`, `p_crosscheck`, `p_topographic_valleys`,
+`p_invariance`, `p_battery`, `p_controllers`.

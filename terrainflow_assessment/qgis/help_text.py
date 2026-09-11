@@ -149,10 +149,10 @@ SLOPE_VECTORS = (
 
 KEYLINE_MAX_VALLEYS = (
     "How many primary valleys to key, largest catchment first.\n\n"
-    "A keypoint belongs to a PRIMARY valley — the small upland valley at the head\n"
-    "of a ridge-and-valley pair, which is a first-order stream link. The trunk of a\n"
-    "catchment is not one, which is why keying only the largest stream answered the\n"
-    "right question about the wrong feature.\n\n"
+    "A keypoint belongs to a PRIMARY valley — the small valley formed into the side\n"
+    "of a main ridge, traced from its divide down to where it joins another valley\n"
+    "or leaves the DEM. The trunk of a catchment is not one, which is why keying\n"
+    "only the largest stream answered the right question about the wrong feature.\n\n"
     "A fine DEM has many primary valleys, and drawing a keyline set on every one is\n"
     "neither useful nor quick, so the ones carrying the most water are keyed first.\n"
     "Valleys whose floor has no genuine steep-to-gentle break are reported and\n"

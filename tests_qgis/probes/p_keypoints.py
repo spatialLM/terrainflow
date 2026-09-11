@@ -5,27 +5,27 @@ KPA-43, KPA-44, KPA-46**, and sizes the measurement window KPA-41's recommendati
 
 Five measurements:
 
-**1. The guard histogram (KPA-39, KPA-44).** `find_keypoints` attributes *every*
-`keypoint_on_path` `None` to the prominence test — the skipped message says "no break in
-the floor clearing 2% of grade change" whatever actually happened. `keypoint_on_path` has
-five ways to return `None`::
+**1. The guard histogram (KPA-39, KPA-44).** `find_keypoints` used to attribute *every*
+`keypoint_on_path` `None` to the prominence test — the skipped message said "no break in
+the floor clearing 2% of grade change" whatever actually happened. Since KPA-52 closed the
+criterion is `keypoint_on_path_with_reason`, which returns ``(None, reason)`` from four
+guards::
 
-    thalweg is None or len(thalweg) < 5
-    total_len <= 0
-    len(arc) < 5                                            (too little finite ground)
-    n_samp - 2*guard < 3                       (too short to have an interior to fit)
-    require_prominence and slope_ease < self.MIN_SLOPE_EASE  (the only one reported)
+    thalweg is None or len(thalweg) < 2 * reach + 1          (too few cells to fit)
+    arc_all[-1] <= 0                                          (zero-length path)
+    len(arc) < 2 * reach + 1                                  (too little finite ground)
+    require_prominence and slope_ease < self.MIN_SLOPE_EASE  (the prominence test)
 
-`sys.settrace` records the line each `None` returned from, so the message can be checked
-against the truth. Those line numbers are **derived from the source at run time** and are
-deliberately not written down here — see `guard_lines()`.
-Run on the real fixture at the production threshold **and** on the
-default synthetic harness DEM, because KPA-44's "all 28 are refused on prominence" was read
-off the very message KPA-39 shows is unconditional, and has to be re-established.
+`sys.settrace` records the line each refusal returned from, so the *reason string* can be
+checked against the *line* — two independent routes to the same histogram. Those line
+numbers are **derived from the source at run time** and are deliberately not written down
+here — see `guard_lines()`. Run on the real fixture at the production threshold **and** on
+the default synthetic harness DEM.
 
-**2. The floor, on both grids (KPA-40).** The shortest thalweg that can yield a keypoint is
-`7 * min(5*cell, 10)` m — 35 m on the 1 m fixture, 70 m on the 2 m synthetic DEM. Measured
-by bisection against the real function rather than asserted from the algebra.
+**2. The floor, on both grids (KPA-40).** There is no longer a metric floor: the two-slope
+fit needs `2 * MIN_REACH_CELLS + 1` cells and nothing else. Measured by bisection against
+the real function rather than asserted from the constant, so a floor creeping back in
+would show here first.
 
 **3. The accounting identity (KPA-43).** `find_keypoints` breaks out of its loop once
 `max_valleys` keypoints are found, dropping every remaining link from **both** returned
@@ -67,15 +67,15 @@ ROUGHNESS_SWEEP = (0.0, 0.05, 0.10, 0.25)
 #: renders it. A guard whose condition is rewritten loses its gloss and falls back to the
 #: source text, which is honest; a guard that *moves* keeps it, which is the point.
 GUARD_GLOSS = {
-    "thalweg is None or len(thalweg) < 5": "no thalweg, or fewer than 5 cells",
-    "total_len <= 0": "zero-length path",
-    "len(arc) < 5": "too little finite ground",
-    "n_samp - 2 * guard < 3": "profile too short to have an interior",
+    "thalweg is None or len(thalweg) < 2 * reach + 1": "no valley, or too few cells to fit",
+    "arc_all[-1] <= 0": "zero-length path",
+    "len(arc) < 2 * reach + 1": "too little finite ground",
     "require_prominence and slope_ease < self.MIN_SLOPE_EASE": "the prominence test",
 }
 
-#: The one guard `find_keypoints` claims for every refusal. KPA-39 is the gap between the
-#: count at this line and the total, so it is named by its *condition*, not its line.
+#: The one guard `find_keypoints` used to claim for every refusal. KPA-39 was the gap
+#: between the count at this line and the total, so it is named by its *condition*, not
+#: its line.
 PROMINENCE_TEST = "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
 
 
@@ -96,7 +96,8 @@ def guard_lines(func):
 
     Nested `if`s are walked so the innermost enclosing test is the one reported. A
     `return None` with no enclosing `if` (there is none today) is labelled as such rather
-    than dropped.
+    than dropped. Since KPA-52 closed the guards return ``None, <reason>`` — a tuple whose
+    first element is ``None`` — and those count as refusals too.
     """
     src, start = inspect.getsourcelines(func)
     # `getsourcelines` hands back the method still indented inside its class, which
@@ -106,14 +107,19 @@ def guard_lines(func):
     tree = ast.parse("".join(line[indent:] if line.strip() else line for line in src))
     found = {}
 
+    def _is_none(node):
+        return isinstance(node, ast.Constant) and node.value is None
+
     def walk(node, enclosing):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.If):
                 walk(child, child)
             elif isinstance(child, ast.Return):
                 value = child.value
-                if value is None or (isinstance(value, ast.Constant)
-                                     and value.value is None):
+                refusal = (value is None or _is_none(value)
+                           or (isinstance(value, ast.Tuple) and value.elts
+                               and _is_none(value.elts[0])))
+                if refusal:
                     test = (ast.unparse(enclosing.test) if enclosing is not None
                             else "<unconditional>")
                     found[child.lineno + start - 1] = test
@@ -155,7 +161,8 @@ class GuardTracer:
 
     def _local(self, frame, event, arg):
         if event == "return":
-            self.returns.append((frame.f_lineno, arg is None))
+            refused = arg is None or (isinstance(arg, tuple) and arg[0] is None)
+            self.returns.append((frame.f_lineno, refused))
         return self._local
 
     # ------------------------------------------------------------------ report
@@ -204,29 +211,24 @@ def source_line(path, lineno):
 
 
 def links_for(ya, threshold_cells=None, max_order=1):
-    """The link list `find_keypoints` would build, without running its loop."""
-    from terrainflow_assessment.modules.flow_graph import (
-        d8_from_dem,
-        strahler_order,
-        stream_links,
-    )
-
+    """The valley list `find_keypoints` walks — from `primary_valleys` itself, so this
+    cannot drift from production the way a hand-built copy of the construction did."""
     _fdir, acc_arr = ya._ensure_flow_data()
     cell_area = ya.cell_w * ya.cell_h
     if threshold_cells is None:
         threshold_cells = max(20, int(round(2_000.0 / cell_area)))
-
-    stream = (acc_arr >= threshold_cells) & np.isfinite(ya.dem)
-    next_flat, _sink = d8_from_dem(ya.dem, ya.cell_w, ya.cell_h)
-    order = strahler_order(next_flat, stream.ravel())
-    links = stream_links(next_flat, stream.ravel(), order, ya.dem.shape[1],
-                         max_order=max_order)
-    links.sort(key=lambda lk: float(acc_arr[lk[-1][0], lk[-1][1]]), reverse=True)
-    return links, acc_arr, int(threshold_cells)
+    valleys = ya.primary_valleys(stream_threshold_cells=threshold_cells,
+                                 max_order=max_order)
+    return [v["cells"] for v in valleys], acc_arr, int(threshold_cells)
 
 
 def stage_guard_histogram(ev, label, ya, dem_label):
-    """KPA-39 and KPA-44: the refusal reason, measured instead of read off the message."""
+    """KPA-39 and KPA-44: the refusal reason, measured instead of read off the message.
+
+    Two routes to one histogram: the line each refusal returned from (settrace) and the
+    reason string it returned. Since KPA-52 closed they must agree; the note says whether
+    they do.
+    """
     from terrainflow_assessment.modules.keypoint_analysis import YeomansKeylineAnalysis
 
     with ev.stage(f"guard_histogram_{label}") as rec:
@@ -236,11 +238,16 @@ def stage_guard_histogram(ev, label, ya, dem_label):
         rec["threshold_ha"] = threshold * ya.cell_w * ya.cell_h / 10_000.0
         rec["order1_links"] = len(links)
 
-        tracer = GuardTracer(YeomansKeylineAnalysis.keypoint_on_path)
+        reasons = {}
+        tracer = GuardTracer(YeomansKeylineAnalysis.keypoint_on_path_with_reason)
         with tracer:
             for link in links:
-                ya.keypoint_on_path(link, require_prominence=True)
+                kp, reason = ya.keypoint_on_path_with_reason(link, require_prominence=True)
+                if kp is None:
+                    key = reason.split(" (")[0]
+                    reasons[key] = reasons.get(key, 0) + 1
         rec["histogram"] = tracer.histogram()
+        rec["reasons_returned"] = reasons
 
         src = ya.__class__.__module__.replace(".", "/") + ".py"
         rec["source_lines_seen"] = {
@@ -252,16 +259,17 @@ def stage_guard_histogram(ev, label, ya, dem_label):
                                       sorted(tracer.guards.items())}
         prominence = tracer.count_at(PROMINENCE_TEST)
         refused = rec["histogram"]["returned_none"]
-        rec["refusals_the_message_blames_on_prominence"] = refused
-        rec["refusals_actually_from_prominence"] = prominence
-        rec["message_is_false_for"] = refused - prominence
+        by_reason = sum(n for k, n in reasons.items() if "grade change" in k)
+        rec["refusals_from_prominence_by_line"] = prominence
+        rec["refusals_from_prominence_by_reason_string"] = by_reason
+        rec["line_and_reason_agree"] = prominence == by_reason and sum(
+            reasons.values()) == refused
 
         ev.note(
-            f"KPA-39 on {dem_label}: {len(links)} order-1 links at "
+            f"KPA-39 on {dem_label}: {len(links)} primary valleys at "
             f"{rec['threshold_ha']:.2f} ha; {refused} refused, of which "
-            f"{prominence} were refused by the prominence test. find_keypoints reports "
-            f"all {refused} as 'no break in the floor clearing 2% of grade change', so "
-            f"the stated reason is false {rec['message_is_false_for']}/{refused} times. "
+            f"{prominence} by the prominence test (by line) and {by_reason} (by the "
+            f"reason string) — {'agree' if rec['line_and_reason_agree'] else 'DISAGREE'}. "
             f"Breakdown: " + ", ".join(
                 f"{v['count']}x :{k} ({v['guard']})"
                 for k, v in rec["histogram"]["by_line"].items()))
@@ -296,18 +304,18 @@ def stage_identity(ev, label, ya, dem_label):
 
 
 def stage_floor(ev, label, ya, dem_label):
-    """KPA-40: the shortest thalweg that can yield a keypoint, found by bisection.
+    """KPA-40: the shortest valley that can yield a keypoint, found by bisection.
 
     Measured against the real function on a synthetic straight profile with a genuine
-    slope break, so the answer is the function's, not the algebra's.
+    slope break, so the answer is the function's, not the constant's. Since KPA-52
+    closed the prediction is `2 * MIN_REACH_CELLS + 1` cells, on any grid.
     """
     with ev.stage(f"profile_floor_{label}") as rec:
         cell = ya.cell_size
-        spacing = min(5.0 * cell, 10.0)
         rec["dem"] = dem_label
         rec["cell_size_m"] = cell
-        rec["resample_spacing_m"] = spacing
-        rec["predicted_floor_m"] = 7.0 * spacing
+        rec["predicted_floor_cells"] = 2 * ya.MIN_REACH_CELLS + 1
+        rec["predicted_floor_m"] = (rec["predicted_floor_cells"] - 1) * cell
 
         # A straight east-west run of cells with a strong break, long enough that only
         # the length guard can refuse it.
@@ -318,6 +326,12 @@ def stage_floor(ev, label, ya, dem_label):
             """A stand-in with a profile that always clears the prominence bar."""
 
             MIN_SLOPE_EASE = ya.MIN_SLOPE_EASE
+            MIN_REACH_CELLS = ya.MIN_REACH_CELLS
+            REFUSED_TOO_FEW_CELLS = ya.REFUSED_TOO_FEW_CELLS
+            REFUSED_ZERO_LENGTH = ya.REFUSED_ZERO_LENGTH
+            REFUSED_TOO_LITTLE_GROUND = ya.REFUSED_TOO_LITTLE_GROUND
+            REFUSED_NO_BREAK = ya.REFUSED_NO_BREAK
+            keypoint_on_path_with_reason = ya.__class__.keypoint_on_path_with_reason
             cell_size = cell
 
             def __init__(self, n):
@@ -345,14 +359,13 @@ def stage_floor(ev, label, ya, dem_label):
         rec["first_passing_cells"] = first_pass
         rec["first_passing_length_m"] = (
             None if first_pass is None else (first_pass - 1) * cell)
-        rec["matches_prediction"] = (
-            first_pass is not None
-            and abs((first_pass - 1) * cell - 7.0 * spacing) <= cell)
+        rec["matches_prediction"] = first_pass == rec["predicted_floor_cells"]
         ev.note(
-            f"KPA-40 on {dem_label}: the shortest axis-aligned thalweg that can yield a "
+            f"KPA-40 on {dem_label}: the shortest axis-aligned valley that can yield a "
             f"keypoint is {first_pass} cells = {rec['first_passing_length_m']} m "
-            f"(predicted floor 7 x min(5*cell, 10) = {rec['predicted_floor_m']:.0f} m). "
-            "Every shorter link is still emitted by stream_links and still profiled.")
+            f"(predicted 2 * MIN_REACH_CELLS + 1 = {rec['predicted_floor_cells']} cells). "
+            "There is no metric floor any more: once a valley starts at its divide it "
+            "is tens of cells long before it is a channel at all.")
 
 
 # ----------------------------------------------------------------------- 4
@@ -527,8 +540,8 @@ def stage_roughness_sweep(ev):
             ya = YeomansKeylineAnalysis(str(path))
             links, _acc, threshold = links_for(ya)
 
-            # One pass over the links, not three: the profile is a savgol filter per
-            # link and the rough surfaces carry hundreds of them.
+            # One pass over the valleys, not three: each is a two-slope fit and the
+            # rough surfaces carry hundreds of them.
             unprominenced = [
                 ya.keypoint_on_path(link, require_prominence=False) for link in links]
             passing = [k for k in unprominenced
@@ -615,16 +628,16 @@ def stage_roughness_sweep(ev):
                     for k, v in rec["runs"].items()}
         rec["network_collapse"] = collapse
         ev.note(
-            "The sweep's own result contradicts the hypothesis it was written to test. "
-            "Correlated roughness does NOT push slope_ease over MIN_SLOPE_EASE "
-            "spuriously — it does the opposite. As roughness_m goes 0.00 -> 0.25 the "
-            "order-1 link count rises "
+            "Roughness sweep, roughness_m 0.00 -> 0.25: primary valleys "
             + " -> ".join(str(v[0]) for v in collapse.values())
-            + " while the links that are long enough to profile at all fall "
+            + "; valleys the fit could be run on "
             + " -> ".join(str(v[1]) for v in collapse.values())
-            + ", and the number clearing the 2% bar stays 0 throughout. Noise shatters "
-            "the channel network into stubs that FLG-18's floor then refuses, so the "
-            "failure mode is KPA-39's length guards, not a false positive on prominence.")
+            + "; valleys clearing the 2% bar "
+            + " -> ".join(str(v[2]) for v in collapse.values())
+            + ". (Before KPA-52 closed, noise shattered the channel network into stubs "
+            "that the 35 m floor refused, so nothing cleared the bar at any roughness; "
+            "the floor is gone and every valley is fitted, so the third series is now "
+            "the one that says whether noise fabricates keypoints.)")
 
 
 def main():

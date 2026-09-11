@@ -11,7 +11,8 @@
   "notes": [
     "KPA-48 fix note, measured: run(crest_split=False) does return a 'conditioned_dem' key, and the surface _ensure_flow_data rebuilds differs from it by at most 0.000e+00 m (0 of 160000 cells differ at all, 0 by more than 1 mm). Dropping the float32 file hop leaves max |\u0394| 0.000e+00 m.",
     "The depression step that actually runs is 'fill_depressions' \u2014 pysheds 0.5 has no breach_depressions, so the except branch is the live one in both flow_analysis.run and _ensure_flow_data.",
-    "FLG-19, measured on the production path: the stream mask comes from D-infinity accumulation over the conditioned surface, but the pointer graph comes from d8_from_dem over the RAW DEM. Raw gives 525 sinks on finite ground and 42 stream cells that are themselves sinks; the conditioned surface gives 65 and 0. Order-1 links: 127 raw vs 93 conditioned.",
+    "After the KPA-52 fix: 23 primary valleys of median 138 m, divide to foot, 10 keypoints and 13 refusals (no break in the floor clearing 2% of grade change, runs off the DEM after 159 m \u2014 its channel begins on the data edge, so no channel is on the map, runs off the DEM after 36 m \u2014 its channel begins on the data edge, so no channel is on the map, runs off the DEM after 56 m \u2014 its channel begins on the data edge, so no channel is on the map, runs off the DEM after 8 m \u2014 its channel begins on the data edge, so no channel is on the map, runs off the DEM after 90 m \u2014 its channel begins on the data edge, so no channel is on the map). The FLG-18/19 figures below are the before picture and are kept as such.",
+    "FLG-19, measured on the production path BEFORE the fix: the stream mask came from D-infinity accumulation over the conditioned surface, but the pointer graph comes from d8_from_dem over the RAW DEM. Raw gives 525 sinks on finite ground and 42 stream cells that are themselves sinks; the conditioned surface gives 65 and 0. Order-1 links: 127 raw vs 93 conditioned.",
     "FLG-18, measured: stream_links emits at min_cells=3, but keypoint_on_path cannot return a keypoint below 35 m of thalweg (n_samp >= 7). At 0.2 ha on the raw surface 127 links are emitted and only 1 can clear that floor \u2014 126 are profiled and refused by construction."
   ],
   "stages": {
@@ -394,6 +395,42 @@
             "role": "sensitivity"
           }
         }
+      },
+      "production_after_fix": {
+        "conditioned_source": "recomputed",
+        "order1_links": 23,
+        "link_length_m": {
+          "n": 23,
+          "min": 8.0,
+          "p25": 108.37615433949863,
+          "median": 138.05382386916236,
+          "p75": 167.97413408594545,
+          "max": 215.69343417595195,
+          "mean": 132.1096617494868,
+          "total": 3038.5222202381965
+        },
+        "extension_cells": {
+          "n": 23,
+          "min": 9.0,
+          "p25": 78.0,
+          "median": 91.0,
+          "p75": 130.5,
+          "max": 154.0,
+          "mean": 96.26086956521739,
+          "total": 2214.0
+        },
+        "links_cut_at_the_data_edge": 7,
+        "links_with_divide_on_the_data_edge": 3,
+        "keypoints": 10,
+        "refused": 13,
+        "refusal_reasons": [
+          "no break in the floor clearing 2% of grade change",
+          "runs off the DEM after 159 m \u2014 its channel begins on the data edge, so no channel is on the map",
+          "runs off the DEM after 36 m \u2014 its channel begins on the data edge, so no channel is on the map",
+          "runs off the DEM after 56 m \u2014 its channel begins on the data edge, so no channel is on the map",
+          "runs off the DEM after 8 m \u2014 its channel begins on the data edge, so no channel is on the map",
+          "runs off the DEM after 90 m \u2014 its channel begins on the data edge, so no channel is on the map"
+        ]
       }
     },
     "rank1_keyline": {
@@ -431,106 +468,20 @@
             39
           ]
         },
-        "keypoint_with_prominence": {
-          "x": 1574612.5,
-          "y": 5169561.5,
-          "elevation": 25.7,
-          "row": 70,
-          "col": 51,
-          "arc_length_m": 42.0,
-          "slope_ease": 0.159
-        },
+        "keypoint_with_prominence": null,
         "keypoint_without_prominence": {
-          "x": 1574612.5,
+          "x": 1574645.5,
           "y": 5169561.5,
-          "elevation": 25.7,
+          "elevation": 43.6,
           "row": 70,
-          "col": 51,
-          "arc_length_m": 42.0,
-          "slope_ease": 0.159
+          "col": 84,
+          "arc_length_m": 9.0,
+          "slope_ease": -0.1171,
+          "grade_above": 0.4194,
+          "grade_below": 0.5365
         },
-        "runs": [
-          {
-            "line_type": "keyline",
-            "offset_m": 0.0,
-            "elevation": 25.71,
-            "drift_fall_m": 0.05,
-            "drift_1_in_n": 3031.8,
-            "over_limit": false,
-            "vertices": 151,
-            "length_m": 150.32296296821877
-          },
-          {
-            "line_type": "valley_guide",
-            "offset_m": -5.0,
-            "elevation": 23.46,
-            "drift_fall_m": 0.0,
-            "drift_1_in_n": null,
-            "over_limit": false,
-            "vertices": 151,
-            "length_m": 150.27847307637424
-          },
-          {
-            "line_type": "ridge_guide",
-            "offset_m": 5.0,
-            "elevation": 28.29,
-            "drift_fall_m": -0.347,
-            "drift_1_in_n": 432.7,
-            "over_limit": true,
-            "vertices": 151,
-            "length_m": 150.1201482400557
-          },
-          {
-            "line_type": "valley_guide",
-            "offset_m": -10.0,
-            "elevation": 21.56,
-            "drift_fall_m": 0.0,
-            "drift_1_in_n": null,
-            "over_limit": false,
-            "vertices": 146,
-            "length_m": 144.98476806506233
-          },
-          {
-            "line_type": "ridge_guide",
-            "offset_m": 10.0,
-            "elevation": 31.01,
-            "drift_fall_m": -0.259,
-            "drift_1_in_n": 586.6,
-            "over_limit": false,
-            "vertices": 152,
-            "length_m": 151.68669211862615
-          },
-          {
-            "line_type": "valley_guide",
-            "offset_m": -15.0,
-            "elevation": 19.83,
-            "drift_fall_m": 0.0,
-            "drift_1_in_n": null,
-            "over_limit": false,
-            "vertices": 143,
-            "length_m": 142.6297407679027
-          },
-          {
-            "line_type": "ridge_guide",
-            "offset_m": 15.0,
-            "elevation": 33.71,
-            "drift_fall_m": -0.282,
-            "drift_1_in_n": 544.8,
-            "over_limit": false,
-            "vertices": 154,
-            "length_m": 153.6479974773958
-          }
-        ],
-        "keyline_master": {
-          "line_type": "keyline",
-          "offset_m": 0.0,
-          "elevation": 25.71,
-          "drift_fall_m": 0.05,
-          "drift_1_in_n": 3031.8,
-          "over_limit": false,
-          "vertices": 151,
-          "length_m": 150.32296296821877
-        }
+        "runs": null,
+        "note": "rank-1 valley yields no keypoint under the prominence rule, so no keyline_master_geom is ever set from it"
       }
     }
   },

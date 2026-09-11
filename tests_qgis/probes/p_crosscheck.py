@@ -380,8 +380,41 @@ def stage_mask_and_pointers_agree(ev, dem_path):
                     sum(1 for m in lengths if m >= floor_m)),
             }
 
+        # And what production does now that KPA-52 is closed: one graph on the
+        # conditioned surface, every valley walked back to its divide and cut at the
+        # data edge. Zero leaving pointers is the property; the rest are the numbers.
+        valleys = ya.primary_valleys()
+        p_next, p_acc = ya._primary_graph()
+        p_stream = (p_acc >= threshold) & finite.ravel()
+        p_lengths = [v["length_m"] for v in valleys]
+        rec["production_after_fix"] = {
+            "conditioned_source": ya.conditioned_source,
+            "stream_cells": int(p_stream.sum()),
+            "order1_links": len(valleys),
+            "cells_inside_a_link": sum(len(v["cells"]) for v in valleys),
+            "stream_cells_whose_pointer_leaves_the_mask": int(sum(
+                1 for i in np.flatnonzero(p_stream)
+                if int(p_next[i]) != i and not p_stream[int(p_next[i])])),
+            "median_link_length_m": float(np.median(p_lengths)) if p_lengths else None,
+            "max_link_length_m": float(max(p_lengths)) if p_lengths else None,
+            "links_cut_at_the_data_edge": sum(
+                1 for v in valleys if v["runs_off_dem_m"] > 0),
+            "links_with_divide_on_the_data_edge": sum(
+                1 for v in valleys if v["head_on_boundary"]),
+            "keypoints_at_every_valley": len(ya.find_keypoints(
+                max_valleys=len(valleys) + 1)[0]),
+        }
+
         a = rec["dinf_mask_production"]
         b = rec["d8_mask_same_graph_as_the_pointers"]
+        c = rec["production_after_fix"]
+        ev.note(
+            f"After the KPA-52 fix, production walks {c['order1_links']} valleys of "
+            f"median {c['median_link_length_m']:.0f} m (divide to foot) on one graph, "
+            f"{c['stream_cells_whose_pointer_leaves_the_mask']} pointers leave the mask, "
+            f"{c['links_cut_at_the_data_edge']} valleys are cut at the data edge and "
+            f"{c['keypoints_at_every_valley']} yield a keypoint. The two rows above are "
+            "kept as the before picture.")
         ev.note(
             f"Mask routing vs pointer routing at {rec['threshold_ha']:.2f} ha. "
             f"Production (D-infinity mask, D8 pointers): {a['stream_cells']:,} stream "

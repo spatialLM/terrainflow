@@ -808,8 +808,8 @@ section in the assembling session's records; the load-bearing results:
 | [TAUDEM] | TauDEM 5 "D-Infinity Flow Directions" (Tarboton 1997 convention) | hydrology.usu.edu/taudem/taudem5/help53/DInfinityFlowDirections.html | FLA-19 |
 | [PYSHEDS] | pysheds README (default dirmap, dinf) | github.com/mdbartos/pysheds | FLA-20 |
 | [JENNESS] | Jenness (2006) TPI documentation v1.2, citing Weiss (2001) | jennessent.com/downloads/TPI_Documentation_online.pdf | KPA-12 |
-| [YEO-WFEF] | Yeomans, K. B. & Yeomans, P. A. (dec.), *Water for Every Farm — Yeomans Keyline Plan*, ISBN 1438225784 / EAN-13 9781438225784. The edition's own front matter records the material as first published by P. A. Yeomans in 1954 (*The Keyline Plan*), 1958 (*The Challenge of Landscape*), 1964 and 1968 (*Water for Every Farm*), 1971 (*The City Forest*). Full 368-page PDF **fetched and text-extracted 2026-09-11**; the Keyline pattern-cultivation chapter and the channel-construction chapter read in full | cheiodasideia.libertar.org/wp-content/uploads/2022/11/Water-for-Every-Farm-Yeomans-Keyline-Plan-Ken-B.-Yeomans-P.A.dec_.-Yeomans.pdf | KPA-29, KPA-31, KPA-49 |
-| [YEO-MKIV] | Yeomans, *Keyline Design Mark IV — "Soil, Water & Carbon for Every Farm"*, 14-page article PDF hosted by Agricultural Water Stewardship. **Fetched and read in full 2026-09-11** | agwaterstewards.org/wp-content/uploads/2016/08/KeylineArticle.pdf | KPA-29, KPA-31 |
+| [YEO-WFEF] | Yeomans, K. B. & Yeomans, P. A. (dec.), *Water for Every Farm — Yeomans Keyline Plan*, ISBN 1438225784 / EAN-13 9781438225784. The edition's own front matter records the material as first published by P. A. Yeomans in 1954 (*The Keyline Plan*), 1958 (*The Challenge of Landscape*), 1964 and 1968 (*Water for Every Farm*), 1971 (*The City Forest*). Full 368-page PDF **fetched and text-extracted 2026-09-11**; the Keyline pattern-cultivation chapter and the channel-construction chapter read in full | cheiodasideia.libertar.org/wp-content/uploads/2022/11/Water-for-Every-Farm-Yeomans-Keyline-Plan-Ken-B.-Yeomans-P.A.dec_.-Yeomans.pdf | KPA-29, KPA-31, KPA-49, KPA-52 |
+| [YEO-MKIV] | Yeomans, *Keyline Design Mark IV — "Soil, Water & Carbon for Every Farm"*, 14-page article PDF hosted by Agricultural Water Stewardship. **Fetched and read in full 2026-09-11** | agwaterstewards.org/wp-content/uploads/2016/08/KeylineArticle.pdf | KPA-29, KPA-31, KPA-52 |
 | [OWNER-2026-09-11] | **Repo owner's domain ruling, 2026-09-11 — an owner attestation, not a fetched source**, and keyed separately so it can never be counted as one. *"Yeomans publishes no drift statistic. Drift is defined directionally… No tolerance, no grade, no sampling length is given. The only Yeomans number is for graded channels: diversion/catchment drains at a fall of 1:400 or flatter — a minimum useful fall for conveyance without scour, opposite in sign to a maximum tolerance. Do not re-express `max_grade_n` against it."* §7's rule is *sources actually fetched and read*, so this row **grounds nothing on its own**. [YEO-WFEF] and [YEO-MKIV] were fetched precisely to establish the same absence independently, and they do — see §9.8. The ruling is recorded because it prompted the fetch and because it is the reading the fetched texts bear out | — | KPA-31 (corroboration only) |
 | [CODE] | Code re-read during this audit (inventory agents' verbatim excerpts + assembling session reads) | — | MAIN rows |
 | [SI] | Definitional unit conversions (SI/metric definitions; international ft/in definitions are exact per the 1959 agreement) | — | conversion rows |
@@ -1105,6 +1105,53 @@ for exactly this row.
 **Not claimed.** The `acc <= 2` ridge test is untouched and is the reason real ridges
 fragment. Whether one 77 m spine on a 16 ha clip is a *useful* answer is a design question,
 not a correctness one, and it is not settled here.
+
+---
+
+### §9.10 `KPA-52` — the primary valley, sourced; `KPA-27/28/29` — the criterion re-expressed as two slopes (2026-09-11)
+
+`ANALYSIS_DEFECTS` §10 is the authority on the fix; this records what it does to the
+audit's rows. **Verdicts only; §1 and §2 stay as written.**
+
+**The valley, sourced.** [YEO-WFEF] and [YEO-MKIV] were re-read for the definition of a
+*primary valley*, which `KPA-52` turned on. Page-cited quotations are in
+`ANALYSIS_DEFECTS` §10.1; the ones the code now rests on are: the valley "starts as a more
+or less sudden steepening of the side slope of a main ridge" and runs "to the stream course
+below it" (p58); it "does not usually have a washed out or channelled water course down
+the middle" (p58); runoff reaches its floor "by the steepest path and the fastest route"
+(p45), "at right angles to the contours" (p43); "the creek is the lower boundary of its
+tributary primary valleys" (p45). So a primary valley is traced from the **divide** on one
+single-successor steepest-descent graph and ends at a junction or where it leaves the DEM;
+a channel-area threshold decides only which valleys count. `KPA-52` is added to the
+Grounds of both rows in §7.
+
+**The criterion, re-expressed.** `KPA-29` was closed `OK (sourced)` in §9.8 on "the
+strongest easing of the profile" as the numeric reading of the keypoint. The measurement
+in `ANALYSIS_DEFECTS` §10.4 showed that reading fails once valleys are profiled from the
+divide: the argmax of a smoothed second derivative placed 3 of 15 keypoints at its own
+smoothing guard and 4 on valleys that steepen downhill — the "nosed over" shape [YEO-WFEF]
+p44 calls a ridge. The same texts describe the keypoint as a change between **two
+slopes** — "the primary valley has two slopes; the upper slope is steep and changes to a
+much flatter slope at the Keyline of the valley" (p44), "the point of change in the two
+slopes of the primary valley" (p60–61), "the contour lines are closer together above it,
+and further apart below it" ([YEO-MKIV]) — and that is a whole-valley statement, not a
+local one. The criterion is now the break of a continuous two-slope least-squares fit,
+accepted when the grade above exceeds the grade below by `MIN_SLOPE_EASE`. On the synthetic
+test valleys it lands on the built-in break exactly (rows 22, 60, 60) and refuses the
+uniform valley with an easing of 0.000.
+
+- `KPA-29` (argmax `d²E/ds²`) — **superseded**: the criterion is the two-slope break,
+  sourced to the same passages. Verdict stays `OK (sourced)`; the implementation changed.
+- `KPA-27` (resample at `min(5·cell, 10)`) and `KPA-28` (Savitzky–Golay, 20 % window,
+  poly 3) — **retired**: the fit runs on the cell profile and smooths nothing. [SCIPY]'s
+  `savgol_filter` reference no longer grounds any live row.
+- `KPA-26` (arc length, nodata bridged) — unchanged in substance: non-finite cells are
+  dropped from the fit, never substituted with 0.0 m.
+- `MIN_SLOPE_EASE` (`KPA-49`) — value unchanged at 2 %; meaning now "grade above minus
+  grade below over the two reaches" rather than a slope difference across ±guard samples.
+  Still a TerrainFlow convention.
+- `MIN_REACH_CELLS = 3` — new, a **TerrainFlow convention** (`ANALYSIS_DEFECTS` §0.3): a
+  reach needs enough cells to have a slope to fit. Not a Yeomans number.
 
 ---
 

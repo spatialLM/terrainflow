@@ -59,4 +59,6 @@ and the probe went on counting correctly while attributing all 126 refusals to
 "UNKNOWN LINE" — which silently inverted the two figures derived from that map, so the
 evidence file was wrong about the finding the probe exists to support. `guard_lines()`
 now reads the positions off the AST on every run. Anything a probe asserts about source
-should be derived from source.
+should be derived from source. (Since KPA-52 closed the guards live in
+`keypoint_on_path_with_reason` and return `None, <reason>`; `guard_lines()` counts those
+too, and the probe checks the traced line against the returned reason.)
