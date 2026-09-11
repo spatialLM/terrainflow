@@ -1,0 +1,138 @@
+{
+  "probe": "p_topographic_valleys",
+  "date": "2026-09-11",
+  "findings": [
+    "KPA-52"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+  "notes": [
+    "Topographic valleys (TPI 15 m, 1.0 sd): 6,171 valley cells thin to 1,313, cut at 118 junctions into 217 branches, 3 of them over 50 m. Running the unchanged keypoint_on_path along those gives **3 keypoints** at [(72, 44), (103, 145), (125, 161)]. No accumulation, no pointers, no routing \u2014 so this answer cannot depend on a routing setting.",
+    "Keypoints: topographic 3, dinf 1, d8 5. Of the topographic set, 0 are within 3 cells of a dinf keypoint and 0 of a d8 one."
+  ],
+  "stages": {
+    "topographic_valleys": {
+      "status": "ok",
+      "tpi_window_m": 15.0,
+      "tpi_sd": 1.0,
+      "boundary_guard_cells": 8,
+      "valley_cells": 6171,
+      "thinned_cells": 1313,
+      "junction_cells": 118,
+      "branches": 217,
+      "min_branch_m": 50.0,
+      "branches_over_min_length": 3,
+      "branch_length_m": {
+        "median": 2.0,
+        "max": 104.2
+      },
+      "keypoints": 3,
+      "keypoint_rc": [
+        [
+          72,
+          44
+        ],
+        [
+          103,
+          145
+        ],
+        [
+          125,
+          161
+        ]
+      ],
+      "keypoint_detail": [
+        {
+          "rc": [
+            72,
+            44
+          ],
+          "elevation": 22.6,
+          "slope_ease": 0.1694,
+          "branch_length_m": 50.4
+        },
+        {
+          "rc": [
+            103,
+            145
+          ],
+          "elevation": 52.3,
+          "slope_ease": 0.1204,
+          "branch_length_m": 104.2
+        },
+        {
+          "rc": [
+            125,
+            161
+          ],
+          "elevation": 56.9,
+          "slope_ease": 0.0804,
+          "branch_length_m": 71.3
+        }
+      ]
+    },
+    "against_the_routing_answers": {
+      "status": "ok",
+      "topographic": [
+        [
+          72,
+          44
+        ],
+        [
+          103,
+          145
+        ],
+        [
+          125,
+          161
+        ]
+      ],
+      "dinf": [
+        [
+          70,
+          51
+        ]
+      ],
+      "shared_with_dinf_within_3_cells": 0,
+      "d8": [
+        [
+          59,
+          14
+        ],
+        [
+          116,
+          290
+        ],
+        [
+          119,
+          3
+        ],
+        [
+          185,
+          172
+        ],
+        [
+          399,
+          186
+        ]
+      ],
+      "shared_with_d8_within_3_cells": 0
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
+    "shape": [
+      400,
+      400
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 0,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  }
+}

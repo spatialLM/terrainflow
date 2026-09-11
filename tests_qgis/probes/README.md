@@ -41,6 +41,7 @@ starts; a mid-run edit makes later modules boot against a half-applied change.
 | `p_battery.py` | Signed witnesses, dimensional identities, conservation | Step D: KPA-54, TIX-02 |
 | `p_coverage.py` | What neither suite calls, and whether tooltips match their constants | Step E — §4 rows |
 | `p_crosscheck.py` | Four quantities computed twice; mask routing vs pointer routing | Step F: KPA-52 |
+| `p_topographic_valleys.py` | Can a keypoint be found with no routing at all? | KPA-52 (§9.7) |
 
 `p_coverage.py` is the one probe that needs **no QGIS at all** — it reads source. Plain
 `python p_coverage.py` is quicker and does the same thing.

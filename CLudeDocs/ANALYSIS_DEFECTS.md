@@ -100,9 +100,55 @@ a later reader cannot mistake it for one. See `MATHS_AUDIT` §9.8 for the resolu
 for the rows.
 
 **This is a new precedent and is labelled as one.** It says: an owner ruling may direct the
-audit's attention and may corroborate, but it does not substitute for a fetch. The owner
-still owes a citation for Doherty (which text, which edition); until then `[DOHERTY]` is not
-added and nothing rests on it.
+audit's attention and may corroborate — and, per the ratification below, may *carry* a row
+when nothing is fetchable, provided it is filed under its own token and never as a source.
+
+~~The owner still owes a citation for Doherty~~ — **DROPPED 2026-09-11 on the owner's
+decision.** `[DOHERTY]` is not added and no row is opened for it. The reasoning is recorded
+because "we decided not to cite something" is the kind of thing a later reader re-opens:
+Darren Doherty's published material is Regrarians course handbooks and recorded workshops,
+which are weak as citations — typically undated, revised per delivery, and not pinnable to
+an edition. Nothing in the tree rested on it. Any constant that would have been attributed
+to him is instead declared a **TerrainFlow convention**, which is what the 50 m drift window
+(§9.6) and `MIN_SLOPE_EASE` already are.
+
+#### §0.3.1 The rule an attestation is admitted under (ratified 2026-09-11)
+
+The owner has ratified the precedent: **an owner attestation may carry a register row.**
+It is admitted under conditions, because grounds that can close anything close nothing.
+
+**An attestation may carry a row only when all four hold:**
+
+1. **Nothing fetchable would settle it.** A published source that exists must be fetched
+   and read — that rule is unchanged and is §7's whole purpose. An attestation is for the
+   case where the question is about practice, local convention, or an absence that no text
+   states. If a fetch was not attempted, the row is not eligible.
+2. **It is filed under its own token**, `[OWNER-<date>]`, never as a `[SOURCE]`. §7 remains
+   *"sources actually fetched and read"* and an attestation never appears in it as one.
+3. **It is dated and quoted.** What was ruled, in the owner's terms, on what day — so a
+   later reader can see the claim rather than a summary of it, and can tell when it was
+   made.
+4. **The row says it rests on an attestation**, in the row itself, not only in §7. A reader
+   scanning §1 must be able to see which rows are attested without cross-referencing.
+
+**What an attestation cannot do:**
+
+- It cannot make a row `OK`. The strongest verdict it supports is `UNVER` — *"no locatable
+  published source"* — which is the honest description of a claim resting on domain
+  authority. `OK` means checked against something external.
+- It cannot override a measurement. Where an attestation and a measurement disagree, the
+  measurement stands and the disagreement is recorded. This has already happened once in
+  spirit: the owner's ruling on Yeomans was corroborated by fetching the texts, and had they
+  contradicted it, the texts would have won.
+- It cannot be inherited. An attestation closes the row it is written for. A later row
+  relying on the same domain fact needs its own, or a fetch.
+
+**Why admit them at all.** The alternative is that a question nobody can settle from a text
+stays `UNVER-B` — "verification blocked" — forever, which reads as an outstanding defect
+when it is actually a settled matter of practice. `KPA-31` was exactly that shape. Letting
+the owner close it, visibly and under a token a reader can discount, is more honest than
+leaving a permanent open row that quietly means "we know the answer but may not write it
+down".
 
 ### §0.4 Rules of entry
 
@@ -1123,11 +1169,12 @@ follows is scoped and not started.
 
 ### Still owed by the owner
 
-1. **Which Doherty text and edition.** Without it `[DOHERTY]` is not added and nothing rests
-   on it.
-2. **Confirmation that an owner attestation may stand as grounds** — a new precedent,
-   labelled as such in §0.3. This pass did not need it to carry a row, because the texts were
-   fetched; the question is whether it may carry one in future.
+1. ~~**Which Doherty text and edition.**~~ — **DROPPED 2026-09-11 on the owner's decision.**
+   `[DOHERTY]` is not added, nothing rested on it, and any constant that would have carried
+   it is declared a TerrainFlow convention instead. See §0.3.
+2. ~~**Confirmation that an owner attestation may stand as grounds**~~ — **RATIFIED
+   2026-09-11 by the owner.** An attestation **may** carry a row. See §0.3.1 for the rule
+   it is admitted under.
 3. ~~**The `KPA-41` window decision**~~ — **DECIDED 2026-09-11: 50 m**, and implemented;
    see §9.6. The reasoning that produced the recommendation is kept below.
 
@@ -1292,7 +1339,7 @@ thing being extended rather than the thing being cited.
 
 ### §8.1 `KPA-52` — the channel mask and the pointer graph disagree about routing
 
-> **STILL OPEN, and changed in character — see §9.5.** Since `KPA-48` was fixed the
+> **STILL OPEN — see §9.5 for the routing table and §9.7 for the routing-free option.** Since `KPA-48` was fixed the
 > mask follows the panel's routing rather than a hard-coded literal, so the mismatch is
 > now a function of a user setting with a measured cost: the D-infinity default yields
 > **1** keypoint where D8 yields **5**. §9.5 carries the three-way table and the
@@ -1984,3 +2031,77 @@ guides read **gentler**, not steeper: 1:19.3 / 1:8.8 / 1:5.8 became 1:26.3 / 1:2
 The mask is now recomputed from the geometry against the raster the same way `_sample_dem`
 decides it, and a window is measured only when every vertex in it is real ground. The
 numbers in the table above are the corrected ones.
+
+### §9.7 Can a keypoint be found without routing? Measured — yes, and it does not settle `KPA-52`
+
+The owner's position, put on 2026-09-11: *a keypoint is a topography-determined point — the
+inflection based on the contours, not the flow of water.*
+
+**The position is right, and the texts support it.** Yeomans locates the keypoint on a
+contour map and on the ground: the break where a primary valley's steep upper floor eases
+into its gentler lower floor. No flow algorithm appears in that definition.
+
+**And the inflection itself is already routing-free.** `keypoint_on_path` resamples the long
+profile, smooths it and takes the argmax of the second derivative — pure topography along a
+line. Routing never touches that computation. What it touches is **which line the profile is
+taken along**, and the word carrying the damage is *primary*: today a primary valley is a
+**Strahler order-1 link**, which is a flow concept by construction.
+
+So `p_topographic_valleys.py` was written to ask whether the routing can be *removed* rather
+than chosen between. Valley floors come from TPI — `z - mean(z)` over a neighbourhood, a
+pure landform measure — classified by `landform_classes`, skeletonised, and **cut at
+junctions**, so a leaf branch is a valley nothing else joins from above. That is the exact
+landform analogue of order-1, expressed in the graph of the land rather than the graph of
+the water. `keypoint_on_path` is then run **unchanged** along each branch, ordered downhill
+because `slope_ease` requires it.
+
+**Result: it works, and it is routing-independent by construction** — the extraction takes a
+DEM and returns keypoints with no accumulation, no pointers and no cell threshold anywhere
+in it. On the fixture: **3 keypoints**, at `(72, 44)`, `(103, 145)`, `(125, 161)`.
+
+Three findings came with it, and the last two are why this does not settle `KPA-52`.
+
+**1. A naive extraction picks up the clip edge.** The first run returned 7 keypoints, of
+which **4** sat on rows 1 and 397 or column 1 of a 400x400 grid. `landform_tpi`'s own
+docstring predicts this — a neighbourhood mean whose window hangs off the data edge is taken
+over fewer cells and drifts, *"fabricating a ridge line all the way round the data
+boundary"* — and valleys fabricate identically. A half-window guard removed exactly those 4
+and left the 3 interior ones untouched. Any production version needs that guard.
+
+**2. The topographic skeleton is shattered too.** 6,171 valley cells thin to 1,313, cut at
+118 junctions into **217 branches — of which 3 exceed 50 m.** That is the same failure mode
+as `KPA-52` describes for the flow network, arrived at by a completely different route.
+Removing the routing does **not** remove the fragmentation; a valley floor picked out by a
+15 m TPI window is broken wherever the floor briefly widens or flattens, just as a channel
+is broken wherever two routing schemes disagree. Whatever fixes one has to fix the other.
+
+**3. Three methods, three disjoint answers.** Of the 3 topographic keypoints, **0** are
+within 3 cells of a D-infinity keypoint (there is 1) and **0** of a D8 one (there are 5).
+
+That third figure needs stating carefully, because the obvious reading overclaims. The three
+methods do not merely disagree about *where the inflection is*; they disagree about **what
+the valleys are** — 3 branches over 50 m against 72 and 123 links. So the disjoint keypoints
+are at least partly a disagreement about valleys rather than about inflections, and this
+probe does not separate the two. Doing so means comparing the *lines*, not the points, and
+has not been done.
+
+**What this means for `KPA-52`.** Adopting a topographic extraction is the architecturally
+right answer — it makes the question "which routing?" disappear rather than answering it,
+and it matches what the method actually is. It is **not** a drop-in fix, and shipping it as
+one would replace a known defect with an unknown one:
+
+- It needs the boundary guard, or it invents keypoints on the clip edge.
+- It needs an answer to fragmentation, or it finds 3 valleys where the terrain has more.
+- It would change every assessment's keypoint set to a third disjoint answer, and nothing
+  measured so far says that answer is *right* — only that it is arrived at honestly.
+
+The stability question underneath all three is the one worth naming: `keypoint_on_path`
+takes an **argmax**, so it always returns something, and on any given line it returns
+exactly one thing. `MIN_SLOPE_EASE` is the only guard against that being noise, and `KPA-39`
+measured it refusing **0 of 126** candidates on real ground. A method that gives a different
+answer for every plausible valley line, with a prominence test that refuses almost nothing,
+is fragile wherever the line comes from.
+
+**Status: `KPA-52` stays open.** The routing-free path is demonstrated and the probe is
+committed so the numbers can be re-run, but the decision now has a third option and two new
+prerequisites rather than a resolution.
