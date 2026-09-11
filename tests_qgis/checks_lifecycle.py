@@ -97,3 +97,82 @@ def check_a_second_plugin_boots_cleanly_over_the_first(dem_path):
                 "the second plugin did not take the DEM — its wiring is not live")
         finally:
             h.state = second._state
+
+
+def check_unload_stops_the_simulation_playback_timer(dem_path):
+    """`plugin.py`'s unload loop skips a controller with no `teardown` attribute,
+    and `SimulationController` had none — so pressing Play and reloading left a
+    500 ms QTimer running against a dismantled panel. Two frames later
+    `_advance_sim_frame` reads `self._panel.sim_frame()` on a deleted widget,
+    inside a Qt slot, which PyQt turns into a process abort with no traceback.
+
+    Asserted on the connection rather than by letting it fire: a check that
+    provokes the abort takes every other check in the module with it, and the
+    state that decides whether it will is exactly what is under test.
+    """
+    with PluginHarness(dem_path, load_dem=False) as h:
+        controller = h.plugin._simulation
+        assert hasattr(controller, "teardown"), (
+            "SimulationController has no teardown() — plugin.unload skips it entirely")
+
+        controller.on_sim_play_toggled(True)
+        assert controller._sim_timer.isActive(), (
+            "Play did not start the timer, so the leak under test is not constructed")
+
+        h.plugin.unload()
+        h.plugin.unload = lambda: None      # the context manager unloads again
+
+        assert not controller._sim_timer.isActive(), (
+            "unload left the playback timer running against a deleted panel")
+        try:
+            controller._sim_timer.timeout.disconnect(controller._advance_sim_frame)
+            still_connected = True
+        except (TypeError, RuntimeError):
+            still_connected = False
+        assert not still_connected, (
+            "unload left _advance_sim_frame connected to the timer; a stopped timer "
+            "restarted by anything else would still reach the dead controller")
+
+
+def check_unload_disconnects_the_contour_layer_selection(dem_path):
+    """The Candidate Contour Swales layer belongs to QgsProject, not the plugin, so
+    `_connect_contour_selection`'s `selectionChanged` connection survives unload.
+    Select a contour with QGIS's own tool afterwards and the slot runs on a dead
+    controller and touches a deleted panel — the abort `ContourController.teardown`
+    said there was nothing to undo about.
+
+    The disconnect probe comes first on purpose: it fails cleanly, and it guards
+    the `selectByIds` below, which is the line that actually aborts the process
+    when the connection is still live.
+    """
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.panel.run_contour_analysis_requested.emit()
+        h.assert_no_errors("contour analysis")
+
+        layer_id = h.state.contour_layer_id
+        assert layer_id, "no contour layer was built, so nothing was connected"
+        layer = QgsProject.instance().mapLayer(layer_id)
+        assert layer is not None, "the contour layer is not in the project"
+        fids = [f.id() for f in layer.getFeatures()][:1]
+        assert fids, "the contour layer has no features to select"
+
+        controller = h.plugin._contour
+        h.plugin.unload()
+        h.plugin.unload = lambda: None      # the context manager unloads again
+
+        try:
+            layer.selectionChanged.disconnect(controller._on_contour_layer_selection)
+            still_connected = True
+        except (TypeError, RuntimeError):
+            still_connected = False
+        assert not still_connected, (
+            "unload left selectionChanged connected on a project-owned layer; "
+            "selecting a contour now calls a dead controller")
+
+        # Safe only because of the assertion above: this is the user gesture that
+        # takes QGIS down when the connection is still live.
+        layer.selectByIds(fids)
+        layer.removeSelection()

@@ -25,6 +25,7 @@ CLAUDE_MD = REPO / "CLAUDE.md"
 MODULES = PKG / "modules"
 CONTROLLERS = PKG / "qgis" / "controllers"
 STATE_PY = CONTROLLERS / "_state.py"
+LIFECYCLE_PY = PKG / "qgis" / "workers" / "_lifecycle.py"
 
 
 def _py_files(root):
@@ -181,6 +182,42 @@ def test_plugin_state_holds_layer_ids_not_layers():
         + "\n  ".join(bad_name)
     )
     assert not bad_type, "PluginState layer fields must be typed as ids:\n  " + "\n  ".join(bad_type)
+
+
+def test_every_worker_slot_is_joined_on_unload():
+    """``WORKER_SLOTS`` must name every ``PluginState`` field that holds a thread.
+
+    ``join_workers`` walks that tuple and nothing else, so a slot missing from it
+    is a thread ``unload`` never waits for: the scratch directory is removed under
+    a worker still writing into it, and the ``QThread`` loses its last reference —
+    "Destroyed while thread is still running", then abort. The constant's own
+    comment names that failure, and ``terrain_worker`` was missing from it anyway.
+
+    Enforced on the field *name*, which is the convention the slots already follow:
+    a field ending ``_worker`` holds a worker, so declaring one is enough to be
+    joined and adding a controller cannot silently skip the step.
+    """
+    tree = _parse(LIFECYCLE_PY)
+    slots = next(
+        (ast.literal_eval(n.value) for n in tree.body
+         if isinstance(n, ast.Assign)
+         and any(isinstance(t, ast.Name) and t.id == "WORKER_SLOTS" for t in n.targets)),
+        None,
+    )
+    assert slots is not None, f"WORKER_SLOTS is not a literal assignment in {LIFECYCLE_PY.name}"
+
+    declared = {name for name, _annotation, _lineno in _state_fields()
+                if name.endswith("_worker")}
+    missing = sorted(declared - set(slots))
+    unknown = sorted(set(slots) - declared)
+    assert not missing, (
+        "PluginState declares a worker slot that unload never joins:\n  "
+        + "\n  ".join(missing)
+    )
+    assert not unknown, (
+        "WORKER_SLOTS names a field PluginState does not declare:\n  "
+        + "\n  ".join(unknown)
+    )
 
 
 # ------------------------------------------------------------------- 4. tooltip copy

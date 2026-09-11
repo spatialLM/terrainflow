@@ -57,6 +57,27 @@ class SimulationController(G.LayerTreeMixin):
         # labelling and the overflow routing this simulation must share.
         self.design_tier = None
 
+    def teardown(self):
+        """Stop the playback timer before the panel it drives is deleted.
+
+        `plugin.py`'s unload loop skips a controller with no `teardown` attribute,
+        and this controller had none — so a plugin reload with Play still toggled
+        left a 500 ms `QTimer` running against a dismantled panel. Two frames
+        later `_advance_sim_frame` reads `self._panel.sim_frame()` on a deleted
+        widget, inside a Qt slot, which PyQt turns into a process abort with no
+        traceback: the failure mode `terrain.py:157-161` describes.
+
+        Disconnect as well as stop. A stopped timer is still connected, and the
+        one Python reference keeping this controller alive is the plugin's, which
+        unload is in the middle of dropping.
+        """
+        try:
+            self._sim_timer.stop()
+            self._sim_timer.timeout.disconnect(self._advance_sim_frame)
+        except (TypeError, RuntimeError):
+            # Never connected, or the C++ timer is already gone.
+            pass
+
     # ---------------------------------------------------------------- Run
 
     def run_simulation(self):

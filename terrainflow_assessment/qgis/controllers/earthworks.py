@@ -1650,6 +1650,26 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """
         if not self._state.dem_path or getattr(ew, "crest_elevation", None) is None:
             return 0.0
+        # The same guard the other three floods open with, and the only one of the
+        # four that lacked it. The burn holds `state.burner` on a worker thread for
+        # several seconds and this floods the same object, so drawing or reshaping a
+        # dam during "Re-analyse with Earthworks" ran `dam_storage` on the GUI thread
+        # against it. Two consequences, both silent: `dam_storage` opens with
+        # `self.warnings = []`, discarding whatever the worker had accumulated; and
+        # `_isolated_burn`'s snapshot/restore puts back a `burned_masks` taken
+        # mid-population, so every feature burned after the snapshot loses its mask
+        # and `_compute_verification` falls through to the re-derived footprint that
+        # biases every Δ negative.
+        #
+        # Returns the cached figure rather than 0.0 — this method's contract is a
+        # volume, and 0.0 would read as "measured, and it impounds nothing". A dam
+        # drawn mid-burn has no cache yet, so it defers to 0 and is re-measured by
+        # `_on_earthworks_complete` when the run finishes.
+        if worker_is_running(self._state, "design_worker"):
+            self._iface.messageBar().pushInfo(
+                "TerrainFlow Assessment",
+                "Dam storage will be measured when the current run finishes.")
+            return float(getattr(ew, "capacity_m3", 0.0) or 0.0)
         try:
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment", "Computing dam storage…"
@@ -2353,16 +2373,21 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """Return ``f(x, y) -> elevation or None`` over the source DEM, or None."""
         if not self._state.dem_path:
             return None
+        # `with`, and the read inside it: this was the one bare `rasterio.open(` in
+        # the tree, with `src.read(1)` outside the `try`, so a truncated file or a
+        # MemoryError left the DEM open for the life of the process — and on Windows
+        # an open handle blocks the burn from rewriting it. A failure here returns
+        # None, the same answer the open failure already gave, and both callers
+        # (`_default_crest_elevation`, `_key_dam_into_banks`) test for it.
         try:
             import rasterio
-            src = rasterio.open(self._state.dem_path)
+            with rasterio.open(self._state.dem_path) as src:
+                band = src.read(1)
+                t, nodata = src.transform, src.nodata
         except Exception:
             return None
 
-        band = src.read(1)
-        t, nodata = src.transform, src.nodata
         rows, cols = band.shape
-        src.close()
 
         def _at(x, y):
             col = int((x - t.c) / t.a)
@@ -5176,6 +5201,32 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         self._state.edits_since_verify = 0
         self._state.verified_delta_pct = v.delta_pct if v is not None else None
         self._update_verified_chip()
+
+        self._measure_deferred_dams()
+
+    def _measure_deferred_dams(self):
+        """Flood any dam whose capacity was deferred because the burn held the burner.
+
+        `_compute_dam_capacity` returns the cached figure while `design_worker` is
+        running, and a dam drawn *during* the run has no cache — it sits at 0. The
+        burn's own completion handler does not measure dams, so without this nothing
+        ever would: the feature would keep a 0 m³ capacity and a "% full" bar reading
+        full, for the rest of the session.
+
+        The retry is bounded by construction — a dam that measures successfully is no
+        longer at 0, and one that fails gets exactly one more flood per Re-analyse
+        rather than a loop.
+        """
+        deferred = [ew for ew in self._state.earthwork_manager.get_all()
+                    if ew.type == "dam"
+                    and not getattr(ew, "capacity_m3", None)
+                    and getattr(ew, "crest_elevation", None) is not None]
+        if not deferred:
+            return
+        for ew in deferred:
+            ew.capacity_m3 = self._compute_dam_capacity(ew)
+            ew.capacity_l = ew.capacity_m3 * 1000.0
+        self._recompute_live_assessment()
 
     def verification_sentence(self, v):
         """Explain the verification delta in words.

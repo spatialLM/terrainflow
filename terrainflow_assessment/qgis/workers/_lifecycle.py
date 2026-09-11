@@ -54,7 +54,11 @@ class WorkerAborted(Exception):
 #: Every slot on ``PluginState`` that can hold a live QThread. A worker missing
 #: from here is one ``unload`` will not wait for, which is how a thread outlives
 #: the plugin and QGIS aborts on "Destroyed while thread is still running".
-WORKER_SLOTS = ("analysis_worker", "sim_worker", "contour_worker", "design_worker")
+#: ``tests/test_architecture.py`` asserts this tuple against every ``PluginState``
+#: field ending ``_worker``, because ``terrain_worker`` was missing from here for
+#: as long as it had existed and nothing said so.
+WORKER_SLOTS = ("analysis_worker", "sim_worker", "contour_worker", "design_worker",
+                "terrain_worker")
 
 
 def join_workers(state, timeout_ms=10_000):

@@ -184,3 +184,94 @@ def check_unload_does_not_abandon_a_running_task(dem_path):
             h.plugin.unload = lambda: None      # the context manager unloads again
     _pump(0.3)
     assert worker is not None and not worker.isRunning()
+
+
+def check_join_workers_waits_for_the_terrain_worker(dem_path):
+    """A fifth slot existed that `unload` never looked at.
+
+    `terrain_worker` is declared on `PluginState` and assigned a live `TaskWorker`
+    by `terrain.py`, but it was absent from `WORKER_SLOTS` — so a reload during
+    "Compute Terrain Indices" got an empty straggler list, `unload` rmtree'd
+    `output_dir` under a thread mid-write, and the QThread lost its last
+    reference. Deliberately its own check rather than a line in the one above: a
+    slot nothing joins is invisible in a test that only walks the slots.
+    """
+    from terrainflow_assessment.qgis.workers._lifecycle import WORKER_SLOTS, join_workers
+
+    assert "terrain_worker" in WORKER_SLOTS, (
+        f"the terrain indices thread is not joined on unload: {WORKER_SLOTS}")
+
+    with harness(dem_path) as h:
+        with gated_task(h.state, slot="terrain_worker") as worker:
+            stragglers = join_workers(h.state, timeout_ms=JOIN_MS)
+            assert not stragglers, f"the terrain task would not stop: {stragglers}"
+            assert not worker.isRunning(), "join_workers returned with it still live"
+            assert h.state.terrain_worker is None, "the slot was not cleared"
+
+
+def check_a_dam_capacity_defers_while_the_burn_holds_the_burner(dem_path):
+    """The fourth flood over `state.burner`, and the one that had no guard.
+
+    `_compute_dam_capacity` is reached from `_on_geometry_drawn` and
+    `_on_vertex_edit_finished`, so drawing or reshaping a dam during "Re-analyse
+    with Earthworks" ran `dam_storage` on the GUI thread against the burner the
+    burn worker was using. Two silent consequences, and this pins both ends of
+    the second: `dam_storage` opens with `self.warnings = []`, discarding the
+    honesty warnings the worker had accumulated for `_on_burn_complete` to push;
+    and the same call's `_isolated_burn` snapshot/restore puts back a
+    `burned_masks` taken mid-population, so features burned after it lose their
+    mask and `_compute_verification` falls through to the re-derived footprint.
+    The mask half is a genuine race and cannot be timed deterministically — but
+    it needs the call to happen at all, which the cached-return assertion denies.
+    """
+    from _harness import line_across_valley
+
+    with harness(dem_path) as h:
+        controller = h.plugin._earthworks
+        dam = h.add_earthwork("dam", geometry=line_across_valley(row=86))
+        dam.crest_elevation = controller._default_crest_elevation(dam.geometry)
+        assert dam.crest_elevation is not None, (
+            "no crest was derived, so the guard under test is never reached")
+        dam.capacity_m3 = 1234.0
+
+        burner = h.state.burner
+        assert burner is not None, "no burner on state — nothing for the two to contend for"
+        worker_warning = "a sub-cell advisory the burn worker already raised"
+        burner.warnings = [worker_warning]
+
+        with gated_task(h.state, slot="design_worker"):
+            got = controller._compute_dam_capacity(dam)
+
+        assert got == 1234.0, (
+            f"the dam was re-flooded over the burner the burn is using and returned "
+            f"{got}; the cached 1234.0 is what a deferred measurement must give back")
+        assert burner.warnings == [worker_warning], (
+            f"the mid-burn flood cleared the burn worker's warnings: {burner.warnings}")
+
+
+def check_a_dam_drawn_mid_burn_is_measured_when_the_run_finishes(dem_path):
+    """Deferring the flood is only half a fix if nothing ever comes back for it.
+
+    A dam drawn *during* a run has no cached capacity to return, so it defers to
+    0 — and `_on_burn_complete` does not measure dams, so without the sweep at the
+    end of `_on_earthworks_complete` the feature would keep a 0 m³ capacity and a
+    "% full" bar reading full for the rest of the session.
+    """
+    from _harness import line_across_valley
+
+    with harness(dem_path) as h:
+        controller = h.plugin._earthworks
+        dam = h.add_earthwork("dam", geometry=line_across_valley(row=86))
+        dam.crest_elevation = controller._default_crest_elevation(dam.geometry)
+        dam.capacity_m3 = 0.0
+
+        with gated_task(h.state, slot="design_worker"):
+            assert controller._compute_dam_capacity(dam) == 0.0, (
+                "a dam with no cache did not defer to 0 while the burn held the burner")
+
+        controller._measure_deferred_dams()
+        assert dam.capacity_m3 > 0.0, (
+            "the deferred dam was never re-measured once the burner was free — its "
+            "capacity stays 0 and the live readout reads full")
+        assert dam.capacity_l == dam.capacity_m3 * 1000.0, (
+            "capacity_l was not kept in step with the re-measured capacity_m3")

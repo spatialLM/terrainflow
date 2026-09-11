@@ -71,7 +71,24 @@ def _ramp_colour(i, ramp=INFLOW_RAMP_HEX):
 
 class ContourController(G.LayerTreeMixin, MapToolMixin):
     def teardown(self):
-        """Take this controller's tool off the canvas. Nothing else to undo."""
+        """Take this controller's tool off the canvas, and undo the one connection
+        it makes to an object that outlives it.
+
+        The Candidate Contour Swales layer belongs to ``QgsProject``, not to the
+        plugin, so `_connect_contour_selection`'s `selectionChanged` connection
+        survives unload. Reload, then select a contour with QGIS's own selection
+        tool, and the slot runs on a dead controller and touches a deleted panel —
+        inside a Qt slot, so the process aborts. Exactly the class
+        `EarthworksController.teardown` and `BaselineController.teardown` exist
+        for; this one said "Nothing else to undo" and was wrong.
+        """
+        layer = resolve_layer(self._project, self._state.contour_layer_id)
+        if layer is not None:
+            try:
+                layer.selectionChanged.disconnect(self._on_contour_layer_selection)
+            except (TypeError, RuntimeError):
+                # Never connected, or the C++ layer is already gone.
+                pass
         self.release_tool()
 
     def __init__(self, state, panel, project, iface, canvas):
