@@ -1384,10 +1384,13 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
         max_grade_n = self._panel.keyline_max_grade_n
         spacing_m = self._panel.keyline_spacing_m
         max_valleys = self._panel.keyline_max_valleys
+        # Only used when no baseline has been run, so there is no accumulation raster to
+        # inherit a routing scheme from — see `_ensure_flow_data`. KPA-53.
+        routing = self._panel.routing
 
         def work(report):
             report(10, "Finding primary valleys…")
-            ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path)
+            ya = YeomansKeylineAnalysis(dem_path, acc_path=acc_path, routing=routing)
 
             # One keypoint per PRIMARY valley — a Strahler order-1 link, which is what
             # Yeomans means by a primary valley. The single largest stream is the trunk

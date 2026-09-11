@@ -1408,6 +1408,11 @@ carries instructions to invert it when the fix lands.
 
 ### §8.3 `KPA-53` — the routing setting never reaches the keyline tier
 
+> **CLOSED — see §9.3**, and not by the route this entry implies. The fix is not to thread
+> the panel's routing down a second path: the accumulation raster `contour.py` already
+> hands over came from `FlowAnalysis.run(routing=panel.routing)`, so honouring it (which is
+> `KPA-48`) carries the routing choice in the data. Both rows close on one change.
+
 | Id | Sev | Dir | Where | Claim | Verdict | Conf |
 |---|---|---|---|---|---|---|
 | `KPA-53` | M | i-d | `keypoint_analysis.py:1173` | `_ensure_flow_data` hard-codes `routing="dinf"`, takes no routing argument, and `find_keypoints` has no parameter to pass one. A user who selects D8 gets D-infinity under every keypoint and keyline regardless | WRONG | H |
@@ -1762,3 +1767,67 @@ pure suite is now passing *while declared to be failing*.
 Collection moved 2,896 → 2,897, which is one test appearing rather than a miscount —
 `test_architecture.py::test_tooltip_copy_lives_in_help_text` is parametrized over the files
 in `modules/`, so `pysheds_compat.py` added a case. It passes.
+
+### §9.3 `KPA-48` and `KPA-53` — the keyline tier uses the field it was handed
+
+**Both closed by one change**, and they turned out to be one defect seen from two sides.
+
+`_ensure_flow_data`'s gate was `if self._fdir_path and self._acc_path:` — an `and` over two
+paths when `contour.py:1390` supplies exactly one (`acc_path=acc_path`, from
+`self._state.baseline_result["flow_accumulation"]`). The gate therefore never opened, the
+supplied raster was discarded, and the tier recomputed its own field from the DEM with
+`routing="dinf"` written as a literal.
+
+That literal is what §8.3 filed as `KPA-53`. The fix is **not** to thread the panel's
+routing setting down a second path: the raster already handed over came from
+`FlowAnalysis.run(routing=panel.routing)`, so **honouring it carries the user's routing
+choice in the data**. `KPA-53` closes as a consequence of `KPA-48`, not beside it.
+
+**The gate now keys on accumulation alone**, because accumulation is the only half anybody
+reads. `_ensure_flow_data` returns `(fdir_arr, acc_arr)`; `find_keypoint` passes `fdir_arr`
+straight into `_trace_thalweg`, which takes it as a parameter and **never touches it** —
+that walk goes by elevation and accumulation deliberately, to avoid the non-monotone
+accumulation artefacts D-infinity produces on flat ground (its own docstring says so). So
+`fdir_arr` may now come back `None`, and the docstring says that too. The cache test had
+the same `and` and was fixed with it.
+
+A `routing` parameter is added to `__init__` for the one case with nothing to inherit — a
+user who presses Keyline before Baseline — and `contour.py` passes `self._panel.routing`
+into it.
+
+**Measured on the fixture**, reproducing `KPA-48`'s own table and extending it:
+
+| | supplied (what production does) | recomputed (the old behaviour) |
+|---|---|---|
+| time to obtain flow data | **0.0196 s** | 0.5000 s |
+| uses the raster it was handed | **yes — 0 cells differ** | no |
+| valleys refused | **122** | 126 |
+| keypoints found | 1 | 1 |
+
+**25.5x faster, and a different answer.** The two fields differ on **510 cells**, by up to
+**65,086** accumulation units — the supplied one is crest-split and the recompute is not,
+so the keyline was the only tool in the plugin drawing on a pond-uncorrected accumulation.
+Four valleys that the recompute refuses are not refused on the corrected field.
+
+**One figure in `KPA-48` is sharpened rather than confirmed.** Its §2 entry reads *"the
+recomputed field differs from the supplied one by up to 65,086 cells"*, which reads as a
+count of cells. It is a magnitude: **510 cells differ**, by up to 65,086 accumulation units.
+Both numbers are now recorded so neither can be quoted as the other.
+
+**Pinning, and a claim this fix made false.**
+`check_keyline_network_numbers_have_not_moved` described itself as running *"the production
+path"*. After this fix production takes the other branch, so that sentence had to go rather
+than be left to mislead — it now says it pins the **no-baseline** branch, which still
+matters because a user can press Keyline before Baseline and get exactly that.
+
+`check_keyline_network_with_a_baseline_has_not_moved` pins what users actually get, with
+`EXPECTED_KEYLINE_WITH_BASELINE` = 1 keypoint, 122 skipped, 123 links accounted for. Its
+load-bearing assertion is **zero cells differing from the supplied raster**: a count that
+drifts is ambiguous, but a reopened gate cannot produce a zero there. Wall time is
+deliberately *not* asserted — the 25x speed-up is the reason for the fix, but a timing
+assertion on a shared machine is a flake generator, and the zero-differing-cells test
+catches the same regression deterministically.
+
+`EXPECTED_KEYLINE` itself does **not** move: that check constructs the analysis without
+`acc_path`, so it takes the branch this change leaves alone. Verified, not assumed — 10
+checks pass in `checks_fixture_regression` and every recorded integer in it is unchanged.

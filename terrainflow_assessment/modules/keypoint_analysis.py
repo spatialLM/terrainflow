@@ -626,7 +626,7 @@ class YeomansKeylineAnalysis:
         together with the flow direction.
     """
 
-    def __init__(self, dem_path, fdir_path=None, acc_path=None):
+    def __init__(self, dem_path, fdir_path=None, acc_path=None, routing="dinf"):
         with rasterio.open(dem_path) as src:
             self.dem = src.read(1).astype("float32")
             self.transform = src.transform
@@ -641,6 +641,9 @@ class YeomansKeylineAnalysis:
         self._dem_path = dem_path
         self._fdir_path = fdir_path
         self._acc_path = acc_path
+        # Only consulted when no accumulation is supplied — see `_ensure_flow_data`.
+        # When one is, its routing is already baked into the raster and this is ignored.
+        self._routing = routing
         self._fdir_arr = None
         self._acc_arr = None
 
@@ -1123,8 +1126,30 @@ class YeomansKeylineAnalysis:
         return float(x), float(y)
 
     def _ensure_flow_data(self):
-        """Return (fdir_arr, acc_arr), computing them if not yet available."""
-        if self._fdir_arr is not None and self._acc_arr is not None:
+        """Return ``(fdir_arr, acc_arr)``, reading or computing them as needed.
+
+        **Accumulation is the cache key, and the gate, because it is the only half
+        anybody reads.** ``fdir_arr`` is returned and threaded through
+        :meth:`find_keypoint` into :meth:`_trace_thalweg`, which takes it as a parameter
+        and never touches it — that walk goes by elevation and accumulation on purpose
+        (see its docstring). So a supplied accumulation is enough to answer with, and
+        ``fdir_arr`` may legitimately come back ``None``. Anything that starts reading it
+        must check for that and for ``dinf_routing`` before treating it as D8 codes.
+
+        Both the gate and the cache test used to be ``and`` over the two, which is
+        `KPA-48`: ``contour.py`` supplies ``acc_path`` alone, so the gate never opened and
+        every keyline press paid **0.48 s** to recompute a field it had been handed
+        (0.022 s to read) — and got a *different* one, differing by up to 65,086 cells,
+        because the supplied field is crest-split and the recompute is not. The keyline
+        was the only tool in the plugin drawing on a pond-uncorrected accumulation.
+
+        Honouring the supplied field closes `KPA-53` with it: that raster came from
+        ``FlowAnalysis.run(routing=panel.routing)``, so the user's routing choice now
+        reaches the keyline tier by carrying it in the data rather than by threading a
+        second copy of the setting down. ``routing`` below is only for the no-baseline
+        case, where there is nothing to inherit.
+        """
+        if self._acc_arr is not None:
             return self._fdir_arr, self._acc_arr
 
         import os
@@ -1134,13 +1159,14 @@ class YeomansKeylineAnalysis:
 
         from terrainflow_assessment.modules.flow_analysis import resolve_flats_safely
 
-        if self._fdir_path and self._acc_path:
+        if self._acc_path:
             # float32, not int32: a supplied raster may be dinf radians as easily as
             # D8 codes, and truncating the former loses the direction entirely.
-            with rasterio.open(self._fdir_path) as src:
-                self._fdir_arr = src.read(1).astype("float32")
             with rasterio.open(self._acc_path) as src:
                 self._acc_arr = src.read(1).astype("float32")
+            if self._fdir_path:
+                with rasterio.open(self._fdir_path) as src:
+                    self._fdir_arr = src.read(1).astype("float32")
             return self._fdir_arr, self._acc_arr
 
         # Compute from DEM
@@ -1170,8 +1196,12 @@ class YeomansKeylineAnalysis:
             # lower. See ``flow_analysis.safe_flat_epsilon``.
             inflated, _eps, _inv = resolve_flats_safely(grid, filled)
             try:
-                fdir = grid.flowdir(inflated, routing="dinf")
-                _routing = "dinf"
+                # `self._routing`, not a literal "dinf". This branch only runs when no
+                # accumulation was supplied — no baseline, nothing to inherit — and a
+                # user who chose D8 should not silently get D-infinity here either.
+                # That literal was half of `KPA-53`.
+                fdir = grid.flowdir(inflated, routing=self._routing)
+                _routing = self._routing
             except TypeError:
                 fdir = grid.flowdir(inflated)
                 _routing = None

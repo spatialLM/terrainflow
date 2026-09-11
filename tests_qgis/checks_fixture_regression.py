@@ -338,7 +338,15 @@ def _arc_length_m(link, cell_size):
 
 
 def check_keyline_network_numbers_have_not_moved(dem_path):
-    """The keyline network on real terrain, as integers, on the production path.
+    """The keyline network on real terrain, as integers, with no baseline to inherit.
+
+    **This pins the no-baseline branch**, which is what it has always pinned and is no
+    longer the whole story. Since `KPA-48`/`KPA-53` were fixed, a keyline press *after a
+    baseline* hands `_ensure_flow_data` the baseline's crest-split accumulation and gets a
+    different, better answer — 122 valleys refused rather than 126, in 0.02 s rather than
+    0.50 s. That branch is pinned by `check_keyline_network_with_a_baseline_has_not_moved`
+    below. This one still matters: a user can press Keyline before Baseline, and then this
+    is exactly what they get.
 
     `check_fixture_numbers_have_not_moved` asks whether the *sizing* answers still hold.
     This asks the same question of the **keyline network** — how many primary valleys the
@@ -436,6 +444,128 @@ def check_keyline_network_numbers_have_not_moved(dem_path):
         + "\n    These pin CURRENT, PARTLY BROKEN behaviour — see "
           "CLudeDocs/ANALYSIS_DEFECTS.md. A fix is expected to move them; re-record "
           "EXPECTED_KEYLINE in the same commit, and say which finding moved it."
+    )
+
+
+#: The same network, reached the way a user reaches it: Baseline, then Keyline. Recorded
+#: 2026-09-11 against the fixture, after `KPA-48`/`KPA-53` were fixed. These differ from
+#: `EXPECTED_KEYLINE` above because the supplied field is **crest-split** and the
+#: recompute is not — that difference is the whole of `KPA-48`.
+EXPECTED_KEYLINE_WITH_BASELINE = {
+    "keypoints": 1,
+    "skipped": 122,
+    "links_accounted_for": 123,
+    # The supplied raster must be used *as supplied*. A single differing cell means the
+    # gate has closed again and the tier is back on its own recompute.
+    "cells_differing_from_the_supplied_raster": 0,
+}
+
+
+def check_keyline_network_with_a_baseline_has_not_moved(dem_path):
+    """Keyline after Baseline — the sequence a user actually performs.
+
+    `contour.py:1390` hands `YeomansKeylineAnalysis` the baseline's accumulation raster.
+    Until `KPA-48` was fixed the gate in `_ensure_flow_data` required *both* a flow-
+    direction path and an accumulation path, so that argument was inert: every keyline
+    press threw the supplied field away and spent 0.48 s recomputing a different one,
+    uncorrected for ponds. This pins the corrected behaviour.
+
+    Three things are asserted and each fails differently:
+
+    1. **The supplied raster is used as supplied** — zero differing cells. This is the
+       direct regression guard on the gate. If someone restores the `and`, this is the
+       assertion that says so, rather than a count drifting for no visible reason.
+    2. **The counts.** 122 refused rather than the no-baseline branch's 126: the
+       crest-split field yields a slightly different channel network, which is the point
+       of using it.
+    3. **`keypoints + skipped == links`** on this branch too, so `KPA-43`'s accounting
+       identity is checked against the field production actually uses.
+
+    Not asserted: wall time. The measured speed-up is 25x (0.0196 s against 0.5000 s) and
+    it is the *reason* for the fix, but a timing assertion on a shared machine is a
+    flake generator. The zero-differing-cells assertion catches the same regression
+    deterministically — a reopened gate cannot pass it.
+    """
+    import numpy as np
+    import rasterio
+
+    from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+    from terrainflow_assessment.modules.flow_graph import (
+        d8_from_dem,
+        strahler_order,
+        stream_links,
+    )
+    from terrainflow_assessment.modules.keypoint_analysis import YeomansKeylineAnalysis
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="tfa_keyline_baseline_") as tmp:
+        import os as _os
+
+        # Crest-split, as production's baseline is — that is what makes the supplied
+        # field differ from a plain recompute.
+        fa = FlowAnalysis()
+        fa.load_dem(FIXTURE_DEM)
+        fa.run(routing="dinf")
+        acc_path = _os.path.join(tmp, "baseline_acc.tif")
+        fa.save_result(fa.acc, acc_path, nodata=np.nan)
+
+        ya = YeomansKeylineAnalysis(FIXTURE_DEM, acc_path=acc_path)
+        _fdir, acc_arr = ya._ensure_flow_data()
+
+        with rasterio.open(acc_path) as src:
+            on_disk = src.read(1).astype("float64")
+        used = np.asarray(acc_arr, dtype="float64")
+        both = np.isfinite(used) & np.isfinite(on_disk)
+        differing = int((used[both] != on_disk[both]).sum())
+
+        # The link population the supplied field implies, built exactly as
+        # `find_keypoints` builds it.
+        threshold = max(20, int(round(2_000.0 / (ya.cell_w * ya.cell_h))))
+        stream = (acc_arr >= threshold) & np.isfinite(ya.dem)
+        next_flat, _sink = d8_from_dem(ya.dem, ya.cell_w, ya.cell_h)
+        order = strahler_order(next_flat, stream.ravel())
+        links = stream_links(next_flat, stream.ravel(), order, ya.dem.shape[1],
+                             max_order=1)
+
+        keypoints, skipped = ya.find_keypoints(max_valleys=8)
+
+    observed = {
+        "keypoints": len(keypoints),
+        "skipped": len(skipped),
+        "links_accounted_for": len(keypoints) + len(skipped),
+        "cells_differing_from_the_supplied_raster": differing,
+    }
+
+    print("\n    --- keyline after baseline (the supplied field) ---")
+    failures = []
+    for key, expected in EXPECTED_KEYLINE_WITH_BASELINE.items():
+        actual = observed[key]
+        print(f"    {'ok ' if actual == expected else 'MOVED'} {key:44s} "
+              f"{actual!s:>6}  (recorded {expected})")
+        if actual != expected:
+            failures.append(f"{key}: {actual} against a recorded {expected}")
+
+    assert differing == 0, (
+        f"{differing:,} cells of the accumulation raster handed to "
+        "YeomansKeylineAnalysis were not the ones it used.\n"
+        "    `acc_path` is being ignored again — check the gate in "
+        "`_ensure_flow_data`, which must key on accumulation alone.\n"
+        "    That gate was an `and` over two paths and the controller supplies one, "
+        "which is KPA-48."
+    )
+    if observed["links_accounted_for"] != len(links):
+        failures.append(
+            f"keypoints + skipped = {observed['links_accounted_for']} against "
+            f"{len(links)} order-1 links (KPA-43's identity, on the supplied field)")
+
+    assert not failures, (
+        "the keyline network moved on the branch production actually takes:\n      "
+        + "\n      ".join(failures)
+        + "\n    These are pinned separately from EXPECTED_KEYLINE because the supplied "
+          "field is crest-split and a recompute is not.\n    Re-record "
+          "EXPECTED_KEYLINE_WITH_BASELINE in the same commit that moves them, and say "
+          "which finding did it."
     )
 
 
