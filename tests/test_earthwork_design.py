@@ -390,12 +390,40 @@ class TestCalculateCutVolume:
 # ---------------------------------------------------------------------------
 
 class TestCalculateFillVolume:
-    def test_berm_fill(self):
+    def test_berm_fill_is_the_trapezoid_the_burn_builds(self):
+        """A trapezoid: ``width`` on top, batters at the registry's 1:1.
+
+        This asserted ``depth²`` — a fixed 1:1 triangle that ignored ``width``
+        altogether, 0.25 m³/m at the registry defaults, while `_burn_berm` placed a
+        ``width × depth`` prism of 1.00. The report's "Fill — soil placed" column
+        described a quarter of the bank that was actually being built.
+        """
         geom = make_mock_line_geom()
         geom.length.return_value = 100.0
-        # cross_section = depth^2 = 0.5^2 = 0.25, vol = 0.25*100 = 25
+        # base = 2.0 + 2 * (0.5 * 1.0) = 3.0; area = (3.0 + 2.0)/2 * 0.5 = 1.25
         fill = calculate_fill_volume("berm", geom, 0.5, 2.0)
-        assert fill == pytest.approx(25.0, rel=1e-3)
+        assert fill == pytest.approx(125.0, rel=1e-3)
+
+    def test_the_berm_batter_is_the_registry_value_and_is_live(self):
+        """``default_side_slope`` on the berm entry was inert; it is the batter now.
+
+        Asserted against the registry rather than against 1.0, so moving the shipped
+        value moves the price with it — which is the point of the field being live.
+        """
+        from terrainflow_assessment.core.registry.earthwork_types import get_type
+        from terrainflow_assessment.modules.earthwork_design import berm_batter_run
+
+        shipped = get_type("berm").default_side_slope
+        assert berm_batter_run(0.5) == pytest.approx(0.5 * shipped)
+
+        geom = make_mock_line_geom()
+        geom.length.return_value = 100.0
+        # An explicit batter overrides it at both ends — vertical sides collapse the
+        # trapezoid back to the prism the burn used to build unconditionally.
+        assert calculate_fill_volume("berm", geom, 0.5, 2.0,
+                                     side_slope=0.0) == pytest.approx(100.0, rel=1e-3)
+        assert calculate_fill_volume("berm", geom, 0.5, 2.0,
+                                     side_slope=2.0) == pytest.approx(150.0, rel=1e-3)
 
     def test_swale_no_berm_zero_fill(self):
         fill = calculate_fill_volume("swale", make_mock_line_geom(), 0.5, 2.0, False)

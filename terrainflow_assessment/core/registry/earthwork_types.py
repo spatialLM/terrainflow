@@ -153,6 +153,16 @@ _add(EarthworkTypeConfig(
         "Raised ridge that blocks or redirects surface flow\n"
         "(no storage of its own)."
     ),
+    # **The berm's batter, and live.** `derived_dims=()` and the panel exposes only
+    # depth and top width, so a berm carries no side slope of its own — this is the
+    # one. `earthwork_design.berm_batter_run` reads it, and both the price
+    # (`calculate_fill_volume`) and the build (`DEMBurner._burn_berm`) go through
+    # that, so moving this number moves the drawn section and the burned bank
+    # together. It used to be inert: the formula assumed a fixed 1:1 triangle and
+    # the burn placed a vertical prism, and they disagreed by 4x.
+    #
+    # `default_top_width` is therefore the **crest**; the base is
+    # `top_width + 2 * depth * side_slope`.
     default_side_slope=1.0,
     default_depth=0.5,
     depth_range=(0.1, 2.0),

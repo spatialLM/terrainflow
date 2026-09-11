@@ -1627,6 +1627,38 @@ def channel_batter_run(ew):
     return (top - bottom) / 2.0
 
 
+def berm_batter_run(depth, side_slope=None):
+    """Horizontal run of a berm's batter, in metres — one derivation, two users.
+
+    ``calculate_fill_volume`` prices a berm and ``DEMBurner._burn_berm`` builds it,
+    and the two must describe the same section or the drawn and measured fill
+    disagree by construction. They did: the formula assumed a 1:1 triangle
+    (``depth²``, ignoring ``width`` entirely) while the burn placed a vertical
+    ``width × depth`` prism — 0.25 against 1.00 m³/m at the registry defaults, so a
+    plain berm on flat ground was drawn at a quarter of what the burn put there.
+    Both now ask this.
+
+    *side_slope* is the batter as an H:V run-per-rise. ``None`` means the registry's
+    shipped ``default_side_slope`` for a berm, which is the live answer today and is
+    now documented on that entry as the batter rather than as an inert field.
+
+    ``Earthwork.side_slope`` is deliberately **not** consulted. Its own docstring
+    says "channel side slope … derived from the stored widths", and a berm is not a
+    channel: its registry entry declares ``derived_dims=()``, the panel exposes only
+    depth and top width, and ``bottom_width_m`` is left at whatever ``__init__``
+    seeded. That seed drifts with depth — raise a default berm from 0.5 m to 1.0 m
+    and the derived slope silently halves to 0.5 — so reading it here would make the
+    batter a function of a field nothing sets. A berm that one day carries a real
+    batter control passes it in at both call sites.
+    """
+    if side_slope is None:
+        try:
+            side_slope = get_type("berm").default_side_slope
+        except KeyError:
+            side_slope = 1.0
+    return max(0.0, float(side_slope)) * max(0.0, float(depth))
+
+
 def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
                        bottom_width=None, batter_run=None):
     """
@@ -1891,25 +1923,35 @@ def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None):
 
 
 def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False,
-                          bottom_width=None):
+                          bottom_width=None, side_slope=None):
     """
     Calculate the volume of material placed (fill) by an earthwork.
 
-    Berm — triangular cross-section (1:1 slopes) × length.
+    Berm — trapezoidal cross-section (``width`` on top, batters at the berm's side
+    slope) × length.
     Swale + companion berm — companion berm fill (from volume conservation).
     Dam — wall footprint × depth (approximate).
     Others — 0.
 
     ``bottom_width`` — swale trapezoid bottom width (m) for the companion-berm branch;
     ``None`` derives it from 1:1 side slopes (historical behaviour).
+    ``side_slope`` — the berm's batter as H:V run-per-rise; ``None`` takes the
+    registry's shipped value. See :func:`berm_batter_run`.
 
     Returns fill volume in m³.
     """
     if ew_type == "berm":
-        # TODO(feature-list): honour the stored side slope for a battered berm; currently
-        # a fixed 1:1 triangle (base=2*depth, height=depth → area=depth²).
+        # A trapezoid: ``width`` on top, batters falling away at the berm's side
+        # slope, so the base is ``width + 2·depth·slope``. This read ``depth²`` — a
+        # fixed 1:1 triangle that ignored ``width`` altogether — while `_burn_berm`
+        # placed a vertical ``width × depth`` prism. At the registry defaults
+        # (0.5 m deep, 2.0 m wide) that is 0.25 m³/m drawn against 1.00 m³/m built,
+        # so the report's "Fill — soil placed" column described a quarter of the
+        # bank on flat ground. Both sides now build the same section; the run comes
+        # from one place so they cannot drift apart again.
         length = shapely_length(geometry)
-        cross_section = depth * depth
+        base = width + 2.0 * berm_batter_run(depth, side_slope)
+        cross_section = trapezoid_section(base, width, depth).area
         return round(cross_section * length, 2)
 
     if ew_type == "swale" and companion_berm:
@@ -2958,12 +3000,28 @@ class DEMBurner:
         # claims every cell the band so much as brushes — a near-constant ~1.3 m wider
         # than drawn (:meth:`_rasterize`) — and every one of those cells was then given
         # the full height, so a berm drawn at 1.0 m³/m of fill placed about 1.65.
-        footprint = line.buffer(ew.width / 2)
+        #
+        # **A trapezoid, not a prism.** `width` is the crest and the batters fall
+        # away outside it, so the footprint is `width + 2·run` wide and each cell
+        # takes its own fraction of the height — the same `taper_reach` primitive
+        # `_burn_diversion` uses, inverted from a cut to a fill. The run comes from
+        # `berm_batter_run` because `calculate_fill_volume` asks the same function:
+        # a berm priced as one section and built as another is exactly the defect
+        # this pair removes. The raised footprint is therefore `2·run` wider than
+        # the drawn crest, and `_record_raised` records the wider band, so the crest
+        # set the overtopping check walks widens with it.
+        run = berm_batter_run(ew.depth)
+        footprint = line.buffer(ew.width / 2.0 + run)
         mask = self._rasterize(footprint, all_touched=False)
         dem = dem.copy()
         raised = mask.copy()
         if mask.any():
-            dem[mask] += ew.depth
+            # None when the run resolves to nothing on this grid — the batter is
+            # narrower than the taper can express, so the band is built flat. That
+            # is a resolution effect and is stated, not hidden: see the burn's own
+            # sub-cell warnings for the same discipline on the cut side.
+            reach = taper_reach(mask, run, (self.cell_h, self.cell_size))
+            dem[mask] += ew.depth if reach is None else ew.depth * reach[mask]
         # Always, not only when the band claimed nothing, for the reason
         # :meth:`_burn_dam` gives: this is the seal as well as the sub-cell fallback,
         # and a barrier with a corner-only join in it is not a barrier. Centre-based

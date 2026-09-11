@@ -1091,12 +1091,21 @@ class TestVolumetricBurnsClaimTheWidthTheyWereDrawn:
             f"{section:.2f} m2 per metre against a drawn {want:.2f} m2")
 
     def test_a_berm_raises_the_band_it_was_drawn_as(self, tmp_path):
+        """The berm's footprint is its **base**, not its crest: ``width`` on top
+        with batters falling away at the registry slope, so 2.0 m wide and 0.5 m
+        deep at 1:1 covers 3.0 m of ground. Three cells is that base; four is the
+        `all_touched` claim on top of it."""
+        from terrainflow_assessment.modules.earthwork_design import berm_batter_run
+
         b, burned, _ = self._burn(tmp_path, "berm", depth=0.5, width=2.0)
+        base = 2.0 + 2 * berm_batter_run(0.5)
+        assert base == pytest.approx(3.0), "the fixture's base is not 3 whole cells"
+
         rise = burned[:, 25] - b.original[:, 25]
         rows = np.nonzero(rise > 1e-9)[0]
-        assert len(rows) == 2, (
-            f"a 2.0 m berm on 1 m cells raised {len(rows)} cells across, not 2 — "
-            f"so it placed half again the fill it was drawn to place")
+        assert len(rows) == 3, (
+            f"a 3.0 m base on 1 m cells raised {len(rows)} cells across, not 3 — "
+            f"so the berm placed a third again the fill it was drawn to place")
 
     def test_the_centreline_seal_does_not_raise_a_cell_twice(self, tmp_path):
         """The seal now runs on every alignment, not only a sub-cell one: centre-based
@@ -1129,3 +1138,87 @@ class TestVolumetricBurnsClaimTheWidthTheyWereDrawn:
                                                        [1, 1, 1],
                                                        [0, 1, 0]]))
         assert n == 1, f"the berm burned as {n} disconnected pieces"
+
+
+class TestTheBermIsBuiltAsTheSectionItIsPricedAs:
+    """`calculate_fill_volume` assumed a 1:1 triangle (``depth²``, ignoring
+    ``width``) and `_burn_berm` placed a vertical ``width × depth`` prism — 0.25
+    against 1.00 m³/m at the registry defaults. Both now build the trapezoid the
+    registry specifies: ``width`` on top, batters at ``default_side_slope``, base
+    ``width + 2·depth·slope``.
+
+    Measured on a transect across the middle, away from the buffer's rounded ends.
+    The site total also carries those caps — ~7% on the fixture below — which is a
+    property of a buffered line, not of the cross-section.
+    """
+
+    @staticmethod
+    def _burn(tmp_path, depth, width, y=30.2, length=40.0):
+        data = np.full((80, 80), 50.0)
+        b = DEMBurner(_write_dem(str(tmp_path / "d.tif"), data))
+        geom = make_mock_line_geom([(15.0, y), (15.0 + length, y)])
+        geom.length.return_value = length
+        ew = _mock_ew("berm", geom, depth=depth, width=width)
+        return b, b.burn_earthworks([ew]), ew, geom, length
+
+    @staticmethod
+    def _transect(burner, burned, col=35):
+        rise = burned[:, col] - burner.original[:, col]
+        rows = np.nonzero(rise > 1e-9)[0]
+        return rows, float(rise[rows].sum()) * burner.cell_size
+
+    def test_the_burn_and_the_formula_agree_on_the_section(self, tmp_path):
+        """The register's case: 1 m cells, depth 1.0, width 2.0, slope 1:1.
+
+        The run is then one whole cell, which is the condition `taper_reach`'s own
+        docstring gives for its quadrature being exact — base 4.0, area 3.0 m³/m.
+        """
+        from terrainflow_assessment.core.sizing import trapezoid_section
+        from terrainflow_assessment.modules.earthwork_design import (
+            berm_batter_run,
+            calculate_fill_volume,
+        )
+
+        b, burned, _ew, geom, length = self._burn(tmp_path, depth=1.0, width=2.0)
+        run = berm_batter_run(1.0)
+        assert run == pytest.approx(1.0), "the fixture is not on a whole-cell run"
+
+        want = trapezoid_section(2.0 + 2 * run, 2.0, 1.0).area
+        assert want == pytest.approx(3.0)
+
+        rows, built = self._transect(b, burned)
+        assert len(rows) == 4, f"a 4.0 m base on 1 m cells covered {len(rows)} cells"
+        assert built == pytest.approx(want, rel=0.02), (
+            f"the burn placed {built:.3f} m3/m against a drawn {want:.3f}")
+        assert calculate_fill_volume("berm", geom, 1.0, 2.0) == pytest.approx(
+            want * length, rel=0.02)
+
+    def test_the_crest_is_the_drawn_width_and_the_batters_fall_away(self, tmp_path):
+        """The shape, not just the volume: full height across ``width``, tapering
+        outside it. A bank of the right volume and the wrong height blocks the
+        wrong storm."""
+        b, burned, _ew, _geom, _length = self._burn(tmp_path, depth=1.0, width=2.0)
+        rows, _ = self._transect(b, burned)
+        rise = (burned[:, 35] - b.original[:, 35])[rows]
+        assert sorted(np.round(rise, 3).tolist()) == [0.5, 0.5, 1.0, 1.0], (
+            f"the section is {np.round(rise, 3).tolist()}, not a crest with batters")
+
+    def test_at_the_registry_defaults_a_half_cell_run_builds_flat(self, tmp_path):
+        """Recorded because it is a real figure the commit quotes, not endorsed.
+
+        The shipped berm is 0.5 m deep at 1:1, so on 1 m cells the run is half a
+        cell and ``taper_reach`` "leaves no taper at all" — the 3.0 m base band is
+        built at full height, 1.50 m³/m against a drawn 1.25. That is the same
+        quadrature over-read `taper_reach`'s docstring records on the cut side
+        ("always an over-cut ... not fixed here"), now reaching the fill side. It
+        is an over-build, which for a barrier is the safe direction, and it is
+        smaller than the 4x mismatch it replaces.
+        """
+        from terrainflow_assessment.core.sizing import trapezoid_section
+
+        b, burned, _ew, _geom, _length = self._burn(tmp_path, depth=0.5, width=2.0)
+        rows, built = self._transect(b, burned)
+        drawn = trapezoid_section(3.0, 2.0, 0.5).area
+        assert drawn == pytest.approx(1.25)
+        assert len(rows) == 3 and built == pytest.approx(1.5, rel=1e-3), (
+            f"the measured over-build moved: {built:.3f} m3/m over {len(rows)} cells")
