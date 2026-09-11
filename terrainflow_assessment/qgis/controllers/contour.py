@@ -1445,8 +1445,14 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         guides = [r for r in runs if r["line_type"] != "keyline"]
         flagged = [r for r in guides if r.get("over_limit")]
-        drifts = [r["drift_1_in_n"] for r in guides
-                  if r.get("drift_1_in_n") is not None]
+        # The steepest sustained fall, not the net one: a guide can start and finish at
+        # nearly the same height while running steeply in the middle, and the net figure
+        # reads 86x gentler than the ground does on this fixture (KPA-41). `over_limit`
+        # is judged on this, so the readout quotes the same thing the flag counts.
+        drifts = [r["steepest_1_in_n"] for r in guides
+                  if r.get("steepest_1_in_n") is not None]
+        window = next((r.get("steepest_window_m") for r in guides
+                       if r.get("steepest_window_m")), None)
 
         summary = (f"{len(keypoints)} primary valley(s) | "
                    f"{len(guides)} cultivation guide(s)")
@@ -1454,7 +1460,8 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             # The number nobody had ever measured. "The drift is emergent from
             # parallelism" had stood in a docstring since this feature was written;
             # this is the measurement of it.
-            summary += f" | drift 1:{min(drifts):.0f}–1:{max(drifts):.0f}"
+            summary += (f" | steepest drift 1:{min(drifts):.0f}–1:{max(drifts):.0f}"
+                        + (f" over {window:.0f} m" if window else ""))
         if flagged:
             summary += f" | {len(flagged)} steeper than the limit"
         self._panel.set_keyline_complete(summary + ".")
@@ -1555,6 +1562,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             QgsField("elevation",    QMetaType.Double),
             QgsField("offset_m",     QMetaType.Double),
             QgsField("drift_1_in_n", QMetaType.Double),
+            QgsField("steepest_1_in_n", QMetaType.Double),
             QgsField("drift_fall_m", QMetaType.Double),
             QgsField("over_limit",   QMetaType.Bool),
         ])
@@ -1570,6 +1578,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
             f.setAttributes([
                 run["line_type"], run.get("valley", 1), run["elevation"],
                 run.get("offset_m"), run.get("drift_1_in_n"),
+                run.get("steepest_1_in_n"),
                 run.get("drift_fall_m"), bool(run.get("over_limit")),
             ])
             feats.append(f)

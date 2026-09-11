@@ -951,6 +951,96 @@ class YeomansKeylineAnalysis:
 
         return results
 
+    #: Window over which a guide's drift is judged, in metres. **A TerrainFlow
+    #: convention, not a Yeomans figure** — the texts were fetched and read on
+    #: 2026-09-11 and publish no drift tolerance at all (`MATHS_AUDIT` §9.8).
+    #:
+    #: Sized rather than chosen, by the roughness sweep in
+    #: `tests_qgis/probes/p_keypoints.py`: it is the shortest window whose steepest-grade
+    #: reading stays inside `MIN_SLOPE_EASE` across synthetic correlated roughness of
+    #: 0.00 -> 0.10 m, which is the band `_box_blur`'s docstring puts real LiDAR noise in.
+    #: 10 m and 20 m read 2.18x and 2.44x `MIN_SLOPE_EASE` on the same ground and are
+    #: measuring the DEM's noise rather than the guide's drift.
+    DRIFT_WINDOW_M = 50.0
+
+    def _steepest_drift(self, coords, window_m=None):
+        """Steepest sustained fall over any *window_m* of a guide — ``(grade, 1:N)``.
+
+        **Net end-to-end fall is not drift**, which is `KPA-41`. A guide wanders up and
+        down its own length by construction, so the two ends can sit at nearly the same
+        height while the middle runs steeply: measured on the fixture, a ridge guide
+        reporting **1:544.8** and `over_limit` **False** runs **1:6.3** over its steepest
+        20 m — an 86x understatement of the thing the docstring promises to flag.
+
+        Windows are taken between vertices at least *window_m* apart along the line, so a
+        guide shorter than the window reduces to its own end-to-end fall rather than
+        returning nothing.
+
+        **A vertex is "real ground" only if its own cell is**, and that cannot be decided
+        from Z. `_sample_dem` hands back the *keypoint elevation* for any sample off the
+        grid or on a nodata cell (`KPA-42`), which is a perfectly finite number — so
+        testing `isfinite(z)` would call a fabricated vertex real and let it flatten every
+        window it falls inside, under-reading exactly the drift this is here to find. The
+        mask is therefore recomputed from the geometry against the raster, the same way
+        `_sample_dem` decided it, and a window is measured only when every vertex in it is
+        real.
+
+        Returns ``(0.0, None)`` when there is no real span to measure.
+        """
+        window_m = self.DRIFT_WINDOW_M if window_m is None else float(window_m)
+        if len(coords) < 2:
+            return 0.0, None
+
+        xs = np.array([c[0] for c in coords], dtype="float64")
+        ys = np.array([c[1] for c in coords], dtype="float64")
+        zs = np.array([c[2] if len(c) > 2 else np.nan for c in coords], dtype="float64")
+
+        rows, cols = self.dem.shape
+        real = np.zeros(len(coords), dtype=bool)
+        for i, (x, y) in enumerate(zip(xs, ys)):
+            if not np.isfinite(zs[i]):
+                continue
+            r, c = xy_to_rc(self.transform, float(x), float(y))
+            real[i] = (0 <= r < rows and 0 <= c < cols
+                       and not np.isnan(self.dem[r, c]))
+        if real.sum() < 2:
+            return 0.0, None
+
+        s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(xs), np.diff(ys)))])
+        # O(1) test for "every vertex between i and j inclusive is real ground".
+        real_prefix = np.concatenate([[0], np.cumsum(real.astype("int64"))])
+
+        best = 0.0
+        j = 0
+        for i in range(len(s)):
+            if not real[i]:
+                continue
+            while j < len(s) and s[j] - s[i] < window_m:
+                j += 1
+            if j >= len(s):
+                break
+            if not real[j]:
+                continue
+            if real_prefix[j + 1] - real_prefix[i] != (j - i + 1):
+                continue
+            run = s[j] - s[i]
+            if run <= 0:
+                continue
+            grade = abs(zs[j] - zs[i]) / run
+            if grade > best:
+                best = grade
+
+        if best == 0.0:
+            # Shorter than the window, or no all-real window in it: fall back to the
+            # widest real span there is, which for a short guide is its whole length.
+            idx = np.flatnonzero(real)
+            i, j = int(idx[0]), int(idx[-1])
+            run = s[j] - s[i]
+            if run > 0 and real_prefix[j + 1] - real_prefix[i] == (j - i + 1):
+                best = abs(zs[j] - zs[i]) / run
+
+        return best, ((1.0 / best) if best > 0 else None)
+
     def _run_record(self, geometry, mean_elev, line_type, offset_m, max_grade_n):
         """One cultivation run, with its achieved drift attached.
 
@@ -964,14 +1054,27 @@ class YeomansKeylineAnalysis:
         length = geometry.length
         grade = abs(fall) / length if length > 0 else 0.0
         one_in_n = (1.0 / grade) if grade > 0 else None
-        over = bool(max_grade_n and one_in_n is not None and one_in_n < max_grade_n)
+
+        # `over_limit` is judged on the steepest sustained fall, not the net one. The
+        # docstring promises to flag guides "whose measured drift is steeper than 1:N",
+        # and a net figure cannot keep that promise on a line that undulates — KPA-41.
+        steep_grade, steep_one_in_n = self._steepest_drift(coords)
+        over = bool(max_grade_n and steep_one_in_n is not None
+                    and steep_one_in_n < max_grade_n)
         return {
             "elevation": round(mean_elev, 2),
             "geometry": geometry,
             "line_type": line_type,
             "offset_m": round(offset_m, 2),
             "drift_fall_m": round(fall, 3),
+            # Net end-to-end, kept under its own name: it is what the map layer's
+            # attribute of that name has always carried, and it is still the right
+            # answer to "where does this guide start and finish".
             "drift_1_in_n": round(one_in_n, 1) if one_in_n is not None else None,
+            # What the limit is actually judged on.
+            "steepest_1_in_n": (round(steep_one_in_n, 1)
+                                if steep_one_in_n is not None else None),
+            "steepest_window_m": self.DRIFT_WINDOW_M,
             "over_limit": over,
         }
 

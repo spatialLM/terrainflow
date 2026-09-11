@@ -1128,7 +1128,10 @@ follows is scoped and not started.
 2. **Confirmation that an owner attestation may stand as grounds** — a new precedent,
    labelled as such in §0.3. This pass did not need it to carry a row, because the texts were
    fetched; the question is whether it may carry one in future.
-3. **The `KPA-41` window decision**, now that the 10/20/50 m table exists. The measurement
+3. ~~**The `KPA-41` window decision**~~ — **DECIDED 2026-09-11: 50 m**, and implemented;
+   see §9.6. The reasoning that produced the recommendation is kept below.
+
+   The measurement
    recommends **50 m** — the shortest window whose steepest-grade spread stays inside
    `MIN_SLOPE_EASE` across `roughness_m` 0.00 → 0.10. 10 m and 20 m are 2.18× and 2.44×
    `MIN_SLOPE_EASE` and are not defensible on noisy ground. The window is a **TerrainFlow
@@ -1916,3 +1919,68 @@ project has previously ruled must not be made quietly. The three readings are:
 Nothing here recommends one. What the campaign can say is that option 3 is the only one
 where the number of mask-leaving pointers is **zero**, and that "a primary valley" has to
 mean something specific before any of the three is defensible.
+
+### §9.6 `KPA-41` — the drift limit is judged on a 50 m window
+
+**Closed**, on the owner's decision of 2026-09-11 to adopt the measurement's recommended
+window.
+
+`drift_1_in_n` was net end-to-end fall: `(z_first - z_last) / length`. `over_limit` tested
+it against `max_grade_n`, under a docstring promising to flag *"guides whose measured drift
+is steeper than 1:N"*. A guide wanders up and down its own length by construction, so a net
+figure cannot keep that promise.
+
+`_steepest_drift` measures the steepest sustained fall over any **50 m** of the guide, and
+`over_limit` is judged on that. `drift_1_in_n` keeps its name, its value and its layer
+attribute — it is still the right answer to *"where does this guide start and finish"* —
+and `steepest_1_in_n` is the new figure the limit tests. The panel readout now quotes the
+same number it flags on, which it previously did not.
+
+**50 m is a TerrainFlow convention and is labelled as one.** The Yeomans texts were fetched
+and read (`MATHS_AUDIT` §9.8) and publish no drift tolerance at all, so there is nothing to
+cite. It was *sized* rather than chosen, by the roughness sweep in `p_keypoints.py`: it is
+the shortest window whose steepest-grade reading stays inside `MIN_SLOPE_EASE` across
+synthetic correlated roughness of 0.00 → 0.10 m, the band `_box_blur`'s docstring puts real
+LiDAR noise in. At 10 m and 20 m the reading is 2.18x and 2.44x `MIN_SLOPE_EASE` — those
+windows measure the DEM's noise, not the guide's drift.
+
+**Measured on the fixture at the panel's 1:500 default**, six guides on one keypoint:
+
+| Guide | net `1:N` | steepest over 50 m | understatement |
+|---|---|---|---|
+| valley | *none measurable* | 1:26.3 | unbounded |
+| ridge | 1:432.7 | 1:32.8 | 13.2x |
+| valley | *none measurable* | 1:22.2 | unbounded |
+| ridge | 1:586.6 | 1:20.9 | 28.1x |
+| valley | *none measurable* | 1:18.9 | unbounded |
+| ridge | 1:544.8 | **1:13.0** | **41.9x** |
+
+**1 of 6 guides was flagged; 6 of 6 are flagged now.** Median understatement 28.1x on the
+guides where a net figure existed at all.
+
+The three valley guides are worse than `KPA-41` described. Their net fall is **zero** —
+both ends at the same height — so `drift_1_in_n` was `None` and the UI reported no
+measurable drift on a guide running at 1:18.9. That is not an understatement, it is a
+blind spot: the net measure cannot see a guide that returns to its starting height however
+steeply it gets there.
+
+**That every guide now exceeds 1:500 is a result, not a bug in the new measure**, and it is
+left standing rather than tuned away. `KPA-41` only ever claimed the flag was broken. What
+the corrected flag says about this terrain — that the limit is wrong for it, or that these
+guides genuinely drift steeply — is a question for the owner and is not answered here.
+
+**A correction made during implementation, because the first version was wrong.**
+`_steepest_drift` initially took "real ground" to mean `isfinite(z)`. That is not the test:
+`_sample_dem` returns the **keypoint's own elevation** for any sample off the grid or on a
+nodata cell (`KPA-42`), which is a perfectly finite number. So fabricated vertices were
+being counted as real.
+
+The effect was the opposite of what was predicted. A fabricated vertex is not *flat* — it
+carries a constant lifted from somewhere else on the hill — so pairing one with real ground
+at a different height manufactures a fall that is not there. Excluding them made the valley
+guides read **gentler**, not steeper: 1:19.3 / 1:8.8 / 1:5.8 became 1:26.3 / 1:22.2 /
+1:18.9. The ridge guides did not move at all, so they lie entirely on-grid.
+
+The mask is now recomputed from the geometry against the raster the same way `_sample_dem`
+decides it, and a window is measured only when every vertex in it is real ground. The
+numbers in the table above are the corrected ones.
