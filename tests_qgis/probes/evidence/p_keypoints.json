@@ -12,12 +12,12 @@
   ],
   "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_catchment.tif",
   "notes": [
-    "KPA-39 on real fixture (1 m, Quail Island): 127 order-1 links at 0.20 ha; 126 refused, of which 0 were refused by the prominence test. find_keypoints reports all 126 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 126/126 times. Breakdown: 78x :674 (thalweg is None or len(thalweg) < 5), 48x :722 (n_samp - 2*guard < 3 \u2014 profile too short to have an interior)",
+    "KPA-39 on real fixture (1 m, Quail Island): 127 order-1 links at 0.20 ha; 126 refused, of which 0 were refused by the prominence test. find_keypoints reports all 126 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 126/126 times. Breakdown: 78x :694 (no thalweg, or fewer than 5 cells), 48x :742 (profile too short to have an interior)",
     "KPA-43 on real fixture (1 m, Quail Island): at max_valleys=1, keypoints+skipped = 3 against 127 links (124 links never examined and never reported); at max_valleys=8, 127 against 127 (0 unaccounted).",
     "KPA-40 on real fixture (1 m): the shortest axis-aligned thalweg that can yield a keypoint is 36 cells = 35.0 m (predicted floor 7 x min(5*cell, 10) = 35 m). Every shorter link is still emitted by stream_links and still profiled.",
     "KPA-41, measured: the steepest 20 m window on ridge_guide at offset 15.0 m runs 1:6.3, while _run_record reports its net drift as 1:544.8 and over_limit False. Understatement factor 86.4x.",
     "KPA-42, measured: 3 of 7 guides carry vertices whose Z is _sample_dem's default (the keypoint elevation) rather than sampled ground \u2014 valley_guide@-5.0m: 9/151; valley_guide@-10.0m: 19/146; valley_guide@-15.0m: 27/143. A guide whose net fall is computed between two fabricated ends reports a drift that is an artefact of the default, not of terrain.",
-    "KPA-39 on default harness DEM (2 m, 36 ha): 28 order-1 links at 0.20 ha; 28 refused, of which 26 were refused by the prominence test. find_keypoints reports all 28 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 2/28 times. Breakdown: 2x :722 (n_samp - 2*guard < 3 \u2014 profile too short to have an interior), 26x :734 (slope_ease < MIN_SLOPE_EASE \u2014 the prominence test)",
+    "KPA-39 on default harness DEM (2 m, 36 ha): 28 order-1 links at 0.20 ha; 28 refused, of which 26 were refused by the prominence test. find_keypoints reports all 28 as 'no break in the floor clearing 2% of grade change', so the stated reason is false 2/28 times. Breakdown: 2x :742 (profile too short to have an interior), 26x :754 (the prominence test)",
     "KPA-43 on default harness DEM (2 m, 36 ha): at max_valleys=1, keypoints+skipped = 28 against 28 links (0 links never examined and never reported); at max_valleys=8, 28 against 28 (0 unaccounted).",
     "KPA-40 on default harness DEM (2 m): the shortest axis-aligned thalweg that can yield a keypoint is 36 cells = 70.0 m (predicted floor 7 x min(5*cell, 10) = 70 m). Every shorter link is still emitted by stream_links and still profiled.",
     "Window sizing (a TerrainFlow convention, sized on SYNTHETIC correlated roughness \u2014 no published source supplies one): spreads across roughness_m 0.00-0.10 on the trunk keyline are 10m 0.0435 (2.18x MIN_SLOPE_EASE); 20m 0.0488 (2.44x MIN_SLOPE_EASE); 50m 0.0165 (0.82x MIN_SLOPE_EASE). Shortest window whose spread stays under MIN_SLOPE_EASE: 50m.",
@@ -35,19 +35,28 @@
         "returned_none": 126,
         "returned_keypoint": 1,
         "by_line": {
-          "674": {
+          "694": {
             "count": 78,
-            "guard": "thalweg is None or len(thalweg) < 5"
+            "test": "thalweg is None or len(thalweg) < 5",
+            "guard": "no thalweg, or fewer than 5 cells"
           },
-          "722": {
+          "742": {
             "count": 48,
-            "guard": "n_samp - 2*guard < 3 \u2014 profile too short to have an interior"
+            "test": "n_samp - 2 * guard < 3",
+            "guard": "profile too short to have an interior"
           }
         }
       },
       "source_lines_seen": {
-        "674": "            return None",
-        "722": "            return None"
+        "694": "            return None",
+        "742": "            return None"
+      },
+      "guard_lines_derived": {
+        "694": "thalweg is None or len(thalweg) < 5",
+        "708": "total_len <= 0",
+        "717": "len(arc) < 5",
+        "742": "n_samp - 2 * guard < 3",
+        "754": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
       "refusals_the_message_blames_on_prominence": 126,
       "refusals_actually_from_prominence": 0,
@@ -369,19 +378,28 @@
         "returned_none": 28,
         "returned_keypoint": 0,
         "by_line": {
-          "722": {
+          "742": {
             "count": 2,
-            "guard": "n_samp - 2*guard < 3 \u2014 profile too short to have an interior"
+            "test": "n_samp - 2 * guard < 3",
+            "guard": "profile too short to have an interior"
           },
-          "734": {
+          "754": {
             "count": 26,
-            "guard": "slope_ease < MIN_SLOPE_EASE \u2014 the prominence test"
+            "test": "require_prominence and slope_ease < self.MIN_SLOPE_EASE",
+            "guard": "the prominence test"
           }
         }
       },
       "source_lines_seen": {
-        "722": "            return None",
-        "734": "            return None"
+        "742": "            return None",
+        "754": "            return None"
+      },
+      "guard_lines_derived": {
+        "694": "thalweg is None or len(thalweg) < 5",
+        "708": "total_len <= 0",
+        "717": "len(arc) < 5",
+        "742": "n_samp - 2 * guard < 3",
+        "754": "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
       },
       "refusals_the_message_blames_on_prominence": 28,
       "refusals_actually_from_prominence": 26,

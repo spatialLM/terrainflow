@@ -10,14 +10,16 @@ Five measurements:
 the floor clearing 2% of grade change" whatever actually happened. `keypoint_on_path` has
 five ways to return `None`::
 
-    :674  thalweg is None or len(thalweg) < 5
-    :688  total_len <= 0
-    :697  len(arc) < 5                  (too little finite ground)
-    :722  n_samp - 2*guard < 3          (profile too short to have an interior)
-    :734  slope_ease < MIN_SLOPE_EASE   (the prominence test — the only one reported)
+    thalweg is None or len(thalweg) < 5
+    total_len <= 0
+    len(arc) < 5                                            (too little finite ground)
+    n_samp - 2*guard < 3                       (too short to have an interior to fit)
+    require_prominence and slope_ease < self.MIN_SLOPE_EASE  (the only one reported)
 
 `sys.settrace` records the line each `None` returned from, so the message can be checked
-against the truth. Run on the real fixture at the production threshold **and** on the
+against the truth. Those line numbers are **derived from the source at run time** and are
+deliberately not written down here — see `guard_lines()`.
+Run on the real fixture at the production threshold **and** on the
 default synthetic harness DEM, because KPA-44's "all 28 are refused on prominence" was read
 off the very message KPA-39 shows is unconditional, and has to be re-established.
 
@@ -50,6 +52,8 @@ Run::
     & 'F:\\bin\\python-qgis-ltr.bat' tests_qgis\\probes\\p_keypoints.py
 """
 
+import ast
+import inspect
 import sys
 
 import _probe
@@ -59,18 +63,65 @@ import numpy as np
 WINDOWS_M = (10.0, 20.0, 50.0)
 ROUGHNESS_SWEEP = (0.0, 0.05, 0.10, 0.25)
 
-#: The five `return None` sites in `keypoint_on_path`, by line, with the guard each is.
-#: Re-read against HEAD before quoting: this probe prints the source line it saw.
-GUARD_LINES = {
-    674: "thalweg is None or len(thalweg) < 5",
-    688: "total_len <= 0",
-    697: "len(arc) < 5 — too little finite ground",
-    722: "n_samp - 2*guard < 3 — profile too short to have an interior",
-    734: "slope_ease < MIN_SLOPE_EASE — the prominence test",
+#: A readable gloss per guard, keyed by the test expression exactly as `ast.unparse`
+#: renders it. A guard whose condition is rewritten loses its gloss and falls back to the
+#: source text, which is honest; a guard that *moves* keeps it, which is the point.
+GUARD_GLOSS = {
+    "thalweg is None or len(thalweg) < 5": "no thalweg, or fewer than 5 cells",
+    "total_len <= 0": "zero-length path",
+    "len(arc) < 5": "too little finite ground",
+    "n_samp - 2 * guard < 3": "profile too short to have an interior",
+    "require_prominence and slope_ease < self.MIN_SLOPE_EASE": "the prominence test",
 }
+
+#: The one guard `find_keypoints` claims for every refusal. KPA-39 is the gap between the
+#: count at this line and the total, so it is named by its *condition*, not its line.
+PROMINENCE_TEST = "require_prominence and slope_ease < self.MIN_SLOPE_EASE"
 
 
 # --------------------------------------------------------------------- tracing
+
+
+def guard_lines(func):
+    """`{lineno: test_source}` for every `return None` in *func*, read off the AST.
+
+    This used to be a hand-written dict of line numbers and it silently rotted. When
+    `find_ridgelines` was rewritten on 2026-09-11 (`ac2966b`) every guard in
+    `keypoint_on_path` shifted down 20 lines; the tracer still counted 78 / 48 / 26
+    correctly but attributed all of them to "UNKNOWN LINE", and the two derived figures —
+    `refusals_actually_from_prominence` and `message_is_false_for` — inverted, reporting
+    that the message was false 28 times out of 28 when it is false twice. A probe whose
+    own evidence file can be wrong about the finding it exists to support is worse than no
+    probe, so the mapping is now computed from the source every run.
+
+    Nested `if`s are walked so the innermost enclosing test is the one reported. A
+    `return None` with no enclosing `if` (there is none today) is labelled as such rather
+    than dropped.
+    """
+    src, start = inspect.getsourcelines(func)
+    # `getsourcelines` hands back the method still indented inside its class, which
+    # `ast.parse` rejects. Dedent by the `def`'s own indent; `start` puts the line numbers
+    # back into module space afterwards.
+    indent = len(src[0]) - len(src[0].lstrip())
+    tree = ast.parse("".join(line[indent:] if line.strip() else line for line in src))
+    found = {}
+
+    def walk(node, enclosing):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If):
+                walk(child, child)
+            elif isinstance(child, ast.Return):
+                value = child.value
+                if value is None or (isinstance(value, ast.Constant)
+                                     and value.value is None):
+                    test = (ast.unparse(enclosing.test) if enclosing is not None
+                            else "<unconditional>")
+                    found[child.lineno + start - 1] = test
+            else:
+                walk(child, enclosing)
+
+    walk(tree, None)
+    return found
 
 
 class GuardTracer:
@@ -84,6 +135,7 @@ class GuardTracer:
 
     def __init__(self, func):
         self.code = func.__code__
+        self.guards = guard_lines(func)
         self.returns = []
         self._prev = None
 
@@ -119,11 +171,25 @@ class GuardTracer:
             "returned_none": sum(1 for _l, n in self.returns if n),
             "returned_keypoint": sum(1 for _l, n in self.returns if not n),
             "by_line": {
-                str(line): {"count": count,
-                            "guard": GUARD_LINES.get(line, "UNKNOWN LINE — re-read source")}
+                str(line): {
+                    "count": count,
+                    "test": self.guards.get(line, "NOT A GUARD — re-read source"),
+                    "guard": GUARD_GLOSS.get(
+                        self.guards.get(line), self.guards.get(line, "unknown")),
+                }
                 for line, count in sorted(hist.items())
             },
         }
+
+    def count_at(self, test):
+        """How many `None`s came from the guard whose condition is *test*.
+
+        By condition rather than by line, so the answer survives the file moving under it.
+        """
+        lines = [line for line, src in self.guards.items() if src == test]
+        return sum(count for line, count in
+                   ((line, sum(1 for lo, n in self.returns if n and lo == line))
+                    for line in lines))
 
 
 def source_line(path, lineno):
@@ -182,7 +248,9 @@ def stage_guard_histogram(ev, label, ya, dem_label):
             for line in rec["histogram"]["by_line"]
         }
 
-        prominence = rec["histogram"]["by_line"].get("734", {}).get("count", 0)
+        rec["guard_lines_derived"] = {str(k): v for k, v in
+                                      sorted(tracer.guards.items())}
+        prominence = tracer.count_at(PROMINENCE_TEST)
         refused = rec["histogram"]["returned_none"]
         rec["refusals_the_message_blames_on_prominence"] = refused
         rec["refusals_actually_from_prominence"] = prominence
