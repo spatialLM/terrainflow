@@ -155,3 +155,70 @@ class TestManagerRoundTrip:
         twice = EarthworkManager()
         twice.from_json(once.to_json(), geometry_factory=_factory)
         assert once.to_json() == twice.to_json()
+
+
+class TestAPayloadWithNoBottomWidthReloadsAtTheBatterItWasDrawnAt:
+    """STRETCH_GOALS §12. `from_dict` restored `bottom_width_m` independently of
+    `depth` and `top_width_m` and nothing re-derived it, so a payload written
+    before the key existed kept the bottom the *constructor* seeded from the
+    shipped defaults while the other two came off the file. The three then
+    described a section nobody drew, and `side_slope` — a derived property —
+    reported the wrong batter to capacity, the burn footprint and
+    `channel_batter_run` from then on.
+
+    The payload is the shape §12 documents rather than a real `.tfd`: none is
+    committed, and what decides this is which keys are present, not which build
+    wrote them.
+    """
+
+    # §12's own worked example: drawn 1.2 m deep and 3.0 m across at 1:1, from
+    # before `bottom_width_m` was serialised at all.
+    V1 = {
+        "type": "swale",
+        "name": "Swale 1",
+        "geometry_wkt": "LINESTRING (0 0, 100 0)",
+        "depth": 1.2,
+        "top_width_m": 3.0,
+    }
+
+    def test_the_batter_is_the_types_shipped_one_not_the_seeded_bottom(self):
+        restored = Earthwork.from_dict(dict(self.V1), geometry_factory=_factory)
+        # 3.0 - 2 * 1.0 * 1.2 = 0.6, so 1:1 — what it was drawn at.
+        assert restored.bottom_width_m == pytest.approx(0.6)
+        assert restored.side_slope == pytest.approx(1.0), (
+            f"reloaded at {restored.side_slope:.2f}:1; the seeded 1.0 m bottom "
+            f"against a 1.2 m depth is 0.83:1, a section nobody drew")
+
+    def test_a_null_bottom_width_counts_as_absent(self):
+        """The restore loop skips a `None`, so the seeded value survived it in
+        exactly the same way — and it means the same thing: nobody chose one."""
+        payload = dict(self.V1, bottom_width_m=None)
+        restored = Earthwork.from_dict(payload, geometry_factory=_factory)
+        assert restored.bottom_width_m == pytest.approx(0.6)
+
+    def test_a_stored_bottom_width_is_never_recomputed(self):
+        """The promise the standard-dimensions work is built on: a preference can
+        never retroactively resize a stored design. A present value is a decision,
+        and recomputing it would be the silent rewrite `advisories.py` forbids —
+        even where it disagrees with the type's shipped batter, as this one does.
+        """
+        payload = dict(self.V1, bottom_width_m=2.2)      # 0.33:1, deliberately odd
+        restored = Earthwork.from_dict(payload, geometry_factory=_factory)
+        assert restored.bottom_width_m == pytest.approx(2.2)
+
+    def test_a_payload_carrying_neither_dimension_is_left_alone(self):
+        """Nothing came off the file to disagree with the seed, so there is
+        nothing to re-derive against."""
+        payload = {"type": "swale", "name": "Bare",
+                   "geometry_wkt": "LINESTRING (0 0, 1 1)"}
+        restored = Earthwork.from_dict(payload, geometry_factory=_factory)
+        fresh = Earthwork("swale", _WktGeom("LINESTRING (0 0, 1 1)"), "Bare")
+        assert restored.bottom_width_m == pytest.approx(fresh.bottom_width_m)
+
+    def test_a_round_trip_of_a_current_design_is_unchanged(self):
+        """The guard that says this only touches old payloads: anything this
+        build wrote carries all three, so nothing here fires."""
+        original = _swale()
+        restored = Earthwork.from_dict(original.to_dict(), geometry_factory=_factory)
+        assert restored.bottom_width_m == pytest.approx(original.bottom_width_m)
+        assert restored.side_slope == pytest.approx(original.side_slope)

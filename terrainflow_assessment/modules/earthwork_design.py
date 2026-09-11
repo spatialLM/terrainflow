@@ -1198,12 +1198,14 @@ class Earthwork:
                 cfg = get_type(ew_type)
                 self.depth = cfg.default_depth
                 self.top_width_m = cfg.default_top_width
-                default_slope = cfg.default_side_slope
             except KeyError:
                 self.depth = 0.5         # metres cut/raised (not used for dam)
                 self.top_width_m = 2.0   # declared top width of cross-section (metres)
-                default_slope = 1.0
-            self.bottom_width_m = max(0.1, self.top_width_m - 2 * default_slope * self.depth)
+            # Through `seeded_bottom_width`, which carries the same KeyError
+            # fallback, because `from_dict` has to reproduce this exact seed for a
+            # payload that predates the field — see STRETCH_GOALS §12.
+            self.bottom_width_m = seeded_bottom_width(
+                ew_type, self.top_width_m, self.depth)
         self.batter_run_m = 0.0      # basin only: horizontal inset to full depth (0 = vertical)
         self.companion_berm = False  # swales only
         self.crest_elevation = None  # dam only: absolute crest elevation (m)
@@ -1505,6 +1507,27 @@ class Earthwork:
             value = data[field]
             if value is not None:
                 setattr(ew, field, value)
+
+        # STRETCH_GOALS §12. `depth` and `top_width_m` come off the payload while
+        # `bottom_width_m` keeps whatever `__init__` seeded from the *shipped*
+        # defaults, and nothing re-derives it — so the three describe a section
+        # nobody drew. A payload written before the key existed, carrying
+        # `depth 1.2, top_width_m 3.0`, loaded with the seeded 1.0 bottom: 0.83:1
+        # where it was drawn at 1:1. `side_slope` is a derived property, so it
+        # then reports the wrong batter to capacity, the burn footprint and
+        # `channel_batter_run` for the rest of the session.
+        #
+        # **Only when absent.** A present value is a decision and must never be
+        # recomputed — that is the silent rewrite `core/sizing/advisories.py`
+        # forbids, and the standard-dimensions work's one promise is that a
+        # preference can never retroactively resize a stored design. `None` counts
+        # as absent: the loop above already skips it, and it means the same thing.
+        if data.get("bottom_width_m") is None and (
+                data.get("depth") is not None
+                or data.get("top_width_m") is not None):
+            ew.bottom_width_m = seeded_bottom_width(
+                ew.type, ew.top_width_m, ew.depth)
+
         ew.spillway = Spillway.from_dict(data.get("spillway"))
         ew.inflow_spillway = Spillway.from_dict(data.get("inflow_spillway"))
         return ew
@@ -1625,6 +1648,21 @@ def channel_batter_run(ew):
     if top <= 0 or bottom <= 0 or bottom >= top:
         return 0.0
     return (top - bottom) / 2.0
+
+
+def seeded_bottom_width(ew_type, top_width_m, depth):
+    """Bottom width implied by *ew_type*'s shipped batter — one derivation, two users.
+
+    ``Earthwork.__init__`` seeds a fresh feature with it, and ``from_dict`` puts it
+    back for a payload that carries none. Both have to agree or a reloaded design
+    describes a different section from the one that was saved, which is the whole
+    of STRETCH_GOALS §12.
+    """
+    try:
+        slope = get_type(ew_type).default_side_slope
+    except KeyError:
+        slope = 1.0
+    return max(0.1, float(top_width_m) - 2.0 * float(slope) * float(depth))
 
 
 def berm_batter_run(depth, side_slope=None):
