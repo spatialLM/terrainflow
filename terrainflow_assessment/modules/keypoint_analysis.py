@@ -787,6 +787,14 @@ class YeomansKeylineAnalysis:
 
         Returns ``(keypoints, skipped)``. Each skipped valley carries its own reason —
         the house style is to say what was refused and why, not to return a shorter list.
+
+        **Two catchment figures, and they are not interchangeable.** ``catchment_ha`` is
+        the *valley's* — accumulation at the link's outlet — which is what ranks the
+        valleys and what the map layer's attribute of that name has always held.
+        ``keypoint_catchment_ha`` is the ground above the keypoint itself, which sits
+        partway up the link and therefore commands less. The label quotes the second and
+        names the first, because "N ha above" attached to a point means the ground above
+        *that point*.
         """
         from terrainflow_assessment.modules.flow_graph import (
             d8_from_dem,
@@ -833,11 +841,23 @@ class YeomansKeylineAnalysis:
                     f"floor clearing {self.MIN_SLOPE_EASE:.0%} of grade change")
                 continue
             kp["valley_cells"] = len(link)
-            kp["catchment_ha"] = _catchment(link) * (self.cell_w * self.cell_h) / 10_000.0
+            cell_area = self.cell_w * self.cell_h
+            # The valley's catchment, measured at the link's **outlet**. This is the
+            # ranking basis (`links.sort(key=_catchment)`) and what the map layer's
+            # `catchment_ha` attribute has always carried, so it keeps the name.
+            kp["catchment_ha"] = _catchment(link) * cell_area / 10_000.0
             kp["_row"], kp["_col"] = kp["row"], kp["col"]
+            # The ground above the keypoint **itself**, which is a different and usually
+            # much smaller number — the keypoint sits partway up the link, not at its
+            # foot. On the Quail Island fixture the rank-1 keypoint reads 2.1 ha here
+            # against 5.9 ha for its valley, so a label saying "5.9 ha above" over-states
+            # what that point commands by 177%. That was `KPA-54`.
+            kp["keypoint_catchment_ha"] = (
+                float(acc_arr[kp["_row"], kp["_col"]]) * cell_area / 10_000.0)
             kp["label"] = (
                 f"Keypoint at {kp['elevation']:.1f} m — "
-                f"{kp['catchment_ha']:.1f} ha above")
+                f"{kp['keypoint_catchment_ha']:.1f} ha above "
+                f"({kp['catchment_ha']:.1f} ha in the valley)")
             keypoints.append(kp)
 
         return keypoints, skipped

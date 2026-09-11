@@ -1289,6 +1289,12 @@ thing being extended rather than the thing being cited.
 
 ### §8.1 `KPA-52` — the channel mask and the pointer graph disagree about routing
 
+> **STILL OPEN, and changed in character — see §9.5.** Since `KPA-48` was fixed the
+> mask follows the panel's routing rather than a hard-coded literal, so the mismatch is
+> now a function of a user setting with a measured cost: the D-infinity default yields
+> **1** keypoint where D8 yields **5**. §9.5 carries the three-way table and the
+> decision it needs.
+
 | Id | Sev | Dir | Where | Claim | Verdict | Conf |
 |---|---|---|---|---|---|---|
 | `KPA-52` | M | U(valley detect) | `keypoint_analysis.py:803,809` | `find_keypoints` builds its stream mask from pysheds **D-infinity** accumulation and then traces links along **D8** pointers. On the fixture that shatters a 1,688-cell network into 127 fragments of median 3.4 m, of which **1** is long enough to profile. Mask taken from the same graph as the pointers: 13 links, median 39.8 m, **7** long enough | WRONG | H |
@@ -1430,6 +1436,8 @@ Recorded now so that the second defect is not created while removing the first.
 `i-d`, not `n`: whether the two disagree at all depends on the terrain.
 
 ### §8.4 `KPA-54` — the keypoint label quotes the valley's catchment, not the keypoint's
+
+> **CLOSED — see §9.4.**
 
 | Id | Sev | Dir | Where | Claim | Verdict | Conf |
 |---|---|---|---|---|---|---|
@@ -1831,3 +1839,80 @@ catches the same regression deterministically.
 `EXPECTED_KEYLINE` itself does **not** move: that check constructs the analysis without
 `acc_path`, so it takes the branch this change leaves alone. Verified, not assumed — 10
 checks pass in `checks_fixture_regression` and every recorded integer in it is unchanged.
+
+### §9.4 `KPA-54` — the keypoint label quotes the ground above the keypoint
+
+**Closed.** The label read `"Keypoint at {elevation} m — {catchment_ha} ha above"`, where
+`catchment_ha` is the accumulation at the **link's outlet**. A keypoint sits partway up its
+link, so on the fixture's rank-1 keypoint that label claimed 5.9 ha over a point commanding
+2.1 ha — an overstatement of **177%**, on the map, at the point itself.
+
+`catchment_ha` **keeps its name and its meaning**, because it is the valley ranking basis
+(`links.sort(key=_catchment)`) and is what the keypoint layer's attribute of that name has
+carried since the layer existed; renaming it would silently change exported data. A second
+key, `keypoint_catchment_ha`, carries the ground above the keypoint itself, and the label
+now quotes that and names the other:
+
+    Keypoint at 41.2 m — 2.1 ha above (5.9 ha in the valley)
+
+Both numbers are useful and they answer different questions — how much water reaches this
+point, and how big the valley this point belongs to is. The defect was never that the
+valley figure was computed; it was that it was presented as the other one.
+
+### §9.5 `KPA-52` — sharpened by the `KPA-48` fix, and now an owner decision
+
+`KPA-52` is **not closed**, and the `KPA-48` fix changed what it is rather than removing it.
+
+`find_keypoints` traces links along `flow_graph.d8_from_dem` pointers. Its mask used to come
+from a hard-coded D-infinity recompute; it now comes from the baseline's accumulation, whose
+routing **the user chooses**. So the mask/pointer mismatch is now a function of a panel
+setting, and the cost of each choice is measurable. On the fixture at the production 0.2 ha
+threshold:
+
+| | D-infinity mask (the default) | D8 mask |
+|---|---|---|
+| stream cells | 1,638 | 1,533 |
+| order-1 links | 123 | **72** |
+| stream cells inside a link | 700 | **1,168** |
+| stream cells in **no** link | 938 | **365** |
+| pointers leaving the mask | 108 | **35** |
+| median link length | 3.41 m | **9.21 m** |
+| longest link | 54.0 m | **157.3 m** |
+| links clearing the 35 m profile floor | 1 | **8** |
+| **keypoints found** | **1** | **5** |
+| valleys refused | 122 | **67** |
+
+**The D-infinity default costs four of five keypoints.** Not because D-infinity is a worse
+accumulation — it is the more physical of the two — but because it wets a broader, more
+diffuse network than the single-successor D8 pointers can trace through, so links end
+wherever the two disagree.
+
+**D8 is closer to consistent but is not consistent.** 35 pointers still leave the mask and
+365 stream cells still fall in no link, because the mask comes from *pysheds'* D8
+accumulation while the pointers come from *TerrainFlow's own* `d8_from_dem` — two D8
+implementations whose tie-breaks differ, as `flow_graph.py:106-113` already documents
+(pysheds scans N, NE, E, SE, S, SW, W, NW; `d8_from_dem` scans NW, N, NE, W, E, SW, S, SE).
+
+So there are three candidate masks, not two, and Step F measured the third:
+
+| Mask source | order-1 links | clearing the floor | pointers leaving the mask |
+|---|---|---|---|
+| pysheds D-infinity (default today) | 123 | 1 | 108 |
+| pysheds D8 (panel's other option) | 72 | 8 | 35 |
+| `d8_from_dem`'s own accumulation | 13 | 7 | **0** |
+
+**This is left open deliberately and is an owner decision**, because every option changes
+how many keypoints every assessment produces, and that is exactly the class of change the
+project has previously ruled must not be made quietly. The three readings are:
+
+1. **Leave the default.** The tier keeps answering one valley on this terrain.
+2. **Recommend D8 in the panel**, making the combo's second entry the one that suits the
+   keyline tier. Cheap, reversible, and does not touch the maths — but it also changes the
+   baseline raster the user sees, which is a separate question.
+3. **Build the mask from `d8_from_dem`'s own accumulation** inside `find_keypoints`, making
+   the tier internally consistent whatever the panel says. Zero pointers leave the mask.
+   Fewest links, but seven of thirteen are profilable against one of 123.
+
+Nothing here recommends one. What the campaign can say is that option 3 is the only one
+where the number of mask-leaving pointers is **zero**, and that "a primary valley" has to
+mean something specific before any of the three is defensible.
