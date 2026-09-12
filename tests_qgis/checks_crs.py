@@ -100,8 +100,10 @@ def check_the_report_map_is_drawn_in_the_dems_crs(dem_path):
     with PluginHarness(dem_path, project_crs=GEOGRAPHIC) as h:
         h.run_baseline()
         controller = h.plugin._reporting
-        data = controller._collect(controller._site_name())
-        specs = controller._map_specs(data)
+        # `_collect` still runs: it is what populates the controller's map state,
+        # and `_map_specs` reads that rather than the ReportData it returns.
+        controller._collect(controller._site_name())
+        specs = controller._map_specs()
         assert specs, "no report maps were specified"
         for key, spec in specs.items():
             assert not spec.crs.isGeographic(), (
@@ -173,7 +175,7 @@ def check_the_pdf_omits_the_bar_it_cannot_measure(dem_path):
         controller = h.plugin._reporting
         data = controller._collect(controller._site_name())
         report = build_report(data)
-        specs = controller._map_specs(data)
+        specs = controller._map_specs()
         assert specs, "no report maps were specified"
 
         def bars(map_specs):

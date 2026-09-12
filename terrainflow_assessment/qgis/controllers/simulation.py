@@ -243,7 +243,7 @@ class SimulationController(G.LayerTreeMixin):
         except Exception:
             pass
 
-        self._create_sim_fill_layer(result)
+        self._create_sim_fill_layer()
         self._setup_sim_ponding()
 
         # Backfill baseline hydrograph
@@ -530,7 +530,7 @@ class SimulationController(G.LayerTreeMixin):
 
     # ---------------------------------------------------------------- Fill layer
 
-    def _create_sim_fill_layer(self, result):
+    def _create_sim_fill_layer(self):
         remove_layer(self._project, self._state.sim_fill_layer_id)
         self._state.sim_fill_layer_id = None
 

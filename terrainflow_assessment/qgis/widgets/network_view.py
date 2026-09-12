@@ -590,7 +590,7 @@ class NetworkView(QWidget):
         exit_lbl.setStyleSheet(
             f"color: {_FAINT}; font-size: 11px; padding: 6px 2px 2px;"
         )
-        exit_lbl.setToolTip(H.NETWORK_SITE_EXIT)
+        exit_lbl.setToolTip(H.SITE_EXIT)
         self._lay.addWidget(exit_lbl)
 
         # The chart shares the list's data; only the arrangement differs. Rank comes

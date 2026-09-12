@@ -422,9 +422,9 @@ class VerificationTable(QWidget):
             names = ", ".join(r.get("name", "?") for r in flagged[:3])
             more = f" and {len(flagged) - 3} more" if len(flagged) > 3 else ""
             bits.append(
-                f"{_OVERSTATED_MARK} marks {names}{more}: this cell size cannot hold "
-                f"{'their sections' if len(flagged) != 1 else 'its section'}, so read "
-                f"Geometric for capacity there.")
+                f"{_OVERSTATED_MARK} marks {names}{more}: {_grid(cell_size_m)} cannot "
+                f"hold {'their sections' if len(flagged) != 1 else 'its section'}, so "
+                f"read Geometric for capacity there.")
 
         # The comparison the member rows could not make. Placed before the existing-
         # ponding lines because it explains two blank columns the reader has already
@@ -455,7 +455,8 @@ class VerificationTable(QWidget):
         if sub_cell:
             bits.append(
                 f"{sub_cell} feature{'s' if sub_cell != 1 else ''} narrower than one "
-                f"cell {'are' if sub_cell != 1 else 'is'} checked for placement and "
+                f"cell ({_cell_width(cell_size_m)}) "
+                f"{'are' if sub_cell != 1 else 'is'} checked for placement and "
                 f"routing only.")
         return " ".join(bits)
 
@@ -463,6 +464,31 @@ class VerificationTable(QWidget):
         header = self.table.horizontalHeader().height()
         row_h = self.table.rowHeight(0) if n_rows else 20
         self.table.setFixedHeight(header + row_h * min(n_rows, 8) + 6)
+
+
+def _grid(cell_size_m):
+    """"the 1.0 m grid", or "this cell size" when the grid is not known.
+
+    R-8: `set_result` has threaded `cell_size_m` from `panel.py` all along and
+    `_footer_text` never read it, so both caveats below talked about "one cell" and
+    "this cell size" without ever saying how big a cell is. That is the one number
+    that makes either sentence actionable — "narrower than one cell" means something
+    different on a 1 m grid and a 5 m one, and the reader cannot tell which they have.
+    """
+    try:
+        size = float(cell_size_m)
+    except (TypeError, ValueError):
+        return "this cell size"
+    return f"the {size:g} m grid" if size > 0 else "this cell size"
+
+
+def _cell_width(cell_size_m):
+    """"1.0 m" for the parenthetical beside "narrower than one cell"."""
+    try:
+        size = float(cell_size_m)
+    except (TypeError, ValueError):
+        return "this grid"
+    return f"{size:g} m" if size > 0 else "this grid"
 
 
 def _m3(value):

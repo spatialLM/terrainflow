@@ -24,7 +24,9 @@ class DrawPolygonTool(QgsMapTool):
         super().__init__(canvas)
         self.canvas = canvas
         self.points = []
-        self._double_click_pending = False
+        # No `_double_click_pending` flag: it guarded the press *after* a double
+        # click, and there is never one — all five completion handlers unset the map
+        # tool and every activation builds a fresh instance.
         self._tool_label = tool_label
         self._last_hint = None
 
@@ -68,9 +70,6 @@ class DrawPolygonTool(QgsMapTool):
     def canvasPressEvent(self, event):
         if self.rubber_band is None:
             return              # deactivated; a queued event is not a gesture
-        if self._double_click_pending:
-            self._double_click_pending = False
-            return
         if event.button() == Qt.MouseButton.LeftButton:
             pt = self.toMapCoordinates(event.pos())
             self.points.append(QgsPointXY(pt))
@@ -81,7 +80,6 @@ class DrawPolygonTool(QgsMapTool):
     def canvasDoubleClickEvent(self, event):
         if self.rubber_band is None:
             return
-        self._double_click_pending = True
         if len(self.points) >= 1:
             self.points.pop()
             self.rubber_band.removeLastPoint()

@@ -600,22 +600,10 @@ AREA_OUTFLOW = (
     "before any earthwork. On a large DEM the ponding raster is computed at a\n"
     "coarser resolution, so treat that figure as indicative."
 )
-TERMINAL_DEFICIT = (
-    "Overflow escaping features that have nothing downstream of them.\n\n"
-    "This is the extra storage, in m³, the design still needs — most usefully\n"
-    "added upslope, where it can intercept the water before it concentrates."
-)
 CAPTURE_DENOMINATOR = (
     "Share of the whole design storm held on site.\n\n"
     "The denominator is the rainfall over the analysis area (or the site\n"
     "boundary, or the DEM) — not the catchment of a single outlet."
-)
-OVERFLOW_TARGET_AUTO = (
-    "Where this feature's overflow goes once it is full.\n\n"
-    "'Auto' follows the actual flow path downhill from the feature's low point\n"
-    "until it meets another earthwork or leaves the site. Choosing a target\n"
-    "instead forces the link — unless that would create a loop, which is\n"
-    "refused with a warning."
 )
 STRESS_POINTS = (
     "Where a feature is predicted to overtop before it is nominally full.\n\n"
@@ -1330,12 +1318,21 @@ SWALE_LENGTH = (
     "Compare with the Recommended length below — if this swale\n"
     "is shorter, consider extending it or adjusting depth / width."
 )
+# The Auto sentence here described an elevation heuristic — "the highest feature
+# below this one" — that `resolve_targets` replaced with a walk down the actual
+# flow path, precisely because the old one linked features on opposite sides of a
+# ridge. The accurate copy was written at the time, as an `OVERFLOW_TARGET_AUTO`
+# constant, and was never wired to anything. This is the name the combo box reads,
+# so this is the one that has to be right.
 OVERFLOW_TARGET = (
     "Where this feature's overflow goes once it is full.\n\n"
-    "Auto: the nearest feature downslope (elevation heuristic).\n"
-    "A named target only receives water when it actually sits\n"
-    "downslope of this feature — water can't flow uphill. An uphill\n"
-    "choice is flagged below and its water goes downslope instead."
+    "'Auto' follows the actual flow path downhill from the feature's low point\n"
+    "until it meets another earthwork or leaves the site. Choosing a target\n"
+    "instead forces the link — unless that would create a loop, which is\n"
+    "refused with a warning.\n\n"
+    "A named target only receives water when it actually sits downslope of this\n"
+    "feature — water can't flow uphill. An uphill choice is flagged below and its\n"
+    "water goes downslope instead."
 )
 MANNINGS_CAPACITY = (
     "Peak discharge capacity using Manning's equation.\n"
@@ -1379,7 +1376,6 @@ NETWORK_SOAKED = (
     "Soaked into the ground over the event — captured, but not held "
     "as standing water, so it does not fill the feature."
 )
-NETWORK_SITE_EXIT = "Runoff not held by any feature"
 
 
 # --------------------------------------------------------------------- Tool menu

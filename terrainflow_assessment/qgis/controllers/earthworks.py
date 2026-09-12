@@ -3774,6 +3774,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
             crs = dem_crs(self._state)
             layer = QgsVectorLayer(f"Point?crs={crs}", "Stress points", "memory")
+            # The copy explaining this layer existed in `help_text` and reached
+            # nothing: the layer has no panel control to hang a tooltip on, so the
+            # abstract — Layer Properties -> Information — is where a reader can
+            # actually find out what the markers mean. Via `serverProperties()`
+            # because `QgsMapLayer.setAbstract()` is deprecated in 3.44 and the
+            # harness turns its DeprecationWarning into run output.
+            layer.serverProperties().setAbstract(H.STRESS_POINTS)
             pr = layer.dataProvider()
             pr.addAttributes([
                 QgsField("name", QMetaType.QString),
@@ -4727,6 +4734,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
             crs = dem_crs(self._state)
             layer = QgsVectorLayer(f"LineString?crs={crs}", "Overflow connections", "memory")
+            # See the note on Stress points.
+            layer.serverProperties().setAbstract(H.CONNECTIONS_LAYER)
             pr = layer.dataProvider()
             pr.addAttributes([
                 QgsField("from_name", QMetaType.QString),

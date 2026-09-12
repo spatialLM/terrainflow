@@ -166,10 +166,11 @@ def _column_widths(headers, rows, total_mm):
                 widest = max(widest, len(str(row[i])))
         longest.append(widest)
 
+    # `_MIN_COL_MM` floors every element, and `headers` is non-empty by the guard
+    # above, so `demand` is at least one whole minimum column. An `if demand <= 0`
+    # branch used to sit here and could not be reached.
     wanted = [max(_MIN_COL_MM, n * _CHAR_MM + _CELL_PAD_MM) for n in longest]
     demand = sum(wanted)
-    if demand <= 0:
-        return [total_mm / len(headers)] * len(headers)
     # Scale to the frame either way: shrink when the content overflows (the
     # table has no wrapping and would run off the page), grow when it is narrow.
     scale = total_mm / demand

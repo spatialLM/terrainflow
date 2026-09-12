@@ -220,11 +220,6 @@ def signature_for(key):
     return _GRAMMAR.get(key, (SIG_NONE, 0.0, 0.0))
 
 
-# Render order inside the Drawn Earthworks group, top of the legend first (and so
-# painted last / on top). Annotation over structure: a spillway sits ON a swale and
-# must be visible; a connection line annotates the design and must never occlude it.
-DRAW_ORDER = ("Stress points", "Spillways", "__earthworks__", "Overflow connections")
-
 # Label priorities. When PAL runs out of room it drops the low numbers first, so
 # identity ("Swale 1") outlives detail ("outflow · 70.07 m").
 PRIORITY_EARTHWORK = 7
@@ -234,7 +229,6 @@ PRIORITY_SPILLWAY = 4
 # Above these denominators the text is noise rather than information. Geometry is
 # never suppressed — only labels.
 MAX_SCALE_POINT_LABEL = 5000.0
-MAX_SCALE_CONNECTION_LABEL = 8000.0
 
 
 # ---------------------------------------------------------------- labels
@@ -247,7 +241,10 @@ def label_colour(hex_or_qcolour):
     halo is roughly 1.5:1 contrast — the hue has to come down about 40% in
     luminance before it is text rather than decoration.
     """
-    c = QColor(hex_or_qcolour) if not isinstance(hex_or_qcolour, QColor) else QColor(hex_or_qcolour)
+    # Both arms of the conditional that used to be here were identical (ruff
+    # RUF034). `QColor(QColor)` is already the copy constructor, so a hex string
+    # and a QColor both arrive as a fresh QColor and neither is mutated.
+    c = QColor(hex_or_qcolour)
     h, s, v, a = c.getHsv()
     return QColor.fromHsv(h, min(255, int(s * 1.1)), max(0, int(v * 0.6)), a)
 

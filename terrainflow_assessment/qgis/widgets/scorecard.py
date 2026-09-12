@@ -12,6 +12,7 @@ from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from terrainflow_assessment.modules.reporting import capture_colour
+from terrainflow_assessment.qgis import help_text as H
 
 _WATER = "#1273b5"
 _SOAKED = "#79b8dd"
@@ -80,6 +81,11 @@ class Scorecard(QWidget):
         self._score_lbl.setTextFormat(Qt.TextFormat.RichText)
         self._caption_lbl = QLabel("")
         self._caption_lbl.setStyleSheet("color: #5f7176; font-size: 11px;")
+        # "19% of what?" is the first question this headline provokes, and the answer
+        # — rainfall over the analysis area, not the catchment of one outlet — was
+        # written in `help_text` and wired to nothing.
+        self._score_lbl.setToolTip(H.CAPTURE_DENOMINATOR)
+        self._caption_lbl.setToolTip(H.CAPTURE_DENOMINATOR)
         self._verified_lbl = QLabel("")  # phase 3: verified-vs-design chip
         self._verified_lbl.setVisible(False)
         top.addWidget(self._score_lbl)

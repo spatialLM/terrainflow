@@ -14,6 +14,12 @@ from qgis.PyQt.QtWidgets import QPushButton
 PANEL_SIZE = (460, 1400)
 
 
+def _fixture_cell_size(h):
+    """The loaded DEM's cell size, or 1.0 before one is loaded."""
+    info = getattr(h.state, "dem_info", None)
+    return getattr(info, "cell_size_m", None) or 1.0
+
+
 def check_panel_renders(dem_path):
     """The whole panel draws — the stage stepper, scorecard and disclosure sections."""
     with PluginHarness(dem_path) as h:
@@ -265,7 +271,10 @@ def check_verification_table_renders(dem_path):
                         "delta_pct": -1.2, "existing_m3": 0.0}])
 
     with PluginHarness(dem_path) as h:
-        h.panel.set_verification(result, cell_size_m=1.0)
+        # The fixture's own cell size, not a hard-coded 1.0: the footer names the
+        # grid now (R-8), so a shot taken at 1 m over a 2 m DEM would bake a
+        # contradiction into the reference image.
+        h.panel.set_verification(result, cell_size_m=_fixture_cell_size(h))
         h.assert_no_errors("verification table populate")
 
         table = h.panel._verification_table
@@ -852,7 +861,10 @@ def check_a_row_with_no_drawn_section_does_not_divide_by_zero(dem_path):
         }])
 
     with PluginHarness(dem_path) as h:
-        h.panel.set_verification(result, cell_size_m=1.0)
+        # The fixture's own cell size, not a hard-coded 1.0: the footer names the
+        # grid now (R-8), so a shot taken at 1 m over a 2 m DEM would bake a
+        # contradiction into the reference image.
+        h.panel.set_verification(result, cell_size_m=_fixture_cell_size(h))
         h.assert_no_errors("verification table with a zero-section row")
         table = h.panel._verification_table
         tip = table._row_tooltip(result.per_feature[0])

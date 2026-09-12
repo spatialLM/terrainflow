@@ -29,19 +29,15 @@ class ProjectAdapter:
 
     # ------------------------------------------------------------------
     # Layer management
-
-    def add_layer(self, layer, add_to_legend: bool = True):
-        self._p().addMapLayer(layer, add_to_legend)
-
-    def remove_layer(self, layer_or_id):
-        lid = layer_or_id if isinstance(layer_or_id, str) else layer_or_id.id()
-        self._p().removeMapLayer(lid)
-
-    def layer_by_id(self, lid: str):
-        return self._p().mapLayer(lid)
-
-    def layers_by_name(self, name: str):
-        return self._p().mapLayersByName(name)
+    #
+    # Four more methods lived here and none of them had a caller: `add_layer`,
+    # `remove_layer`, `layer_by_id` and `layers_by_name`. Two were worse than
+    # merely unused. `add_layer` was the only `addMapLayer(` outside `_groups.py`
+    # — a ready-made bypass of the rule that every layer is filed under its stage
+    # group, and invisible to the gate in `test_architecture.py`, which scans the
+    # controllers directory and not this one. `layers_by_name` packaged the
+    # by-name lookup `_state.py:157-161` bans, the one that picks the wrong
+    # feature as soon as two share a name.
 
     def layer_tree_root(self):
         return self._p().layerTreeRoot()

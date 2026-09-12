@@ -373,7 +373,7 @@ def check_report_both_formats_carry_the_same_maps(dem_path):
 
         controller = h.plugin._reporting
         data = controller._collect(controller._site_name())
-        specs = controller._map_specs(data)
+        specs = controller._map_specs()
         assert specs, "expected at least one drawable map"
 
         work = str(tmp / "assets")
@@ -401,7 +401,7 @@ def check_report_maps_include_the_stream_network(dem_path):
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        specs = controller._map_specs(controller._collect("Site"))
+        specs = controller._map_specs()
         # The summary and flow maps are the two that carry water. The design map
         # deliberately does not: it is the sheet somebody stands in a paddock
         # holding, and it shows the features and the ground and nothing else.
@@ -431,7 +431,7 @@ def check_report_maps_have_terrain_behind_them(dem_path):
         controller = h.plugin._reporting
         assert controller._basemap_layer() is None, (
             "the harness project has no tile layer; something matched anyway")
-        specs = controller._map_specs(controller._collect("Site"))
+        specs = controller._map_specs()
         for key in ("overview", "design", "flow"):
             names = [layer.name() for layer in specs[key].layers]
             assert any("Hillshade" in name for name in names), (
@@ -456,7 +456,7 @@ def check_report_map_stacking_keeps_everything_visible(dem_path):
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        specs = controller._map_specs(controller._collect("Site"))
+        specs = controller._map_specs()
 
         def order(key):
             # Layer lists are top-first, so a lower index draws in front.
@@ -515,7 +515,7 @@ def check_report_maps_are_framed_on_the_boundary(dem_path):
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        specs = controller._map_specs(controller._collect("Site"))
+        specs = controller._map_specs()
         extents = {k: spec.extent for k, spec in specs.items()}
         comparable = {k: e for k, e in extents.items()
                       if k not in ("overview", "design")}
@@ -561,7 +561,7 @@ def check_summary_map_is_the_scheme_over_the_ground(dem_path):
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        specs = controller._map_specs(controller._collect("Site"))
+        specs = controller._map_specs()
         layers = specs["overview"].layers
         names = [layer.name() for layer in layers]
 
@@ -613,8 +613,7 @@ def check_summary_map_outlines_what_the_scheme_catches(dem_path):
                 "a report-only layer reached the layer tree")
 
             outline_id = outline.id()
-            assert outline in controller._map_specs(
-                controller._collect("S"))["overview"].layers, (
+            assert outline in controller._map_specs()["overview"].layers, (
                 "the summary map is not drawing the catchment outline")
         finally:
             controller._close_transients()
@@ -651,7 +650,7 @@ def check_flow_map_runoff_stops_at_the_boundary(dem_path):
             # Same ramp, by cloning rather than by re-deriving it.
             assert type(clipped.renderer()) is type(source.renderer()), (
                 "the clipped copy was restyled instead of inheriting")
-            layers = controller._map_specs(controller._collect("S"))["flow"].layers
+            layers = controller._map_specs()["flow"].layers
             assert clipped in layers, (
                 "the flow map is still drawing the unclipped raster")
             assert source not in layers, [ly.name() for ly in layers]
@@ -674,7 +673,7 @@ def check_report_map_never_draws_a_selection(dem_path):
         h.panel.analysis_inputs_changed.emit()
 
         controller = h.plugin._reporting
-        spec = controller._map_specs(controller._collect("Site"))["design"]
+        spec = controller._map_specs()["design"]
         vectors = [layer for layer in spec.layers
                    if hasattr(layer, "selectAll")]
         assert vectors, "expected a vector layer on the design map"
@@ -719,7 +718,7 @@ def check_report_map_png_carries_a_scale_bar(dem_path):
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         controller = h.plugin._reporting
-        spec = controller._map_specs(controller._collect("Site"))["flow"]
+        spec = controller._map_specs()["flow"]
 
         def render(decorations):
             return render_map_image(spec.layers, extent=spec.extent,
@@ -898,7 +897,7 @@ def check_report_page_shots(dem_path):
 
         try:
             layout = build_layout(h.project, build_report(data), images=images,
-                                  maps=controller._map_specs(data))
+                                  maps=controller._map_specs())
             pages = layout.pageCollection().pageCount()
             assert pages >= 4, f"expected a multi-page report, got {pages}"
 

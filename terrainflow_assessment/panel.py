@@ -122,7 +122,6 @@ class AssessmentPanel(QDockWidget):
 
     # Baseline
     run_baseline_requested = pyqtSignal()
-    threshold_changed = pyqtSignal()
     query_ponding_requested = pyqtSignal()
     toggle_slope_class_requested = pyqtSignal(bool)
     toggle_slope_vectors_requested = pyqtSignal(bool)
@@ -149,7 +148,6 @@ class AssessmentPanel(QDockWidget):
     contour_rows_selected = pyqtSignal(object)       # list[int] of selected row indices
     clear_analysis_requested = pyqtSignal()          # wipe analysis layers + state
     generate_simple_contours_requested = pyqtSignal()
-    contour_layer_changed = pyqtSignal(object)
     run_keypoint_analysis_requested = pyqtSignal()
     recommend_ponds_requested = pyqtSignal()
     keypoint_result_activated = pyqtSignal(float, float)  # (x, y) → zoom canvas to it
@@ -2212,10 +2210,6 @@ class AssessmentPanel(QDockWidget):
         for key, btn in self._terrain_index_buttons.items():
             btn.setEnabled(key in available)
 
-    def set_terrain_enabled(self, enabled):
-        """The compute button follows the baseline, as the slope tools do."""
-        self._terrain_run_btn.setEnabled(bool(enabled))
-
     # ------------------------------------------------------------------ Spacing advice
 
     def set_spacing_advice(self, text, interval_m=None):
@@ -2719,13 +2713,6 @@ class AssessmentPanel(QDockWidget):
     @property
     def keyline_spacing_m(self):
         return self._keyline_spacing_spin.value()
-
-    @property
-    def keyline_cross_grade(self):
-        """Deprecated — the grade never reached the geometry. See
-        :attr:`keyline_max_grade_n`, which is the limit the drift is flagged against."""
-        n = self._keyline_grade_spin.value()
-        return 1.0 / n if n else 0.0
 
     @property
     def keyline_max_grade_n(self):

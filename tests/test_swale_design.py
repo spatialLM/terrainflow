@@ -311,6 +311,18 @@ class TestSampleElevations:
     def test_no_points_is_no_work(self):
         assert sample_elevations([], "/no/such/dem.tif") == []
 
+    def test_one_unreadable_point_does_not_discard_the_others(self, tmp_dem):
+        """The guard is per point, and that is the whole reason it is per point.
+
+        A single draw sends this the centroid of every feature on the site. One
+        geometry with a degenerate centroid must cost its own elevation and nothing
+        else — an outer-only guard would blank the whole dialog's overflow list.
+        """
+        out = sample_elevations(
+            [(0.5, 19.5), ("not a number", 3.0), (5.5, 12.5)], tmp_dem)
+        assert out[1] is None
+        assert out[0] is not None and out[2] is not None
+
 
 # ---------------------------------------------------------------------------
 # required_storage_at_length — the deficit-at-drawn-length readout

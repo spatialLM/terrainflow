@@ -368,3 +368,68 @@ def test_claude_md_scoping_table_names_no_module_that_is_gone():
         "CLAUDE.md names these checks modules, but they are not on disk:\n  "
         + "\n  ".join(phantom)
     )
+
+
+# ------------------------------------------------- help copy reaches a surface
+
+HELP_TEXT_PY = PKG / "qgis" / "help_text.py"
+
+#: Copy that is deliberately not attached to one widget. Each entry says why, and
+#: the point of the list is that adding to it is a decision rather than a drift.
+_HELP_NOT_ATTACHED = {
+    # Formatted at the call site with a label, not used as a constant by name.
+    "TOOL_DRAW_FALLBACK",
+}
+
+
+def _help_constants():
+    """Every UPPER_SNAKE string constant defined in ``help_text.py``."""
+    tree = _parse(HELP_TEXT_PY)
+    names = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and re.fullmatch(r"[A-Z][A-Z0-9_]*",
+                                                             target.id):
+                names.add(target.id)
+    return names
+
+
+def _names_referenced_outside_help_text():
+    """Every identifier used anywhere in the package except ``help_text.py`` itself.
+
+    Read off the source text rather than the AST because the constants are reached
+    as ``H.NAME`` attributes, and an attribute access carries no binding to resolve.
+    """
+    used = set()
+    word = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    for path in _py_files(PKG):
+        if path == HELP_TEXT_PY:
+            continue
+        used.update(word.findall(path.read_text(encoding="utf-8")))
+    return used
+
+
+def test_every_help_text_constant_reaches_a_widget():
+    """Q-19. Tooltip copy nobody can read is worse than none.
+
+    Seven constants here were orphans, and three of them described features that had
+    shipped with no tooltip at all: the Stress points layer, the Overflow connections
+    layer and the channel-length figure in the intensity dialog. The copy was written,
+    reviewed and then simply never attached, and nothing said so.
+
+    Worse, an orphan can be *more correct than the one on screen*. ``OVERFLOW_TARGET_
+    AUTO`` described the flow-path walk that ``resolve_targets`` actually does, while
+    the ``OVERFLOW_TARGET`` tooltip the combo box shows still described the elevation
+    heuristic that walk replaced. Two versions of the same sentence, one of them wired
+    and wrong.
+    """
+    defined = _help_constants()
+    used = _names_referenced_outside_help_text()
+    orphans = sorted(defined - used - _HELP_NOT_ATTACHED)
+    assert not orphans, (
+        "these help_text constants are referenced nowhere in the package — attach "
+        "them to the widget they describe, or delete them:\n  "
+        + "\n  ".join(orphans)
+    )

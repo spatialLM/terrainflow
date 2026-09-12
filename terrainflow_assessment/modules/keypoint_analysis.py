@@ -16,7 +16,6 @@ import warnings
 
 import numpy as np
 import rasterio
-from shapely.affinity import translate
 from shapely.geometry import LineString
 
 from terrainflow_assessment.modules.footprint import xy_to_rc
@@ -1482,28 +1481,6 @@ class YeomansKeylineAnalysis:
             if max(abs(d - target) for d in dists) <= tol:
                 kept.append(part)
         return kept
-
-    def _offset_line(self, line, signed_dist, kr, kc):
-        """One parallel offset of *line*, or a translated fallback.
-
-        Kept for the callers that want a single line. New code should prefer
-        :meth:`offset_parts`, which returns every usable limb instead of the longest.
-        """
-        parts = self.offset_parts(line, signed_dist)
-        if parts:
-            return max(parts, key=lambda g: g.length)
-        # Fallback: translate along the (down-slope) gradient direction.
-        rows, cols = self.dem.shape
-        r0, r1 = max(0, kr - 1), min(rows - 1, kr + 1)
-        c0, c1 = max(0, kc - 1), min(cols - 1, kc + 1)
-        dz_dr = ((float(self.dem[r1, kc]) - float(self.dem[r0, kc]))
-                 / ((r1 - r0) * self.cell_h)) if r1 > r0 else 0.0
-        dz_dc = ((float(self.dem[kr, c1]) - float(self.dem[kr, c0]))
-                 / ((c1 - c0) * self.cell_w)) if c1 > c0 else 1.0
-        gmag = (dz_dr ** 2 + dz_dc ** 2) ** 0.5 or 1.0
-        # map dx/dy from column/row gradient; row increases downward (transform.e<0)
-        ux, uy = dz_dc / gmag, -dz_dr / gmag
-        return translate(line, xoff=ux * signed_dist, yoff=uy * signed_dist)
 
     def _sample_z(self, line, base_elev):
         """Sample DEM elevation along *line* → list of (x, y, z) plus mean z."""

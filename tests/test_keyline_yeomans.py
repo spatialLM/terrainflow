@@ -287,23 +287,6 @@ class TestKeylineHelpers:
         # An elevation far outside the DEM range has no contour.
         assert ya._trace_keyline(1.0e6, 20, 20) is None
 
-    def test_offset_line_happy_path(self, tmp_path):
-        from shapely.geometry import LineString
-        dem_path, _ = _make_valley_dem(tmp_path)
-        ya = YeomansKeylineAnalysis(dem_path)
-        line = LineString([(0, 0), (10, 0), (20, 0)])
-        off = ya._offset_line(line, 5.0, 20, 20)
-        assert off is not None and off.length > 0
-
-    def test_offset_line_fallback_translate(self, tmp_path):
-        from shapely.geometry import LineString
-        dem_path, _ = _make_valley_dem(tmp_path)
-        ya = YeomansKeylineAnalysis(dem_path)
-        # Zero-length line → offset_curve empty → translate fallback returns a line.
-        degenerate = LineString([(5, 5), (5, 5)])
-        off = ya._offset_line(degenerate, 5.0, 20, 20)
-        assert off is not None
-
     def test_sample_dem_out_of_bounds_returns_default(self, tmp_path):
         dem_path, _ = _make_valley_dem(tmp_path)
         ya = YeomansKeylineAnalysis(dem_path)
@@ -795,3 +778,54 @@ class TestOffsetParts:
         parts = ya.offset_parts(LineString([(0, 0), (100, 0)]), 5.0)
         assert len(parts) == 1
         assert parts[0].length == pytest.approx(100.0, rel=0.05)
+
+    def test_a_line_with_no_length_offsets_to_nothing(self, tmp_path):
+        """The empty answer, asserted directly rather than through a caller.
+
+        ``offset_curve`` on a zero-length line returns an empty geometry, and the
+        contract is that nothing survives: the caller refuses the guide and says why,
+        rather than drawing a line a plough cannot follow. This was only ever covered
+        incidentally, by ``_offset_line``'s tests — and ``_offset_line`` has now been
+        deleted as the dead wrapper its own docstring said it was, which is how the
+        gap came to light.
+        """
+        from shapely.geometry import LineString
+
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+        assert ya.offset_parts(LineString([(5, 5), (5, 5)]), 5.0) == []
+
+    def test_an_offset_this_shapely_cannot_take_returns_no_guide(self, tmp_path,
+                                                                 monkeypatch):
+        """Both offset routes failing must produce ``[]``, never an exception.
+
+        ``offset_curve`` is a shapely 2.0 API and ``metadata.txt`` declares
+        ``qgisMinimumVersion=3.22``, which can ship shapely 1.x — hence the
+        ``parallel_offset`` fallback. What this pins is the *contract at the end of
+        that chain*: when no offset can be taken at all, the method returns no parts
+        and the caller refuses the guide, rather than raising up through the keyline
+        run and failing it.
+
+        It cannot pin that the fallback *succeeds* on shapely 1.x, and it does not
+        pretend to: on the shapely 2.1 installed here ``parallel_offset`` is itself
+        implemented by calling ``offset_curve``, so removing one removes both. (Nor
+        does subclassing ``LineString`` to hide the method work — that test passes
+        while never entering the fallback. Coverage of 1453-1458 is what showed it.)
+        """
+        from shapely.geometry import LineString
+
+        dem_path = _two_valley_dem(str(tmp_path / "two.tif"))
+        ya = YeomansKeylineAnalysis(dem_path)
+
+        line = LineString([(0, 0), (100, 0)])
+        assert ya.offset_parts(line, 5.0), "precondition: this line offsets fine"
+
+        def _no_offset_curve(self, *_a, **_kw):
+            raise AttributeError("offset_curve is shapely 2.0")
+
+        monkeypatch.setattr(type(line), "offset_curve", _no_offset_curve,
+                            raising=False)
+        with pytest.raises(AttributeError):
+            line.offset_curve(5.0)      # the method really is gone
+
+        assert ya.offset_parts(line, 5.0) == []

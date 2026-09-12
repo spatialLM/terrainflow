@@ -253,18 +253,6 @@ def clear_group(project, path=SITE, site_name="", tag=""):
     return grp
 
 
-def collapse(project, layer):
-    """Collapse an already-placed layer's legend, ignoring a dead reference."""
-    if layer is None:
-        return
-    try:
-        node = project.instance().layerTreeRoot().findLayer(layer.id())
-    except Exception:
-        return
-    if node is not None:
-        node.setExpanded(False)
-
-
 class LayerTreeMixin:
     """Gives a controller ``self.place(layer, G.ANALYSIS)``.
 

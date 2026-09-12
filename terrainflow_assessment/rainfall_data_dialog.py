@@ -163,7 +163,7 @@ class RainfallDataDialog(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight
                                       | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(r, c, item)
-        self._report(table, [])
+        self._report([])
 
     def _on_parse(self):
         """Parse the pasted text into the grid, reporting anything unreadable.
@@ -179,7 +179,7 @@ class RainfallDataDialog(QDialog):
                 merged.depths.setdefault(ari, {}).update(rows)
             self._load(merged)
             self.edit_site.setText(self.edit_site.text() or parsed.site)
-        self._report(parsed, problems)
+        self._report(problems)
 
     def _current_table(self):
         """Read the grid back into an IDFTable."""
@@ -198,7 +198,7 @@ class RainfallDataDialog(QDialog):
                     depths.setdefault(ari, {})[duration] = value
         return IDFTable(depths=depths, source="HIRDS v4", site=self.edit_site.text().strip())
 
-    def _report(self, table, problems):
+    def _report(self, problems):
         if problems:
             self.lbl_status.setStyleSheet(f"color: {_WARN}; font-size: 10.5px;")
             self.lbl_status.setText("\n".join(f"⚠ {p}" for p in problems))

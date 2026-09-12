@@ -187,7 +187,7 @@ class ReportingController:
                     export_pdf,
                 )
                 export_pdf(path, self._project.instance(), report,
-                           images=images, maps=self._map_specs(data))
+                           images=images, maps=self._map_specs())
         finally:
             # Before the working directory goes: a raster layer holds its file
             # open, and on Windows a tree with an open handle in it does not
@@ -283,7 +283,7 @@ class ReportingController:
         from terrainflow_assessment.qgis.adapters.map_image import save_map_png
 
         out = {}
-        for key, spec in self._map_specs(data).items():
+        for key, spec in self._map_specs().items():
             path = os.path.join(work, f"map_{key}.png")
             try:
                 if save_map_png(path, spec.layers, extent=spec.extent,
@@ -422,7 +422,7 @@ class ReportingController:
                 "cannot be compared. Re-run Baseline and Re-analyse together.")
         return reasons
 
-    def _map_specs(self, data):
+    def _map_specs(self):
         from terrainflow_assessment.qgis.adapters.layout_pdf import MapSpec
         from terrainflow_assessment.qgis.adapters.map_image import (
             usable_layers,

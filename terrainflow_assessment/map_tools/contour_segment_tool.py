@@ -260,3 +260,10 @@ class ContourSegmentTool(QgsMapTool):
         self._phase = 0
         self._contour_shp = None
         self._start_dist = None
+        # Cleared too. Nothing reads these before `_try_select_contour` writes all
+        # three together, so this is latent rather than live — but leaving one
+        # gesture's elevation and QgsGeometry lying about for the next one makes a
+        # reset that resets most of the state, which is worse than none because it
+        # reads as complete.
+        self._contour_geom = None
+        self._elevation = 0.0

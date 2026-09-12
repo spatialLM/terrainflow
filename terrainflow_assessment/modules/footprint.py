@@ -85,7 +85,7 @@ def line_points(coords, distances):
 
     Deliberately numpy rather than ``shapely.line_interpolate_point``: that is a
     shapely 2.0 API, ``metadata.txt`` declares ``qgisMinimumVersion=3.22``, and
-    ``keypoint_analysis._offset_line`` already hedges ``offset_curve`` against shapely
+    ``keypoint_analysis.offset_parts`` already hedges ``offset_curve`` against shapely
     1.x. Reaching for the vectorised shapely call would quietly raise the plugin's
     floor to buy nothing this does not already do.
 

@@ -451,7 +451,11 @@ class SpillwayTable(QWidget):
         QTimer.singleShot(0, lambda: self.depth_edited.emit(index, depth))
 
     def summary(self):
-        """One-line state for the section header — counts, worst first."""
+        """One-line state for the section header: how many, and how many need work.
+
+        Counts only. It used to say "worst first", which described a ranking this
+        does not do and the rows do not carry.
+        """
         if not self._rows:
             return ""
         live = [r for r in self._rows if r.get("state") != "disabled"]
@@ -918,9 +922,14 @@ class SpillwayTable(QWidget):
 
         failing = [r for r in live if r.get("state") == "fail"]
         if failing:
-            worst = failing[0]
-            problem = (worst.get("problems") or ["needs attention"])[0]
-            bits.append(f"{worst.get('name')}: {problem}")
+            # The *first* failing row in table order, not the worst one — the rows
+            # carry no severity to rank by, only a pass/fail state and a list of
+            # problems. It was called `worst`, which claimed a judgement nothing here
+            # makes; the sentence it builds does not claim it, and now the name does
+            # not either.
+            first_failing = failing[0]
+            problem = (first_failing.get("problems") or ["needs attention"])[0]
+            bits.append(f"{first_failing.get('name')}: {problem}")
 
         undesigned = [r for r in live if not r.get("designed")]
         if undesigned:

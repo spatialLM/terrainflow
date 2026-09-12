@@ -205,7 +205,12 @@ class DesignIntensityDialog(QDialog):
                 text = f"{path:,.0f} m measured down the flow path"
                 if channel > 0:
                     text += f", last {channel:,.0f} m in a channel"
-                ctx_form.addRow("Longest flow path:", self._value_label(text))
+                path_label = self._value_label(text)
+                # Why the channel leg matters, on the row that reports it: channel
+                # flow is about twice the speed of shallow concentrated flow, so
+                # leaving it at zero overstates Tc and undersizes the overflow.
+                path_label.setToolTip(H.CHANNEL_LENGTH)
+                ctx_form.addRow("Longest flow path:", path_label)
 
             legs = getattr(self._tc, "leg_slopes", None)
             if legs:

@@ -58,18 +58,6 @@ def dem_crs(state):
     return wkt
 
 
-def dem_crs_or_project(state, project):
-    """:func:`dem_crs`, falling back to the project's CRS rather than raising.
-
-    For layers that are display furniture rather than measurements — where being
-    drawn in the operator's CRS is merely unhelpful, not wrong.
-    """
-    try:
-        return dem_crs(state)
-    except MissingDemCrs:
-        return project.instance().crs().toWkt()
-
-
 def crs_object(wkt):
     """A ``QgsCoordinateReferenceSystem`` from what :func:`dem_crs` returns."""
     from qgis.core import QgsCoordinateReferenceSystem
