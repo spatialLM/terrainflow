@@ -291,6 +291,57 @@ class TestFindRidgelines:
         result = kl.find_ridgelines(boundary_mask=mask)
         assert isinstance(result, list)
 
+    def test_short_components_cost_no_raster_work(self, tmp_path, monkeypatch):
+        """M-11: a component under ``min_cells`` must be rejected by its **size**.
+
+        The loop used to do ``labeled == region_id`` — a compare over the whole grid —
+        followed by ``np.argwhere``, for every component, and only then apply
+        ``min_cells``. On the owner's 1139x1016 design that is 1,462 full-raster passes
+        to return nothing at all: every skeleton component there is shorter than the
+        50-cell minimum, so the whole 5.8 s is spent measuring things it then discards.
+
+        ``np.argwhere`` is the loop's only per-component raster call, so counting it
+        counts the passes. One long spine survives the filter here and forty single-cell
+        bumps do not, and the fix is what makes those forty free.
+        """
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+
+        rows, cols = 60, 60
+        dem = np.full((rows, cols), 50.0, dtype="float32")
+        # One spine, comfortably over min_cells, one cell wide so thinning keeps it.
+        dem[30, 5:56] += 5.0
+        # Forty isolated bumps, each its own one-cell component, each under min_cells.
+        bumps = [(r, c) for r in range(6, 26, 4) for c in range(6, 46, 5)][:40]
+        for r, c in bumps:
+            dem[r, c] += 5.0
+        acc = np.ones((rows, cols), dtype="float32")   # acc <= 2 everywhere: all ridge
+
+        dem_path = _write_raster(str(tmp_path / "comb_dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "comb_acc.tif"), acc, cell_size=1.0)
+
+        calls = {"n": 0}
+        real_argwhere = np.argwhere
+
+        def counting_argwhere(*args, **kwargs):
+            calls["n"] += 1
+            return real_argwhere(*args, **kwargs)
+
+        monkeypatch.setattr(np, "argwhere", counting_argwhere)
+
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                   min_length_m=10.0)
+
+        # The spine is found and the bumps are not: the filter still filters.
+        assert len(lines) == 1, f"expected the one spine, got {len(lines)}"
+        assert lines[0]["length_m"] >= 40, lines[0]
+
+        # And it cost one pass, not forty-one. Without the fix this is 41.
+        assert calls["n"] <= 5, (
+            f"{calls['n']} full-raster passes for 1 surviving component — the "
+            f"size filter is still running after the raster work, not before it"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _valley_cross_width

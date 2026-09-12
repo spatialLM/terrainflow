@@ -7,9 +7,12 @@ other's results without direct controller-to-controller coupling.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +57,15 @@ class PluginState:
     # ------------------------------------------------------------------ Before/after layer IDs
     baseline_layer_ids: list[str] = field(default_factory=list)
     earthworks_layer_ids: list[str] = field(default_factory=list)
+    # The burned DEM and its hillshade, which `_load_burned_dem_layer` puts under
+    # Design. Tracked apart from `earthworks_layer_ids` because that list is
+    # *reassigned* by `_load_result_layers` a moment before the backdrops are placed,
+    # so it cannot be what remembers the previous pair — and nothing else did:
+    # three Verify runs stacked six ticked-on backdrops on one file, and the
+    # before/after toggle (which walks `earthworks_layer_ids`) reached only the
+    # newest pair, so it stopped hiding the design. The new ids still go into
+    # `earthworks_layer_ids` as well; this list is what removes the old ones.
+    burned_backdrop_layer_ids: list[str] = field(default_factory=list)
     # family name → {"members": {layer id: claimed maximum}, "top": float}
     # The ramp top shared by a Baseline layer and its Earthworks counterpart, so a
     # colour means the same depth (or the same m³) on both and the pair can be read
@@ -235,9 +247,60 @@ class PluginState:
     design_worker: Any | None = None
     terrain_worker: Any | None = None
 
+    # ------------------------------------------------------------------ Slope band
+    # ``(file key, (array, transform) | None)`` — see `slope_band`. Not part of the
+    # public surface; read it through the method, which owns the invalidation.
+    _slope_band_cache: Any | None = None
+
     # ------------------------------------------------------------------ Cache invalidation
     # Lives on the state rather than a controller so any controller can invalidate
     # without reaching across to another one (baseline invalidates what earthworks owns).
+
+    def slope_band(self):
+        """``(array, transform)`` for the slope raster, read once — or ``None``.
+
+        Both draw tools sample this for their live grade readout, and each used to
+        read the whole band in its own ``__init__``. A fresh tool is built per draw
+        action, so that was 16.2 ms of the 18.2 ms it takes to arm one, paid again on
+        every click of every draw button.
+
+        Held here rather than on a tool because the tool is thrown away and the
+        raster is not. Footprint: one float32 copy of the grid — 4.6 MB on the
+        owner's 1139x1016 site.
+
+        Keyed on the file's **identity, not its path**: ``slope.tif`` is rewritten
+        into the same ``output_dir`` every time a DEM is loaded, so a path-keyed
+        cache would hand the new terrain's tools the old terrain's slopes.
+        """
+        import os
+
+        path = self.slope_raster_path
+        if not path:
+            self._slope_band_cache = None
+            return None
+        try:
+            st = os.stat(path)
+            key = (path, st.st_size, st.st_mtime_ns)
+        except OSError:
+            self._slope_band_cache = None
+            return None
+
+        cached = self._slope_band_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        band = None
+        try:
+            import rasterio
+
+            with rasterio.open(path) as src:
+                band = (src.read(1).astype("float32"), src.transform)
+        except Exception:
+            _log.debug("slope raster could not be read: %s", path, exc_info=True)
+        # Cached either way, the failure included: a raster that cannot be read must
+        # not be retried once per draw action for the rest of the session.
+        self._slope_band_cache = (key, band)
+        return band
 
     def invalidate_catchment_cache(self):
         """Forget which cells drain to which earthwork (geometry changed)."""

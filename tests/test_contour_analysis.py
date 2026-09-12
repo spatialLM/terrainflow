@@ -179,6 +179,44 @@ class TestExtractContours:
         result = extract_contours(dem_path, interval_m=5.0, output_path=out)
         assert isinstance(result, list)
 
+    def test_the_scratch_directory_does_not_outlive_the_call(self, tmp_path,
+                                                             monkeypatch):
+        """CTA-30. With no ``output_path`` this makes a private ``tfa_contours_``
+        directory for gdal_contour to write into, and never removed it: 138.7 MB
+        across 456 directories in one test window, and it is called on every contour
+        run, every keyline run and every segment pick.
+
+        The scratch belongs to the call, so it dies with the call — on the gdal
+        path, on the marching-squares fallback, and on the way out of a raise.
+        """
+        import tempfile
+
+        from terrainflow_assessment.modules.contour_analysis import extract_contours
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+        dem_path = _make_dem(tmp_path)
+        result = extract_contours(dem_path, interval_m=5.0)
+
+        assert isinstance(result, list)
+        left = sorted(p.name for p in scratch.iterdir())
+        assert left == [], f"the call left {left} behind in the scratch directory"
+
+    def test_a_caller_supplied_output_path_is_left_alone(self, tmp_path):
+        """The cleanup must only remove what this function created: an output the
+        caller named is the caller's file, and naming one is the whole point.
+        """
+        from terrainflow_assessment.modules.contour_analysis import extract_contours
+
+        dem_path = _make_dem(tmp_path)
+        out_dir = tmp_path / "mine"
+        out_dir.mkdir()
+        out = str(out_dir / "contours.gpkg")
+        extract_contours(dem_path, interval_m=5.0, output_path=out)
+        assert out_dir.exists(), "a caller-supplied output directory was deleted"
+
 
 # ---------------------------------------------------------------------------
 # filter_by_slope

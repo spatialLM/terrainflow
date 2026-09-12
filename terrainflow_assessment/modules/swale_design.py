@@ -398,22 +398,52 @@ def snap_point_to_contour_elevation(point_xy, dem_path):
     -------
     float — elevation in metres, or None if outside the raster extent.
     """
+    return sample_elevations([point_xy], dem_path)[0]
+
+
+def sample_elevations(points_xy, dem_path):
+    """DEM elevation under each of *points_xy* — one open, and one cell read each.
+
+    One implementation of *what is the ground here*, because the old one paid two
+    costs per point and both were avoidable: the file was reopened, and
+    ``src.read(1)`` decompressed the **whole band** to index a single element. That
+    is 15 ms a point on a 1139x1016 DEM, which would be a footnote if it happened
+    once — but a single draw makes 38 of these calls. ``_orient_downhill`` samples
+    both ends of the line, ``_feature_elevation`` samples the centroid, and
+    ``_overflow_options`` samples the centroid of every *other* earthwork so the
+    dialog can warn about an uphill overflow target. On a 35-feature design that is
+    990 ms between finishing a line and seeing the properties dialog, 571 ms of it
+    spent reading 1.16 M cells to look at 38 of them.
+
+    Returns a list as long as *points_xy*: the elevation, or ``None`` for a point
+    outside the raster, on a nodata cell, or when the DEM cannot be read at all.
+    Per point, so one unreadable point does not discard the others.
+    """
     import numpy as np
     import rasterio
+    from rasterio.windows import Window
 
-    x, y = point_xy
+    points = list(points_xy)
+    if not points:
+        return []
+    out = [None] * len(points)
     try:
         with rasterio.open(dem_path) as src:
             transform = src.transform
-            row, col = xy_to_rc(transform, x, y)
-            if 0 <= row < src.height and 0 <= col < src.width:
-                val = src.read(1)[row, col]
-                nodata = src.nodata
-                if nodata is None or not np.isclose(val, nodata):
-                    return float(val)
+            nodata = src.nodata
+            for i, (x, y) in enumerate(points):
+                try:
+                    row, col = xy_to_rc(transform, x, y)
+                    if not (0 <= row < src.height and 0 <= col < src.width):
+                        continue
+                    val = src.read(1, window=Window(col, row, 1, 1))[0, 0]
+                    if nodata is None or not np.isclose(val, nodata):
+                        out[i] = float(val)
+                except Exception:
+                    continue
     except Exception:
         pass
-    return None
+    return out
 
 
 def sample_peak_inflow(qgs_geom, acc_path, n_samples=30):

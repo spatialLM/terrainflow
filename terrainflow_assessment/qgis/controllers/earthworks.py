@@ -199,7 +199,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self.use_tool(tool)
         else:
             tool = DrawLineTool(self._canvas,
-                                slope_raster_path=self._state.slope_raster_path,
+                                slope_band=self._state.slope_band(),
                                 tool_label="swale")
             tool.line_drawn.connect(lambda geom: self._on_geometry_drawn("swale", geom))
             tool.cancelled.connect(self._on_draw_cancelled)
@@ -255,7 +255,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     def activate_draw_line(self, ew_type):
         tool = DrawLineTool(self._canvas,
-                            slope_raster_path=self._state.slope_raster_path,
+                            slope_band=self._state.slope_band(),
                             tool_label=ew_type)
         tool.line_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
@@ -263,7 +263,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     def activate_draw_polygon(self, ew_type):
         tool = DrawPolygonTool(self._canvas,
-                               slope_raster_path=self._state.slope_raster_path,
+                               slope_band=self._state.slope_band(),
                                tool_label=ew_type)
         tool.polygon_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
@@ -1457,14 +1457,16 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             from shapely.geometry import LineString
             from shapely.geometry import shape as shapely_shape
 
-            from terrainflow_assessment.modules.swale_design import (
-                snap_point_to_contour_elevation,
-            )
+            from terrainflow_assessment.modules.swale_design import sample_elevations
+
             coords = list(shapely_shape(json.loads(geometry.asJson())).coords)
             if len(coords) < 2:
                 return geometry
-            z0 = snap_point_to_contour_elevation(coords[0], self._state.dem_path)
-            z1 = snap_point_to_contour_elevation(coords[-1], self._state.dem_path)
+            # Both ends under one open: two questions about the same raster are one
+            # visit to it, and this runs on the path between finishing a line and
+            # the properties dialog appearing.
+            z0, z1 = sample_elevations([coords[0], coords[-1]],
+                                       self._state.dem_path)
             if z0 is not None and z1 is not None and z1 > z0:
                 return QgsGeometry.fromWkt(LineString(coords[::-1]).wkt)
         except Exception:
@@ -6132,11 +6134,30 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return
         from qgis.core import QgsRasterLayer
 
+        from terrainflow_assessment.qgis.controllers._layers import remove_layer
+
+        # The pair this method placed last time. Nothing else removes them: the only
+        # ``clear_group`` call clears Rerun and Baseline, and ``earthworks_layer_ids``
+        # has already been reassigned by ``_load_result_layers`` by the time this
+        # runs, so the previous ids were simply dropped. Three Verify runs therefore
+        # left six ticked-on backdrops stacked on one file — and three live
+        # ``QgsRasterLayer``s holding ``modified_dem.tif`` open while the next run
+        # rewrites it, which on Windows is the GDAL lock ``simulation.py:447-453``
+        # already documents.
+        for old_id in list(self._state.burned_backdrop_layer_ids):
+            remove_layer(self._project, old_id)
+        self._state.burned_backdrop_layer_ids = []
+
         ids = list(getattr(self._state, "earthworks_layer_ids", None) or [])
+        backdrops = []
 
         def _place(layer, visible=True):
             self.place(layer, G.DESIGN, visible=visible)
+            # Both lists. ``toggle_before_after`` walks ``earthworks_layer_ids``, so
+            # the ids have to stay there or the toggle stops reaching the backdrops;
+            # ``backdrops`` is only what lets the *next* run remove this pair.
             ids.append(layer.id())
+            backdrops.append(layer.id())
 
         if baseline is not None:
             baseline._add_hillshade(_place, path, "Earthworks — Hillshade")
@@ -6145,6 +6166,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if layer.isValid():
             _place(layer)
         self._state.earthworks_layer_ids = ids
+        self._state.burned_backdrop_layer_ids = backdrops
 
     def _on_analysis_error(self, tb):
         self._panel.set_earthworks_failed(

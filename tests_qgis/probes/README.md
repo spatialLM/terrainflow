@@ -42,9 +42,21 @@ starts; a mid-run edit makes later modules boot against a half-applied change.
 | `p_coverage.py` | What neither suite calls, and whether tooltips match their constants | Step E — §4 rows |
 | `p_crosscheck.py` | Four quantities computed twice; mask routing vs pointer routing | Step F: KPA-52 |
 | `p_topographic_valleys.py` | Can a keypoint be found with no routing at all? | KPA-52 (§9.7) |
+| `p_perf_gate.py` | Is an optimisation worth its 10%? The harness the four below use | M-6 |
+| `p_gate_reads.py` | What does reading a whole band actually cost? | M-10, Q-11, G-9 |
+| `p_gate_burn.py` | `_cut_spillway` and `overtopping_spill`, against the burn and a Verify | M-12, R-5 |
+| `p_gate_ui.py` | Five Batch 4 items against the UI operations they sit in | M-11, Q-11, G-9, G-8, M-10 |
+| `p_gate_m10.py` | M-10's *real* denominator, and how many reads a draw makes | M-10 |
 
 `p_coverage.py` is the one probe that needs **no QGIS at all** — it reads source. Plain
 `python p_coverage.py` is quicker and does the same thing.
+
+The `p_gate_*` probes load the owner's real `.tfd` — 35 features on 1139x1016 — because
+the committed fixture cannot price performance work: it is a 400x400 clip with two ponds
+and no spillways at all, so `_cut_spillway` is never even reached on it. Their verdicts,
+before and after, are in `evidence/p_gate_batch4.json`. `p_gate_reads.py` is the cheap
+one — it opens no project and needs no design, and it exists because if a whole-band read
+had turned out to cost 2 ms, three of the items would have been settled in a minute.
 
 Steps C, D and F also left five permanent assertions behind, in
 `checks_fixture_regression.py`. They pin *properties* rather than measurements — a

@@ -484,8 +484,6 @@ def adoptable_spillway_width(required_m, cell_size=None, feature_length_m=None):
     *feature_length_m* is ``None`` from the dialog and ``0.0`` from ``Earthwork.length_m``
     on empty geometry; both mean "no bound".
     """
-    from terrainflow_assessment.modules.burn_strategy import spillway_burn_width
-
     if required_m is None or float(required_m) <= 0:
         return None
     built = (spillway_burn_width(required_m, cell_size) if cell_size

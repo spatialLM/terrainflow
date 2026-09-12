@@ -295,3 +295,77 @@ def check_baseline_stage_renders_per_method(dem_path):
             h.panel._sizing_basis_combo.setCurrentIndex(index)
             path = save_widget(h.panel, f"panel_baseline_{name}", size=PANEL_SIZE)
             assert_rendered(path, f"baseline stage ({name})", min_colours=12)
+
+
+# ---------------------------------------------------------------- backdrop leak
+
+def _design_backdrops():
+    """Every "Earthworks — …" backdrop layer currently in the project, by name."""
+    from qgis.core import QgsProject
+
+    names = []
+    for layer in QgsProject.instance().mapLayers().values():
+        if layer.name().startswith("Earthworks — "):
+            names.append(layer.name())
+    return sorted(names)
+
+
+def check_a_second_verify_replaces_the_backdrops_it_made(dem_path):
+    """Q-13. `_load_burned_dem_layer` places "Earthworks — Hillshade" and
+    "Earthworks — Burned DEM" under Design on every Verify run. Nothing removed the
+    previous pair: `clear_group` only ever clears Rerun and Baseline, and
+    `earthworks_layer_ids` is reassigned in `_load_result_layers` *before* this runs,
+    so the old pair's ids were dropped on the floor.
+
+    Three Verify runs left six ticked-on backdrops stacked on one path — and because
+    `toggle_before_after` walks `earthworks_layer_ids`, it only ever reached the
+    newest pair, so 'Show: with earthworks' stopped hiding the design.
+    """
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", geometry=line_across_valley())
+
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("first verify")
+        first = _design_backdrops()
+        assert first, "no burned backdrops were placed at all"
+
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("second verify")
+        second = _design_backdrops()
+
+        assert second == first, (
+            f"a second Verify stacked another set of backdrops on the same path: "
+            f"{first} -> {second}"
+        )
+
+
+def check_the_before_after_toggle_still_hides_a_re_verified_backdrop(dem_path):
+    """Q-13, the half a user notices. The toggle walks `earthworks_layer_ids`, so a
+    backdrop whose id fell out of that list stays ticked on whatever the toggle says
+    — the design stays painted over the baseline it is supposed to be compared with.
+    """
+    from qgis.core import QgsProject
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        h.add_earthwork("swale", geometry=line_across_valley())
+        h.panel.run_earthworks_requested.emit()
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("two verify runs")
+
+        h.plugin._baseline.toggle_before_after(False)
+
+        root = QgsProject.instance().layerTreeRoot()
+        still_on = []
+        for layer in QgsProject.instance().mapLayers().values():
+            if not layer.name().startswith("Earthworks — "):
+                continue
+            node = root.findLayer(layer.id())
+            if node is not None and node.itemVisibilityChecked():
+                still_on.append(layer.name())
+
+        assert not still_on, (
+            f"'Show: baseline' left these earthworks backdrops ticked on: "
+            f"{still_on} — their ids are not in earthworks_layer_ids"
+        )

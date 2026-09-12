@@ -1,8 +1,12 @@
+import logging
+
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 from qgis.utils import iface
+
+_log = logging.getLogger(__name__)
 
 
 class DrawLineTool(QgsMapTool):
@@ -15,28 +19,42 @@ class DrawLineTool(QgsMapTool):
     line_drawn = pyqtSignal(object)
     cancelled = pyqtSignal()
 
-    def __init__(self, canvas, color=None, slope_raster_path=None, tool_label="line"):
+    def __init__(self, canvas, color=None, slope_raster_path=None, tool_label="line",
+                 slope_band=None):
         super().__init__(canvas)
         self.canvas = canvas
         self.points = []
         self._double_click_pending = False
         self._tool_label = tool_label  # e.g. "swale", "berm", "dam"
+        self._last_hint = None
 
         self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
         c = color or QColor(0, 120, 220, 200)
         self.rubber_band.setColor(c)
         self.rubber_band.setWidth(3)
 
+        # *slope_band* is ``(array, transform)`` already in hand — `PluginState.
+        # slope_band()`, which reads the raster once per terrain rather than once per
+        # tool. A fresh tool is built for every draw action, and that read was 16.2 ms
+        # of the 18.2 ms it takes to arm one. The path is still accepted, so a tool
+        # built outside the plugin (a check, a script) still works on its own.
         self._slope_array = None
         self._slope_transform = None
-        if slope_raster_path:
+        if slope_band is not None:
+            self._slope_array, self._slope_transform = slope_band
+        elif slope_raster_path:
             try:
                 import rasterio
                 with rasterio.open(slope_raster_path) as src:
                     self._slope_array = src.read(1).astype("float32")
                     self._slope_transform = src.transform
             except Exception:
-                pass
+                # Was `pass`. A slope raster that has been deleted, truncated or
+                # locked then killed the live grade readout in silence: the tool
+                # still drew, the hint simply never mentioned the grade again, and
+                # nothing anywhere said why.
+                _log.debug("slope raster could not be read: %s",
+                           slope_raster_path, exc_info=True)
 
         self._show_hint()
 
@@ -50,9 +68,18 @@ class DrawLineTool(QgsMapTool):
             msg = f"{base}  |  {slope_text}"
         else:
             msg = base
+        # Called from `canvasMoveEvent`, where the message is usually the one already
+        # showing: the hint only changes when the cursor crosses into a different
+        # slope band. Re-sending it is a signal and a status-bar repaint per mouse
+        # move to say what the bar already says.
+        if msg == self._last_hint:
+            return
+        self._last_hint = msg
         iface.mainWindow().statusBar().showMessage(msg)
 
     def canvasPressEvent(self, event):
+        if self.rubber_band is None:
+            return              # deactivated; a queued event is not a gesture
         if self._double_click_pending:
             self._double_click_pending = False
             return
@@ -64,6 +91,8 @@ class DrawLineTool(QgsMapTool):
             self._finish()
 
     def canvasDoubleClickEvent(self, event):
+        if self.rubber_band is None:
+            return
         self._double_click_pending = True
         if len(self.points) >= 1:
             self.points.pop()
@@ -71,6 +100,8 @@ class DrawLineTool(QgsMapTool):
         self._finish()
 
     def canvasMoveEvent(self, event):
+        if self.rubber_band is None:
+            return
         pt = self.toMapCoordinates(event.pos())
         slope_text = ""
         if self._slope_array is not None:
@@ -119,10 +150,25 @@ class DrawLineTool(QgsMapTool):
 
     def _reset(self):
         self.points = []
-        self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        if self.rubber_band is not None:
+            self.rubber_band.reset(QgsWkbTypes.LineGeometry)
 
     def deactivate(self):
         self._reset()
+        # `reset()` empties the geometry; the QGraphicsItem stays parented to the
+        # canvas scene. `use_tool` then drops this tool, the band's only reference,
+        # so every draw action left one invisible item in the scene for the canvas's
+        # lifetime — they survive unload. The four sibling tools that do this right
+        # (`connect_earthworks_tool`, `link_spillway_tool`, `place_point_tool`,
+        # `edit_earthwork_tool`) all call `scene().removeItem`.
+        if self.rubber_band is not None:
+            try:
+                self.canvas.scene().removeItem(self.rubber_band)
+            except Exception:
+                pass
+            self.rubber_band = None
         if iface:
             iface.mainWindow().statusBar().clearMessage()
+        # The bar is now empty, so the next hint is a change however it reads.
+        self._last_hint = None
         super().deactivate()

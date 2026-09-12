@@ -1,8 +1,12 @@
+import logging
+
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 from qgis.utils import iface
+
+_log = logging.getLogger(__name__)
 
 
 class DrawPolygonTool(QgsMapTool):
@@ -15,12 +19,14 @@ class DrawPolygonTool(QgsMapTool):
     polygon_drawn = pyqtSignal(object)
     cancelled = pyqtSignal()
 
-    def __init__(self, canvas, color=None, slope_raster_path=None, tool_label="polygon"):
+    def __init__(self, canvas, color=None, slope_raster_path=None,
+                 tool_label="polygon", slope_band=None):
         super().__init__(canvas)
         self.canvas = canvas
         self.points = []
         self._double_click_pending = False
         self._tool_label = tool_label
+        self._last_hint = None
 
         self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
         c = color or QColor(0, 180, 80, 160)
@@ -28,16 +34,22 @@ class DrawPolygonTool(QgsMapTool):
         self.rubber_band.setFillColor(QColor(c.red(), c.green(), c.blue(), 60))
         self.rubber_band.setWidth(3)
 
+        # See `DrawLineTool.__init__`: the band is read once per terrain by
+        # `PluginState.slope_band()`, not once per tool, and a tool is built for
+        # every draw action. The path is still accepted for standalone use.
         self._slope_array = None
         self._slope_transform = None
-        if slope_raster_path:
+        if slope_band is not None:
+            self._slope_array, self._slope_transform = slope_band
+        elif slope_raster_path:
             try:
                 import rasterio
                 with rasterio.open(slope_raster_path) as src:
                     self._slope_array = src.read(1).astype("float32")
                     self._slope_transform = src.transform
             except Exception:
-                pass
+                _log.debug("slope raster could not be read: %s",
+                           slope_raster_path, exc_info=True)
 
         self._show_hint()
 
@@ -47,9 +59,15 @@ class DrawPolygonTool(QgsMapTool):
             "Left-click: add point  |  Right-click / Double-click: finish (≥ 3 points)  |  Esc: cancel"
         )
         msg = f"{base}  |  {slope_text}" if slope_text else base
+        # Only a changed hint is worth a signal and a repaint — see DrawLineTool.
+        if msg == self._last_hint:
+            return
+        self._last_hint = msg
         iface.mainWindow().statusBar().showMessage(msg)
 
     def canvasPressEvent(self, event):
+        if self.rubber_band is None:
+            return              # deactivated; a queued event is not a gesture
         if self._double_click_pending:
             self._double_click_pending = False
             return
@@ -61,6 +79,8 @@ class DrawPolygonTool(QgsMapTool):
             self._finish()
 
     def canvasDoubleClickEvent(self, event):
+        if self.rubber_band is None:
+            return
         self._double_click_pending = True
         if len(self.points) >= 1:
             self.points.pop()
@@ -68,6 +88,8 @@ class DrawPolygonTool(QgsMapTool):
         self._finish()
 
     def canvasMoveEvent(self, event):
+        if self.rubber_band is None:
+            return
         pt = self.toMapCoordinates(event.pos())
         slope_text = ""
         if self._slope_array is not None:
@@ -116,10 +138,20 @@ class DrawPolygonTool(QgsMapTool):
 
     def _reset(self):
         self.points = []
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        if self.rubber_band is not None:
+            self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
 
     def deactivate(self):
         self._reset()
+        # See `DrawLineTool.deactivate`: `reset()` empties the geometry and leaves
+        # the QGraphicsItem parented to the scene, so every draw action orphaned one.
+        if self.rubber_band is not None:
+            try:
+                self.canvas.scene().removeItem(self.rubber_band)
+            except Exception:
+                pass
+            self.rubber_band = None
         if iface:
             iface.mainWindow().statusBar().clearMessage()
+        self._last_hint = None
         super().deactivate()

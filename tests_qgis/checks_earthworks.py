@@ -3031,3 +3031,116 @@ def check_a_drag_frame_does_not_re_sum_the_domain_mask(dem_path):
         assert poisoned != honest, (
             "the cached domain count made no difference to the frame, so the mask "
             "is still being re-summed")
+
+
+def check_the_dam_dialog_reads_the_dem_once(dem_path):
+    """Q-11. `_calc_dam_wall_metrics` did `src.read(1)` — the whole band — to sample
+    about sixty cells along the wall, and it is wired to `spin_crest_elev`,
+    `chk_key_banks` and `spin_width`. Holding the up arrow on Crest elevation
+    auto-repeats at ~30 Hz, on the GUI thread, inside a modal: 15.3 ms of the 18.4 ms
+    the dialog spends answering each tick, on the owner's 1139x1016 DEM.
+
+    The dialog is modal, short-lived and its `_dem_path` never changes, so the band
+    can simply be held. Ten ticks, one open.
+    """
+    import rasterio
+
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+
+    seen = {}
+    original_exec = EarthworkPropertiesDialog.exec
+    real_open = rasterio.open
+
+    def capture(dialog):
+        # One tick first: the band is fetched when it is first needed, and what this
+        # check is about is the *second* tick onwards.
+        dialog.spin_crest_elev.setValue(dialog.spin_crest_elev.value() + 0.01)
+        opens = {"n": 0}
+
+        def counting_open(*args, **kwargs):
+            opens["n"] += 1
+            return real_open(*args, **kwargs)
+
+        rasterio.open = counting_open
+        try:
+            base = dialog.spin_crest_elev.value()
+            for i in range(10):
+                dialog.spin_crest_elev.setValue(base + (i + 1) * 0.01)
+        finally:
+            rasterio.open = real_open
+        seen["opens"] = opens["n"]
+        seen["wall_volume"] = dialog.lbl_wall_volume.text()
+        return 0
+
+    EarthworkPropertiesDialog.exec = capture
+    try:
+        with PluginHarness(dem_path) as h:
+            h.run_baseline()
+            h.plugin._earthworks._on_geometry_drawn(
+                "dam", line_across_valley(row=70))
+            h.assert_no_errors("dam properties dialog")
+    finally:
+        EarthworkPropertiesDialog.exec = original_exec
+
+    assert seen, "the dam properties dialog never opened"
+    assert seen["opens"] == 0, (
+        f"ten crest-elevation ticks reopened the DEM {seen['opens']} times — the "
+        f"band is being re-read per tick"
+    )
+    assert seen["wall_volume"] and seen["wall_volume"] != "—", (
+        f"the wall-volume readout stopped working: {seen['wall_volume']!r}"
+    )
+
+
+def check_a_zero_nodata_dem_does_not_erase_the_dam_wall(dem_path):
+    """Q-11, second half. `abs(ground - nodata) < 1.0` called any cell within a
+    metre of the sentinel nodata. At -9999 that is harmless; on a DEM that declares
+    `nodata=0` it silently discards every cell between -1 m and +1 m — real ground
+    on any site surveyed to a local datum or to mean sea level. The wall then gets
+    its height from whatever survived, or from nothing at all.
+
+    Equality is what "is this cell nodata" means, so that is what it asks now.
+    """
+    import numpy as np
+    import rasterio
+
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+
+    with PluginHarness(dem_path, load_dem=False) as h:
+        # A DEM declaring nodata=0, with real ground either side of it.
+        with rasterio.open(dem_path) as src:
+            profile = src.profile.copy()
+            transform = src.transform
+        ground = np.full((40, 40), 0.4, dtype="float32")   # 0.4 m above the datum
+        profile.update(height=40, width=40, nodata=0.0, dtype="float32",
+                       count=1, transform=transform)
+        near_datum = os.path.join(
+            h.state.output_dir or os.path.dirname(dem_path), "near_datum.tif")
+        with rasterio.open(near_datum, "w", **profile) as dst:
+            dst.write(ground, 1)
+
+        from qgis.core import QgsGeometry, QgsPointXY
+
+        x0, y0 = transform.c, transform.f
+        geom = QgsGeometry.fromPolylineXY(
+            [QgsPointXY(x0 + 5.0, y0 - 20.0), QgsPointXY(x0 + 35.0, y0 - 20.0)])
+
+        dlg = EarthworkPropertiesDialog(
+            ew_type="dam", geometry=geom, parent=h.main_window,
+            dem_path=near_datum,
+        )
+        try:
+            # Crest 3 m above ground that sits 0.4 m above a zero datum.
+            max_h, wall_vol = dlg._calc_dam_wall_metrics(3.4, 2.0)
+        finally:
+            dlg.deleteLater()
+
+    assert abs(max_h - 3.0) < 0.11, (
+        f"ground 0.4 m above a zero nodata value was treated as nodata: the wall "
+        f"measured {max_h} m against a 3.0 m crest height"
+    )
+    assert wall_vol > 0, "a wall standing 3 m over real ground priced at nothing"

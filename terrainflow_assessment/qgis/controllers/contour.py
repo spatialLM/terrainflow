@@ -1528,7 +1528,7 @@ class ContourController(G.LayerTreeMixin, MapToolMixin):
 
         tool = DrawLineTool(
             self._canvas,
-            slope_raster_path=self._state.slope_raster_path,
+            slope_band=self._state.slope_band(),
             tool_label="keyline plough guide",
         )
         tool.line_drawn.connect(self._on_keyline_drawn)

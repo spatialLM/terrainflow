@@ -379,6 +379,7 @@ class DrainageLineAnalysis:
 
         Returns list of dicts: {geometry (LineString), length_m, mean_elevation, label}
         """
+        from scipy.ndimage import find_objects
         from scipy.ndimage import label as nd_label
 
         from terrainflow_assessment.modules.terrain_indices import (
@@ -419,10 +420,27 @@ class DrainageLineAnalysis:
         min_cells = max(3, int(min_length_m / self.cell_size))
         lines = []
 
+        # Size first, and off one pass rather than one per component. ``labeled ==
+        # region_id`` is a compare over the whole grid, and the component it finds is
+        # then usually thrown away: on the owner's 1139x1016 design **all 1,462** of
+        # them are shorter than the 50-cell minimum, so the button spent 5.8 s
+        # measuring things it discarded and returned nothing. ``bincount`` sizes every
+        # component in one pass, and ``find_objects`` bounds the survivors so their
+        # own cost is proportional to the component rather than to the grid.
+        # ``sizes[region_id]`` *is* the old ``len(rc)``, so the filter is unchanged;
+        # C-order within a bounding box plus a constant offset gives the same ``rc``
+        # in the same order, so ``_order_pixels`` sees exactly what it saw before.
+        sizes = np.bincount(labeled.ravel(), minlength=n_regions + 1)
+        boxes = find_objects(labeled)
+
         for region_id in range(1, n_regions + 1):
-            rc = np.argwhere(labeled == region_id)
-            if len(rc) < min_cells:
+            if sizes[region_id] < min_cells:
                 continue
+            box = boxes[region_id - 1]
+            if box is None:
+                continue
+            rc = np.argwhere(labeled[box] == region_id)
+            rc += (box[0].start, box[1].start)
 
             ordered = self._order_pixels(rc.tolist())
             if len(ordered) < 2:

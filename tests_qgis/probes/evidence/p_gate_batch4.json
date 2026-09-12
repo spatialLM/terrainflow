@@ -1,0 +1,133 @@
+{
+  "probe": "p_gate_burn / p_gate_ui / p_gate_m10",
+  "date": "2026-09-12",
+  "findings": [
+    "M-10",
+    "M-11",
+    "M-12",
+    "R-5",
+    "G-8",
+    "G-9",
+    "Q-11"
+  ],
+  "dem": "Quail_Island 03.09.2026.tfd (1139x1016, 35 features, 29 sited spillways)",
+  "notes": [
+    "The plan's Batch 4 bar: gain >= 10% of the ENCLOSING OPERATION, or >= 50 ms per drag frame. Under = DROP, not merge.",
+    "Every number here is on the owner's real design, never the committed 400x400 clip (gate rule 2).",
+    "Call counts are recorded beside every clock (gate rule 3): three of the seven registers described a mechanism the count contradicted.",
+    "M-10's register entry says `_orient_downhill` samples the DEM twice per diversion drawn. The count says a draw makes 38 full-band reads: `_overflow_options` calls `_feature_elevation` once per OTHER earthwork, so a 35-feature design reads the band 34 extra times before the properties dialog can appear.",
+    "M-12's register entry says ~250 full-raster passes per full analysis on 5 spillways. The design has 29 sited spillways, but `_isolated_burn` is handed no sills, so the per-feature capacity pass reaches `_cut_spillway` 32 times for 0.1 ms total. The double rasterise IS real in the burn (`_bar_cells` n=58 for 29 notches, exactly 2x), it is simply not worth 10%.",
+    "R-5's register entry says a shared pool pays per member. The count says 43 (barrier, pool) pairs over 39 distinct pools, so memoising by pool removes 9% of the function, not most of it.",
+    "G-8's register entry says rasterio `shapes()` traces every zero region of a 2.85 M-cell array. Measured: passing `mask=` saves 2.2 ms of a 22.0 ms polygonise. The premise is right and the cost is not there.",
+    "Out of scope but recorded: `find_ridgelines` returns 0 lines on this design. All 1462 skeleton components are shorter than `min_cells` (50 cells at 1 m). The Ridgelines button spends 5.8 s to produce nothing.",
+    "Out of scope but recorded: `_on_spillway_placed` costs 4.6 s and `_on_vertex_edit_finished` 5.6 s on this design. Neither is in this plan.",
+    "M-6's precedent stands: a measured number decides, and the owner may merge under the bar with the number in hand (M-6 merged at 8.0%).",
+    "AFTER, same probes, same design: M-11 5835.4 -> 85.4 ms; the Keypoint run 6075.6 -> 342.7 ms. Q-11 18.4 -> 5.2 ms per tick. G-9 18.2 -> 0.3 ms to arm a tool. M-10 989.9 -> 345.6 ms to the dialog."
+  ],
+  "stages": {
+    "M-11 find_ridgelines": {
+      "status": "MERGE",
+      "operation": "Keypoint analysis run: DrainageLineAnalysis() + find_keypoints + find_ridgelines",
+      "operation_ms": 6075.6,
+      "function_ms": 5835.4,
+      "gain_ms": 5692.4,
+      "share_pct": 93.7,
+      "mechanism": "1462 skeleton components, every one of them below min_cells=50; the loop pays a full-raster `labeled == region_id` + argwhere for each. Loop as written 5701.2 ms; bincount + find_objects equivalent 8.9 ms.",
+      "probe": "p_gate_ui.py::_m11"
+    },
+    "Q-11 dam dialog band read": {
+      "status": "MERGE",
+      "operation": "_update_capacity(), the dialog's whole response to one spin-box tick",
+      "operation_ms": 18.4,
+      "function_ms": 18.4,
+      "gain_ms": 15.3,
+      "share_pct": 83.5,
+      "per_frame_verdict": "15.3 ms against the 50 ms drag-frame bar: under it, but a spin tick is not a drag frame and the share bar is the one that applies",
+      "mechanism": "src.read(1).astype('float32') on 1139x1016 to sample ~60 cells, per tick, on the GUI thread inside a modal",
+      "probe": "p_gate_ui.py::_q11"
+    },
+    "G-9 draw tools slope band": {
+      "status": "MERGE",
+      "operation": "activate_draw_line(): construct the tool after a toolbar press",
+      "operation_ms": 18.2,
+      "gain_ms": 16.2,
+      "share_pct": 89.1,
+      "mechanism": "full slope band read in DrawLineTool.__init__, and a fresh tool is built per draw action",
+      "probe": "p_gate_ui.py::_g9"
+    },
+    "M-10 snap_point_to_contour_elevation": {
+      "status": "MERGE",
+      "operation": "_on_geometry_drawn up to dlg.exec(): draw a feature and wait for the properties dialog",
+      "operation_ms": 989.9,
+      "gain_ms": 570.8,
+      "share_pct": 57.7,
+      "mechanism": "38 full-band reads per draw (38 rasterio.open, all of them this function); 15.0 ms each saved by a 1x1 window",
+      "denominator_note": "Pricing it against `_orient_downhill` gives 83.5% and is meaningless — `_orient_downhill` is made of the two samples. That is gate rule 1's own trap and was rejected.",
+      "rejected_denominators": {
+        "spillway-placement click": {
+          "share_pct": 0.3,
+          "operation_ms": 4650.2
+        },
+        "_on_vertex_edit_finished": {
+          "operation_ms": 5593.3,
+          "opens": 10
+        }
+      },
+      "probe": "p_gate_m10.py"
+    },
+    "M-12 _cut_spillway": {
+      "status": "DROP",
+      "operation": "burn_earthworks (8016.6 ms) + the per-feature terrain-capacity pass (11462.7 ms)",
+      "ceiling_ms": 546.5,
+      "share_pct": 2.8,
+      "share_pct_burn_only": 6.8,
+      "mechanism": "_cut_spillway n=35, _bar_cells n=58 (exactly 2x per notch, as the register says), _downhill_step n=29. In the capacity pass: _cut_spillway n=32 for 0.1 ms, because _isolated_burn passes no sills.",
+      "verdict_note": "Removing ALL of _cut_spillway cannot reach 10% of either operation. Settled without coding it, per gate rule 1.",
+      "probe": "p_gate_burn.py"
+    },
+    "R-5 overtopping_spill": {
+      "status": "DROP",
+      "operation": "a Verify run (run_with_earthworks end to end)",
+      "operation_ms": 20895.2,
+      "ceiling_ms": 925.9,
+      "share_pct": 4.4,
+      "mechanism": "29 barriers, 43 (barrier, pool) pairs, 39 distinct pools. Memoising the pool work removes 9% of the function, so the real gain is ~83 ms = 0.4% of a Verify run.",
+      "verdict_note": "Two independent reasons to drop: the ceiling is under the bar, and the mechanism the register priced barely occurs on a real design.",
+      "probe": "p_gate_burn.py"
+    },
+    "G-8 ponding query polygonise": {
+      "status": "DROP",
+      "operation": "PondingQueryTool.canvasPressEvent body: _flood_fill + _mask_to_qgs_geometry",
+      "operation_ms": 29.2,
+      "gain_ms": 2.2,
+      "share_pct": 7.5,
+      "mechanism": "310 ponds, largest 1840 cells. _mask_to_qgs_geometry 22.0 ms; with mask= 19.8 ms; geometry identical.",
+      "probe": "p_gate_ui.py::_g8"
+    }
+  },
+  "after": {
+    "M-11 find_ridgelines": {
+      "find_ridgelines_ms": 85.4,
+      "operation_ms": 342.7,
+      "was": "5835.4 ms of a 6075.6 ms operation",
+      "note": "the per-component loop that cost 5801.2 ms re-measured at 8.9 ms as bincount + find_objects; 68x on the function, 17.7x on the Keypoint analysis run"
+    },
+    "Q-11 dam dialog band read": {
+      "operation_ms": 5.2,
+      "was": "18.4 ms per spin-box tick",
+      "note": "_calc_dam_wall_metrics 18.4 -> 4.4 ms per call"
+    },
+    "G-9 draw tools slope band": {
+      "operation_ms": 0.3,
+      "was": "18.2 ms to arm a draw tool",
+      "note": "60x; the band is read once per terrain instead of once per tool"
+    },
+    "M-10 snap_point_to_contour_elevation": {
+      "operation_ms": 345.6,
+      "was": "989.9 ms from finishing a line to the dialog",
+      "opens_per_draw": 37,
+      "was_opens": 38,
+      "note": "the function itself 16.2 -> 2.6 ms; _orient_downhill 33.0 -> 3.1 ms (two points, one open). What is left is 36 opens at ~2.2 ms each plus the dialog's own construction."
+    }
+  }
+}

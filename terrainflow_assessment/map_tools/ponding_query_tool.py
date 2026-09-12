@@ -66,6 +66,8 @@ class PondingQueryTool(QgsMapTool):
             self.rows, self.cols = self.ponding_array.shape
 
     def canvasPressEvent(self, event):
+        if self.rubber_band is None:
+            return              # deactivated; a queued event is not a click
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
@@ -105,11 +107,22 @@ class PondingQueryTool(QgsMapTool):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+            if self.rubber_band is not None:
+                self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
             self.canvas.unsetMapTool(self)
 
     def deactivate(self):
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        # `reset()` empties the geometry and leaves the QGraphicsItem parented to the
+        # canvas scene; `use_tool` then drops this tool, the band's only reference, so
+        # every ponding query orphaned one invisible item for the canvas's lifetime.
+        # The sibling tools all call `scene().removeItem` — this one did not.
+        if self.rubber_band is not None:
+            self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+            try:
+                self.canvas.scene().removeItem(self.rubber_band)
+            except Exception:
+                pass
+            self.rubber_band = None
         super().deactivate()
 
     # ---------------------------------------------------------------- internals

@@ -207,6 +207,9 @@ class EarthworkPropertiesDialog(QDialog):
         self._crest_elevation = crest_elevation  # pre-sampled for dam type
         self._duration_hours = duration_hours    # storm duration for spillway sizing
         self._dem_path = dem_path                # for dam wall height/volume
+        # Read once, on first use — see `_dem_band`. A one-tuple rather than the band
+        # itself so "tried and it failed" is distinguishable from "not tried yet".
+        self._dem_band_cache = None
         self._soil_name = soil_name              # site earthwork soil → batter/grade advisory
         self._cn = cn                            # curve number (advisory cross-check context)
         self._overflow_options = overflow_options or []  # [(id, name[, elev])] of OTHERS
@@ -1927,6 +1930,33 @@ class EarthworkPropertiesDialog(QDialog):
         self.chk_save_standard.setChecked(
             True if target is None else dims_match(self._current_dims(), target))
 
+    def _dem_band(self):
+        """``(band, transform, nodata)`` for this dialog's DEM, read once.
+
+        ``_calc_dam_wall_metrics`` samples about sixty cells along the wall and used
+        to decompress the whole band to do it — 15.3 ms of the 18.4 ms this dialog
+        spends answering one spin-box tick, on a 1139x1016 DEM. It is wired to
+        ``spin_crest_elev``, ``chk_key_banks`` and ``spin_width``, and holding the up
+        arrow on Crest elevation auto-repeats at about 30 Hz, on the GUI thread,
+        inside a modal.
+
+        Safe to hold: the dialog is modal and short-lived, and ``_dem_path`` is fixed
+        at construction. ``None`` when there is no DEM or it cannot be read, and the
+        failure is cached too so a broken path is not retried thirty times a second.
+        """
+        if self._dem_band_cache is not None:
+            return self._dem_band_cache[0]
+        band = None
+        try:
+            import rasterio
+
+            with rasterio.open(self._dem_path) as src:
+                band = (src.read(1).astype("float32"), src.transform, src.nodata)
+        except Exception:
+            band = None
+        self._dem_band_cache = (band,)
+        return band
+
     def _calc_dam_wall_metrics(self, crest_elev, wall_thickness):
         """
         Sample the DEM under the dam line and return (max_wall_height_m, wall_fill_volume_m3).
@@ -1937,15 +1967,15 @@ class EarthworkPropertiesDialog(QDialog):
         try:
             import json
 
-            import rasterio
+            import numpy as np
             from shapely.geometry import shape as shapely_shape
 
             shp = shapely_shape(json.loads(self.geometry.asJson()))
-            with rasterio.open(self._dem_path) as src:
-                dem = src.read(1).astype("float32")
-                t = src.transform
-                cell_size = abs(t.a)
-                nodata = src.nodata
+            band = self._dem_band()
+            if band is None:
+                return 0.0, 0.0
+            dem, t, nodata = band
+            cell_size = abs(t.a)
 
             # Sample every cell_size along the wall (min 10 points)
             n_steps = max(10, int(shp.length / max(cell_size, 0.5)))
@@ -1957,7 +1987,12 @@ class EarthworkPropertiesDialog(QDialog):
                 if not (0 <= row < dem.shape[0] and 0 <= col < dem.shape[1]):
                     continue
                 ground = float(dem[row, col])
-                if nodata is not None and abs(ground - nodata) < 1.0:
+                # Equality, not "within a metre". The tolerance was invisible at the
+                # usual -9999 sentinel and wrong the moment a DEM declares
+                # ``nodata=0``: it then discarded every cell between -1 m and +1 m,
+                # which on a site surveyed to a local datum or to mean sea level is
+                # real ground. A wall over it measured 0.0 m and priced at nothing.
+                if nodata is not None and np.isclose(ground, nodata):
                     continue
                 h = crest_elev - ground
                 if h > 0:

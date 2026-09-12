@@ -297,7 +297,7 @@ class BaselineController(G.LayerTreeMixin, MapToolMixin, QObject):
         label = self._AREA_LABELS.get(kind, "Area")
         tool = DrawPolygonTool(
             self._canvas,
-            slope_raster_path=self._state.slope_raster_path,
+            slope_band=self._state.slope_band(),
             tool_label=label,
         )
         tool.polygon_drawn.connect(lambda geom: self._on_area_drawn(kind, geom))

@@ -13,6 +13,7 @@ Provides:
 import logging
 import math
 import os
+import shutil
 
 import numpy as np
 
@@ -190,12 +191,9 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
     -------
     list of ContourFeature (geometry in DEM CRS, elevation from GDAL output)
     """
-    import subprocess
     import tempfile
 
-    import geopandas as gpd
-    import rasterio
-
+    scratch = None
     if output_path is None:
         # A private directory, not mktemp's bare name: mktemp leaves the window between
         # returning a name and gdal_contour creating it open to anyone. mkstemp is the
@@ -203,8 +201,32 @@ def extract_contours(dem_path, interval_m=1.0, output_path=None):
         # refuses to write to a path that already exists ("A file system object called
         # ... already exists"). Creating the directory instead reserves the name safely
         # and still hands gdal_contour a path it can create.
-        output_path = os.path.join(tempfile.mkdtemp(prefix="tfa_contours_"),
-                                   "contours.gpkg")
+        #
+        # CTA-30: it was also never removed. This runs on every contour run, every
+        # keyline run and every segment pick, and one test window left 456 of these
+        # directories holding 138.7 MB. ``scratch`` is what records that *we* made
+        # it, so the cleanup below can never touch a path the caller named.
+        scratch = tempfile.mkdtemp(prefix="tfa_contours_")
+        output_path = os.path.join(scratch, "contours.gpkg")
+
+    try:
+        return _gdal_contour(dem_path, interval_m, output_path)
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _gdal_contour(dem_path, interval_m, output_path):
+    """The body of :func:`extract_contours`, with its output path already chosen.
+
+    Split out so the scratch cleanup is one ``finally`` around every exit. There are
+    five: the two falls back to the marching-squares path, the two ``RuntimeError``
+    raises, and the normal return — and every one of them used to leak.
+    """
+    import subprocess
+
+    import geopandas as gpd
+    import rasterio
 
     # gdal_contour picks the range of levels it will emit from the band statistics,
     # and it accepts *approximate* ones. QGIS writes exactly those into a PAM

@@ -8,6 +8,8 @@ DrawLineTool converts it back with toMapCoordinates(). A tool that mis-reads a
 click position fails here and nowhere else.
 """
 
+import os
+
 from _harness import PluginHarness, centreline_x
 from _mouse import RIGHT, click_map, dclick_map, move_map, pixel_size_m, press_key
 from _shots import assert_rendered, pixels, save_widget
@@ -229,3 +231,246 @@ def check_escape_cancels_line(dem_path):
             )
     finally:
         restore()
+
+
+def check_arming_a_draw_tool_does_not_reread_the_slope_band(dem_path):
+    """G-9. Both draw tools did a full ``src.read(1)`` in ``__init__``, and a fresh
+    tool is built for every draw action — 16.2 ms of the 18.2 ms it takes to arm one
+    on the owner's 1139x1016 site, paid again on every click of every draw button.
+
+    The slope raster is a fixed-path product of the baseline, so the band is read
+    once and held on `_state`. Footprint: one float32 copy of the grid, 4.6 MB on
+    that design, released with the rest of the terrain-derived state when the DEM
+    changes.
+    """
+    import rasterio
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        if not h.state.slope_raster_path:
+            return          # no slope product on this fixture; nothing to hold
+
+        controller = h.plugin._earthworks
+        controller.activate_draw_line("swale")       # first arm: the read happens
+
+        real_open = rasterio.open
+        opens = {"n": 0}
+
+        def counting_open(*args, **kwargs):
+            opens["n"] += 1
+            return real_open(*args, **kwargs)
+
+        rasterio.open = counting_open
+        try:
+            for _ in range(5):
+                controller.activate_draw_line("swale")
+            controller.activate_draw_polygon("basin")
+        finally:
+            rasterio.open = real_open
+
+        h.assert_no_errors("arming draw tools")
+        assert opens["n"] == 0, (
+            f"arming six more draw tools reopened a raster {opens['n']} times — "
+            f"the slope band is still read per tool"
+        )
+
+        tool = h.canvas.mapTool()
+        assert getattr(tool, "_slope_array", None) is not None, (
+            "the tool has no slope band, so the readout is dead"
+        )
+
+
+def check_a_slope_readout_stays_correct_when_the_band_is_shared(dem_path):
+    """The held band must be the same ground the tool would have read itself.
+
+    A cache that hands back a different array is worse than the read it replaced,
+    so this pins the readout against a direct read of the same file.
+    """
+    import rasterio
+
+    from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
+
+    with PluginHarness(dem_path) as h:
+        h.run_baseline()
+        slope_path = h.state.slope_raster_path
+        if not slope_path:
+            return
+
+        h.plugin._earthworks.activate_draw_line("swale")
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, DrawLineTool)
+
+        held = h.state.slope_band()
+        assert held is not None, "the state holds no slope band"
+        assert tool._slope_array is held[0], (
+            "the tool read its own band instead of taking the one the state holds, "
+            "so the rest of this check compares two direct reads and proves nothing"
+        )
+
+        with rasterio.open(slope_path) as src:
+            t, width, height = src.transform, src.width, src.height
+
+        direct = DrawLineTool(h.canvas, slope_raster_path=slope_path,
+                              tool_label="swale")
+        try:
+            probes = [(10, 10), (height // 2, width // 2), (height - 11, width - 11)]
+            for row, col in probes:
+                x = t.c + t.a * (col + 0.5)
+                y = t.f + t.e * (row + 0.5)
+                assert tool._get_slope_text(x, y) == direct._get_slope_text(x, y), (
+                    f"the shared band reports a different slope at ({row}, {col}) "
+                    f"than a direct read"
+                )
+        finally:
+            direct.deactivate()
+
+
+def check_the_draw_hint_is_not_resent_unchanged(dem_path):
+    """G-9, third part. ``_show_hint`` pushed an identical status-bar message on
+    every ``canvasMoveEvent`` — a Qt signal and a repaint per mouse move to say what
+    the bar already said. Only a changed message is worth sending.
+    """
+    from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
+
+    with PluginHarness(dem_path) as h:
+        h.prepare_canvas_for_input()
+        h.plugin._earthworks.activate_draw_earthwork("diversion")
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, DrawLineTool)
+
+        sent = []
+        bar = h.iface.mainWindow().statusBar()
+        real_show = bar.showMessage
+        bar.showMessage = lambda text, *a, **kw: sent.append(text)
+        try:
+            x, y = _line_points()[0]
+            for _ in range(6):
+                move_map(h.canvas, x, y)     # the same place, so the same message
+        finally:
+            bar.showMessage = real_show
+
+        h.assert_no_errors("hovering with the draw tool")
+        assert len(sent) <= 1, (
+            f"six mouse moves over one spot sent {len(sent)} identical status "
+            f"messages: {sent[:2]}"
+        )
+
+
+def check_a_broken_slope_raster_is_logged_not_swallowed(dem_path):
+    """G-9, second part. ``except Exception: pass`` meant a slope raster that had
+    been deleted, truncated or locked killed the live slope readout in silence —
+    the tool still drew, the hint simply never mentioned the grade again, and
+    nothing anywhere said why.
+    """
+    import logging
+
+    from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
+
+    records = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Catch()
+    logger = logging.getLogger("terrainflow_assessment.map_tools.draw_line_tool")
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        with PluginHarness(dem_path) as h:
+            h.prepare_canvas_for_input()
+            tool = DrawLineTool(h.canvas,
+                                slope_raster_path="/no/such/slope.tif",
+                                tool_label="swale")
+            try:
+                assert tool._slope_array is None, (
+                    "a missing slope raster somehow produced a band"
+                )
+            finally:
+                tool.deactivate()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+    assert records, (
+        "a slope raster that could not be read was swallowed silently — the live "
+        "readout dies and nothing says why"
+    )
+
+
+# ---------------------------------------------------------------- scene items
+
+def check_a_deactivated_draw_tool_leaves_nothing_in_the_scene(dem_path):
+    """G-10. Four tools only ever `reset()` their rubber band on deactivate — which
+    empties the geometry and leaves the QGraphicsItem parented to the canvas scene.
+    `use_tool` then drops the tool, the only reference to that band, so every draw
+    action orphaned one invisible item for the canvas's lifetime. They survive
+    unload. Their four siblings (`connect_earthworks_tool`, `link_spillway_tool`,
+    `place_point_tool`, `edit_earthwork_tool`) all call `scene().removeItem`.
+    """
+    with PluginHarness(dem_path) as h:
+        h.prepare_canvas_for_input()
+        controller = h.plugin._earthworks
+        scene = h.canvas.scene()
+
+        # One round first: the canvas adds its own furniture on first use, and that
+        # is not what this is counting.
+        controller.activate_draw_line("swale")
+        h.canvas.unsetMapTool(h.canvas.mapTool())
+        baseline = len(scene.items())
+
+        for _ in range(5):
+            controller.activate_draw_line("swale")
+            h.canvas.unsetMapTool(h.canvas.mapTool())
+            controller.activate_draw_polygon("basin")
+            h.canvas.unsetMapTool(h.canvas.mapTool())
+
+        h.assert_no_errors("arming and dropping draw tools")
+        after = len(scene.items())
+        assert after == baseline, (
+            f"ten draw tools left {after - baseline} items in the canvas scene "
+            f"({baseline} -> {after}) — each one is an orphaned rubber band"
+        )
+
+
+def check_a_deactivated_query_tool_leaves_nothing_in_the_scene(dem_path):
+    """G-10, the other two tools: the ponding query and the contour segment picker.
+
+    The segment tool is the worst of the four — two rubber bands and a vertex
+    marker, and its `_cleanup` only hides the marker rather than removing it.
+    """
+    with PluginHarness(dem_path) as h:
+        h.prepare_canvas_for_input()
+        h.run_baseline()
+        scene = h.canvas.scene()
+
+        from terrainflow_assessment.map_tools.contour_segment_tool import (
+            ContourSegmentTool,
+        )
+        from terrainflow_assessment.map_tools.ponding_query_tool import (
+            PondingQueryTool,
+        )
+
+        ponding = (h.state.baseline_result or {}).get("ponding")
+
+        def _round():
+            if ponding and os.path.exists(ponding):
+                tool = PondingQueryTool(h.canvas, ponding)
+                h.canvas.setMapTool(tool)
+                h.canvas.unsetMapTool(tool)
+            seg = ContourSegmentTool(h.canvas, [])
+            h.canvas.setMapTool(seg)
+            h.canvas.unsetMapTool(seg)
+
+        _round()
+        baseline = len(scene.items())
+        for _ in range(5):
+            _round()
+
+        h.assert_no_errors("arming and dropping query tools")
+        after = len(scene.items())
+        assert after == baseline, (
+            f"five rounds left {after - baseline} items in the canvas scene "
+            f"({baseline} -> {after})"
+        )

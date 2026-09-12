@@ -116,7 +116,27 @@ class ContourSegmentTool(QgsMapTool):
 
     def deactivate(self):
         self._cleanup()
+        self._discard_scene_items()
         super().deactivate()
+
+    def _discard_scene_items(self):
+        """Take the two rubber bands and the marker out of the canvas scene.
+
+        `_cleanup` resets the bands and *hides* the marker, which leaves all three
+        QGraphicsItems parented to the scene. `use_tool` then drops this tool, their
+        only reference, so every segment pick orphaned three invisible items for the
+        canvas's lifetime — and they survive unload. Guarded for re-entry: deactivate
+        can arrive twice, and a tool with no items is simply already clean.
+        """
+        for attr in ("_rb_contour", "_rb_segment", "_marker"):
+            item = getattr(self, attr, None)
+            if item is None:
+                continue
+            try:
+                self._canvas.scene().removeItem(item)
+            except Exception:
+                pass
+            setattr(self, attr, None)
 
     # ---------------------------------------------------------------- phases
 
@@ -148,7 +168,8 @@ class ContourSegmentTool(QgsMapTool):
         self._elevation = elev
 
         # Highlight the full contour
-        self._rb_contour.setToGeometry(geom, None)
+        if self._rb_contour is not None:
+            self._rb_contour.setToGeometry(geom, None)
         self._phase = 1
         self._show_hint(1)
 
@@ -157,8 +178,9 @@ class ContourSegmentTool(QgsMapTool):
         snapped = self._contour_shp.interpolate(dist)
         self._start_dist = dist
 
-        self._marker.setCenter(QgsPointXY(snapped.x, snapped.y))
-        self._marker.setVisible(True)
+        if self._marker is not None:
+            self._marker.setCenter(QgsPointXY(snapped.x, snapped.y))
+            self._marker.setVisible(True)
         self._phase = 2
         self._show_hint(2)
 
@@ -202,6 +224,8 @@ class ContourSegmentTool(QgsMapTool):
             return None
 
     def _update_segment_preview(self, d0, d1):
+        if self._rb_segment is None:
+            return
         seg = self._extract_segment(d0, d1)
         if seg and not seg.is_empty:
             self._rb_segment.setToGeometry(QgsGeometry.fromWkt(seg.wkt), None)
@@ -222,9 +246,12 @@ class ContourSegmentTool(QgsMapTool):
             pass
 
     def _cleanup(self):
-        self._rb_contour.reset(QgsWkbTypes.LineGeometry)
-        self._rb_segment.reset(QgsWkbTypes.LineGeometry)
-        self._marker.setVisible(False)
+        if self._rb_contour is not None:
+            self._rb_contour.reset(QgsWkbTypes.LineGeometry)
+        if self._rb_segment is not None:
+            self._rb_segment.reset(QgsWkbTypes.LineGeometry)
+        if self._marker is not None:
+            self._marker.setVisible(False)
         try:
             from qgis.utils import iface
             iface.mainWindow().statusBar().clearMessage()

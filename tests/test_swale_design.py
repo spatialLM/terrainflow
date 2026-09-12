@@ -12,6 +12,7 @@ from terrainflow_assessment.modules.swale_design import (
     overtopping_station,
     recommend_swale_length,
     required_storage_at_length,
+    sample_elevations,
     snap_point_to_contour_elevation,
 )
 
@@ -241,6 +242,74 @@ class TestSnapPointToContourElevation:
 
         elev = snap_point_to_contour_elevation((5.0, 5.0), path)
         assert elev is None
+
+    def test_samples_one_cell_not_the_whole_band(self, tmp_dem, monkeypatch):
+        """M-10: one cell is asked for, so one cell is read.
+
+        ``src.read(1)[row, col]`` decompresses the entire band to index one element —
+        15 ms on the owner's 1139x1016 DEM. That would be a footnote if it happened
+        once, but a single draw makes **38** of these calls: ``_orient_downhill``
+        samples both ends, ``_feature_elevation`` samples the centroid, and
+        ``_overflow_options`` samples the centroid of every *other* feature so the
+        dialog can warn about an uphill overflow target. 990 ms between finishing a
+        line and seeing the properties dialog, 571 ms of it this.
+
+        Windowing is the whole fix, so a read with no ``window=`` is the failure.
+        """
+        import rasterio
+
+        real_read = rasterio.DatasetReader.read
+        seen = []
+
+        def recording_read(self, *args, **kwargs):
+            seen.append(kwargs.get("window"))
+            return real_read(self, *args, **kwargs)
+
+        monkeypatch.setattr(rasterio.DatasetReader, "read", recording_read)
+
+        elev = snap_point_to_contour_elevation((0.5, 19.5), tmp_dem)
+
+        assert elev is not None, "the sample stopped working"
+        assert seen, "no band read happened at all"
+        assert all(w is not None for w in seen), (
+            f"read the whole band to sample one cell: windows={seen}"
+        )
+
+
+class TestSampleElevations:
+    """The batched sampler ``_orient_downhill`` uses for both ends of a line."""
+
+    def test_matches_the_single_point_sampler(self, tmp_dem):
+        pts = [(0.5, 19.5), (5.5, 12.5), (19.5, 0.5)]
+        assert sample_elevations(pts, tmp_dem) == [
+            snap_point_to_contour_elevation(p, tmp_dem) for p in pts
+        ]
+
+    def test_opens_the_dem_once_for_every_point(self, tmp_dem, monkeypatch):
+        import rasterio
+
+        real_open = rasterio.open
+        opens = {"n": 0}
+
+        def counting_open(*args, **kwargs):
+            opens["n"] += 1
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr(rasterio, "open", counting_open)
+        sample_elevations([(0.5, 19.5), (5.5, 12.5), (19.5, 0.5)], tmp_dem)
+        assert opens["n"] == 1, f"{opens['n']} opens for three points"
+
+    def test_out_of_bounds_and_nodata_are_none_per_point(self, tmp_dem):
+        out = sample_elevations([(0.5, 19.5), (999.0, 999.0)], tmp_dem)
+        assert out[0] is not None
+        assert out[1] is None
+
+    def test_bad_path_is_none_per_point(self):
+        assert sample_elevations([(1.0, 1.0), (2.0, 2.0)], "/no/such/dem.tif") == [
+            None, None]
+
+    def test_no_points_is_no_work(self):
+        assert sample_elevations([], "/no/such/dem.tif") == []
 
 
 # ---------------------------------------------------------------------------
