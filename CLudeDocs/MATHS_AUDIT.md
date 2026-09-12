@@ -1106,6 +1106,17 @@ for exactly this row.
 fragment. Whether one 77 m spine on a 16 ha clip is a *useful* answer is a design question,
 not a correctness one, and it is not settled here.
 
+**Corrected 2026-09-12.** "`acc <= 2` is the reason" was a guess, and it was mostly wrong.
+Measured (`tests_qgis/probes/p_ridgelines.py`): the dominant cause was `nd_label` grouping
+the skeleton **4-connected** while `_order_pixels` twenty lines below walked it
+**8-connected**, so any ridge not aligned to the grid was labelled one component per cell.
+Sweeping the accumulation term from `acc <= 1` to removing it altogether, the count of
+4-connected components reaching 50 cells was **zero at every bar** — so the test could not
+have been the reason on its own, and no ridgeline was reachable at any threshold. Both are
+now fixed: 8-connected labelling, and the bar expressed as a catchment area
+(`max_catchment_m2`, default 20 m²) so it stops being resolution-dependent. This is the
+third parameter in this one function to have carried that same fault.
+
 ---
 
 ### §9.10 `KPA-52` — the primary valley, sourced; `KPA-27/28/29` — the criterion re-expressed as two slopes (2026-09-11)

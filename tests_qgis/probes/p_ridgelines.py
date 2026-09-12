@@ -88,8 +88,31 @@ Three things had to be separated to see it, and each moved the numbers:
 So the connectivity is a defect to fix on its own terms, and it is *not*
 sufficient: at production's ``acc <= 2`` it yields one ridgeline. Making the
 button useful also means a view on what ``acc <= 2`` is for, and that is a
-decision about what counts as a ridge rather than a bug — which is why this probe
-stops here.
+decision about what counts as a ridge rather than a bug.
+
+What was done about it
+----------------------
+Both, on the owner's call. The labelling is 8-connected, and the accumulation
+term is now ``max_catchment_m2`` — a catchment **area**, defaulting to 20 m².
+The bar was chosen off ``stage candidate_bars``, which prices each candidate by
+what it actually draws: 5 m² gives 7 lines / 150 m, 10 m² gives 14 / 338 m, 20 m²
+gives 19 / 586 m, and beyond it 30 m² and 50 m² add only fragments (22 / 695 m
+and 25 / 689 m) while the *median* line falls from 26.6 m to 17.7 m. 20 m² is
+where the longest ridge reaches its full 157 m and the median peaks.
+``min_length_m`` stays at 50: the bar was never the problem.
+
+Real design 0 -> 19 ridgelines; committed 400x400 clip 1 -> 7.
+
+**Still open, and deliberately.** What counts as a ridge here is "convex ground
+that sheds nearly all its own water" — a proxy chosen for being computable off a
+DEM, not for being right, and 20 m² is a threshold on that proxy rather than a
+definition. A divide traced from the flow field, or a multi-scale TPI, would be a
+different and probably better answer. The owner has this down for a later pass;
+this probe is the evidence it should start from.
+
+Re-running this probe after that pass is the point of it: every stage below is
+production's own preamble, so it follows the source rather than describing a
+version of it.
 """
 import os
 import sys
@@ -118,6 +141,7 @@ REAL_TFD = (r"F:\Terrain Flow Design\QGIS Working Files"
 TPI_WINDOW_M = 15.0
 MIN_TPI_SD = 1.0
 MIN_LENGTH_M = 50.0
+MAX_CATCHMENT_M2 = 20.0
 
 #: What the probe sweeps `min_length_m` over when asking "what would a lower bar
 #: draw?". Deliberately reaches well below anything defensible, so the shape of
@@ -153,7 +177,7 @@ def accumulation(dem_path, work):
     `DrainageLineAnalysis` reads both from files, and the controller hands it the
     baseline's rasters. A full `FlowAnalysis.run()` on the tile is ~5.4 s, which is
     worth caching across the probe's own re-runs but not worth skipping: the ridge
-    test is ``acc <= 2``, so measuring against an accumulation this DEM did not
+    test is a bar on the accumulation, so measuring against one this DEM did not
     produce would answer nothing.
     """
     import numpy as np
@@ -189,13 +213,17 @@ def accumulation(dem_path, work):
     return str(acc_path), out_pond
 
 
-def build_skeleton(ka, boundary_mask=None, acc_bar=2):
+def build_skeleton(ka, boundary_mask=None, acc_bar=None):
     """Re-derive exactly what `find_ridgelines`' filter loop walks.
 
     Every line here is copied from `find_ridgelines`' preamble rather than
     approximated, because an approximation is precisely the guess this probe exists
     to replace — `p_gate_ui._ridgeline_components` takes the same approach and for
     the same reason. Returns the intermediates the distribution is computed from.
+
+    ``acc_bar`` is in **cells**, not m², because that is the units of the array it
+    is compared against. ``None`` means production's own bar and is what every
+    stage but `acc_bar` uses; ``float("inf")`` drops the term.
     """
     import numpy as np
     from scipy.ndimage import label as nd_label
@@ -210,10 +238,12 @@ def build_skeleton(ka, boundary_mask=None, acc_bar=2):
     tpi = landform_tpi(ka.dem, ka.cell_w, ka.cell_h, window_m=TPI_WINDOW_M)
     with np.errstate(invalid="ignore"):
         above = landform_classes(tpi, sd=MIN_TPI_SD, mask=boundary_mask) == 1
-        # `acc_bar` is production's literal `2` unless a caller is sweeping it.
-        # Swept in `stage acc_bar`, because "which of the two terms breaks the
-        # line" is not answerable from the product of them.
-        low_acc = np.ones_like(above) if acc_bar is None else (ka.acc <= acc_bar)
+        # Production's own bar unless a caller is sweeping it. Swept in
+        # `stage acc_bar`, because "which of the two terms breaks the line" is not
+        # answerable from the product of them.
+        if acc_bar is None:
+            acc_bar = max(1.0, MAX_CATCHMENT_M2 / (ka.cell_w * ka.cell_h))
+        low_acc = ka.acc <= acc_bar
         ridge_raw = above & low_acc & valid
     ridge_raw[[0, -1], :] = False
     ridge_raw[:, [0, -1]] = False
@@ -223,10 +253,12 @@ def build_skeleton(ka, boundary_mask=None, acc_bar=2):
     skeleton = _thin_to_centreline(ridge_raw)
     if not skeleton.any():
         skeleton = ridge_raw
-    # Production's own call: `nd_label(skeleton)`, no `structure=`, which is
-    # scipy's **4-connected** default. Kept verbatim — the alternative is measured
-    # separately in `stage connectivity` rather than substituted here.
-    labeled, n = nd_label(skeleton)
+    # Production's own call. It was `nd_label(skeleton)` with no `structure=` —
+    # scipy's 4-connected default — until this probe found that that is why the
+    # button returned nothing; the historical labelling is still measured beside
+    # it in `stage connectivity` rather than dropped.
+    labeled, n = nd_label(skeleton, structure=np.ones((3, 3), dtype=int))
+    labeled4, n4 = nd_label(skeleton)
     return {
         "tpi": tpi,
         "valid": valid,
@@ -236,6 +268,9 @@ def build_skeleton(ka, boundary_mask=None, acc_bar=2):
         "skeleton": skeleton,
         "labeled": labeled,
         "n": int(n),
+        "labeled4": labeled4,
+        "n4": int(n4),
+        "acc_bar_cells": float(acc_bar),
         "min_cells": max(3, int(MIN_LENGTH_M / ka.cell_size)),
     }
 
@@ -280,7 +315,7 @@ def component_table(ka, labeled, n):
     return rows
 
 
-def summarise(ka, mask, label, acc_bar=2):
+def summarise(ka, mask, label, acc_bar=None):
     """One row of the mask-sensitivity table: what this mask makes of the terrain.
 
     `min_tpi_sd` is a cut in standard deviations **of the TPI over the masked
@@ -291,13 +326,12 @@ def summarise(ka, mask, label, acc_bar=2):
     analysis area are asking two different questions of the same terrain.
     """
     import numpy as np
-    from scipy.ndimage import label as nd_label
     from shapely.geometry import LineString
 
     sk = build_skeleton(ka, boundary_mask=mask, acc_bar=acc_bar)
     finite = np.isfinite(sk["tpi"])
     sample = finite if mask is None else (finite & mask)
-    lab8, n8 = nd_label(sk["skeleton"], structure=np.ones((3, 3), dtype=int))
+    lab8, n8 = sk["labeled"], sk["n"]
     sizes8 = np.bincount(lab8.ravel(), minlength=n8 + 1)[1:]
 
     longest_m = 0.0
@@ -322,27 +356,18 @@ def summarise(ka, mask, label, acc_bar=2):
                   if sample.any() else 0.0),
         "ridge_raw_cells": int(sk["ridge_raw"].sum()),
         "skeleton_cells": int(sk["skeleton"].sum()),
-        "components_4": sk["n"],
+        "components_4": sk["n4"],
         "components_8": int(n8),
         "largest_cells_8": int(sizes8.max()) if n8 else 0,
         "largest_length_m_8": longest_m,
         # The number the button's output actually turns on: how many components
         # would clear `min_cells` at all. Zero here is zero ridgelines drawn.
         "over_min_cells_4": int((np.bincount(
-            sk["labeled"].ravel(), minlength=sk["n"] + 1)[1:] >= min_cells).sum())
-            if sk["n"] else 0,
+            sk["labeled4"].ravel(), minlength=sk["n4"] + 1)[1:] >= min_cells).sum())
+            if sk["n4"] else 0,
         "over_min_cells_8": int((sizes8 >= min_cells).sum()) if n8 else 0,
         "_sk": sk,
     }
-
-
-def _label8(sk):
-    """``(labels, n)`` for the same skeleton, relabelled 8-connected."""
-    import numpy as np
-    from scipy.ndimage import label as nd_label
-
-    lab, n = nd_label(sk["skeleton"], structure=np.ones((3, 3), dtype=int))
-    return lab, int(n)
 
 
 def print_summary_header():
@@ -399,6 +424,54 @@ def design_mask(ka, dem_path):
             if mask.any():
                 return mask, f"design {key} area"
     return None, "the design carries no earthworks or analysis area"
+
+
+def simulate_fixed(ka, mask, max_catchment_m2, min_length_m=MIN_LENGTH_M):
+    """What `find_ridgelines` draws at a given catchment bar.
+
+    This used to reimplement the fix so the candidate bars could be priced before
+    the source was touched. The fix has landed, so it calls the real function —
+    a reimplementation kept beside the thing it imitates is a second copy waiting
+    to drift, and this probe exists partly because an earlier copy of this very
+    preamble did exactly that.
+    """
+    return ka.find_ridgelines(
+        tpi_window_m=TPI_WINDOW_M, min_tpi_sd=MIN_TPI_SD,
+        min_length_m=min_length_m, max_catchment_m2=max_catchment_m2,
+        boundary_mask=mask)
+
+
+def render_lines(ka, mask, bars, work):
+    """Draw what each candidate bar would put on the map, over the terrain.
+
+    The count and the quantiles cannot answer "are these ridges?". This can.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from terrainflow_assessment.modules.footprint import xy_to_rc
+
+    fig, axes = plt.subplots(1, len(bars), figsize=(7 * len(bars), 7))
+    axes = np.atleast_1d(axes)
+    hill = np.where(np.isfinite(ka.dem), ka.dem, np.nan)
+    for ax, m2 in zip(axes, bars):
+        lines = simulate_fixed(ka, mask, m2)
+        ax.imshow(hill, cmap="terrain")
+        for ln in lines:
+            rc = [xy_to_rc(ka.transform, x, y) for x, y in ln["geometry"].coords]
+            ax.plot([c for _r, c in rc], [r for r, _c in rc],
+                    color="magenta", linewidth=1.4)
+        ax.set_title(f"max_catchment {m2} m² — {len(lines)} lines, "
+                     f"{sum(ln['length_m'] for ln in lines):.0f} m total")
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.tight_layout()
+    p = work / "candidate_bars.png"
+    fig.savefig(p, dpi=110)
+    plt.close(fig)
+    return [p]
 
 
 def describe(rows, label):
@@ -609,63 +682,60 @@ def main():
             print(f"      ridge_raw at acc <= {acc_bar:<3}     {n_acc:>9,}")
 
     with ev.stage("connectivity"):
-        # The one measurement the gap histogram demands. A skeletonised line moves
-        # diagonally wherever the ridge does not run along a grid axis, and
-        # `nd_label`'s default structure is the 4-connected cross — so a diagonal
-        # step is a *break*. `_order_pixels`, twenty lines further down the same
-        # function, walks all **eight** neighbours. If the two disagree, the
-        # components being filtered are not the components the walker would trace.
-        from scipy.ndimage import label as nd_label
-
-        lab8, n8 = nd_label(sk["skeleton"], structure=np.ones((3, 3), dtype=int))
-        sizes8 = np.bincount(lab8.ravel(), minlength=n8 + 1)[1:]
-        sizes4 = np.bincount(sk["labeled"].ravel(), minlength=sk["n"] + 1)[1:]
+        # The measurement the gap histogram demanded, kept after the fix because it
+        # is what says the fix is still in. A skeletonised line moves diagonally
+        # wherever the ridge does not run along a grid axis, and `nd_label`'s
+        # **default** structure is the 4-connected cross — so a diagonal step was a
+        # break, while `_order_pixels` twenty lines further down walked all eight
+        # neighbours. The components being filtered were not the components the
+        # walker would trace. Production now labels 8-connected; the historical
+        # labelling is measured beside it so the gap stays visible.
+        sizes8 = np.bincount(sk["labeled"].ravel(), minlength=sk["n"] + 1)[1:]
+        sizes4 = np.bincount(sk["labeled4"].ravel(), minlength=sk["n4"] + 1)[1:]
         conn = {
-            "four_connected": {
+            "eight_connected (production)": {
                 "components": sk["n"],
-                "largest_cells": int(sizes4.max()) if sk["n"] else 0,
-                "mean_cells": float(sizes4.mean()) if sk["n"] else 0.0,
-                "singletons": int((sizes4 == 1).sum()),
-            },
-            "eight_connected": {
-                "components": int(n8),
-                "largest_cells": int(sizes8.max()) if n8 else 0,
-                "mean_cells": float(sizes8.mean()) if n8 else 0.0,
+                "largest_cells": int(sizes8.max()) if sk["n"] else 0,
+                "mean_cells": float(sizes8.mean()) if sk["n"] else 0.0,
                 "singletons": int((sizes8 == 1).sum()),
+            },
+            "four_connected (was)": {
+                "components": sk["n4"],
+                "largest_cells": int(sizes4.max()) if sk["n4"] else 0,
+                "mean_cells": float(sizes4.mean()) if sk["n4"] else 0.0,
+                "singletons": int((sizes4 == 1).sum()),
             },
         }
         ev["connectivity"] = conn
         for key, c in conn.items():
-            print(f"    {key:<16}  {c['components']:>5} components, "
+            print(f"    {key:<28}  {c['components']:>5} components, "
                   f"largest {c['largest_cells']:>4} cells, "
                   f"mean {c['mean_cells']:.1f}, "
                   f"{c['singletons']} single-cell")
-        if n8 and sk["n"]:
-            ev.note(f"4-connected labelling splits the skeleton into "
-                    f"{sk['n']} components where 8-connected gives {n8}; "
-                    f"`_order_pixels` in the same function walks 8 neighbours")
-        sk["labeled8"] = lab8
-        sk["n8"] = int(n8)
+        if sk["n"] and sk["n4"]:
+            ev.note(f"4-connected labelling splits this skeleton into "
+                    f"{sk['n4']} components where production's 8-connected gives "
+                    f"{sk['n']}; `_order_pixels` walks 8 neighbours")
 
     rows = []
     with ev.stage("distribution"):
         rows = component_table(ka, sk["labeled"], sk["n"])
-        ev["distribution"] = describe(rows, "4-connected (production)")
+        ev["distribution"] = describe(rows, "8-connected (production)")
 
     with ev.stage("sweep"):
-        ev["sweep"] = sweep_bar(rows, ka, "4-connected (production)")
+        ev["sweep"] = sweep_bar(rows, ka, "8-connected (production)")
 
-    rows8 = []
-    with ev.stage("distribution_8connected"):
-        # The same three measurements over the same skeleton, relabelled the way
-        # `_order_pixels` would traverse it. Everything else is held fixed — same
-        # DEM, same TPI, same cut, same skeleton — so any difference here is the
-        # `structure=` argument and nothing else.
-        rows8 = component_table(ka, sk["labeled8"], sk["n8"])
-        ev["distribution_8connected"] = describe(rows8, "8-connected")
+    rows4 = []
+    with ev.stage("distribution_4connected"):
+        # The same three measurements over the same skeleton, labelled the way it
+        # used to be. Everything else is held fixed — same DEM, same TPI, same cut,
+        # same skeleton — so any difference here is the `structure=` argument and
+        # nothing else.
+        rows4 = component_table(ka, sk["labeled4"], sk["n4"])
+        ev["distribution_4connected"] = describe(rows4, "4-connected (was)")
 
-    with ev.stage("sweep_8connected"):
-        ev["sweep_8connected"] = sweep_bar(rows8, ka, "8-connected")
+    with ev.stage("sweep_4connected"):
+        ev["sweep_4connected"] = sweep_bar(rows4, ka, "4-connected (was)")
 
     with ev.stage("fragmentation"):
         # The direct test of answer two. If one cell of dilation collapses 1,462
@@ -782,14 +852,14 @@ def main():
             print_summary(row)
             rows_p = component_table(ka, sk_p["labeled"], sk_p["n"])
             ev["production_mask"]["distribution"] = describe(
-                rows_p, f"{label}, 4-connected (production)")
-            rows_p8 = component_table(ka, *_label8(sk_p))
-            ev["production_mask"]["distribution_8connected"] = describe(
-                rows_p8, f"{label}, 8-connected")
+                rows_p, f"{label}, 8-connected (production)")
+            rows_p4 = component_table(ka, sk_p["labeled4"], sk_p["n4"])
+            ev["production_mask"]["distribution_4connected"] = describe(
+                rows_p4, f"{label}, 4-connected (was)")
             ev["production_mask"]["sweep"] = sweep_bar(
-                rows_p, ka, f"{label}, 4-connected (production)")
-            ev["production_mask"]["sweep_8connected"] = sweep_bar(
-                rows_p8, ka, f"{label}, 8-connected")
+                rows_p, ka, f"{label}, 8-connected (production)")
+            ev["production_mask"]["sweep_4connected"] = sweep_bar(
+                rows_p4, ka, f"{label}, 4-connected (was)")
             ev["production_mask"]["renders"] = [
                 str(p) for p in render(ka, sk_p, rows_p, work, prefix="design_")]
             lines = ka.find_ridgelines(boundary_mask=mask)
@@ -851,13 +921,51 @@ def main():
             print(f"    (no design mask: {exc})")
         rows_acc = []
         print_summary_header()
-        for bar in (1, 2, 3, 5, 10, 20, 50, 100, None):
-            name = "acc<=inf (TPI only)" if bar is None else f"acc<={bar}"
+        for bar in (1, 2, 3, 5, 10, 20, 50, 100, float("inf")):
+            name = "acc<=inf (TPI only)" if bar == float("inf") else f"acc<={bar}"
             r = summarise(ka, mask_p, name, acc_bar=bar)
             r.pop("_sk", None)
             rows_acc.append(r)
             print_summary(r)
         ev["acc_bar"] = {"mask": label_p, "rows": rows_acc}
+
+    with ev.stage("candidate_bars"):
+        # The owner's decision is connectivity **and** a relaxed accumulation bar.
+        # This stage simulates the fixed function — 8-connected labelling, the
+        # accumulation term as a catchment **area** — and reports the lines it
+        # would actually draw, at the unchanged `min_length_m=50`. The number to
+        # choose is not "which bar draws most" but which draws ridges: a bar so
+        # loose that the TPI class is all that is left stops selecting divides.
+        mask_c, label_c = design_mask(ka, dem_path)
+        if mask_c is None:
+            print(f"    skipped — {label_c}")
+        else:
+            cand = []
+            for m2 in (2, 5, 10, 20, 30, 50):
+                lines = simulate_fixed(ka, mask_c, m2)
+                lens = sorted((ln["length_m"] for ln in lines), reverse=True)
+                cand.append({
+                    "max_catchment_m2": m2,
+                    "acc_cells_equivalent": m2 / (ka.cell_w * ka.cell_h),
+                    "lines": len(lines),
+                    "longest_m": lens[0] if lens else 0.0,
+                    "median_m": lens[len(lens) // 2] if lens else 0.0,
+                    "shortest_m": lens[-1] if lens else 0.0,
+                    "total_m": float(sum(lens)),
+                })
+            ev["candidate_bars"] = cand
+            print(f"    {label_c}, 8-connected, min_length_m={MIN_LENGTH_M}")
+            print("    max_catchment_m2  acc<=  lines  longest_m  median_m  "
+                  "shortest_m  total_m")
+            for c in cand:
+                print(f"      {c['max_catchment_m2']:>14}  "
+                      f"{c['acc_cells_equivalent']:>5.0f}  {c['lines']:>5}  "
+                      f"{c['longest_m']:>9.1f}  {c['median_m']:>8.1f}  "
+                      f"{c['shortest_m']:>10.1f}  {c['total_m']:>7.0f}")
+            ev["candidate_renders"] = [
+                str(p) for p in render_lines(ka, mask_c, (5, 10, 20), work)]
+            for p in ev["candidate_renders"]:
+                print(f"    {p}")
 
     with ev.stage("render"):
         pngs = render(ka, sk, rows, work)

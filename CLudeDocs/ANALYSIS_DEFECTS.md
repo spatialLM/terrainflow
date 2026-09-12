@@ -1293,6 +1293,14 @@ measurements.
 - **`acc <= 2`** — the ridge test itself is untouched, and it is why real ridges fragment
   into short runs where the synthetic surface gives 592 m spines. Whether one 77 m ridgeline
   on a 16 ha clip is a *useful* answer is a design question, not a correctness one.
+  **Superseded 2026-09-12.** Half of that was right and half was a misattribution.
+  `p_ridgelines` found the fragmentation was mostly `nd_label` grouping the skeleton
+  4-connected while `_order_pixels` walked it 8-connected — a diagonal run became one
+  component per cell, and on the owner's 1139x1016 design *no* setting of any exposed
+  threshold could yield a single 50-cell component. The bar is now a catchment **area**
+  (`max_catchment_m2`, default 20 m², measured) rather than a bare cell count. Clip: 1
+  ridgeline -> 7. Real design: 0 -> 19. What counts as a ridge is still a proxy and is
+  still open — see §7.5's successor note below.
 - **`tpi_window_m`, `min_tpi_sd` and `min_length_m` are still not exposed in the panel** or
   persisted in `project_io.INPUT_FIELDS`. A user on ground the defaults do not suit still
   cannot reach them. That is feature work, and it is not done.

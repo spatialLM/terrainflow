@@ -348,6 +348,200 @@ class TestFindRidgelines:
 
 
 # ---------------------------------------------------------------------------
+# find_ridgelines — the two faults that made it return nothing on real ground
+# ---------------------------------------------------------------------------
+
+def _diagonal_ridge_dem(n=80, pad=10, height=6.0):
+    """A DEM whose only feature is one straight ridge running at 45°.
+
+    A diagonal is the shape the whole question turns on: `skeletonize` produces
+    diagonal steps wherever a ridge is not aligned to the grid, which on real
+    terrain is almost everywhere. Returns ``(dem, cells)`` so a test can state the
+    expected length rather than discover it.
+    """
+    size = n + 2 * pad
+    dem = np.full((size, size), 50.0, dtype="float32")
+    cells = []
+    for i in range(n):
+        r = c = pad + i
+        dem[r, c] += height
+        cells.append((r, c))
+    return dem, cells
+
+
+class TestRidgelineConnectivity:
+    """`nd_label` grouped 4-connected while `_order_pixels` walked 8.
+
+    scipy's default structure is the cross, so a skeleton running diagonally was
+    labelled **one component per cell** — and `min_cells` then threw every one of
+    them away. On the owner's 1139x1016 design that was 1,462 components against
+    816 when labelled the way the walker traverses them, and *no* setting of the
+    other two thresholds could produce a single 50-cell component: measured across
+    accumulation bars from 1 to unlimited, the 4-connected count of components
+    reaching 50 cells was zero at every one. See `tests_qgis/probes/p_ridgelines.py`.
+    """
+
+    def test_a_diagonal_ridge_comes_back_as_one_line(self, tmp_path):
+        """80 diagonal cells are one ridge, not 80 components of one cell.
+
+        This is the whole fault in one assertion. Under the 4-connected labelling
+        the same DEM returns **nothing**: every component is a single cell, and a
+        single cell is under any `min_cells`.
+        """
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+
+        dem, cells = _diagonal_ridge_dem(n=80)
+        acc = np.ones(dem.shape, dtype="float32")
+        dem_path = _write_raster(str(tmp_path / "diag_dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "diag_acc.tif"), acc, cell_size=1.0)
+
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                   min_length_m=50.0)
+
+        assert len(lines) == 1, (
+            f"a single straight diagonal ridge came back as {len(lines)} lines. "
+            f"If it is 0, `nd_label` is grouping 4-connected again and every cell "
+            f"of the diagonal is its own component."
+        )
+        # 80 cells stepping diagonally on a 1 m grid is 79 * sqrt(2) m of line.
+        expected = (len(cells) - 1) * np.sqrt(2.0)
+        assert lines[0]["length_m"] == pytest.approx(expected, abs=8.0), (
+            f"{lines[0]['length_m']} m against an expected {expected:.1f} m"
+        )
+
+    def test_a_staircase_ridge_is_also_one_line(self, tmp_path):
+        """Two along, one down — the other shape a shallow-angle ridge makes.
+
+        A staircase is 4-connected *within* each tread and broken *between* them,
+        so it fragments into one component per tread rather than per cell. It fails
+        the same way for the same reason, and it is the commoner shape of the two.
+        """
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+
+        size = 140
+        dem = np.full((size, size), 50.0, dtype="float32")
+        r, c, treads = 10, 10, 55
+        for _ in range(treads):
+            dem[r, c] += 6.0
+            dem[r, c + 1] += 6.0
+            c += 2
+            r += 1
+        acc = np.ones(dem.shape, dtype="float32")
+        dem_path = _write_raster(str(tmp_path / "stair_dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "stair_acc.tif"), acc, cell_size=1.0)
+
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                   min_length_m=50.0)
+
+        assert len(lines) == 1, (
+            f"a staircase ridge came back as {len(lines)} lines; 4-connected "
+            f"labelling breaks it into one component per tread"
+        )
+        assert lines[0]["length_m"] > 90.0, lines[0]
+
+    def test_a_fragment_under_the_bar_is_still_dropped(self, tmp_path):
+        """The filter still filters — connectivity is not a licence to draw stubs.
+
+        The same diagonal, 20 cells instead of 80. 20 cells is 27 m of line against
+        a 50 m bar, so the honest answer is nothing, and it has to stay nothing:
+        the fault being fixed would otherwise be traded for hundreds of fragments,
+        which is worse than returning nothing.
+        """
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+
+        dem, _ = _diagonal_ridge_dem(n=20)
+        acc = np.ones(dem.shape, dtype="float32")
+        dem_path = _write_raster(str(tmp_path / "frag_dem.tif"), dem, cell_size=1.0)
+        acc_path = _write_raster(str(tmp_path / "frag_acc.tif"), acc, cell_size=1.0)
+
+        kl = KeylineAnalysis(dem_path, acc_path)
+        lines = kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                   min_length_m=50.0)
+        assert lines == [], f"a 20-cell fragment cleared a 50 m bar: {lines}"
+
+
+class TestRidgelineCatchmentBar:
+    """The accumulation term, and why it is now an area rather than a count.
+
+    ``acc <= 2`` was a bare cell count, so it asked a different question at every
+    resolution — 2 m² of contributing area on a 1 m DEM and 8 m² on a 2 m one.
+    That is the same fault the TPI window (`tpi_window_m`) and the TPI cut
+    (`min_tpi_sd`) were each fixed for already, and it is the third instance of it
+    in this one function.
+    """
+
+    @staticmethod
+    def _ridge_with_shoulder(tmp_path, cell_size, shoulder_acc, n_cells=80):
+        """One diagonal ridge whose cells carry *shoulder_acc* of accumulation."""
+        from terrainflow_assessment.modules.keypoint_analysis import KeylineAnalysis
+
+        dem, cells = _diagonal_ridge_dem(n=n_cells)
+        acc = np.ones(dem.shape, dtype="float32")
+        for r, c in cells:
+            acc[r, c] = shoulder_acc
+        tag = f"{cell_size}_{shoulder_acc}_{n_cells}"
+        dem_path = _write_raster(str(tmp_path / f"cb_dem_{tag}.tif"), dem,
+                                 cell_size=cell_size)
+        acc_path = _write_raster(str(tmp_path / f"cb_acc_{tag}.tif"), acc,
+                                 cell_size=cell_size)
+        return KeylineAnalysis(dem_path, acc_path)
+
+    def test_the_bar_gates_on_accumulation_at_all(self, tmp_path):
+        """A ridge carrying more than the bar is not a ridge; under it, it is."""
+        kl = self._ridge_with_shoulder(tmp_path, 1.0, shoulder_acc=15.0)
+        assert kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                  min_length_m=50.0,
+                                  max_catchment_m2=20.0), \
+            "15 m² of catchment on a 1 m grid is inside a 20 m² bar"
+        assert kl.find_ridgelines(tpi_window_m=15.0, min_tpi_m=1.0,
+                                  min_length_m=50.0,
+                                  max_catchment_m2=10.0) == [], \
+            "15 m² of catchment cleared a 10 m² bar"
+
+    def test_the_same_ground_answers_the_same_at_two_resolutions(self, tmp_path):
+        """6 m² of catchment is 6 cells at 1 m and 1.5 at 2 m — one answer.
+
+        Under the old bare ``acc <= 2`` those two flip: 6 cells at 1 m fails and
+        1.5 cells at 2 m passes. Same ground, same physical catchment, opposite
+        answers. This asserts they now agree, in both directions.
+        """
+        for catchment_m2, expected in ((6.0, True), (60.0, False)):
+            answers = {}
+            for cell_size in (1.0, 2.0):
+                acc_cells = catchment_m2 / (cell_size ** 2)
+                # Same ground either way: 80 m of ridge is 80 cells at 1 m and 40
+                # at 2 m. A cell count here would change the terrain as well as
+                # the bar and the test would prove nothing.
+                kl = self._ridge_with_shoulder(
+                    tmp_path, cell_size, shoulder_acc=acc_cells,
+                    n_cells=int(round(80 / cell_size)))
+                lines = kl.find_ridgelines(
+                    tpi_window_m=15.0, min_tpi_m=1.0,
+                    min_length_m=40.0, max_catchment_m2=20.0)
+                answers[cell_size] = bool(lines)
+            assert answers[1.0] == answers[2.0] == expected, (
+                f"{catchment_m2} m² of catchment against a 20 m² bar: "
+                f"1 m grid says {answers[1.0]}, 2 m grid says {answers[2.0]}, "
+                f"expected {expected} from both"
+            )
+
+    def test_a_coarse_grid_keeps_at_least_the_divide_cells(self, tmp_path):
+        """On a 10 m DEM, 20 m² is a fifth of one cell — the bar floors at 1.
+
+        Without the floor the whole term reads ``acc <= 0.2``, which no cell
+        satisfies (a cell contributes itself), and ridgelines would return nothing
+        on every DEM coarser than ~4 m — reintroducing exactly the
+        resolution-dependent silence this parameter exists to end.
+        """
+        kl = self._ridge_with_shoulder(tmp_path, 10.0, shoulder_acc=1.0)
+        lines = kl.find_ridgelines(tpi_window_m=150.0, min_tpi_m=1.0,
+                                   min_length_m=100.0, max_catchment_m2=20.0)
+        assert lines, "a true divide (acc == 1) was excluded on a 10 m grid"
+
+
+# ---------------------------------------------------------------------------
 # _valley_cross_width
 # ---------------------------------------------------------------------------
 

@@ -385,13 +385,24 @@ EXPECTED_KEYLINE = {
 # and could not clear it on any 1 m DEM. A count taken on real 1 m ground is the only thing
 # that would have caught that, so here it is.
 #
-# One is not many. The fixture is a 16 ha clip whose longest connected, thinned ridge run
-# is 77 m, because `acc <= 2` fragments real ridges at every saddle. But one is the
-# difference between a feature that works and a feature that never has, and if this returns
-# to zero something has regressed.
+# Re-recorded 2026-09-12, 1 -> 7 lines and 77 -> 79 m, by the two faults `p_ridgelines`
+# found: `nd_label` grouped the skeleton 4-connected while `_order_pixels` walked it
+# 8-connected, so every diagonal run was labelled one component per cell; and the
+# accumulation bar was a bare `acc <= 2` rather than a catchment area, which asked a
+# different question at every resolution. On the owner's 1139x1016 design the first of
+# those was a ceiling — no setting of any exposed threshold could produce one 50-cell
+# component — which is why this clip managed one line and the real site managed none.
+#
+# Seven is not many either. The fixture is a 16 ha clip and this is still a proxy for a
+# ridge rather than a definition of one. But if it returns to zero something has regressed:
+# zero is where the feature sat for its whole life before MATHS_AUDIT §9.9.
 EXPECTED_RIDGELINES = {
-    "ridgelines": 1,
-    "longest_ridgeline_m": 77.0,
+    "ridgelines": 7,
+    "longest_ridgeline_m": 79.0,
+    # A count and a maximum both survive the middle of the distribution changing
+    # completely — seven lines could each be replaced and leave both fixed. The total
+    # is the term that moves when they do.
+    "total_ridgeline_m": 216.0,
 }
 
 #: Cells of the channel network at the production threshold, for context in the printout.
@@ -682,18 +693,29 @@ def check_ridgelines_still_fire_on_real_ground(dem_path):
         "ridgelines": len(ridgelines),
         "longest_ridgeline_m": (
             max(r["length_m"] for r in ridgelines) if ridgelines else 0.0),
+        "total_ridgeline_m": float(sum(r["length_m"] for r in ridgelines)),
     }
 
     print("\n    --- ridgelines on real ground ---")
     failures = []
-    for key, expected in EXPECTED_RIDGELINES.items():
-        actual = observed[key]
+    # Walks `observed`, not `EXPECTED_RIDGELINES`. Walking the recorded dict means a
+    # newly observed quantity is silently never asserted — it is simply absent from
+    # the loop — so an added measurement looks recorded while pinning nothing.
+    for key, actual in observed.items():
+        if key not in EXPECTED_RIDGELINES:
+            failures.append(f"{key}: {actual} observed with nothing recorded for it")
+            print(f"    NEW   {key:26s} {actual!s:>8}  (nothing recorded)")
+            continue
+        expected = EXPECTED_RIDGELINES[key]
         ok = (actual == expected if isinstance(expected, int)
               else abs(actual - expected) <= 1.0)
         print(f"    {'ok ' if ok else 'MOVED'} {key:26s} {actual!s:>8}  "
               f"(recorded {expected})")
         if not ok:
             failures.append(f"{key}: {actual} against a recorded {expected}")
+    for key in EXPECTED_RIDGELINES:
+        if key not in observed:
+            failures.append(f"{key}: recorded but no longer observed")
 
     assert observed["ridgelines"] > 0, (
         "ridgeline detection found nothing on the real fixture. That was the state "

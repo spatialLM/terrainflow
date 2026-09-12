@@ -118,7 +118,8 @@ class DrainageLineAnalysis:
         accumulation. **Pass it whenever it exists.** Every use of ``self.acc`` in this class
         reads accumulation as *contributing area* — a keypoint's catchment is
         ``acc x cell area``, a pond site is found by walking to cells of higher ``acc``, and
-        a ridge is ``acc <= 2``. Inside a contracted pond the accumulation stops meaning
+        a ridge is a cell whose ``acc x cell area`` is under ``max_catchment_m2``. Inside a
+        contracted pond the accumulation stops meaning
         that: the pond holds its inflow and sheds it along its crest rather than threading a
         channel through itself, so the median pool cell reads **1.0 where it used to read
         22.3**. Substituting the pond's own throughput restores the reading for every use at
@@ -127,7 +128,7 @@ class DrainageLineAnalysis:
         **On the ridge test it changes nothing, and that was worth measuring.** A pool is a
         hollow, so its TPI is negative and ``tpi > min_tpi_m`` excludes it whatever the
         accumulation says: on Quail Island the ridge set moves by **0 cells inside a pond**,
-        against 9,325 pool cells that newly satisfy ``acc <= 2`` on their own. The two
+        against 9,325 pool cells that newly satisfy the catchment bar on their own. The two
         conditions are not independent, and reading only the second one predicts a fault
         that does not exist. Kept here because the *reading* is still wrong without it and
         the next thing to consult ``self.acc`` would inherit that.
@@ -340,13 +341,14 @@ class DrainageLineAnalysis:
     # ---------------------------------------------------------------------- ridgelines
 
     def find_ridgelines(self, tpi_window_m=15.0, min_tpi_sd=1.0, min_tpi_m=None,
-                        min_length_m=50.0, boundary_mask=None):
+                        min_length_m=50.0, max_catchment_m2=20.0,
+                        boundary_mask=None):
         """
         Find watershed divides (ridgelines) using the Topographic Position Index.
 
         TPI = cell elevation − neighbourhood mean elevation.
-        Cells with high TPI and very low flow accumulation (acc ≤ 2) are ridge cells.
-        These are thinned to centrelines and vectorised into polylines.
+        Cells with high TPI and a catchment no larger than *max_catchment_m2* are
+        ridge cells. These are thinned to centrelines and vectorised into polylines.
 
         **The TPI itself comes from ``terrain_indices.landform_tpi``, and the ridge cut
         from ``terrain_indices.landform_classes``.** This method used to carry its own
@@ -369,12 +371,38 @@ class DrainageLineAnalysis:
         ``min_tpi_m`` overrides the standard-deviation rule with an absolute bar when a
         caller genuinely wants one. It defaults to ``None``, which means "use Weiss".
 
+        **The catchment bar is an area, not a cell count.** It read ``acc <= 2`` — a
+        bare count — which is the same resolution-dependence the window and the cut
+        above were each already fixed for, and the third instance of it in this one
+        function: 2 cells is 2 m² of contributing area on a 1 m DEM and 8 m² on a 2 m
+        one, so the same ground answered differently at every resolution. The bar
+        floors at one cell, because a cell contributes itself and any bar under that
+        excludes every cell on earth — on a 10 m DEM 20 m² is a fifth of a cell, and
+        without the floor ridgelines would go silent on every grid coarser than ~4 m.
+
+        **20 m², measured rather than chosen.** On the reference design, with the
+        connectivity below fixed, the number of drawn ridgelines and their total length
+        rise with the bar to about 20 m² and then stop: 5 m² draws 7 lines / 150 m,
+        10 m² draws 14 / 337 m, 20 m² draws 19 / 587 m, and past it 30 m² and 50 m²
+        add only fragments — 22 / 695 m and 25 / 689 m, with the median line *falling*
+        from 26.6 m to 17.7 m. 20 m² is where the longest ridge reaches its full
+        157 m extent and the median peaks. ``min_length_m`` is deliberately **not**
+        lowered from 50 m: the bar was never the problem.
+
+        **This is a threshold, not a definition.** What counts as a ridge here is still
+        "convex ground that sheds nearly all its own water", and that is a proxy chosen
+        for being computable off a DEM rather than for being right. Revisiting it — a
+        divide traced from the flow field, or a multi-scale TPI — is open work; see
+        `tests_qgis/probes/p_ridgelines.py` for the evidence this default rests on.
+
         Parameters
         ----------
-        tpi_window_m : float — neighbourhood window for TPI, in **metres**
-        min_tpi_sd   : float — ridge cut, in standard deviations of this site's TPI
-        min_tpi_m    : float or None — absolute TPI bar (m); overrides *min_tpi_sd*
-        min_length_m : float — minimum ridge segment length to keep
+        tpi_window_m     : float — neighbourhood window for TPI, in **metres**
+        min_tpi_sd       : float — ridge cut, in standard deviations of this site's TPI
+        min_tpi_m        : float or None — absolute TPI bar (m); overrides *min_tpi_sd*
+        min_length_m     : float — minimum ridge segment length to keep
+        max_catchment_m2 : float — largest contributing area a ridge cell may carry,
+                           in **square metres**; floored at one cell
 
         Returns list of dicts: {geometry (LineString), length_m, mean_elevation, label}
         """
@@ -398,7 +426,10 @@ class DrainageLineAnalysis:
                 # +1 for ridge; the valley class it also finds is not wanted here.
                 above = landform_classes(tpi, sd=min_tpi_sd,
                                          mask=boundary_mask) == 1
-            ridge_raw = above & (self.acc <= 2) & valid
+            # `self.acc` is a **count of cells**, so the bar converts. Floored at one
+            # cell: a cell contributes itself, so anything under 1 selects nothing.
+            acc_bar = max(1.0, float(max_catchment_m2) / (self.cell_w * self.cell_h))
+            ridge_raw = above & (self.acc <= acc_bar) & valid
 
         # Remove 1-cell border (often artefacts)
         ridge_raw[[0, -1], :] = False
@@ -415,7 +446,21 @@ class DrainageLineAnalysis:
         if not skeleton.any():
             skeleton = ridge_raw
 
-        labeled, n_regions = nd_label(skeleton)
+        # **Eight-connected, which is how `_order_pixels` below traverses it.**
+        # `nd_label`'s default structure is the 4-connected cross, and a skeleton runs
+        # diagonally wherever the ridge is not aligned to the grid — so a diagonal run
+        # of N cells was labelled as N components of one cell each, and a staircase as
+        # one component per tread. `min_cells` then discarded all of them. The two
+        # rules sat twenty lines apart in this function and disagreed: the walker would
+        # have joined what the labeller had already severed.
+        #
+        # It was a ceiling, not a contribution. On the reference design the count of
+        # 4-connected components reaching 50 cells was **zero at every accumulation
+        # bar** measured, up to and including dropping the term altogether — so no
+        # setting of the thresholds this function exposes could have drawn a single
+        # ridgeline. 1,462 components against 816 relabelled. See
+        # `tests_qgis/probes/p_ridgelines.py`.
+        labeled, n_regions = nd_label(skeleton, structure=np.ones((3, 3), dtype=int))
         min_cells = max(3, int(min_length_m / self.cell_size))
         lines = []
 

@@ -146,7 +146,11 @@ def _ridgeline_components(ka, boundary_mask):
         tpi = landform_tpi(ka.dem, ka.cell_w, ka.cell_h, window_m=15.0)
         with np.errstate(invalid="ignore"):
             above = landform_classes(tpi, sd=1.0, mask=boundary_mask) == 1
-            ridge_raw = above & (ka.acc <= 2) & valid
+            # Production's bar, which is an **area** — it was a bare `acc <= 2`
+            # here and in `find_ridgelines` until `p_ridgelines` found that a cell
+            # count asks a different question at every resolution.
+            acc_bar = max(1.0, 20.0 / (ka.cell_w * ka.cell_h))
+            ridge_raw = above & (ka.acc <= acc_bar) & valid
         ridge_raw[[0, -1], :] = False
         ridge_raw[:, [0, -1]] = False
         if boundary_mask is not None:
@@ -156,7 +160,9 @@ def _ridgeline_components(ka, boundary_mask):
         skeleton = _thin_to_centreline(ridge_raw)
         if not skeleton.any():
             skeleton = ridge_raw
-        labeled, n = nd_label(skeleton)
+        # 8-connected, as production labels it — `nd_label`'s default cross broke
+        # every diagonal run into one component per cell. See `p_ridgelines`.
+        labeled, n = nd_label(skeleton, structure=np.ones((3, 3), dtype=int))
         min_cells = max(3, int(50.0 / ka.cell_size))
     except Exception as exc:
         print(f"  (could not rebuild the skeleton: {exc})")
