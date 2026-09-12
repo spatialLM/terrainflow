@@ -1,0 +1,37 @@
+{
+  "probe": "p_freeze_incremental",
+  "stages": {
+    "catchment_churn": {
+      "status": "ok",
+      "rows": [
+        {
+          "case": "small nudge",
+          "nudge_m": 0.25,
+          "handler_ms": 3446.2,
+          "feature": "Swale 3",
+          "features_with_catchments": 35,
+          "unchanged": 33,
+          "changed": 2,
+          "moved_feature_changed": true,
+          "other_features_changed": 1,
+          "appeared": 0,
+          "vanished": 0
+        },
+        {
+          "case": "25 m move",
+          "nudge_m": 25.0,
+          "handler_ms": 3219.2,
+          "feature": "Swale 3",
+          "features_with_catchments": 35,
+          "unchanged": 32,
+          "changed": 3,
+          "moved_feature_changed": true,
+          "other_features_changed": 2,
+          "appeared": 0,
+          "vanished": 0
+        }
+      ]
+    }
+  },
+  "dem": "F:\\Temp\\tfa_perf_gate\\dem.tif"
+}

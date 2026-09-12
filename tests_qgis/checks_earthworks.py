@@ -3144,3 +3144,94 @@ def check_a_zero_nodata_dem_does_not_erase_the_dam_wall(dem_path):
         f"measured {max_h} m against a 3.0 m crest height"
     )
     assert wall_vol > 0, "a wall standing 3 m over real ground priced at nothing"
+
+
+def check_an_unchanged_feature_does_not_reproject_its_catchment(dem_path):
+    """A feature nobody touched must not have its inflow profile recomputed.
+
+    `refresh_stress_points_layer` asks every linear feature where its catchment
+    arrives, once per settled edit. On the reference design of 35 that is 30 calls
+    costing 763 ms, of which the user's edit accounts for one — and measurement says
+    it accounts for very little else either: nudging one vertex leaves **33 of 35**
+    catchments byte-identical, and a 25 m move leaves 32 (`p_freeze_incremental`).
+
+    So the work is skippable, and the only question is whether skipping it is *sound*.
+    It is, if and only if the cache key is the whole input: the cells the catchment
+    actually covers, the alignment they are projected onto, and the storm depth that
+    turns cells into volume. That is what this check pins — each of the three, changed
+    one at a time, must produce a recompute, and changing none of them must not.
+
+    Keyed on the cells themselves rather than on a version counter or on the identity
+    of the labels array: `recompute_catchments` rebuilds the labels on every edit, so
+    identity would miss every hit, and a counter would invalidate all thirty because
+    two moved. Identity is not invalidation — the lesson M-6 cost.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    from terrainflow_assessment.modules import swale_design as SD
+
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        ew = h.add_earthwork("swale", geometry=line_across_valley())
+        controller.recompute_catchments()
+
+        # `feature_inflow_profile` imports `line_stations` in its own body, so the
+        # module attribute is what it resolves at call time — patch that, rather than
+        # hoisting the import in production to make this testable.
+        calls = {"n": 0}
+        real = SD.line_stations
+
+        def counted(line, xs, ys):
+            calls["n"] += 1
+            return real(line, xs, ys)
+
+        SD.line_stations = counted
+        try:
+            first = controller.feature_inflow_profile(ew)
+            assert first is not None, (
+                "the fixture feature has no catchment, so there is nothing to cache")
+            assert calls["n"] == 1, f"first call projected {calls['n']} times, want 1"
+
+            second = controller.feature_inflow_profile(ew)
+            assert calls["n"] == 1, (
+                f"nothing changed and the profile was projected again "
+                f"({calls['n']} projections); that is the 763 ms this is about")
+            assert second == first, "the cached profile is not the one it replaced"
+
+            # (1) the storm changes -> recompute
+            before = calls["n"]
+            other_runoff = (controller._current_runoff_mm() or 50.0) + 25.0
+            controller.feature_inflow_profile(ew, runoff_mm=other_runoff)
+            assert calls["n"] == before + 1, (
+                "a different storm depth returned a cached profile; volumes per cell "
+                "scale with runoff, so that profile is for the wrong storm")
+
+            # (2) the alignment changes -> recompute
+            before = calls["n"]
+            pts = ew.geometry.asPolyline()
+            pts[-1] = QgsPointXY(pts[-1].x() + 5.0, pts[-1].y() + 5.0)
+            ew.geometry = QgsGeometry.fromPolylineXY([QgsPointXY(p) for p in pts])
+            controller.feature_inflow_profile(ew)
+            assert calls["n"] == before + 1, (
+                "the alignment moved and the cached profile was returned; every "
+                "station in it is measured along the line that no longer exists")
+
+            # (3) the catchment changes -> recompute
+            before = calls["n"]
+            labels = h.state.catchment_labels
+            assert labels is not None, "no catchment labels to perturb"
+            idx = list(h.state.catchment_label_ids).index(ew.id)
+            cells = (labels == idx)
+            assert cells.any(), "this feature drains nothing on the fixture"
+            rr, cc = cells.nonzero()
+            labels[rr[0], cc[0]] = -1          # one cell leaves the catchment
+            controller.feature_inflow_profile(ew)
+            assert calls["n"] == before + 1, (
+                "the catchment lost a cell and the cached profile was returned; the "
+                "cache is not keyed on the cells, so it cannot know what it is holding")
+        finally:
+            SD.line_stations = real
+
+    return (f"{calls['n']} projections over six calls — cached when the cells, the "
+            f"alignment and the storm all held, recomputed when each changed")

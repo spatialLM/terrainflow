@@ -32,50 +32,50 @@
     "swale": 26
   },
   "spillway_placed": {
-    "total_ms": 2044.1250000149012,
+    "total_ms": 1737.6670999801718,
     "before_ms": 4750.2,
     "responsive": false,
     "feature": "Dam 1",
     "rows": [
       {
         "n": 1,
-        "secs": 1.889342599984957,
+        "secs": 1.569466699991608,
         "name": "_recompute_live_assessment"
       },
       {
         "n": 32,
-        "secs": 0.7859048000536859,
+        "secs": 1.1946932999126147,
         "name": "_spillway_datums"
       },
       {
         "n": 1,
-        "secs": 0.11959069999284111,
+        "secs": 0.12855919997673482,
         "name": "_refresh_terrain_capacity"
       },
       {
         "n": 1,
-        "secs": 0.1195646999985911,
+        "secs": 0.12848089999170043,
         "name": "_refresh_dam_stage_storage"
       },
       {
         "n": 1,
-        "secs": 0.009662299999035895,
+        "secs": 0.010268199985148385,
         "name": "_refresh_spillway_layer"
       },
       {
         "n": 1,
-        "secs": 0.00014779999037273228,
+        "secs": 0.00016159997903741896,
         "name": "_mark_design_edit"
       },
       {
         "n": 1,
-        "secs": 3.070000093430281e-05,
+        "secs": 3.300001844763756e-05,
         "name": "_refresh_spillway_link_inverts"
       }
     ]
   },
   "vertex_edit_finished": {
-    "total_ms": 2931.7018000001553,
+    "total_ms": 2236.0052000149153,
     "before_ms": 5447.7,
     "responsive": false,
     "feature": "Swale 3",
@@ -83,47 +83,47 @@
     "rows": [
       {
         "n": 1,
-        "secs": 2.0648300999891944,
+        "secs": 1.262956499995198,
         "name": "_recompute_live_assessment"
       },
       {
         "n": 31,
-        "secs": 0.9828151000547223,
+        "secs": 0.8374739999708254,
         "name": "_spillway_datums"
       },
       {
         "n": 1,
-        "secs": 0.4358427999832202,
+        "secs": 0.49506520002614707,
         "name": "recompute_catchments"
       },
       {
         "n": 1,
-        "secs": 0.4138344999810215,
+        "secs": 0.46160079998662695,
         "name": "_refresh_terrain_capacity"
       },
       {
         "n": 1,
-        "secs": 0.010844899981748313,
+        "secs": 0.010262199997669086,
         "name": "_refresh_spillway_layer"
       },
       {
         "n": 1,
-        "secs": 0.006085800006985664,
+        "secs": 0.0058105000061914325,
         "name": "_refresh_ew_layer"
       },
       {
         "n": 1,
-        "secs": 0.00015819998225197196,
+        "secs": 0.00018780000391416252,
         "name": "_mark_design_edit"
       },
       {
         "n": 1,
-        "secs": 5.549998604692519e-05,
+        "secs": 5.9399986639618874e-05,
         "name": "_resnap_spillways"
       },
       {
         "n": 1,
-        "secs": 3.250001464039087e-05,
+        "secs": 4.73999825771898e-05,
         "name": "_refresh_spillway_link_inverts"
       }
     ]
@@ -131,277 +131,277 @@
   "per_feature_scaling": [
     {
       "enabled_features": 35,
-      "ms": 2694.8635000153445
+      "ms": 3049.9932000238914
     },
     {
       "enabled_features": 18,
-      "ms": 1835.7568999927025
+      "ms": 1882.7826000051573
     },
     {
       "enabled_features": 9,
-      "ms": 1430.992600013269
+      "ms": 1201.4079000218771
     },
     {
       "enabled_features": 4,
-      "ms": 1013.8016999990214
+      "ms": 984.8144999996293
     },
     {
       "enabled_features": 2,
-      "ms": 893.8219999836292
+      "ms": 875.1537000061944
     }
   ],
   "inside_live_assessment": {
-    "total_ms": 2859.179999999999,
+    "total_ms": 2260.2296,
     "rows": [
       {
-        "func": "earthworks.py:1560 _on_vertex_edit_finished",
+        "func": "earthworks.py:1547 _on_vertex_edit_finished",
         "calls": 1,
-        "cumulative_ms": 2860.366,
-        "share": 1.000414804244574
+        "cumulative_ms": 2260.9482000000003,
+        "share": 1.0003179323020988
       },
       {
-        "func": "earthworks.py:4312 _recompute_live_assessment",
+        "func": "earthworks.py:4324 _recompute_live_assessment",
         "calls": 1,
-        "cumulative_ms": 1967.3198,
-        "share": 0.6880713351380469
+        "cumulative_ms": 1384.6131000000003,
+        "share": 0.612598428053504
       },
       {
-        "func": "earthworks.py:3294 _build_spillway_rows",
+        "func": "earthworks.py:3281 _build_spillway_rows",
         "calls": 1,
-        "cumulative_ms": 832.2289000000001,
-        "share": 0.29107258025028165
+        "cumulative_ms": 831.2465,
+        "share": 0.3677708229287856
       },
       {
-        "func": "earthworks.py:2996 _spillway_row",
+        "func": "earthworks.py:2983 _spillway_row",
         "calls": 35,
-        "cumulative_ms": 817.3393000000001,
-        "share": 0.2858649333025554
+        "cumulative_ms": 817.3268,
+        "share": 0.36161228930016664
       },
       {
-        "func": "earthworks.py:3747 refresh_stress_points_layer",
-        "calls": 1,
-        "cumulative_ms": 812.3046,
-        "share": 0.28410404381675874
-      },
-      {
-        "func": "earthworks.py:3662 feature_inflow_profile",
-        "calls": 30,
-        "cumulative_ms": 803.5674,
-        "share": 0.28104820263152386
-      },
-      {
-        "func": "earthworks.py:3961 _spillway_datums",
+        "func": "earthworks.py:3973 _spillway_datums",
         "calls": 31,
-        "cumulative_ms": 802.1739,
-        "share": 0.28056082513168124
+        "cumulative_ms": 805.3055,
+        "share": 0.35629367034216347
       },
       {
-        "func": "swale_design.py:231 line_stations",
-        "calls": 30,
-        "cumulative_ms": 643.4236000000001,
-        "share": 0.22503780804286555
-      },
-      {
-        "func": "earthworks.py:2304 recompute_catchments",
+        "func": "earthworks.py:2291 recompute_catchments",
         "calls": 1,
-        "cumulative_ms": 453.3358,
-        "share": 0.15855448065529285
+        "cumulative_ms": 443.4035,
+        "share": 0.1961763088139364
       },
       {
-        "func": "earthworks.py:1699 _refresh_terrain_capacity",
+        "func": "earthworks.py:1686 _refresh_terrain_capacity",
         "calls": 1,
-        "cumulative_ms": 416.19130000000007,
-        "share": 0.14556316846088746
+        "cumulative_ms": 409.0642,
+        "share": 0.18098347176764698
       },
       {
-        "func": "earthwork_design.py:3585 feature_storage",
+        "func": "earthwork_design.py:3577 feature_storage",
         "calls": 1,
-        "cumulative_ms": 405.7216,
-        "share": 0.1419013843129849
+        "cumulative_ms": 398.6229,
+        "share": 0.17636389683596745
       },
       {
         "func": "footprint.py:339 pour_point",
         "calls": 42,
-        "cumulative_ms": 373.5213,
-        "share": 0.13063930917256
+        "cumulative_ms": 392.2948,
+        "share": 0.17356413702395543
       },
       {
         "func": "footprint.py:151 rasterize_footprint",
         "calls": 107,
-        "cumulative_ms": 370.1934,
-        "share": 0.12947537405829648
+        "cumulative_ms": 349.8176,
+        "share": 0.1547708250524637
       },
       {
         "func": "footprint.py:368 pour_point_near",
         "calls": 29,
-        "cumulative_ms": 309.6958,
-        "share": 0.1083163004777594
+        "cumulative_ms": 322.4657,
+        "share": 0.1426694438476516
+      },
+      {
+        "func": "earthwork_design.py:3539 _isolated_burn",
+        "calls": 1,
+        "cumulative_ms": 278.47330000000005,
+        "share": 0.12320575750357397
+      },
+      {
+        "func": "earthwork_design.py:2298 burn_earthworks",
+        "calls": 1,
+        "cumulative_ms": 278.3879,
+        "share": 0.12316797373151825
+      },
+      {
+        "func": "earthwork_design.py:2840 _burn_swale",
+        "calls": 1,
+        "cumulative_ms": 276.14140000000003,
+        "share": 0.12217404815864726
       },
       {
         "func": "env.py:408 wrapper",
         "calls": 107,
-        "cumulative_ms": 283.885,
-        "share": 0.0992889569736778
-      },
-      {
-        "func": "earthwork_design.py:3547 _isolated_burn",
-        "calls": 1,
-        "cumulative_ms": 281.5,
-        "share": 0.09845480172636914
-      },
-      {
-        "func": "earthwork_design.py:2297 burn_earthworks",
-        "calls": 1,
-        "cumulative_ms": 281.4171,
-        "share": 0.09842580739932433
-      },
-      {
-        "func": "earthwork_design.py:2848 _burn_swale",
-        "calls": 1,
-        "cumulative_ms": 279.5047,
-        "share": 0.09775694429871505
+        "cumulative_ms": 264.7521,
+        "share": 0.11713504681117351
       },
       {
         "func": "features.py:205 rasterize",
         "calls": 107,
-        "cumulative_ms": 264.8998,
-        "share": 0.09264887135472412
+        "cumulative_ms": 246.93820000000002,
+        "share": 0.10925359087413067
+      },
+      {
+        "func": "earthworks.py:3759 refresh_stress_points_layer",
+        "calls": 1,
+        "cumulative_ms": 242.62990000000002,
+        "share": 0.10734745709020004
+      },
+      {
+        "func": "earthworks.py:3649 feature_inflow_profile",
+        "calls": 30,
+        "cumulative_ms": 236.5258,
+        "share": 0.10464680225407189
       },
       {
         "func": "burn_strategy.py:193 taper_reach",
         "calls": 2,
-        "cumulative_ms": 205.8925,
-        "share": 0.07201103113480091
+        "cumulative_ms": 201.1782,
+        "share": 0.08900786008642661
       },
       {
         "func": "footprint.py:411 outlet_cell",
         "calls": 35,
-        "cumulative_ms": 198.6609,
-        "share": 0.06948177449478525
+        "cumulative_ms": 195.49530000000001,
+        "share": 0.08649355799959438
       },
       {
-        "func": "footprint.py:331 _valid",
-        "calls": 107,
-        "cumulative_ms": 168.68060000000003,
-        "share": 0.058996145748081645
+        "func": "swale_design.py:231 line_stations",
+        "calls": 6,
+        "cumulative_ms": 172.3682,
+        "share": 0.07626136742922046
       },
       {
         "func": "footprint.py:319 outer_ring",
         "calls": 71,
-        "cumulative_ms": 165.60860000000002,
-        "share": 0.05792171181947275
+        "cumulative_ms": 167.82360000000003,
+        "share": 0.07425068674439092
       },
       {
-        "func": "earthworks.py:4086 _make_walker",
+        "func": "footprint.py:331 _valid",
+        "calls": 107,
+        "cumulative_ms": 166.46760000000003,
+        "share": 0.0736507476939511
+      },
+      {
+        "func": "earthworks.py:4098 _make_walker",
         "calls": 1,
-        "cumulative_ms": 163.14720000000003,
-        "share": 0.057060835624199974
+        "cumulative_ms": 162.6053,
+        "share": 0.0719419389959321
       },
       {
-        "func": "earthworks.py:3819 _footprint_mask",
+        "func": "earthwork_design.py:2897 _companion_berm",
+        "calls": 1,
+        "cumulative_ms": 134.80700000000002,
+        "share": 0.05964305573203713
+      },
+      {
+        "func": "earthworks.py:3831 _footprint_mask",
         "calls": 31,
-        "cumulative_ms": 149.6517,
-        "share": 0.05234077602669299
+        "cumulative_ms": 130.6723,
+        "share": 0.05781372830441651
       },
       {
-        "func": "earthwork_design.py:2905 _companion_berm",
+        "func": "earthwork_design.py:3122 _storage_invert",
         "calls": 1,
-        "cumulative_ms": 141.65820000000002,
-        "share": 0.04954504438335469
-      },
-      {
-        "func": "earthwork_design.py:3130 _storage_invert",
-        "calls": 1,
-        "cumulative_ms": 107.18970000000002,
-        "share": 0.03748966486894846
+        "cumulative_ms": 105.16900000000001,
+        "share": 0.046530228610403124
       },
       {
         "func": "burn_strategy.py:263 tapered_invert",
         "calls": 1,
-        "cumulative_ms": 106.55590000000001,
-        "share": 0.03726799292104731
+        "cumulative_ms": 104.5147,
+        "share": 0.04624074474557806
       },
       {
         "func": "footprint.py:308 _dilate8",
         "calls": 71,
-        "cumulative_ms": 102.7416,
-        "share": 0.0359339391014207
+        "cumulative_ms": 103.1118,
+        "share": 0.045620055590812544
       },
       {
-        "func": "earthwork_design.py:3341 get_ponding_layer",
+        "func": "earthwork_design.py:3333 get_ponding_layer",
         "calls": 1,
-        "cumulative_ms": 101.11500000000001,
-        "share": 0.03536503473023736
+        "cumulative_ms": 96.94570000000002,
+        "share": 0.04289196991314511
       },
       {
         "func": "flow_graph.py:190 label_direct_catchments",
         "calls": 1,
-        "cumulative_ms": 82.0729,
-        "share": 0.02870504830056171
-      },
-      {
-        "func": "panel.py:2338 set_network",
-        "calls": 1,
-        "cumulative_ms": 68.5878,
-        "share": 0.023988626109583876
-      },
-      {
-        "func": "network_view.py:562 set_network",
-        "calls": 1,
-        "cumulative_ms": 68.57880000000002,
-        "share": 0.023985478353933658
+        "cumulative_ms": 76.7414,
+        "share": 0.03395292230488442
       },
       {
         "func": "sgrid.py:2131 fill_depressions",
         "calls": 1,
-        "cumulative_ms": 65.1414,
-        "share": 0.022783245545925764
+        "cumulative_ms": 62.124500000000005,
+        "share": 0.027485924438826925
+      },
+      {
+        "func": "panel.py:2338 set_network",
+        "calls": 1,
+        "cumulative_ms": 62.04430000000001,
+        "share": 0.027450441317997072
+      },
+      {
+        "func": "network_view.py:565 set_network",
+        "calls": 1,
+        "cumulative_ms": 62.035900000000005,
+        "share": 0.02744672488140143
       },
       {
         "func": "flow_graph.py:156 resolve_terminals",
         "calls": 1,
-        "cumulative_ms": 65.09230000000001,
-        "share": 0.022766072790100667
+        "cumulative_ms": 61.266600000000004,
+        "share": 0.027106361229850277
       },
       {
         "func": "_sgrid.py:1927 _wrapper",
         "calls": 1,
-        "cumulative_ms": 63.9242,
-        "share": 0.02235752908176471
+        "cumulative_ms": 60.869400000000006,
+        "share": 0.026930626870827635
       },
       {
         "func": "simulation.py:835 build_stores_from_earthworks",
         "calls": 2,
-        "cumulative_ms": 51.46600000000001,
-        "share": 0.018000265810477138
+        "cumulative_ms": 47.624700000000004,
+        "share": 0.021070735468644426
       },
       {
-        "func": "earthworks.py:4076 _shapely_of",
+        "func": "earthworks.py:4088 _shapely_of",
         "calls": 100,
-        "cumulative_ms": 42.3489,
-        "share": 0.014811554361740085
+        "cumulative_ms": 41.5998,
+        "share": 0.018405121320418067
       },
       {
-        "func": "network_view.py:113 __init__",
+        "func": "network_view.py:116 __init__",
         "calls": 35,
-        "cumulative_ms": 37.9079,
-        "share": 0.01325831182366973
+        "cumulative_ms": 33.63740000000001,
+        "share": 0.014882293374089075
       },
       {
-        "func": "earthworks.py:4487 _drawn_basis_balance",
-        "calls": 1,
-        "cumulative_ms": 28.2584,
-        "share": 0.009883393140690692
+        "func": "env.py:443 wrapper",
+        "calls": 6,
+        "cumulative_ms": 27.047900000000002,
+        "share": 0.011966881594684009
       }
     ]
   },
   "inside_inflow_profile": {
     "features": 30,
     "largest_cells": 16823,
-    "mask_ms": 121.64259990095161,
-    "project_ms": 3169.8631999315694,
-    "vector_ms": 684.5279999542981,
-    "profile_ms": 16.796800075098872,
+    "mask_ms": 127.8232998738531,
+    "project_ms": 4234.842299920274,
+    "vector_ms": 785.2957999857608,
+    "profile_ms": 26.359800103818998,
     "max_projection_disagreement_m": 0.0,
     "rows": [
       {

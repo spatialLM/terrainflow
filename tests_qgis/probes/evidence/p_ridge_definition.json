@@ -1,0 +1,202 @@
+{
+  "probe": "p_ridge_definition",
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_full.tif",
+  "grid": [
+    1016,
+    1139
+  ],
+  "scopes": {
+    "whole tile (unmasked)": {
+      "cells_in_scope": 1157224,
+      "rows": [
+        {
+          "definition": "current (TPI@15m + acc<=20m2)",
+          "ridge_cells": 13306,
+          "ridge_cells_pct": 1.15,
+          "lines": 10,
+          "total_length_m": 242.2,
+          "median_length_m": 16.7,
+          "max_length_m": 60.9
+        },
+        {
+          "definition": "multi-scale TPI (15.0, 30.0, 60.0)",
+          "ridge_cells": 11212,
+          "ridge_cells_pct": 0.969,
+          "lines": 7,
+          "total_length_m": 390.6,
+          "median_length_m": 58.5,
+          "max_length_m": 132.7,
+          "cells_per_scale": {
+            "15.0": 18608,
+            "30.0": 25089,
+            "60.0": 37120
+          }
+        },
+        {
+          "definition": "inverted drainage, bar 200 m2",
+          "ridge_cells": 31882,
+          "ridge_cells_pct": 2.755,
+          "lines": 30,
+          "total_length_m": 2374.0,
+          "median_length_m": 72.8,
+          "max_length_m": 188.9
+        },
+        {
+          "definition": "inverted drainage, bar 500 m2",
+          "ridge_cells": 11619,
+          "ridge_cells_pct": 1.004,
+          "lines": 25,
+          "total_length_m": 1604.7,
+          "median_length_m": 58.0,
+          "max_length_m": 136.5
+        },
+        {
+          "definition": "inverted drainage, bar 1,000 m2",
+          "ridge_cells": 5286,
+          "ridge_cells_pct": 0.457,
+          "lines": 17,
+          "total_length_m": 1147.2,
+          "median_length_m": 65.5,
+          "max_length_m": 131.9
+        },
+        {
+          "definition": "inverted drainage, bar 2,000 m2",
+          "ridge_cells": 2409,
+          "ridge_cells_pct": 0.208,
+          "lines": 8,
+          "total_length_m": 555.4,
+          "median_length_m": 70.1,
+          "max_length_m": 112.4
+        },
+        {
+          "definition": "inverted drainage, bar 5,000 m2",
+          "ridge_cells": 883,
+          "ridge_cells_pct": 0.076,
+          "lines": 1,
+          "total_length_m": 48.7,
+          "median_length_m": 48.7,
+          "max_length_m": 48.7
+        }
+      ],
+      "agreement": {
+        "current|multiscale": 49.0,
+        "current|inverted@200": 4.3,
+        "current|inverted@500": 3.1,
+        "current|inverted@1000": 1.5,
+        "current|inverted@2000": 0.4,
+        "current|inverted@5000": 0.1,
+        "multiscale|inverted@200": 3.4,
+        "multiscale|inverted@500": 2.9,
+        "multiscale|inverted@1000": 1.7,
+        "multiscale|inverted@2000": 0.5,
+        "multiscale|inverted@5000": 0.1,
+        "inverted@200|inverted@500": 36.4,
+        "inverted@200|inverted@1000": 16.6,
+        "inverted@200|inverted@2000": 7.6,
+        "inverted@200|inverted@5000": 2.8,
+        "inverted@500|inverted@1000": 45.5,
+        "inverted@500|inverted@2000": 20.7,
+        "inverted@500|inverted@5000": 7.6,
+        "inverted@1000|inverted@2000": 45.6,
+        "inverted@1000|inverted@5000": 16.7,
+        "inverted@2000|inverted@5000": 36.7
+      }
+    },
+    "design area (design earthworks area)": {
+      "cells_in_scope": 399820,
+      "rows": [
+        {
+          "definition": "current (TPI@15m + acc<=20m2)",
+          "ridge_cells": 26403,
+          "ridge_cells_pct": 6.604,
+          "lines": 19,
+          "total_length_m": 587.4,
+          "median_length_m": 26.6,
+          "max_length_m": 157.2
+        },
+        {
+          "definition": "multi-scale TPI (15.0, 30.0, 60.0)",
+          "ridge_cells": 24918,
+          "ridge_cells_pct": 6.232,
+          "lines": 23,
+          "total_length_m": 589.4,
+          "median_length_m": 16.5,
+          "max_length_m": 114.9,
+          "cells_per_scale": {
+            "15.0": 98109,
+            "30.0": 111131,
+            "60.0": 131396
+          }
+        },
+        {
+          "definition": "inverted drainage, bar 200 m2",
+          "ridge_cells": 21494,
+          "ridge_cells_pct": 5.376,
+          "lines": 25,
+          "total_length_m": 1553.2,
+          "median_length_m": 57.4,
+          "max_length_m": 161.0
+        },
+        {
+          "definition": "inverted drainage, bar 500 m2",
+          "ridge_cells": 8738,
+          "ridge_cells_pct": 2.185,
+          "lines": 21,
+          "total_length_m": 1438.5,
+          "median_length_m": 68.1,
+          "max_length_m": 129.7
+        },
+        {
+          "definition": "inverted drainage, bar 1,000 m2",
+          "ridge_cells": 4313,
+          "ridge_cells_pct": 1.079,
+          "lines": 17,
+          "total_length_m": 1003.1,
+          "median_length_m": 62.0,
+          "max_length_m": 98.4
+        },
+        {
+          "definition": "inverted drainage, bar 2,000 m2",
+          "ridge_cells": 2016,
+          "ridge_cells_pct": 0.504,
+          "lines": 8,
+          "total_length_m": 561.9,
+          "median_length_m": 78.7,
+          "max_length_m": 112.4
+        },
+        {
+          "definition": "inverted drainage, bar 5,000 m2",
+          "ridge_cells": 759,
+          "ridge_cells_pct": 0.19,
+          "lines": 1,
+          "total_length_m": 87.8,
+          "median_length_m": 87.8,
+          "max_length_m": 87.8
+        }
+      ],
+      "agreement": {
+        "current|multiscale": 58.4,
+        "current|inverted@200": 8.8,
+        "current|inverted@500": 5.6,
+        "current|inverted@1000": 3.3,
+        "current|inverted@2000": 1.7,
+        "current|inverted@5000": 0.4,
+        "multiscale|inverted@200": 9.4,
+        "multiscale|inverted@500": 5.7,
+        "multiscale|inverted@1000": 3.3,
+        "multiscale|inverted@2000": 1.6,
+        "multiscale|inverted@5000": 0.4,
+        "inverted@200|inverted@500": 40.7,
+        "inverted@200|inverted@1000": 20.1,
+        "inverted@200|inverted@2000": 9.4,
+        "inverted@200|inverted@5000": 3.5,
+        "inverted@500|inverted@1000": 49.4,
+        "inverted@500|inverted@2000": 23.1,
+        "inverted@500|inverted@5000": 8.7,
+        "inverted@1000|inverted@2000": 46.7,
+        "inverted@1000|inverted@5000": 17.6,
+        "inverted@2000|inverted@5000": 37.6
+      }
+    }
+  }
+}

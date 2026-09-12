@@ -96,6 +96,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # properties dialog saves one.
         self._earthwork_defaults = {}
         self.load_earthwork_defaults()
+        # `{feature id: (key, cells digest, profile)}` — see `feature_inflow_profile`.
+        # Bounded: one tuple per feature, holding a 16-byte digest rather than the
+        # catchment it stands for, so a large catchment does not become a large cache.
+        self._profile_cache = {}
 
     def _watch_visibility(self, layer_id):
         """Clear the highlight when this layer is unticked.
@@ -3671,16 +3675,45 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if ew.type not in ("swale", "diversion", "berm"):
             return None                      # a polygon has no alignment to profile
         try:
+            import hashlib
+
             import numpy as np
 
             line = self._shapely_of(ew)
             if line is None or line.length <= 0:
                 return None
 
-            mask = labels == list(label_ids).index(ew.id)
-            rows, cols = np.nonzero(mask)
-            if rows.size == 0:
+            cells = np.flatnonzero(labels.ravel() == list(label_ids).index(ew.id))
+            if cells.size == 0:
                 return None
+
+            if runoff_mm is None:
+                runoff_mm = self._current_runoff_mm()
+
+            # Everything this profile is a function of. `refresh_stress_points_layer`
+            # asks all thirty linear features once per settled edit — 763 ms on the
+            # reference design — and an edit changes almost none of them: nudging one
+            # vertex leaves 33 of 35 catchments byte-identical, a 25 m move leaves 32
+            # (`tests_qgis/probes/p_freeze_incremental.py`).
+            #
+            # Keyed on the **cells**, not on a version counter and not on the identity
+            # of the labels array. `recompute_catchments` rebuilds the labels on every
+            # edit, so identity would never hit; a counter would invalidate all thirty
+            # because two of them moved. Identity is not invalidation — M-6's lesson.
+            #
+            # The digest stands in for the cells so the cache cannot grow with the
+            # catchment: 16 bytes per feature instead of one int64 per cell.
+            digest = hashlib.blake2b(cells.tobytes(), digest_size=16).digest()
+            # The transform as well as the cell area: the cells are flat indices, so a
+            # grid whose origin moved would give the same indices a different easting
+            # and northing while `cell_area_m2` never changed.
+            key = (line.wkb, float(runoff_mm), float(meta["cell_area_m2"]),
+                   tuple(meta["transform"])[:6])
+            hit = self._profile_cache.get(ew.id)
+            if hit is not None and hit[0] == key and hit[1] == digest:
+                return hit[2]
+
+            rows, cols = np.divmod(cells, labels.shape[1])
 
             # Subsample very large catchments: the profile's shape is what matters,
             # and every retained cell is scaled up so the total stays exact.
@@ -3703,12 +3736,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # every feature of that design, so no station moves.
             distances = line_stations(line, xs, ys)
 
-            if runoff_mm is None:
-                runoff_mm = self._current_runoff_mm()
             per_cell = meta["cell_area_m2"] * runoff_mm / 1000.0 * scale
             volumes = [per_cell] * len(distances)
 
-            return inflow_profile(distances, volumes, line.length)
+            profile = inflow_profile(distances, volumes, line.length)
+            self._profile_cache[ew.id] = (key, digest, profile)
+            return profile
         except Exception as exc:
             print(f"TerrainFlow Assessment — inflow profile error: {exc}")
             return None
