@@ -47,6 +47,7 @@ starts; a mid-run edit makes later modules boot against a half-applied change.
 | `p_gate_burn.py` | `_cut_spillway` and `overtopping_spill`, against the burn and a Verify | M-12, R-5 |
 | `p_gate_ui.py` | Five Batch 4 items against the UI operations they sit in | M-11, Q-11, G-9, G-8, M-10 |
 | `p_gate_m10.py` | M-10's *real* denominator, and how many reads a draw makes | M-10 |
+| `p_ridgelines.py` | Why every skeleton component is under `min_cells` | Ridgelines returns nothing |
 
 `p_coverage.py` is the one probe that needs **no QGIS at all** — it reads source. Plain
 `python p_coverage.py` is quicker and does the same thing.
@@ -57,6 +58,13 @@ and no spillways at all, so `_cut_spillway` is never even reached on it. Their v
 before and after, are in `evidence/p_gate_batch4.json`. `p_gate_reads.py` is the cheap
 one — it opens no project and needs no design, and it exists because if a whole-band read
 had turned out to cost 2 ms, three of the items would have been settled in a minute.
+
+`p_ridgelines.py` reads the owner's `.tfd` too, but for its **area polygon only** —
+`min_tpi_sd` is a cut in standard deviations of the TPI *inside the mask*, so a run
+with no mask is not a weaker version of the production run but a different question,
+and the stage that needs the design skips cleanly when it is absent. Its terrain is
+the committed `tests/fixtures/quail_island_full.tif`, which is bit-identical to the
+DEM inside that `.tfd`.
 
 Steps C, D and F also left five permanent assertions behind, in
 `checks_fixture_regression.py`. They pin *properties* rather than measurements — a

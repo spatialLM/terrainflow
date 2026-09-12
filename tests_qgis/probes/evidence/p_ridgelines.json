@@ -1,0 +1,2499 @@
+{
+  "probe": "p_ridgelines",
+  "date": "2026-09-12",
+  "findings": [
+    "ridgelines-returns-nothing"
+  ],
+  "dem": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_full.tif",
+  "notes": [
+    "4-connected labelling splits the skeleton into 857 components where 8-connected gives 435; `_order_pixels` in the same function walks 8 neighbours",
+    "a diagonal ridge of N cells becomes N single-cell components under `nd_label(skeleton)`; `_order_pixels` would have walked it as one line"
+  ],
+  "stages": {
+    "dem": {
+      "status": "ok"
+    },
+    "defaults": {
+      "status": "ok"
+    },
+    "accumulation": {
+      "status": "ok"
+    },
+    "skeleton": {
+      "status": "ok"
+    },
+    "mask_decomposition": {
+      "status": "ok"
+    },
+    "connectivity": {
+      "status": "ok"
+    },
+    "distribution": {
+      "status": "ok"
+    },
+    "sweep": {
+      "status": "ok"
+    },
+    "distribution_8connected": {
+      "status": "ok"
+    },
+    "sweep_8connected": {
+      "status": "ok"
+    },
+    "fragmentation": {
+      "status": "ok"
+    },
+    "endpoint_gaps": {
+      "status": "ok"
+    },
+    "mask_sensitivity": {
+      "status": "ok"
+    },
+    "production_mask": {
+      "status": "ok"
+    },
+    "connectivity_oracle": {
+      "status": "ok"
+    },
+    "acc_bar": {
+      "status": "ok"
+    },
+    "render": {
+      "status": "ok"
+    },
+    "production_call": {
+      "status": "ok"
+    }
+  },
+  "dem_stats": {
+    "path": "F:\\Terrain Flow Design\\TerrainFlow\\tests\\fixtures\\quail_island_full.tif",
+    "shape": [
+      1016,
+      1139
+    ],
+    "cell_w_m": 1.0,
+    "cell_h_m": 1.0,
+    "cell_area_m2": 1.0,
+    "crs": "EPSG:2193",
+    "nodata": -9999.0,
+    "nodata_cells": 455090,
+    "z_min": -0.10000000149011612,
+    "z_max": 84.77928161621094,
+    "default_stream_threshold_cells": 2000,
+    "default_stream_threshold_ha": 0.2
+  },
+  "production_defaults": {
+    "tpi_window_m": 15.0,
+    "min_tpi_sd": 1.0,
+    "min_tpi_m": null,
+    "min_length_m": 50.0,
+    "boundary_mask": null
+  },
+  "acc_path": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\acc.tif",
+  "pond_path": "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\pond_flow.tif",
+  "tpi": {
+    "sd_m": 0.7320616245269775,
+    "max_m": 18.211732864379883,
+    "min_m": -15.022908210754395,
+    "cut_m": 0.7320616245269775
+  },
+  "masks": {
+    "ridge_raw_cells": 3013,
+    "skeleton_cells": 1620,
+    "components": 857,
+    "min_cells": 50
+  },
+  "mask_decomposition": {
+    "valid": 702134,
+    "above_tpi": 18608,
+    "acc_le_2": 62709,
+    "above_and_acc": 3013,
+    "above_pct_of_valid": 2.6502063708636814,
+    "acc_pct_of_valid": 8.931201166728858,
+    "independent_prediction": 1661.917913104906
+  },
+  "connectivity": {
+    "four_connected": {
+      "components": 857,
+      "largest_cells": 17,
+      "mean_cells": 1.8903150525087515,
+      "singletons": 473
+    },
+    "eight_connected": {
+      "components": 435,
+      "largest_cells": 85,
+      "mean_cells": 3.7241379310344827,
+      "singletons": 156
+    }
+  },
+  "distribution": {
+    "labelling": "4-connected (production)",
+    "n": 857,
+    "cells": {
+      "p0": 1.0,
+      "p25": 1.0,
+      "p50": 1.0,
+      "p75": 2.0,
+      "p90": 3.0,
+      "p95": 5.0,
+      "p99": 8.0,
+      "p100": 17.0
+    },
+    "length_m": {
+      "p0": 0.0,
+      "p25": 0.0,
+      "p50": 0.0,
+      "p75": 1.0,
+      "p90": 2.0,
+      "p95": 3.414213562373095,
+      "p99": 5.596467529817232,
+      "p100": 14.414213562373096
+    },
+    "extent_m": {
+      "p0": 0.0,
+      "p25": 0.0,
+      "p50": 0.0,
+      "p75": 1.0,
+      "p90": 2.0,
+      "p95": 3.1622776601683795,
+      "p99": 6.0,
+      "p100": 14.142135623730951
+    },
+    "cells_hist": [
+      {
+        "lo": 1,
+        "hi": 2,
+        "n": 473
+      },
+      {
+        "lo": 2,
+        "hi": 3,
+        "n": 224
+      },
+      {
+        "lo": 3,
+        "hi": 5,
+        "n": 113
+      },
+      {
+        "lo": 5,
+        "hi": 8,
+        "n": 35
+      },
+      {
+        "lo": 8,
+        "hi": 12,
+        "n": 9
+      },
+      {
+        "lo": 12,
+        "hi": 20,
+        "n": 3
+      },
+      {
+        "lo": 20,
+        "hi": 30,
+        "n": 0
+      },
+      {
+        "lo": 30,
+        "hi": 50,
+        "n": 0
+      },
+      {
+        "lo": 50,
+        "hi": 100,
+        "n": 0
+      },
+      {
+        "lo": 100,
+        "hi": null,
+        "n": 0
+      }
+    ],
+    "length_hist": [
+      {
+        "lo": 0,
+        "hi": 2,
+        "n": 697
+      },
+      {
+        "lo": 2,
+        "hi": 5,
+        "n": 138
+      },
+      {
+        "lo": 5,
+        "hi": 10,
+        "n": 21
+      },
+      {
+        "lo": 10,
+        "hi": 15,
+        "n": 1
+      },
+      {
+        "lo": 15,
+        "hi": 20,
+        "n": 0
+      },
+      {
+        "lo": 20,
+        "hi": 30,
+        "n": 0
+      },
+      {
+        "lo": 30,
+        "hi": 40,
+        "n": 0
+      },
+      {
+        "lo": 40,
+        "hi": 50,
+        "n": 0
+      },
+      {
+        "lo": 50,
+        "hi": 100,
+        "n": 0
+      },
+      {
+        "lo": 100,
+        "hi": null,
+        "n": 0
+      }
+    ],
+    "total_skeleton_cells": 1620,
+    "mean_cells": 1.8903150525087515,
+    "top20": [
+      {
+        "id": 113,
+        "cells": 17,
+        "length_m": 3.414213562373095,
+        "extent_m": 14.142135623730951,
+        "box": [
+          109,
+          750,
+          3,
+          15
+        ]
+      },
+      {
+        "id": 731,
+        "cells": 17,
+        "length_m": 14.414213562373096,
+        "extent_m": 14.035668847618199,
+        "box": [
+          839,
+          287,
+          15,
+          2
+        ]
+      },
+      {
+        "id": 1,
+        "cells": 15,
+        "length_m": 5.0,
+        "extent_m": 8.602325267042627,
+        "box": [
+          11,
+          718,
+          6,
+          8
+        ]
+      },
+      {
+        "id": 2,
+        "cells": 11,
+        "length_m": 4.414213562373095,
+        "extent_m": 7.280109889280518,
+        "box": [
+          13,
+          737,
+          3,
+          8
+        ]
+      },
+      {
+        "id": 197,
+        "cells": 10,
+        "length_m": 9.414213562373096,
+        "extent_m": 8.06225774829855,
+        "box": [
+          211,
+          827,
+          2,
+          9
+        ]
+      },
+      {
+        "id": 704,
+        "cells": 10,
+        "length_m": 6.414213562373095,
+        "extent_m": 7.280109889280518,
+        "box": [
+          813,
+          288,
+          8,
+          3
+        ]
+      },
+      {
+        "id": 443,
+        "cells": 9,
+        "length_m": 5.82842712474619,
+        "extent_m": 5.0,
+        "box": [
+          431,
+          951,
+          4,
+          5
+        ]
+      },
+      {
+        "id": 628,
+        "cells": 9,
+        "length_m": 8.0,
+        "extent_m": 8.0,
+        "box": [
+          727,
+          126,
+          1,
+          9
+        ]
+      },
+      {
+        "id": 53,
+        "cells": 8,
+        "length_m": 5.414213562373095,
+        "extent_m": 5.385164807134504,
+        "box": [
+          52,
+          605,
+          3,
+          6
+        ]
+      },
+      {
+        "id": 135,
+        "cells": 8,
+        "length_m": 4.414213562373095,
+        "extent_m": 5.385164807134504,
+        "box": [
+          124,
+          811,
+          3,
+          6
+        ]
+      },
+      {
+        "id": 418,
+        "cells": 8,
+        "length_m": 5.414213562373095,
+        "extent_m": 5.0990195135927845,
+        "box": [
+          395,
+          922,
+          2,
+          6
+        ]
+      },
+      {
+        "id": 538,
+        "cells": 8,
+        "length_m": 5.414213562373095,
+        "extent_m": 3.605551275463989,
+        "box": [
+          500,
+          1065,
+          3,
+          4
+        ]
+      },
+      {
+        "id": 3,
+        "cells": 7,
+        "length_m": 3.414213562373095,
+        "extent_m": 4.47213595499958,
+        "box": [
+          14,
+          732,
+          3,
+          5
+        ]
+      },
+      {
+        "id": 359,
+        "cells": 7,
+        "length_m": 6.0,
+        "extent_m": 6.0,
+        "box": [
+          351,
+          955,
+          1,
+          7
+        ]
+      },
+      {
+        "id": 427,
+        "cells": 7,
+        "length_m": 6.0,
+        "extent_m": 6.0,
+        "box": [
+          412,
+          943,
+          1,
+          7
+        ]
+      },
+      {
+        "id": 544,
+        "cells": 7,
+        "length_m": 5.414213562373095,
+        "extent_m": 4.47213595499958,
+        "box": [
+          504,
+          1063,
+          3,
+          5
+        ]
+      },
+      {
+        "id": 606,
+        "cells": 7,
+        "length_m": 6.0,
+        "extent_m": 6.0,
+        "box": [
+          656,
+          141,
+          1,
+          7
+        ]
+      },
+      {
+        "id": 791,
+        "cells": 7,
+        "length_m": 6.414213562373095,
+        "extent_m": 4.47213595499958,
+        "box": [
+          882,
+          505,
+          5,
+          3
+        ]
+      },
+      {
+        "id": 32,
+        "cells": 6,
+        "length_m": 5.414213562373095,
+        "extent_m": 3.605551275463989,
+        "box": [
+          31,
+          695,
+          4,
+          3
+        ]
+      },
+      {
+        "id": 59,
+        "cells": 6,
+        "length_m": 5.0,
+        "extent_m": 5.0,
+        "box": [
+          56,
+          612,
+          1,
+          6
+        ]
+      }
+    ]
+  },
+  "sweep": [
+    {
+      "min_length_m": 5,
+      "min_cells": 5,
+      "survivors": 47,
+      "drawn": 30,
+      "shortest_drawn_m": 4.414213562373095,
+      "longest_drawn_m": 14.414213562373096
+    },
+    {
+      "min_length_m": 8,
+      "min_cells": 8,
+      "survivors": 12,
+      "drawn": 12,
+      "shortest_drawn_m": 3.414213562373095,
+      "longest_drawn_m": 14.414213562373096
+    },
+    {
+      "min_length_m": 10,
+      "min_cells": 10,
+      "survivors": 6,
+      "drawn": 6,
+      "shortest_drawn_m": 3.414213562373095,
+      "longest_drawn_m": 14.414213562373096
+    },
+    {
+      "min_length_m": 12,
+      "min_cells": 12,
+      "survivors": 3,
+      "drawn": 3,
+      "shortest_drawn_m": 3.414213562373095,
+      "longest_drawn_m": 14.414213562373096
+    },
+    {
+      "min_length_m": 15,
+      "min_cells": 15,
+      "survivors": 3,
+      "drawn": 3,
+      "shortest_drawn_m": 3.414213562373095,
+      "longest_drawn_m": 14.414213562373096
+    },
+    {
+      "min_length_m": 20,
+      "min_cells": 20,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 25,
+      "min_cells": 25,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 30,
+      "min_cells": 30,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 35,
+      "min_cells": 35,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 40,
+      "min_cells": 40,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 45,
+      "min_cells": 45,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 50,
+      "min_cells": 50,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 60,
+      "min_cells": 60,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 80,
+      "min_cells": 80,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    },
+    {
+      "min_length_m": 100,
+      "min_cells": 100,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    }
+  ],
+  "distribution_8connected": {
+    "labelling": "8-connected",
+    "n": 435,
+    "cells": {
+      "p0": 1.0,
+      "p25": 1.0,
+      "p50": 2.0,
+      "p75": 4.0,
+      "p90": 7.0,
+      "p95": 12.0,
+      "p99": 27.639999999999873,
+      "p100": 85.0
+    },
+    "length_m": {
+      "p0": 0.0,
+      "p25": 0.0,
+      "p50": 1.0,
+      "p75": 3.414213562373095,
+      "p90": 6.414213562373095,
+      "p95": 9.82842712474619,
+      "p99": 16.899494936611667,
+      "p100": 27.313708498984763
+    },
+    "extent_m": {
+      "p0": 0.0,
+      "p25": 0.0,
+      "p50": 1.0,
+      "p75": 3.0,
+      "p90": 6.0,
+      "p95": 9.848857801796104,
+      "p99": 21.754208850049206,
+      "p100": 64.8459713474939
+    },
+    "cells_hist": [
+      {
+        "lo": 1,
+        "hi": 2,
+        "n": 156
+      },
+      {
+        "lo": 2,
+        "hi": 3,
+        "n": 109
+      },
+      {
+        "lo": 3,
+        "hi": 5,
+        "n": 80
+      },
+      {
+        "lo": 5,
+        "hi": 8,
+        "n": 50
+      },
+      {
+        "lo": 8,
+        "hi": 12,
+        "n": 14
+      },
+      {
+        "lo": 12,
+        "hi": 20,
+        "n": 15
+      },
+      {
+        "lo": 20,
+        "hi": 30,
+        "n": 8
+      },
+      {
+        "lo": 30,
+        "hi": 50,
+        "n": 2
+      },
+      {
+        "lo": 50,
+        "hi": 100,
+        "n": 1
+      },
+      {
+        "lo": 100,
+        "hi": null,
+        "n": 0
+      }
+    ],
+    "length_hist": [
+      {
+        "lo": 0,
+        "hi": 2,
+        "n": 265
+      },
+      {
+        "lo": 2,
+        "hi": 5,
+        "n": 103
+      },
+      {
+        "lo": 5,
+        "hi": 10,
+        "n": 46
+      },
+      {
+        "lo": 10,
+        "hi": 15,
+        "n": 15
+      },
+      {
+        "lo": 15,
+        "hi": 20,
+        "n": 3
+      },
+      {
+        "lo": 20,
+        "hi": 30,
+        "n": 3
+      },
+      {
+        "lo": 30,
+        "hi": 40,
+        "n": 0
+      },
+      {
+        "lo": 40,
+        "hi": 50,
+        "n": 0
+      },
+      {
+        "lo": 50,
+        "hi": 100,
+        "n": 0
+      },
+      {
+        "lo": 100,
+        "hi": null,
+        "n": 0
+      }
+    ],
+    "total_skeleton_cells": 1620,
+    "mean_cells": 3.7241379310344827,
+    "top20": [
+      {
+        "id": 1,
+        "cells": 85,
+        "length_m": 11.656854249492381,
+        "extent_m": 64.8459713474939,
+        "box": [
+          11,
+          694,
+          30,
+          59
+        ]
+      },
+      {
+        "id": 38,
+        "cells": 38,
+        "length_m": 27.313708498984763,
+        "extent_m": 35.22782990761707,
+        "box": [
+          108,
+          729,
+          5,
+          36
+        ]
+      },
+      {
+        "id": 221,
+        "cells": 37,
+        "length_m": 11.071067811865476,
+        "extent_m": 32.2490309931942,
+        "box": [
+          427,
+          939,
+          29,
+          17
+        ]
+      },
+      {
+        "id": 117,
+        "cells": 29,
+        "length_m": 25.72792206135786,
+        "extent_m": 26.40075756488817,
+        "box": [
+          270,
+          372,
+          25,
+          12
+        ]
+      },
+      {
+        "id": 267,
+        "cells": 29,
+        "length_m": 14.485281374238573,
+        "extent_m": 18.027756377319946,
+        "box": [
+          497,
+          1062,
+          18,
+          7
+        ]
+      },
+      {
+        "id": 11,
+        "cells": 25,
+        "length_m": 9.242640687119286,
+        "extent_m": 21.840329667841555,
+        "box": [
+          51,
+          603,
+          7,
+          22
+        ]
+      },
+      {
+        "id": 353,
+        "cells": 24,
+        "length_m": 12.242640687119286,
+        "extent_m": 21.587033144922902,
+        "box": [
+          808,
+          286,
+          22,
+          6
+        ]
+      },
+      {
+        "id": 19,
+        "cells": 22,
+        "length_m": 7.242640687119285,
+        "extent_m": 17.46424919657298,
+        "box": [
+          70,
+          703,
+          18,
+          5
+        ]
+      },
+      {
+        "id": 85,
+        "cells": 21,
+        "length_m": 13.071067811865477,
+        "extent_m": 15.652475842498529,
+        "box": [
+          206,
+          826,
+          8,
+          15
+        ]
+      },
+      {
+        "id": 297,
+        "cells": 20,
+        "length_m": 13.656854249492381,
+        "extent_m": 17.11724276862369,
+        "box": [
+          654,
+          124,
+          3,
+          18
+        ]
+      },
+      {
+        "id": 371,
+        "cells": 20,
+        "length_m": 17.242640687119287,
+        "extent_m": 16.278820596099706,
+        "box": [
+          837,
+          286,
+          17,
+          4
+        ]
+      },
+      {
+        "id": 49,
+        "cells": 17,
+        "length_m": 10.071067811865476,
+        "extent_m": 12.206555615733702,
+        "box": [
+          120,
+          807,
+          8,
+          11
+        ]
+      },
+      {
+        "id": 111,
+        "cells": 17,
+        "length_m": 20.55634918610405,
+        "extent_m": 19.4164878389476,
+        "box": [
+          256,
+          425,
+          17,
+          12
+        ]
+      },
+      {
+        "id": 159,
+        "cells": 15,
+        "length_m": 8.242640687119284,
+        "extent_m": 9.848857801796104,
+        "box": [
+          326,
+          844,
+          5,
+          10
+        ]
+      },
+      {
+        "id": 243,
+        "cells": 15,
+        "length_m": 16.899494936611667,
+        "extent_m": 13.341664064126334,
+        "box": [
+          464,
+          977,
+          14,
+          4
+        ]
+      },
+      {
+        "id": 423,
+        "cells": 15,
+        "length_m": 16.899494936611667,
+        "extent_m": 15.652475842498529,
+        "box": [
+          956,
+          524,
+          15,
+          8
+        ]
+      },
+      {
+        "id": 28,
+        "cells": 14,
+        "length_m": 10.242640687119284,
+        "extent_m": 10.295630140987,
+        "box": [
+          90,
+          709,
+          10,
+          6
+        ]
+      },
+      {
+        "id": 205,
+        "cells": 14,
+        "length_m": 7.65685424949238,
+        "extent_m": 8.06225774829855,
+        "box": [
+          393,
+          920,
+          5,
+          8
+        ]
+      },
+      {
+        "id": 312,
+        "cells": 14,
+        "length_m": 13.828427124746192,
+        "extent_m": 13.152946437965905,
+        "box": [
+          726,
+          124,
+          3,
+          14
+        ]
+      },
+      {
+        "id": 399,
+        "cells": 14,
+        "length_m": 13.485281374238571,
+        "extent_m": 11.661903789690601,
+        "box": [
+          866,
+          618,
+          7,
+          11
+        ]
+      }
+    ]
+  },
+  "sweep_8connected": [
+    {
+      "min_length_m": 5,
+      "min_cells": 5,
+      "survivors": 90,
+      "drawn": 30,
+      "shortest_drawn_m": 8.242640687119284,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 8,
+      "min_cells": 8,
+      "survivors": 40,
+      "drawn": 30,
+      "shortest_drawn_m": 8.242640687119284,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 10,
+      "min_cells": 10,
+      "survivors": 31,
+      "drawn": 30,
+      "shortest_drawn_m": 7.242640687119285,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 12,
+      "min_cells": 12,
+      "survivors": 26,
+      "drawn": 26,
+      "shortest_drawn_m": 2.8284271247461903,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 15,
+      "min_cells": 15,
+      "survivors": 16,
+      "drawn": 16,
+      "shortest_drawn_m": 7.242640687119285,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 20,
+      "min_cells": 20,
+      "survivors": 11,
+      "drawn": 11,
+      "shortest_drawn_m": 7.242640687119285,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 25,
+      "min_cells": 25,
+      "survivors": 6,
+      "drawn": 6,
+      "shortest_drawn_m": 9.242640687119286,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 30,
+      "min_cells": 30,
+      "survivors": 3,
+      "drawn": 3,
+      "shortest_drawn_m": 11.071067811865476,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 35,
+      "min_cells": 35,
+      "survivors": 3,
+      "drawn": 3,
+      "shortest_drawn_m": 11.071067811865476,
+      "longest_drawn_m": 27.313708498984763
+    },
+    {
+      "min_length_m": 40,
+      "min_cells": 40,
+      "survivors": 1,
+      "drawn": 1,
+      "shortest_drawn_m": 11.656854249492381,
+      "longest_drawn_m": 11.656854249492381
+    },
+    {
+      "min_length_m": 45,
+      "min_cells": 45,
+      "survivors": 1,
+      "drawn": 1,
+      "shortest_drawn_m": 11.656854249492381,
+      "longest_drawn_m": 11.656854249492381
+    },
+    {
+      "min_length_m": 50,
+      "min_cells": 50,
+      "survivors": 1,
+      "drawn": 1,
+      "shortest_drawn_m": 11.656854249492381,
+      "longest_drawn_m": 11.656854249492381
+    },
+    {
+      "min_length_m": 60,
+      "min_cells": 60,
+      "survivors": 1,
+      "drawn": 1,
+      "shortest_drawn_m": 11.656854249492381,
+      "longest_drawn_m": 11.656854249492381
+    },
+    {
+      "min_length_m": 80,
+      "min_cells": 80,
+      "survivors": 1,
+      "drawn": 1,
+      "shortest_drawn_m": 11.656854249492381,
+      "longest_drawn_m": 11.656854249492381
+    },
+    {
+      "min_length_m": 100,
+      "min_cells": 100,
+      "survivors": 0,
+      "drawn": 0,
+      "shortest_drawn_m": null,
+      "longest_drawn_m": null
+    }
+  ],
+  "fragmentation": {
+    "as_is": 857,
+    "dilate_1": {
+      "components": 296,
+      "largest_cells": 317,
+      "skeleton_cells_in_largest": 88,
+      "original_components_in_largest": 28
+    },
+    "dilate_2": {
+      "components": 223,
+      "largest_cells": 1669,
+      "skeleton_cells_in_largest": 234,
+      "original_components_in_largest": 94
+    },
+    "dilate_3": {
+      "components": 181,
+      "largest_cells": 3501,
+      "skeleton_cells_in_largest": 314,
+      "original_components_in_largest": 134
+    }
+  },
+  "endpoint_gaps": {
+    "sampled": 200,
+    "quantiles_m": {
+      "p0": 1.4142135623730951,
+      "p25": 1.4142135623730951,
+      "p50": 1.4142135623730951,
+      "p75": 1.4142135623730951,
+      "p90": 4.1580086585558504,
+      "p95": 7.319217282231406,
+      "p99": 17.12304001854842,
+      "p100": 44.82186966202994
+    },
+    "hist_m": [
+      {
+        "lo": 0,
+        "hi": 1.5,
+        "n": 153
+      },
+      {
+        "lo": 1.5,
+        "hi": 2.5,
+        "n": 14
+      },
+      {
+        "lo": 2.5,
+        "hi": 3.5,
+        "n": 8
+      },
+      {
+        "lo": 3.5,
+        "hi": 5,
+        "n": 8
+      },
+      {
+        "lo": 5,
+        "hi": 8,
+        "n": 7
+      },
+      {
+        "lo": 8,
+        "hi": 12,
+        "n": 4
+      },
+      {
+        "lo": 12,
+        "hi": 20,
+        "n": 4
+      },
+      {
+        "lo": 20,
+        "hi": 40,
+        "n": 1
+      },
+      {
+        "lo": 40,
+        "hi": null,
+        "n": 1
+      }
+    ]
+  },
+  "mask_sensitivity": [
+    {
+      "mask": "none (production)",
+      "acc_bar": 2,
+      "mask_cells": 702134,
+      "tpi_sd_m": 0.7320616245269775,
+      "cut_m": 0.7320616245269775,
+      "ridge_raw_cells": 3013,
+      "skeleton_cells": 1620,
+      "components_4": 857,
+      "components_8": 435,
+      "largest_cells_8": 85,
+      "largest_length_m_8": 11.656854249492381,
+      "over_min_cells_4": 0,
+      "over_min_cells_8": 1
+    },
+    {
+      "mask": "land eroded 25 m",
+      "acc_bar": 2,
+      "mask_cells": 597230,
+      "tpi_sd_m": 0.7358015179634094,
+      "cut_m": 0.7358015179634094,
+      "ridge_raw_cells": 2419,
+      "skeleton_cells": 1351,
+      "components_4": 722,
+      "components_8": 381,
+      "largest_cells_8": 38,
+      "largest_length_m_8": 27.313708498984763,
+      "over_min_cells_4": 0,
+      "over_min_cells_8": 0
+    },
+    {
+      "mask": "land eroded 50 m",
+      "acc_bar": 2,
+      "mask_cells": 498604,
+      "tpi_sd_m": 0.665820837020874,
+      "cut_m": 0.665820837020874,
+      "ridge_raw_cells": 1823,
+      "skeleton_cells": 987,
+      "components_4": 525,
+      "components_8": 286,
+      "largest_cells_8": 38,
+      "largest_length_m_8": 26.485281374238575,
+      "over_min_cells_4": 0,
+      "over_min_cells_8": 0
+    },
+    {
+      "mask": "land eroded 100 m",
+      "acc_bar": 2,
+      "mask_cells": 323245,
+      "tpi_sd_m": 0.1398431956768036,
+      "cut_m": 0.1398431956768036,
+      "ridge_raw_cells": 6460,
+      "skeleton_cells": 3467,
+      "components_4": 1893,
+      "components_8": 1027,
+      "largest_cells_8": 97,
+      "largest_length_m_8": 26.142135623730955,
+      "over_min_cells_4": 0,
+      "over_min_cells_8": 5
+    },
+    {
+      "mask": "land eroded 150 m",
+      "acc_bar": 2,
+      "mask_cells": 179006,
+      "tpi_sd_m": 0.10616745054721832,
+      "cut_m": 0.10616745054721832,
+      "ridge_raw_cells": 5340,
+      "skeleton_cells": 2868,
+      "components_4": 1518,
+      "components_8": 808,
+      "largest_cells_8": 102,
+      "largest_length_m_8": 13.242640687119286,
+      "over_min_cells_4": 0,
+      "over_min_cells_8": 5
+    }
+  ],
+  "production_mask": {
+    "label": "design earthworks area",
+    "available": true,
+    "mask": "design earthworks area",
+    "acc_bar": 2,
+    "mask_cells": 399820,
+    "tpi_sd_m": 0.18950818479061127,
+    "cut_m": 0.18950818479061127,
+    "ridge_raw_cells": 4816,
+    "skeleton_cells": 2561,
+    "components_4": 1462,
+    "components_8": 816,
+    "largest_cells_8": 89,
+    "largest_length_m_8": 26.142135623730955,
+    "over_min_cells_4": 0,
+    "over_min_cells_8": 1,
+    "distribution": {
+      "labelling": "design earthworks area, 4-connected (production)",
+      "n": 1462,
+      "cells": {
+        "p0": 1.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 3.0,
+        "p95": 4.0,
+        "p99": 8.0,
+        "p100": 27.0
+      },
+      "length_m": {
+        "p0": 0.0,
+        "p25": 0.0,
+        "p50": 0.0,
+        "p75": 1.0,
+        "p90": 2.0,
+        "p95": 3.0,
+        "p99": 6.0,
+        "p100": 16.899494936611667
+      },
+      "extent_m": {
+        "p0": 0.0,
+        "p25": 0.0,
+        "p50": 0.0,
+        "p75": 1.0,
+        "p90": 2.0,
+        "p95": 3.0,
+        "p99": 6.0,
+        "p100": 13.0
+      },
+      "cells_hist": [
+        {
+          "lo": 1,
+          "hi": 2,
+          "n": 880
+        },
+        {
+          "lo": 2,
+          "hi": 3,
+          "n": 370
+        },
+        {
+          "lo": 3,
+          "hi": 5,
+          "n": 150
+        },
+        {
+          "lo": 5,
+          "hi": 8,
+          "n": 45
+        },
+        {
+          "lo": 8,
+          "hi": 12,
+          "n": 10
+        },
+        {
+          "lo": 12,
+          "hi": 20,
+          "n": 6
+        },
+        {
+          "lo": 20,
+          "hi": 30,
+          "n": 1
+        },
+        {
+          "lo": 30,
+          "hi": 50,
+          "n": 0
+        },
+        {
+          "lo": 50,
+          "hi": 100,
+          "n": 0
+        },
+        {
+          "lo": 100,
+          "hi": null,
+          "n": 0
+        }
+      ],
+      "length_hist": [
+        {
+          "lo": 0,
+          "hi": 2,
+          "n": 1250
+        },
+        {
+          "lo": 2,
+          "hi": 5,
+          "n": 184
+        },
+        {
+          "lo": 5,
+          "hi": 10,
+          "n": 24
+        },
+        {
+          "lo": 10,
+          "hi": 15,
+          "n": 2
+        },
+        {
+          "lo": 15,
+          "hi": 20,
+          "n": 2
+        },
+        {
+          "lo": 20,
+          "hi": 30,
+          "n": 0
+        },
+        {
+          "lo": 30,
+          "hi": 40,
+          "n": 0
+        },
+        {
+          "lo": 40,
+          "hi": 50,
+          "n": 0
+        },
+        {
+          "lo": 50,
+          "hi": 100,
+          "n": 0
+        },
+        {
+          "lo": 100,
+          "hi": null,
+          "n": 0
+        }
+      ],
+      "total_skeleton_cells": 2561,
+      "mean_cells": 1.7517099863201095,
+      "top20": [
+        {
+          "id": 1011,
+          "cells": 27,
+          "length_m": 4.414213562373095,
+          "extent_m": 12.083045973594572,
+          "box": [
+            614,
+            379,
+            6,
+            12
+          ]
+        },
+        {
+          "id": 447,
+          "cells": 17,
+          "length_m": 16.899494936611667,
+          "extent_m": 7.0710678118654755,
+          "box": [
+            446,
+            299,
+            6,
+            6
+          ]
+        },
+        {
+          "id": 911,
+          "cells": 16,
+          "length_m": 10.82842712474619,
+          "extent_m": 10.816653826391969,
+          "box": [
+            583,
+            618,
+            10,
+            7
+          ]
+        },
+        {
+          "id": 1136,
+          "cells": 16,
+          "length_m": 8.414213562373096,
+          "extent_m": 8.06225774829855,
+          "box": [
+            661,
+            578,
+            8,
+            5
+          ]
+        },
+        {
+          "id": 684,
+          "cells": 14,
+          "length_m": 13.0,
+          "extent_m": 13.0,
+          "box": [
+            504,
+            719,
+            1,
+            14
+          ]
+        },
+        {
+          "id": 938,
+          "cells": 14,
+          "length_m": 15.071067811865477,
+          "extent_m": 7.211102550927978,
+          "box": [
+            593,
+            608,
+            5,
+            7
+          ]
+        },
+        {
+          "id": 983,
+          "cells": 13,
+          "length_m": 9.82842712474619,
+          "extent_m": 8.06225774829855,
+          "box": [
+            607,
+            593,
+            5,
+            8
+          ]
+        },
+        {
+          "id": 635,
+          "cells": 11,
+          "length_m": 5.82842712474619,
+          "extent_m": 7.0710678118654755,
+          "box": [
+            488,
+            426,
+            6,
+            6
+          ]
+        },
+        {
+          "id": 772,
+          "cells": 11,
+          "length_m": 4.414213562373095,
+          "extent_m": 8.246211251235321,
+          "box": [
+            542,
+            455,
+            9,
+            3
+          ]
+        },
+        {
+          "id": 253,
+          "cells": 10,
+          "length_m": 5.414213562373095,
+          "extent_m": 6.4031242374328485,
+          "box": [
+            371,
+            577,
+            5,
+            6
+          ]
+        },
+        {
+          "id": 285,
+          "cells": 9,
+          "length_m": 7.82842712474619,
+          "extent_m": 7.0710678118654755,
+          "box": [
+            385,
+            860,
+            2,
+            8
+          ]
+        },
+        {
+          "id": 448,
+          "cells": 9,
+          "length_m": 9.242640687119284,
+          "extent_m": 5.656854249492381,
+          "box": [
+            446,
+            803,
+            5,
+            5
+          ]
+        },
+        {
+          "id": 881,
+          "cells": 9,
+          "length_m": 7.82842712474619,
+          "extent_m": 7.0710678118654755,
+          "box": [
+            575,
+            643,
+            2,
+            8
+          ]
+        },
+        {
+          "id": 648,
+          "cells": 8,
+          "length_m": 4.414213562373095,
+          "extent_m": 5.0,
+          "box": [
+            492,
+            239,
+            4,
+            5
+          ]
+        },
+        {
+          "id": 875,
+          "cells": 8,
+          "length_m": 4.414213562373095,
+          "extent_m": 5.0,
+          "box": [
+            573,
+            636,
+            4,
+            5
+          ]
+        },
+        {
+          "id": 1000,
+          "cells": 8,
+          "length_m": 7.414213562373095,
+          "extent_m": 5.0,
+          "box": [
+            611,
+            416,
+            5,
+            4
+          ]
+        },
+        {
+          "id": 1446,
+          "cells": 8,
+          "length_m": 5.414213562373095,
+          "extent_m": 4.242640687119285,
+          "box": [
+            882,
+            505,
+            4,
+            4
+          ]
+        },
+        {
+          "id": 298,
+          "cells": 7,
+          "length_m": 6.414213562373095,
+          "extent_m": 5.0990195135927845,
+          "box": [
+            389,
+            284,
+            6,
+            2
+          ]
+        },
+        {
+          "id": 681,
+          "cells": 7,
+          "length_m": 5.414213562373095,
+          "extent_m": 4.47213595499958,
+          "box": [
+            503,
+            1022,
+            5,
+            3
+          ]
+        },
+        {
+          "id": 694,
+          "cells": 7,
+          "length_m": 6.414213562373095,
+          "extent_m": 4.242640687119285,
+          "box": [
+            507,
+            1025,
+            4,
+            4
+          ]
+        }
+      ]
+    },
+    "distribution_8connected": {
+      "labelling": "design earthworks area, 8-connected",
+      "n": 816,
+      "cells": {
+        "p0": 1.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 6.0,
+        "p95": 10.0,
+        "p99": 19.850000000000023,
+        "p100": 89.0
+      },
+      "length_m": {
+        "p0": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 2.414213562373095,
+        "p90": 5.656854249492381,
+        "p95": 8.65685424949238,
+        "p99": 14.972539674441634,
+        "p100": 33.38477631085024
+      },
+      "extent_m": {
+        "p0": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 2.23606797749979,
+        "p90": 5.0990195135927845,
+        "p95": 8.558584125748805,
+        "p99": 15.51932792515878,
+        "p100": 38.2099463490856
+      },
+      "cells_hist": [
+        {
+          "lo": 1,
+          "hi": 2,
+          "n": 321
+        },
+        {
+          "lo": 2,
+          "hi": 3,
+          "n": 209
+        },
+        {
+          "lo": 3,
+          "hi": 5,
+          "n": 166
+        },
+        {
+          "lo": 5,
+          "hi": 8,
+          "n": 61
+        },
+        {
+          "lo": 8,
+          "hi": 12,
+          "n": 29
+        },
+        {
+          "lo": 12,
+          "hi": 20,
+          "n": 21
+        },
+        {
+          "lo": 20,
+          "hi": 30,
+          "n": 5
+        },
+        {
+          "lo": 30,
+          "hi": 50,
+          "n": 3
+        },
+        {
+          "lo": 50,
+          "hi": 100,
+          "n": 1
+        },
+        {
+          "lo": 100,
+          "hi": null,
+          "n": 0
+        }
+      ],
+      "length_hist": [
+        {
+          "lo": 0,
+          "hi": 2,
+          "n": 530
+        },
+        {
+          "lo": 2,
+          "hi": 5,
+          "n": 192
+        },
+        {
+          "lo": 5,
+          "hi": 10,
+          "n": 60
+        },
+        {
+          "lo": 10,
+          "hi": 15,
+          "n": 25
+        },
+        {
+          "lo": 15,
+          "hi": 20,
+          "n": 5
+        },
+        {
+          "lo": 20,
+          "hi": 30,
+          "n": 3
+        },
+        {
+          "lo": 30,
+          "hi": 40,
+          "n": 1
+        },
+        {
+          "lo": 40,
+          "hi": 50,
+          "n": 0
+        },
+        {
+          "lo": 50,
+          "hi": 100,
+          "n": 0
+        },
+        {
+          "lo": 100,
+          "hi": null,
+          "n": 0
+        }
+      ],
+      "total_skeleton_cells": 2561,
+      "mean_cells": 3.138480392156863,
+      "top20": [
+        {
+          "id": 503,
+          "cells": 89,
+          "length_m": 26.142135623730955,
+          "extent_m": 38.2099463490856,
+          "box": [
+            575,
+            602,
+            27,
+            29
+          ]
+        },
+        {
+          "id": 624,
+          "cells": 44,
+          "length_m": 33.38477631085024,
+          "extent_m": 31.240998703626616,
+          "box": [
+            659,
+            559,
+            21,
+            25
+          ]
+        },
+        {
+          "id": 557,
+          "cells": 35,
+          "length_m": 5.82842712474619,
+          "extent_m": 15.652475842498529,
+          "box": [
+            612,
+            376,
+            8,
+            15
+          ]
+        },
+        {
+          "id": 241,
+          "cells": 34,
+          "length_m": 9.65685424949238,
+          "extent_m": 17.029386365926403,
+          "box": [
+            441,
+            296,
+            14,
+            12
+          ]
+        },
+        {
+          "id": 545,
+          "cells": 26,
+          "length_m": 11.656854249492381,
+          "extent_m": 16.55294535724685,
+          "box": [
+            604,
+            589,
+            8,
+            16
+          ]
+        },
+        {
+          "id": 293,
+          "cells": 25,
+          "length_m": 6.242640687119285,
+          "extent_m": 24.041630560342615,
+          "box": [
+            462,
+            600,
+            18,
+            18
+          ]
+        },
+        {
+          "id": 198,
+          "cells": 23,
+          "length_m": 18.142135623730955,
+          "extent_m": 17.69180601295413,
+          "box": [
+            414,
+            300,
+            13,
+            14
+          ]
+        },
+        {
+          "id": 464,
+          "cells": 22,
+          "length_m": 25.384776310850242,
+          "extent_m": 22.825424421026653,
+          "box": [
+            553,
+            626,
+            21,
+            12
+          ]
+        },
+        {
+          "id": 379,
+          "cells": 20,
+          "length_m": 13.485281374238571,
+          "extent_m": 13.45362404707371,
+          "box": [
+            503,
+            1021,
+            11,
+            10
+          ]
+        },
+        {
+          "id": 160,
+          "cells": 19,
+          "length_m": 10.071067811865476,
+          "extent_m": 13.601470508735444,
+          "box": [
+            384,
+            858,
+            5,
+            14
+          ]
+        },
+        {
+          "id": 247,
+          "cells": 19,
+          "length_m": 20.071067811865476,
+          "extent_m": 10.63014581273465,
+          "box": [
+            444,
+            912,
+            9,
+            8
+          ]
+        },
+        {
+          "id": 496,
+          "cells": 19,
+          "length_m": 17.899494936611667,
+          "extent_m": 11.40175425099138,
+          "box": [
+            572,
+            633,
+            10,
+            8
+          ]
+        },
+        {
+          "id": 436,
+          "cells": 18,
+          "length_m": 12.656854249492381,
+          "extent_m": 12.041594578792296,
+          "box": [
+            541,
+            455,
+            10,
+            9
+          ]
+        },
+        {
+          "id": 497,
+          "cells": 18,
+          "length_m": 8.65685424949238,
+          "extent_m": 11.704699910719626,
+          "box": [
+            572,
+            643,
+            5,
+            12
+          ]
+        },
+        {
+          "id": 551,
+          "cells": 18,
+          "length_m": 15.071067811865477,
+          "extent_m": 10.0,
+          "box": [
+            607,
+            415,
+            9,
+            7
+          ]
+        },
+        {
+          "id": 771,
+          "cells": 18,
+          "length_m": 18.656854249492383,
+          "extent_m": 15.811388300841896,
+          "box": [
+            842,
+            530,
+            6,
+            16
+          ]
+        },
+        {
+          "id": 121,
+          "cells": 16,
+          "length_m": 18.72792206135786,
+          "extent_m": 14.7648230602334,
+          "box": [
+            341,
+            423,
+            8,
+            14
+          ]
+        },
+        {
+          "id": 353,
+          "cells": 15,
+          "length_m": 13.071067811865477,
+          "extent_m": 12.041594578792296,
+          "box": [
+            490,
+            234,
+            9,
+            10
+          ]
+        },
+        {
+          "id": 382,
+          "cells": 15,
+          "length_m": 14.414213562373096,
+          "extent_m": 14.035668847618199,
+          "box": [
+            504,
+            719,
+            2,
+            15
+          ]
+        },
+        {
+          "id": 802,
+          "cells": 15,
+          "length_m": 10.242640687119286,
+          "extent_m": 10.0,
+          "box": [
+            869,
+            540,
+            9,
+            7
+          ]
+        }
+      ]
+    },
+    "sweep": [
+      {
+        "min_length_m": 5,
+        "min_cells": 5,
+        "survivors": 62,
+        "drawn": 30,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 16.899494936611667
+      },
+      {
+        "min_length_m": 8,
+        "min_cells": 8,
+        "survivors": 17,
+        "drawn": 17,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 16.899494936611667
+      },
+      {
+        "min_length_m": 10,
+        "min_cells": 10,
+        "survivors": 10,
+        "drawn": 10,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 16.899494936611667
+      },
+      {
+        "min_length_m": 12,
+        "min_cells": 12,
+        "survivors": 7,
+        "drawn": 7,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 16.899494936611667
+      },
+      {
+        "min_length_m": 15,
+        "min_cells": 15,
+        "survivors": 4,
+        "drawn": 4,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 16.899494936611667
+      },
+      {
+        "min_length_m": 20,
+        "min_cells": 20,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 4.414213562373095
+      },
+      {
+        "min_length_m": 25,
+        "min_cells": 25,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 4.414213562373095,
+        "longest_drawn_m": 4.414213562373095
+      },
+      {
+        "min_length_m": 30,
+        "min_cells": 30,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 35,
+        "min_cells": 35,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 40,
+        "min_cells": 40,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 45,
+        "min_cells": 45,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 50,
+        "min_cells": 50,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 60,
+        "min_cells": 60,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 80,
+        "min_cells": 80,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      },
+      {
+        "min_length_m": 100,
+        "min_cells": 100,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      }
+    ],
+    "sweep_8connected": [
+      {
+        "min_length_m": 5,
+        "min_cells": 5,
+        "survivors": 120,
+        "drawn": 30,
+        "shortest_drawn_m": 10.656854249492381,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 8,
+        "min_cells": 8,
+        "survivors": 59,
+        "drawn": 30,
+        "shortest_drawn_m": 10.656854249492381,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 10,
+        "min_cells": 10,
+        "survivors": 48,
+        "drawn": 30,
+        "shortest_drawn_m": 10.656854249492381,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 12,
+        "min_cells": 12,
+        "survivors": 30,
+        "drawn": 30,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 15,
+        "min_cells": 15,
+        "survivors": 20,
+        "drawn": 20,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 20,
+        "min_cells": 20,
+        "survivors": 9,
+        "drawn": 9,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 25,
+        "min_cells": 25,
+        "survivors": 6,
+        "drawn": 6,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 30,
+        "min_cells": 30,
+        "survivors": 4,
+        "drawn": 4,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 35,
+        "min_cells": 35,
+        "survivors": 3,
+        "drawn": 3,
+        "shortest_drawn_m": 5.82842712474619,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 40,
+        "min_cells": 40,
+        "survivors": 2,
+        "drawn": 2,
+        "shortest_drawn_m": 26.142135623730955,
+        "longest_drawn_m": 33.38477631085024
+      },
+      {
+        "min_length_m": 45,
+        "min_cells": 45,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 26.142135623730955,
+        "longest_drawn_m": 26.142135623730955
+      },
+      {
+        "min_length_m": 50,
+        "min_cells": 50,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 26.142135623730955,
+        "longest_drawn_m": 26.142135623730955
+      },
+      {
+        "min_length_m": 60,
+        "min_cells": 60,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 26.142135623730955,
+        "longest_drawn_m": 26.142135623730955
+      },
+      {
+        "min_length_m": 80,
+        "min_cells": 80,
+        "survivors": 1,
+        "drawn": 1,
+        "shortest_drawn_m": 26.142135623730955,
+        "longest_drawn_m": 26.142135623730955
+      },
+      {
+        "min_length_m": 100,
+        "min_cells": 100,
+        "survivors": 0,
+        "drawn": 0,
+        "shortest_drawn_m": null,
+        "longest_drawn_m": null
+      }
+    ],
+    "renders": [
+      "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\design_overview.png",
+      "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\design_skeleton_full.png",
+      "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\design_crop_largest.png"
+    ],
+    "production_lines": 0
+  },
+  "connectivity_oracle": {
+    "default_structure": [
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        0,
+        1,
+        0
+      ]
+    ],
+    "diagonal_10_cells": {
+      "as_production": 10,
+      "eight_connected": 1
+    },
+    "staircase_6_runs": {
+      "as_production": 6,
+      "eight_connected": 1
+    }
+  },
+  "acc_bar": {
+    "mask": "design earthworks area",
+    "rows": [
+      {
+        "mask": "acc<=1",
+        "acc_bar": 1,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 2033,
+        "skeleton_cells": 1409,
+        "components_4": 912,
+        "components_8": 648,
+        "largest_cells_8": 32,
+        "largest_length_m_8": 17.48528137423857,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 0
+      },
+      {
+        "mask": "acc<=2",
+        "acc_bar": 2,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 4816,
+        "skeleton_cells": 2561,
+        "components_4": 1462,
+        "components_8": 816,
+        "largest_cells_8": 89,
+        "largest_length_m_8": 26.142135623730955,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 1
+      },
+      {
+        "mask": "acc<=3",
+        "acc_bar": 3,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 7873,
+        "skeleton_cells": 3616,
+        "components_4": 1953,
+        "components_8": 947,
+        "largest_cells_8": 159,
+        "largest_length_m_8": 20.899494936611667,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 4
+      },
+      {
+        "mask": "acc<=5",
+        "acc_bar": 5,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 12643,
+        "skeleton_cells": 4963,
+        "components_4": 2552,
+        "components_8": 1114,
+        "largest_cells_8": 237,
+        "largest_length_m_8": 21.55634918610405,
+        "over_min_cells_4": 1,
+        "over_min_cells_8": 7
+      },
+      {
+        "mask": "acc<=10",
+        "acc_bar": 10,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 19684,
+        "skeleton_cells": 6419,
+        "components_4": 3250,
+        "components_8": 1312,
+        "largest_cells_8": 219,
+        "largest_length_m_8": 29.970562748477146,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 14
+      },
+      {
+        "mask": "acc<=20",
+        "acc_bar": 20,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 26403,
+        "skeleton_cells": 7955,
+        "components_4": 3958,
+        "components_8": 1539,
+        "largest_cells_8": 211,
+        "largest_length_m_8": 157.1959594928933,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 19
+      },
+      {
+        "mask": "acc<=50",
+        "acc_bar": 50,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 34105,
+        "skeleton_cells": 9410,
+        "components_4": 4268,
+        "components_8": 1495,
+        "largest_cells_8": 272,
+        "largest_length_m_8": 47.284271247461874,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 25
+      },
+      {
+        "mask": "acc<=100",
+        "acc_bar": 100,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 37071,
+        "skeleton_cells": 9836,
+        "components_4": 4374,
+        "components_8": 1414,
+        "largest_cells_8": 295,
+        "largest_length_m_8": 68.0121933088197,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 30
+      },
+      {
+        "mask": "acc<=inf (TPI only)",
+        "acc_bar": null,
+        "mask_cells": 399820,
+        "tpi_sd_m": 0.18950818479061127,
+        "cut_m": 0.18950818479061127,
+        "ridge_raw_cells": 38911,
+        "skeleton_cells": 9930,
+        "components_4": 4280,
+        "components_8": 1310,
+        "largest_cells_8": 364,
+        "largest_length_m_8": 111.08326112068517,
+        "over_min_cells_4": 0,
+        "over_min_cells_8": 28
+      }
+    ]
+  },
+  "renders": [
+    "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\overview.png",
+    "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\skeleton_full.png",
+    "F:\\Terrain Flow Design\\TerrainFlow\\tests_qgis\\probes\\evidence\\_work\\ridgelines\\crop_largest.png"
+  ],
+  "production_lines": 0
+}
