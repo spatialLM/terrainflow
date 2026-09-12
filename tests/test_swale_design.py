@@ -542,3 +542,103 @@ class TestCapacityPerMetre:
         cap = capacity_per_metre(0.5, 2.0)
         r = spacing_advisory(2.0, "Loam", runoff_mm=25.0, capacity_m3_per_m=cap)
         assert r["capture_spacing_m"] == pytest.approx(cap / 0.025)
+
+
+# ---------------------------------------------------------------------------
+# line_stations — the projection `inflow_profile` is fed from
+# ---------------------------------------------------------------------------
+
+class TestLineStations:
+    """The vectorised form of ``[line.project(Point(x, y)) for x, y in ...]``.
+
+    That loop is one Python-level shapely call per catchment cell, capped at
+    20,000 cells per feature, run for every linear feature on the design. Measured
+    on the reference design of 35 it is **3,236 ms** of the 5.3 s freeze after a
+    vertex edit — the single largest term in it. `shapely.line_locate_point` is
+    the same GEOS call over an array instead of over a list, at 622 ms.
+
+    The tests assert the two agree **exactly**, not approximately. That is the
+    whole licence for the swap: it is only safe to land without re-recording a
+    single figure if no station anywhere can move, and a tolerance would hide
+    precisely the drift that would make that false.
+    """
+
+    @staticmethod
+    def _naive(line, xs, ys):
+        from shapely.geometry import Point
+
+        return [line.project(Point(float(x), float(y))) for x, y in zip(xs, ys)]
+
+    def test_matches_the_loop_it_replaces_on_a_realistic_scatter(self):
+        import numpy as np
+        from shapely.geometry import LineString
+
+        from terrainflow_assessment.modules.swale_design import line_stations
+
+        # A zigzag, because a real alignment is not one segment.
+        line = LineString([(0, 0), (50, 10), (90, -5), (140, 20)])
+        rng = np.random.default_rng(20260912)
+        xs = rng.uniform(-40.0, 190.0, 400)
+        ys = rng.uniform(-60.0, 70.0, 400)
+
+        got = line_stations(line, xs, ys)
+        want = self._naive(line, xs, ys)
+        assert np.array_equal(np.asarray(got), np.asarray(want)), (
+            "line_stations disagrees with line.project — max difference "
+            f"{np.abs(np.asarray(got) - np.asarray(want)).max():.3e} m"
+        )
+
+    def test_the_awkward_positions_agree_too(self):
+        """Before the start, past the end, on a vertex, and on the line itself.
+
+        A random scatter can miss every one of these, and they are where a
+        projection is most likely to differ: `project` clamps to the line's own
+        extent, so a point beyond either end must come back as 0 or as the full
+        length rather than as something off the end.
+        """
+        import numpy as np
+        from shapely.geometry import LineString
+
+        from terrainflow_assessment.modules.swale_design import line_stations
+
+        line = LineString([(0, 0), (50, 10), (90, -5), (140, 20)])
+        xs = [-100.0, 0.0, 50.0, 90.0, 140.0, 300.0, 25.0, 70.0]
+        ys = [-100.0, 0.0, 10.0, -5.0, 20.0, 300.0, 5.0, 2.5]
+
+        got = np.asarray(line_stations(line, xs, ys))
+        want = np.asarray(self._naive(line, xs, ys))
+        assert np.array_equal(got, want), list(zip(got, want))
+        # And the clamping itself, stated rather than inherited: a point well
+        # before the start is station 0 and one well past the end is the length.
+        assert got[0] == 0.0
+        assert got[5] == pytest.approx(line.length)
+
+    def test_empty_input_gives_an_empty_answer(self):
+        import numpy as np
+        from shapely.geometry import LineString
+
+        from terrainflow_assessment.modules.swale_design import line_stations
+
+        out = line_stations(LineString([(0, 0), (10, 0)]), [], [])
+        assert len(np.asarray(out)) == 0
+
+    def test_the_result_feeds_inflow_profile_unchanged(self):
+        """End to end: the profile built from each projection is the same dict.
+
+        `line_stations` exists to be `inflow_profile`'s first argument, and that
+        is the only thing about it that matters downstream.
+        """
+        import numpy as np
+        from shapely.geometry import LineString
+
+        from terrainflow_assessment.modules.swale_design import line_stations
+
+        line = LineString([(0, 0), (50, 10), (90, -5), (140, 20)])
+        rng = np.random.default_rng(7)
+        xs = rng.uniform(-10.0, 150.0, 250)
+        ys = rng.uniform(-30.0, 40.0, 250)
+        volumes = [2.5] * len(xs)
+
+        fast = inflow_profile(line_stations(line, xs, ys), volumes, line.length)
+        slow = inflow_profile(self._naive(line, xs, ys), volumes, line.length)
+        assert fast == slow

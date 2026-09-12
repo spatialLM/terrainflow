@@ -1,0 +1,529 @@
+{
+  "probe": "p_interaction_freeze",
+  "date": "2026-09-12",
+  "findings": [
+    "spillway-placed-4.6s",
+    "vertex-edit-5.2s"
+  ],
+  "dem": "F:\\Temp\\tfa_perf_gate\\dem.tif",
+  "notes": [],
+  "stages": {
+    "spillway_placed": {
+      "status": "ok"
+    },
+    "vertex_edit_finished": {
+      "status": "ok"
+    },
+    "per_feature_scaling": {
+      "status": "ok"
+    },
+    "inside_live_assessment": {
+      "status": "ok"
+    },
+    "inside_inflow_profile": {
+      "status": "ok"
+    }
+  },
+  "features": 35,
+  "by_type": {
+    "basin": 2,
+    "dam": 3,
+    "diversion": 4,
+    "swale": 26
+  },
+  "spillway_placed": {
+    "total_ms": 2044.1250000149012,
+    "before_ms": 4750.2,
+    "responsive": false,
+    "feature": "Dam 1",
+    "rows": [
+      {
+        "n": 1,
+        "secs": 1.889342599984957,
+        "name": "_recompute_live_assessment"
+      },
+      {
+        "n": 32,
+        "secs": 0.7859048000536859,
+        "name": "_spillway_datums"
+      },
+      {
+        "n": 1,
+        "secs": 0.11959069999284111,
+        "name": "_refresh_terrain_capacity"
+      },
+      {
+        "n": 1,
+        "secs": 0.1195646999985911,
+        "name": "_refresh_dam_stage_storage"
+      },
+      {
+        "n": 1,
+        "secs": 0.009662299999035895,
+        "name": "_refresh_spillway_layer"
+      },
+      {
+        "n": 1,
+        "secs": 0.00014779999037273228,
+        "name": "_mark_design_edit"
+      },
+      {
+        "n": 1,
+        "secs": 3.070000093430281e-05,
+        "name": "_refresh_spillway_link_inverts"
+      }
+    ]
+  },
+  "vertex_edit_finished": {
+    "total_ms": 2931.7018000001553,
+    "before_ms": 5447.7,
+    "responsive": false,
+    "feature": "Swale 3",
+    "vertices": 191,
+    "rows": [
+      {
+        "n": 1,
+        "secs": 2.0648300999891944,
+        "name": "_recompute_live_assessment"
+      },
+      {
+        "n": 31,
+        "secs": 0.9828151000547223,
+        "name": "_spillway_datums"
+      },
+      {
+        "n": 1,
+        "secs": 0.4358427999832202,
+        "name": "recompute_catchments"
+      },
+      {
+        "n": 1,
+        "secs": 0.4138344999810215,
+        "name": "_refresh_terrain_capacity"
+      },
+      {
+        "n": 1,
+        "secs": 0.010844899981748313,
+        "name": "_refresh_spillway_layer"
+      },
+      {
+        "n": 1,
+        "secs": 0.006085800006985664,
+        "name": "_refresh_ew_layer"
+      },
+      {
+        "n": 1,
+        "secs": 0.00015819998225197196,
+        "name": "_mark_design_edit"
+      },
+      {
+        "n": 1,
+        "secs": 5.549998604692519e-05,
+        "name": "_resnap_spillways"
+      },
+      {
+        "n": 1,
+        "secs": 3.250001464039087e-05,
+        "name": "_refresh_spillway_link_inverts"
+      }
+    ]
+  },
+  "per_feature_scaling": [
+    {
+      "enabled_features": 35,
+      "ms": 2694.8635000153445
+    },
+    {
+      "enabled_features": 18,
+      "ms": 1835.7568999927025
+    },
+    {
+      "enabled_features": 9,
+      "ms": 1430.992600013269
+    },
+    {
+      "enabled_features": 4,
+      "ms": 1013.8016999990214
+    },
+    {
+      "enabled_features": 2,
+      "ms": 893.8219999836292
+    }
+  ],
+  "inside_live_assessment": {
+    "total_ms": 2859.179999999999,
+    "rows": [
+      {
+        "func": "earthworks.py:1560 _on_vertex_edit_finished",
+        "calls": 1,
+        "cumulative_ms": 2860.366,
+        "share": 1.000414804244574
+      },
+      {
+        "func": "earthworks.py:4312 _recompute_live_assessment",
+        "calls": 1,
+        "cumulative_ms": 1967.3198,
+        "share": 0.6880713351380469
+      },
+      {
+        "func": "earthworks.py:3294 _build_spillway_rows",
+        "calls": 1,
+        "cumulative_ms": 832.2289000000001,
+        "share": 0.29107258025028165
+      },
+      {
+        "func": "earthworks.py:2996 _spillway_row",
+        "calls": 35,
+        "cumulative_ms": 817.3393000000001,
+        "share": 0.2858649333025554
+      },
+      {
+        "func": "earthworks.py:3747 refresh_stress_points_layer",
+        "calls": 1,
+        "cumulative_ms": 812.3046,
+        "share": 0.28410404381675874
+      },
+      {
+        "func": "earthworks.py:3662 feature_inflow_profile",
+        "calls": 30,
+        "cumulative_ms": 803.5674,
+        "share": 0.28104820263152386
+      },
+      {
+        "func": "earthworks.py:3961 _spillway_datums",
+        "calls": 31,
+        "cumulative_ms": 802.1739,
+        "share": 0.28056082513168124
+      },
+      {
+        "func": "swale_design.py:231 line_stations",
+        "calls": 30,
+        "cumulative_ms": 643.4236000000001,
+        "share": 0.22503780804286555
+      },
+      {
+        "func": "earthworks.py:2304 recompute_catchments",
+        "calls": 1,
+        "cumulative_ms": 453.3358,
+        "share": 0.15855448065529285
+      },
+      {
+        "func": "earthworks.py:1699 _refresh_terrain_capacity",
+        "calls": 1,
+        "cumulative_ms": 416.19130000000007,
+        "share": 0.14556316846088746
+      },
+      {
+        "func": "earthwork_design.py:3585 feature_storage",
+        "calls": 1,
+        "cumulative_ms": 405.7216,
+        "share": 0.1419013843129849
+      },
+      {
+        "func": "footprint.py:339 pour_point",
+        "calls": 42,
+        "cumulative_ms": 373.5213,
+        "share": 0.13063930917256
+      },
+      {
+        "func": "footprint.py:151 rasterize_footprint",
+        "calls": 107,
+        "cumulative_ms": 370.1934,
+        "share": 0.12947537405829648
+      },
+      {
+        "func": "footprint.py:368 pour_point_near",
+        "calls": 29,
+        "cumulative_ms": 309.6958,
+        "share": 0.1083163004777594
+      },
+      {
+        "func": "env.py:408 wrapper",
+        "calls": 107,
+        "cumulative_ms": 283.885,
+        "share": 0.0992889569736778
+      },
+      {
+        "func": "earthwork_design.py:3547 _isolated_burn",
+        "calls": 1,
+        "cumulative_ms": 281.5,
+        "share": 0.09845480172636914
+      },
+      {
+        "func": "earthwork_design.py:2297 burn_earthworks",
+        "calls": 1,
+        "cumulative_ms": 281.4171,
+        "share": 0.09842580739932433
+      },
+      {
+        "func": "earthwork_design.py:2848 _burn_swale",
+        "calls": 1,
+        "cumulative_ms": 279.5047,
+        "share": 0.09775694429871505
+      },
+      {
+        "func": "features.py:205 rasterize",
+        "calls": 107,
+        "cumulative_ms": 264.8998,
+        "share": 0.09264887135472412
+      },
+      {
+        "func": "burn_strategy.py:193 taper_reach",
+        "calls": 2,
+        "cumulative_ms": 205.8925,
+        "share": 0.07201103113480091
+      },
+      {
+        "func": "footprint.py:411 outlet_cell",
+        "calls": 35,
+        "cumulative_ms": 198.6609,
+        "share": 0.06948177449478525
+      },
+      {
+        "func": "footprint.py:331 _valid",
+        "calls": 107,
+        "cumulative_ms": 168.68060000000003,
+        "share": 0.058996145748081645
+      },
+      {
+        "func": "footprint.py:319 outer_ring",
+        "calls": 71,
+        "cumulative_ms": 165.60860000000002,
+        "share": 0.05792171181947275
+      },
+      {
+        "func": "earthworks.py:4086 _make_walker",
+        "calls": 1,
+        "cumulative_ms": 163.14720000000003,
+        "share": 0.057060835624199974
+      },
+      {
+        "func": "earthworks.py:3819 _footprint_mask",
+        "calls": 31,
+        "cumulative_ms": 149.6517,
+        "share": 0.05234077602669299
+      },
+      {
+        "func": "earthwork_design.py:2905 _companion_berm",
+        "calls": 1,
+        "cumulative_ms": 141.65820000000002,
+        "share": 0.04954504438335469
+      },
+      {
+        "func": "earthwork_design.py:3130 _storage_invert",
+        "calls": 1,
+        "cumulative_ms": 107.18970000000002,
+        "share": 0.03748966486894846
+      },
+      {
+        "func": "burn_strategy.py:263 tapered_invert",
+        "calls": 1,
+        "cumulative_ms": 106.55590000000001,
+        "share": 0.03726799292104731
+      },
+      {
+        "func": "footprint.py:308 _dilate8",
+        "calls": 71,
+        "cumulative_ms": 102.7416,
+        "share": 0.0359339391014207
+      },
+      {
+        "func": "earthwork_design.py:3341 get_ponding_layer",
+        "calls": 1,
+        "cumulative_ms": 101.11500000000001,
+        "share": 0.03536503473023736
+      },
+      {
+        "func": "flow_graph.py:190 label_direct_catchments",
+        "calls": 1,
+        "cumulative_ms": 82.0729,
+        "share": 0.02870504830056171
+      },
+      {
+        "func": "panel.py:2338 set_network",
+        "calls": 1,
+        "cumulative_ms": 68.5878,
+        "share": 0.023988626109583876
+      },
+      {
+        "func": "network_view.py:562 set_network",
+        "calls": 1,
+        "cumulative_ms": 68.57880000000002,
+        "share": 0.023985478353933658
+      },
+      {
+        "func": "sgrid.py:2131 fill_depressions",
+        "calls": 1,
+        "cumulative_ms": 65.1414,
+        "share": 0.022783245545925764
+      },
+      {
+        "func": "flow_graph.py:156 resolve_terminals",
+        "calls": 1,
+        "cumulative_ms": 65.09230000000001,
+        "share": 0.022766072790100667
+      },
+      {
+        "func": "_sgrid.py:1927 _wrapper",
+        "calls": 1,
+        "cumulative_ms": 63.9242,
+        "share": 0.02235752908176471
+      },
+      {
+        "func": "simulation.py:835 build_stores_from_earthworks",
+        "calls": 2,
+        "cumulative_ms": 51.46600000000001,
+        "share": 0.018000265810477138
+      },
+      {
+        "func": "earthworks.py:4076 _shapely_of",
+        "calls": 100,
+        "cumulative_ms": 42.3489,
+        "share": 0.014811554361740085
+      },
+      {
+        "func": "network_view.py:113 __init__",
+        "calls": 35,
+        "cumulative_ms": 37.9079,
+        "share": 0.01325831182366973
+      },
+      {
+        "func": "earthworks.py:4487 _drawn_basis_balance",
+        "calls": 1,
+        "cumulative_ms": 28.2584,
+        "share": 0.009883393140690692
+      }
+    ]
+  },
+  "inside_inflow_profile": {
+    "features": 30,
+    "largest_cells": 16823,
+    "mask_ms": 121.64259990095161,
+    "project_ms": 3169.8631999315694,
+    "vector_ms": 684.5279999542981,
+    "profile_ms": 16.796800075098872,
+    "max_projection_disagreement_m": 0.0,
+    "rows": [
+      {
+        "feature": "Swale 3",
+        "cells": 5887
+      },
+      {
+        "feature": "Swale 4",
+        "cells": 1923
+      },
+      {
+        "feature": "Swale 5",
+        "cells": 10988
+      },
+      {
+        "feature": "Swale 6",
+        "cells": 1087
+      },
+      {
+        "feature": "Swale 7",
+        "cells": 7003
+      },
+      {
+        "feature": "Swale 8",
+        "cells": 5393
+      },
+      {
+        "feature": "Swale 9",
+        "cells": 2739
+      },
+      {
+        "feature": "Swale 10",
+        "cells": 2058
+      },
+      {
+        "feature": "Swale 11",
+        "cells": 788
+      },
+      {
+        "feature": "Swale 12",
+        "cells": 3155
+      },
+      {
+        "feature": "Swale 13",
+        "cells": 6106
+      },
+      {
+        "feature": "Swale 14",
+        "cells": 1944
+      },
+      {
+        "feature": "Swale 15",
+        "cells": 2304
+      },
+      {
+        "feature": "Swale 16",
+        "cells": 1467
+      },
+      {
+        "feature": "Swale 18",
+        "cells": 9971
+      },
+      {
+        "feature": "Swale 19",
+        "cells": 1118
+      },
+      {
+        "feature": "Swale 20",
+        "cells": 3063
+      },
+      {
+        "feature": "Swale 21",
+        "cells": 1624
+      },
+      {
+        "feature": "Swale 22",
+        "cells": 1444
+      },
+      {
+        "feature": "Swale 23",
+        "cells": 2720
+      },
+      {
+        "feature": "Swale 24",
+        "cells": 5510
+      },
+      {
+        "feature": "Swale 25",
+        "cells": 1437
+      },
+      {
+        "feature": "Swale 26",
+        "cells": 2520
+      },
+      {
+        "feature": "Swale 27",
+        "cells": 4409
+      },
+      {
+        "feature": "Swale 28",
+        "cells": 2751
+      },
+      {
+        "feature": "Swale 29",
+        "cells": 9530
+      },
+      {
+        "feature": "Diversion 30",
+        "cells": 13244
+      },
+      {
+        "feature": "Diversion 31",
+        "cells": 16823
+      },
+      {
+        "feature": "Diversion 34",
+        "cells": 9461
+      },
+      {
+        "feature": "Diversion 35",
+        "cells": 5231
+      }
+    ]
+  }
+}

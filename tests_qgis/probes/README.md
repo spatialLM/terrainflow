@@ -48,6 +48,7 @@ starts; a mid-run edit makes later modules boot against a half-applied change.
 | `p_gate_ui.py` | Five Batch 4 items against the UI operations they sit in | M-11, Q-11, G-9, G-8, M-10 |
 | `p_gate_m10.py` | M-10's *real* denominator, and how many reads a draw makes | M-10 |
 | `p_ridgelines.py` | Why every skeleton component is under `min_cells` | Ridgelines returns nothing |
+| `p_interaction_freeze.py` | Where the seconds after a click go, and whether they must | spillway-placed 4.6 s, vertex-edit 5.2 s |
 
 `p_coverage.py` is the one probe that needs **no QGIS at all** — it reads source. Plain
 `python p_coverage.py` is quicker and does the same thing.

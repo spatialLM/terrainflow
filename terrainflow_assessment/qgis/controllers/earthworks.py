@@ -3675,7 +3675,10 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
         Returns the profile dict from :func:`swale_design.inflow_profile`, or None.
         """
-        from terrainflow_assessment.modules.swale_design import inflow_profile
+        from terrainflow_assessment.modules.swale_design import (
+            inflow_profile,
+            line_stations,
+        )
 
         labels = self._state.catchment_labels
         meta = self._state.flow_grid_meta
@@ -3708,9 +3711,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             xs = transform.c + (cols + 0.5) * transform.a
             ys = transform.f + (rows + 0.5) * transform.e
 
-            from shapely.geometry import Point
-            distances = [line.project(Point(float(x), float(y)))
-                         for x, y in zip(xs, ys)]
+            # One GEOS call over the array, not one per cell. This was
+            # ``[line.project(Point(x, y)) for ...]`` — 3,236 ms of the 5.3 s a
+            # vertex edit costs on the reference design, because
+            # `refresh_stress_points_layer` calls this method once per *feature*
+            # and each call projected up to `_PROFILE_MAX_CELLS` cells through a
+            # Python loop. Same routine underneath, and measured bit-identical on
+            # every feature of that design, so no station moves.
+            distances = line_stations(line, xs, ys)
 
             if runoff_mm is None:
                 runoff_mm = self._current_runoff_mm()
