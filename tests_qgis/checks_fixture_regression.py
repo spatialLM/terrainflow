@@ -61,7 +61,13 @@ EXPECTED = {
     "swale_a_catchment_ha": 1.6551,
     "swale_b_catchment_ha": 2.1829,
     "basin_c_catchment_ha": 0.1884,
-    "uncaptured_cells": 89336.0000,
+    # Re-recorded 2026-09-12: 89,336 -> 52,839 when `_build_design` gained Berm D and
+    # Diversion E. The two new features intercept ground that previously reached the
+    # boundary uncaptured, which is what a berm across the slope is for. Everything
+    # else in this block held to 0.00% — direct catchments are mutually exclusive, so
+    # the new features take from the uncaptured remainder rather than from Swale A,
+    # Swale B or Basin C, and the two capacities are analytic and never saw the burn.
+    "uncaptured_cells": 52839.0000,
     "swale_capacity_m3": 252.0000,
     "basin_capacity_m3": 1170.0000,
 }
@@ -73,6 +79,30 @@ def _swale_line(northing_offset):
     y = Y0 + northing_offset
     return QgsGeometry.fromWkt(
         f"LINESTRING ({X0 + 60} {y}, {X0 + 200} {y}, {X0 + 340} {y})")
+
+
+def _diversion_line():
+    """A graded drain on ground that falls the way a drain needs — measured, not guessed.
+
+    `_burn_diversion` grades from the **first vertex** at `gradient_pct` and keeps
+    the lower of that invert and the ground, so the alignment decides whether this
+    pins a drain or a canyon. The first alignment tried here ran east-west, which
+    on this clip **rises 17.3 m** along its length: the graded invert then sat some
+    20 m below ground for most of the line and the burn cut a trench to match. A
+    real code path, and a worthless thing to hang a site total on.
+
+    This one falls **1.90 m over 126 m (-1.51%)** against the 1.0% the drain is
+    graded at, so the invert tracks the ground and cuts the shallow trench a
+    diversion actually is. The slope on this clip runs east-west — the berm
+    alignment rises 23 m along it — which is why this runs across that.
+
+    Off the half-metre on purpose: a band whose edges land exactly on cell centres
+    is the one alignment where centre-based rasterising is ambiguous, and a pin
+    taken there would pin the ambiguity.
+    """
+    return QgsGeometry.fromWkt(
+        f"LINESTRING ({X0 + 260.3} {Y0 + 300.3}, {X0 + 200.3} {Y0 + 280.3}, "
+        f"{X0 + 140.3} {Y0 + 260.3})")
 
 
 def _basin_polygon(east_offset, north_offset, side=30.0):
@@ -130,7 +160,22 @@ def _size(earthwork):
 
 
 def _build_design(harness):
-    """Two swales across the slope and one basin, at fixed coordinates."""
+    """One of every burn method, at fixed coordinates.
+
+    It was two swales and a basin, and that left a hole worth naming: `_burn_swale`
+    and `_burn_basin` were the two volumetric burns already rasterising on cell
+    centres, so **no pinned number here touched `_burn_berm`, `_burn_diversion` or
+    `_key_berm_into_banks`**. When those three were fixed (M-1) and the berm's
+    section was changed from a 1:1 triangle to a trapezoid (M-2), every pin in this
+    module held — not because the burns were unchanged, but because nothing pinned
+    reached them.
+
+    So: a berm, a diversion, and a companion berm on Swale B, which is the only way
+    `_key_berm_into_banks` runs (`_companion_berm` calls it when `key_into_banks` is
+    set, and that defaults True for a swale). Together with the burn quantities
+    pinned in `check_the_burn_quantities_have_not_moved`, every burn method the
+    plugin has is now behind a recorded number.
+    """
     swale = harness.add_earthwork("swale", geometry=_swale_line(140.0), name="Swale A")
     swale.depth = 0.6
     swale.top_width_m = 2.0
@@ -140,13 +185,28 @@ def _build_design(harness):
     swale_b.depth = 0.6
     swale_b.top_width_m = 2.0
     swale_b.bottom_width_m = 1.0
+    # The keyed-berm path. `key_into_banks` is already True by default for a swale,
+    # so this one flag is what reaches `_key_berm_into_banks` — and it also puts a
+    # companion berm's spoil into the fill total below.
+    swale_b.companion_berm = True
 
     basin = harness.add_earthwork("basin", geometry=_basin_polygon(170.0, 60.0),
                                   name="Basin C")
     basin.depth = 1.5
     basin.batter_run_m = 2.0
 
-    return [_size(ew) for ew in (swale, swale_b, basin)]
+    berm = harness.add_earthwork("berm", geometry=_swale_line(300.0), name="Berm D")
+    berm.depth = 0.5
+    berm.top_width_m = 2.0
+
+    drain = harness.add_earthwork("diversion", geometry=_diversion_line(),
+                                  name="Diversion E")
+    drain.depth = 0.5
+    drain.top_width_m = 2.0
+    drain.bottom_width_m = 1.0
+    drain.gradient_pct = 1.0
+
+    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain)]
 
 
 def _relative_gap(actual, expected):
@@ -1245,3 +1305,126 @@ def check_d8_routing_runs_and_differs_from_dinf(dem_path):
         + "\n    Both are offered in the panel's Routing combo, so both have to mean "
           "something.\n    See ANALYSIS_DEFECTS.md §9.1 and modules/pysheds_compat.py."
     )
+
+
+
+
+# Recorded 2026-09-12, when `_build_design` gained a berm, a diversion and a companion
+# berm so that every burn method is exercised.
+#
+# **Per feature, each burned alone, and the site total beside them.** A single site
+# total does not close the coverage gap it was added to close: the two swales and the
+# basin already account for 13,869.8 m3 of the 13,914.2 m3 cut, so the diversion's own
+# 48.8 m3 is 0.35% of the figure. A change that moved `_burn_diversion` by a third
+# would shift the total by 0.1% and pass the 0.5% tolerance without a murmur.
+#
+# Burning each feature alone is well defined and order-independent — it is the same
+# device `_isolated_burn` uses for `feature_storage`, and it sidesteps the attribution
+# problem `burn_quantities`' own docstring gives as the reason it reports site totals
+# only. Nothing is attributed here; each figure is what one feature does to this
+# hillside with nothing else on it.
+#
+# What each line covers:
+#   swale_a      `_burn_swale`, level invert
+#   swale_b      the same plus `_add_companion_berm` -> `_key_berm_into_banks` (fill)
+#   basin_c      `_burn_basin`, level floor
+#   berm_d       `_burn_berm` — the trapezoid section and the centreline seal (M-1, M-2)
+#   diversion_e  `_burn_diversion` — graded invert, tapered section (M-1)
+EXPECTED_BURN = {
+    "swale_a_cut_m3": 6120.7970,
+    "swale_b_cut_m3": 5010.0210,
+    "swale_b_fill_m3": 3757.5160,
+    "basin_c_cut_m3": 2739.0170,
+    "berm_d_fill_m3": 562.0000,
+    "diversion_e_cut_m3": 48.8260,
+    "site_cut_m3": 13914.1630,
+    "site_fill_m3": 4315.1177,
+}
+
+
+def check_the_burn_quantities_have_not_moved(dem_path):
+    """Every burn method, pinned on what it does to this hillside alone.
+
+    The gap this closes, stated plainly: `_build_design` was two swales and a basin,
+    which are the burns that were *already* rasterising on cell centres. So when
+    M-1 fixed the other three and M-2 changed the berm's section from a 1:1 triangle
+    to a trapezoid, every pin in this module held — not because the burns were
+    unchanged, but because nothing here reached them. The only other burn figure in
+    the module, `check_haul_volumes_agree_with_the_burn`, reduces a deliberately
+    *synthetic* surface and never touched a real burn either.
+    """
+    from terrainflow_assessment.modules.earthwork_design import (
+        DEMBurner,
+        burn_quantities,
+    )
+
+    with PluginHarness(FIXTURE_DEM, load_boundary=False, load_dem=False) as h:
+        design = _build_design(h)
+        by_name = {ew.name: ew for ew in design}
+
+        present = sorted({ew.type for ew in design})
+        assert present == ["basin", "berm", "diversion", "swale"], (
+            f"the design no longer covers every burn method: {present}")
+        bermed = [ew for ew in design if getattr(ew, "companion_berm", False)]
+        assert bermed and all(getattr(ew, "key_into_banks", False) for ew in bermed), (
+            "no keyed companion berm in the design, so `_key_berm_into_banks` is "
+            "unpinned again")
+
+        def alone(name):
+            """Cut and fill for one feature burned into fresh ground."""
+            burner = DEMBurner(FIXTURE_DEM)
+            burned = burner.burn_earthworks([by_name[name]])
+            return burn_quantities(burner.original, burned, burner.cell_area)
+
+        site_burner = DEMBurner(FIXTURE_DEM)
+        site = burn_quantities(
+            site_burner.original,
+            site_burner.burn_earthworks(design),
+            site_burner.cell_area,
+        )
+
+        observed = {
+            "swale_a_cut_m3": float(alone("Swale A")["cut_m3"]),
+            "swale_b_cut_m3": float(alone("Swale B")["cut_m3"]),
+            "swale_b_fill_m3": float(alone("Swale B")["fill_m3"]),
+            "basin_c_cut_m3": float(alone("Basin C")["cut_m3"]),
+            "berm_d_fill_m3": float(alone("Berm D")["fill_m3"]),
+            "diversion_e_cut_m3": float(alone("Diversion E")["cut_m3"]),
+            "site_cut_m3": float(site["cut_m3"]),
+            "site_fill_m3": float(site["fill_m3"]),
+        }
+
+        # Each per-method figure has to be a real quantity, or its pin is a pin on
+        # zero and the method could stop burning entirely without moving it.
+        for key, value in observed.items():
+            assert value > 0.0, f"{key} is {value} — that burn produced nothing"
+
+        print("\n    --- burned cut and fill, per feature and site ---")
+        failures = []
+        if not EXPECTED_BURN:
+            print("    NO RECORDED VALUES — copy the block below into EXPECTED_BURN:")
+            print("    EXPECTED_BURN = {")
+            for key, value in observed.items():
+                print(f'        "{key}": {value:.4f},')
+            print("    }")
+            failures.append("EXPECTED_BURN is empty, so nothing was asserted.")
+        else:
+            for key, expected in EXPECTED_BURN.items():
+                actual = observed.get(key)
+                if actual is None:
+                    failures.append(f"{key}: not produced by this run")
+                    continue
+                gap = _relative_gap(actual, expected)
+                marker = "ok " if gap <= TOLERANCE else "MOVED"
+                print(f"    {marker} {key:22} {actual:13.3f}  "
+                      f"(recorded {expected:.3f}, {gap * 100:.2f}%)")
+                if gap > TOLERANCE:
+                    failures.append(
+                        f"{key}: {actual:.3f} vs recorded {expected:.3f} "
+                        f"({gap * 100:.2f}% > {TOLERANCE * 100:.1f}%)")
+
+        assert not failures, (
+            "the burn moved against the recorded fixture:\n      "
+            + "\n      ".join(failures)
+            + "\n    If the change was intended, re-record EXPECTED_BURN in this file."
+        )
