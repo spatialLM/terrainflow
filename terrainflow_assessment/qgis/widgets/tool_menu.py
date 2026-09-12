@@ -24,26 +24,26 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from terrainflow_assessment.core.registry.earthwork_types import all_types
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
 
 # Small monochrome-on-colour glyphs per type (kept ASCII/BMP so Qt renders them
-# everywhere). The chip carries the type's registry colour.
-_GLYPH = {
-    "swale": "∿", "basin": "▢", "dam": "▮", "berm": "⌒", "diversion": "↘",
-}
+# everywhere). The chip carries the type's registry colour. Shared with the network
+# view, which carried a byte-identical copy.
+_GLYPH = _theme.GLYPH
 _SWALE_MODES = (("contour", "Segment"), ("full_contour", "Contour"), ("freehand", "Free"))
 
 # Overflow routing rows. Deliberately NOT registry types: `_ensure_ew_layers`
 # iterates all_types(), so a registry entry here would conjure a map layer, a burn
 # method and a capacity path for something that is not an earthwork at all.
 _CONNECTION_ROWS = (
-    ("outflow", "▽", "#1273b5", "Outflow Spillway", H.TOOL_OUTFLOW_SPILLWAY),
-    ("inflow", "▲", "#2e7d55", "Inflow Spillway", H.TOOL_INFLOW_SPILLWAY),
-    ("connect", "⇢", "#5f7176", "Route Overflow", H.TOOL_ROUTE_OVERFLOW),
+    ("outflow", *_theme.SPILLWAY_OUT, "Outflow Spillway", H.TOOL_OUTFLOW_SPILLWAY),
+    ("inflow", *_theme.SPILLWAY_IN, "Inflow Spillway", H.TOOL_INFLOW_SPILLWAY),
+    ("connect", "⇢", _theme.MUTED, "Route Overflow", H.TOOL_ROUTE_OVERFLOW),
     # The same grey as Route Overflow, deliberately: both rows link two features that
     # already exist, as against the two above them, which place a structure. A fourth
     # chip colour would say these are four unrelated things.
-    ("link_drain", "⇥", "#5f7176", "Drain from Spillway", H.TOOL_LINK_DRAIN),
+    ("link_drain", "⇥", _theme.MUTED, "Drain from Spillway", H.TOOL_LINK_DRAIN),
 )
 
 
@@ -112,7 +112,7 @@ class EarthworkToolMenu(QWidget):
         h.setContentsMargins(9, 5, 9, 5)
         h.setSpacing(9)
 
-        chip = QLabel(_GLYPH.get(key, "●"))
+        chip = QLabel(_GLYPH.get(key, _theme.GLYPH_UNKNOWN))
         chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chip.setFixedSize(22, 22)
         chip.setStyleSheet(

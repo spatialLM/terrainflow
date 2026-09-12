@@ -15,10 +15,13 @@ whose stop tracks the progress percent.
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QPushButton
 
+from terrainflow_assessment.qgis import _theme
+
 
 class RunButton(QPushButton):
-    def __init__(self, idle_text, accent="#15628f", accent_hover="#0f4f75",
-                 ghost_bg="#eef4f8", parent=None):
+    def __init__(self, idle_text, accent=_theme.ACCENT,
+                 accent_hover=_theme.ACCENT_HOVER,
+                 ghost_bg=_theme.ACCENT_GHOST, parent=None):
         super().__init__(idle_text, parent)
         self._idle_text = idle_text
         self._accent = accent

@@ -18,6 +18,8 @@ active).
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
+from terrainflow_assessment.qgis import _theme
+
 _STATE_GLYPHS = {"todo": "·", "done": "✓", "active": "✎", "stale": "⚠"}
 
 #: The one source for the stage text colours, and now actually read. Nothing read
@@ -33,8 +35,8 @@ _STATE_GLYPHS = {"todo": "·", "done": "✓", "active": "✎", "stale": "⚠"}
 #: screen. Green belongs to the *active* stage alone, which is not a state and so
 #: is not in here. A lookup table nothing looks up is documentation, and this one
 #: had drifted.
-_STATE_COLOURS = {"todo": "#8fa0a4", "done": "#5f7176", "stale": "#b9770e"}
-_ACTIVE_COLOUR = "#2e7d55"
+_STATE_COLOURS = {"todo": _theme.FAINT, "done": _theme.MUTED, "stale": _theme.WARN}
+_ACTIVE_COLOUR = _theme.GROWTH
 
 
 class StageStepper(QWidget):

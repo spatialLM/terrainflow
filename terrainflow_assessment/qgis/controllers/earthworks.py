@@ -1197,58 +1197,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         )
 
         if dlg.exec():
-            ew.name = dlg.get_name()
-            ew.depth = dlg.get_depth()
-            ew.width = getattr(dlg, "get_width", lambda: ew.width)()
-            if ew_type == "dam":
-                ew.crest_elevation = dlg.get_crest_elevation()
-                ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
-            elif ew_type == "swale":
-                ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
-                # A berm open at its ends impounds nothing on ground that falls along
-                # the swale, so this decides whether the companion berm is real storage.
-                ew.key_into_banks = getattr(
-                    dlg, "get_key_into_banks", lambda: True)()
-            elif ew_type == "diversion":
-                # Was silently dropped on create (only the edit path read it).
-                ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
-            if ew_type == "basin":
-                # After depth — the wall_slope setter back-solves batter_run from it.
-                ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
-            ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
-            ew.soil_name = getattr(dlg, "get_soil_name", lambda: None)()
-            # The dialog is modal and cannot site a spillway, so it round-trips the
-            # location the map tool set. Read it back regardless — until now the
-            # dialog computed a spillway width, displayed it, and dropped it on OK.
-            self._apply_spillway_from_dialog(ew, dlg)
-            # Apply the bottom width (channels only; None otherwise) — the canonical
-            # cross-section field that drives capacity and the burn footprint.
-            bw = getattr(dlg, "get_bottom_width", lambda: None)()
-            if bw is not None:
-                ew.bottom_width_m = bw
-
-            # Every dimension is final by here, so this is the moment the feature can
-            # be offered as the standard for its type. Create path only — editing a
-            # feature drawn months ago must not rewrite what new ones start at.
-            if getattr(dlg, "get_save_as_standard", lambda: False)():
-                self._remember_standard_dims(ew)
-
-            if ew_type == "dam":
-                # Key into the banks first: capacity must be flooded against the wall
-                # that will actually be built, not the shorter line as drawn.
-                if getattr(ew, "key_into_banks", False):
-                    self._key_dam_into_banks(ew)
-                    geometry = ew.geometry
-                ew.capacity_m3 = self._compute_dam_capacity(ew)
-                ew.capacity_l = ew.capacity_m3 * 1000.0
-            else:
-                ew.capacity_m3, ew.capacity_l = calculate_capacity(
-                    ew_type, geometry, ew.depth, ew.width,
-                    getattr(ew, "companion_berm", False),
-                    bottom_width=getattr(ew, "bottom_width_m", None),
-                    batter_run=getattr(ew, "batter_run_m", None),
-                )
-            self._refresh_terrain_capacity(ew)
+            self._apply_dialog_to_earthwork(ew, dlg, is_new=True)
             self._state.earthwork_manager.add(ew)
             self._panel.add_earthwork_to_list(
                 len(self._state.earthwork_manager) - 1, ew.summary()
@@ -1264,6 +1213,80 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._refresh_spillway_layer()
             self._mark_design_edit()
         self._canvas.unsetMapTool(self._canvas.mapTool())
+
+    def _apply_dialog_to_earthwork(self, ew, dlg, *, is_new):
+        """Take an accepted properties dialog and write it onto *ew*.
+
+        The one place the dialog is read. It used to be two: `_on_geometry_drawn` and
+        `edit_selected_earthwork` carried the same fourteen getters, the same capacity
+        branch and the same refresh, written out separately — and they had already
+        drifted. `gradient_pct` was read when editing and dropped when creating, so a
+        diversion drawn with a grade got none until somebody happened to reopen it. That
+        is the failure mode duplication produces here: not a crash, a field that quietly
+        is not there on one of the two routes in.
+
+        Order matters in three places and each is load-bearing:
+
+        * **`wall_slope` after `depth`** — its setter back-solves `batter_run` from the
+          depth, so setting it first solves against the old one.
+        * **`key_into_banks` before capacity** — a keyed dam is flooded against the wall
+          that will actually be built, not the shorter line as drawn.
+        * **the spillway before `bottom_width`** — the width the dialog computed is read
+          back off it rather than recomputed, and the section it belongs to is the one
+          the bottom width then describes.
+
+        *is_new* carries the only genuine asymmetry. Offering to save these dimensions as
+        the standard for the type is a create-path act: editing a feature drawn months ago
+        must not rewrite what new ones start at. Everything else the two paths do
+        differently is *around* this call — seeding dimensions, adding to the manager,
+        recomputing catchments, updating a row — and stays where it is.
+        """
+        ew.name = dlg.get_name()
+        ew.depth = dlg.get_depth()
+        ew.width = getattr(dlg, "get_width", lambda: ew.width)()
+        if ew.type == "dam":
+            ew.crest_elevation = dlg.get_crest_elevation()
+            ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
+        elif ew.type == "swale":
+            ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
+            # A berm open at its ends impounds nothing on ground that falls along the
+            # swale, so this decides whether the companion berm is real storage.
+            ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: True)()
+        elif ew.type == "diversion":
+            ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
+        if ew.type == "basin":
+            # After depth — the wall_slope setter back-solves batter_run from it.
+            ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
+        ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
+        ew.soil_name = getattr(dlg, "get_soil_name", lambda: None)()
+        # The dialog is modal and cannot site a spillway, so it round-trips the location
+        # the map tool set. Read it back regardless — the dialog used to compute a
+        # spillway width, display it, and drop it on OK.
+        self._apply_spillway_from_dialog(ew, dlg)
+        # The bottom width (channels only; None otherwise) — the canonical cross-section
+        # field that drives capacity and the burn footprint.
+        bw = getattr(dlg, "get_bottom_width", lambda: None)()
+        if bw is not None:
+            ew.bottom_width_m = bw
+
+        # Every dimension is final by here, so this is the moment the feature can be
+        # offered as the standard for its type.
+        if is_new and getattr(dlg, "get_save_as_standard", lambda: False)():
+            self._remember_standard_dims(ew)
+
+        if ew.type == "dam":
+            if getattr(ew, "key_into_banks", False):
+                self._key_dam_into_banks(ew)
+            ew.capacity_m3 = self._compute_dam_capacity(ew)
+            ew.capacity_l = ew.capacity_m3 * 1000.0
+        else:
+            ew.capacity_m3, ew.capacity_l = calculate_capacity(
+                ew.type, ew.geometry, ew.depth, ew.width,
+                getattr(ew, "companion_berm", False),
+                bottom_width=getattr(ew, "bottom_width_m", None),
+                batter_run=getattr(ew, "batter_run_m", None),
+            )
+        self._refresh_terrain_capacity(ew)
 
     def _apply_spillway_from_dialog(self, ew, dlg):
         """Take the spillway off the dialog — and ask before throwing one away.
@@ -1382,47 +1405,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             overtop_surplus=edit_surplus,
         )
         if dlg.exec():
-            ew.name = dlg.get_name()
-            ew.depth = dlg.get_depth()
-            # Re-read every edited dimension (the edit path previously dropped
-            # width / companion / gradient / side-slope changes silently).
-            ew.width = getattr(dlg, "get_width", lambda: ew.width)()
-            if ew.type == "dam":
-                ew.crest_elevation = dlg.get_crest_elevation()
-                ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
-            elif ew.type == "swale":
-                ew.companion_berm = getattr(dlg, "get_companion_berm", lambda: False)()
-                # A berm open at its ends impounds nothing on ground that falls along
-                # the swale, so this decides whether the companion berm is real storage.
-                ew.key_into_banks = getattr(
-                    dlg, "get_key_into_banks", lambda: True)()
-            elif ew.type == "diversion":
-                ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
-            if ew.type == "basin":
-                # After depth — the wall_slope setter back-solves batter_run from it.
-                ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
-            ew.overflow_target_id = getattr(dlg, "get_overflow_target_id", lambda: None)()
-            ew.soil_name = getattr(dlg, "get_soil_name", lambda: None)()
-            # The dialog is modal and cannot site a spillway, so it round-trips the
-            # location the map tool set. Read it back regardless — until now the
-            # dialog computed a spillway width, displayed it, and dropped it on OK.
-            self._apply_spillway_from_dialog(ew, dlg)
-            bw = getattr(dlg, "get_bottom_width", lambda: None)()
-            if bw is not None:
-                ew.bottom_width_m = bw
-            if ew.type == "dam":
-                if getattr(ew, "key_into_banks", False):
-                    self._key_dam_into_banks(ew)
-                ew.capacity_m3 = self._compute_dam_capacity(ew)
-                ew.capacity_l = ew.capacity_m3 * 1000.0
-            else:
-                ew.capacity_m3, ew.capacity_l = calculate_capacity(
-                    ew.type, ew.geometry, ew.depth, ew.width,
-                    getattr(ew, "companion_berm", False),
-                    bottom_width=getattr(ew, "bottom_width_m", None),
-                    batter_run=getattr(ew, "batter_run_m", None),
-                )
-            self._refresh_terrain_capacity(ew)
+            self._apply_dialog_to_earthwork(ew, dlg, is_new=False)
             self._panel.update_earthwork_in_list(idx, ew.summary())
             self._refresh_ew_layer()
             # See the draw path: the recompute is what settles an auto width against the

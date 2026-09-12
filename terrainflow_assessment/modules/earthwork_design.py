@@ -67,6 +67,7 @@ from terrainflow_assessment.modules.footprint import (
     rasterize_footprint,
     xy_to_rc,
 )
+from terrainflow_assessment.modules.swale_design import line_stations
 from terrainflow_assessment.qgis.adapters.geom import shapely_area, shapely_length
 
 _log = logging.getLogger(__name__)
@@ -2439,34 +2440,25 @@ class DEMBurner:
         Chainage is the distance from the line's start to the closest point on it —
         what a graded invert needs in order to know how deep to cut each cell.
 
-        Vectorised over segments × cells rather than looped, because it can be: an
-        alignment has a handful of vertices and its band a few thousand cells, so the
-        whole projection is a couple of small array operations. The obvious
-        alternative, one ``line.project(Point(...))`` per cell, puts a shapely call
-        back in an inner loop, which is what this was rewritten to remove.
+        The projection is :func:`swale_design.line_stations`, which is also what
+        ``feature_inflow_profile`` asks. This method carried its own numpy implementation
+        until M-5b — vectorised over segments × cells, written for this call site while
+        the other was written for that one, and never compared. They agree **exactly**:
+        over a straight run, a twelve-vertex alignment, a hairpin where the nearest
+        segment is genuinely ambiguous, a 200-vertex line, a zero-length segment and
+        points beyond both ends, the largest disagreement was 0.000e+00 m.
+
+        The numpy body was the quicker of the two at the handful of vertices an alignment
+        actually has, and it bought that by allocating a ``(segments × cells)`` array —
+        about 190 MB for a 200-vertex alignment over a 20,000-cell band. This runs about
+        four times per burn, so a couple of milliseconds is not worth an unbounded
+        allocation; ``line_locate_point`` is linear in the cells. Same reasoning as R-6
+        and M-8 in the same pass.
         """
         rows, cols = np.nonzero(mask)
         xs = self.transform.c + (cols + 0.5) * self.transform.a
         ys = self.transform.f + (rows + 0.5) * self.transform.e
-
-        pts = np.asarray(coords, dtype="float64")
-        starts, ends = pts[:-1], pts[1:]
-        deltas = ends - starts                             # (S, 2)
-        seg_len2 = (deltas ** 2).sum(axis=1)               # (S,)
-        seg_len = np.sqrt(seg_len2)
-        cumulative = np.concatenate(([0.0], np.cumsum(seg_len)))
-
-        # Projection parameter of every cell onto every segment, clamped to the
-        # segment so a cell beside a bend projects to the vertex, not past it.
-        qx = xs[None, :] - starts[:, 0:1]
-        qy = ys[None, :] - starts[:, 1:2]
-        safe = np.where(seg_len2 > 0.0, seg_len2, 1.0)[:, None]
-        t = np.clip((qx * deltas[:, 0:1] + qy * deltas[:, 1:2]) / safe, 0.0, 1.0)
-
-        gap2 = (qx - t * deltas[:, 0:1]) ** 2 + (qy - t * deltas[:, 1:2]) ** 2
-        nearest = np.argmin(gap2, axis=0)
-        cell = np.arange(t.shape[1])
-        chainage = cumulative[nearest] + t[nearest, cell] * seg_len[nearest]
+        chainage = np.asarray(line_stations(LineString(coords), xs, ys), dtype="float64")
         return rows, cols, chainage
 
     def _line_path_cells(self, line):

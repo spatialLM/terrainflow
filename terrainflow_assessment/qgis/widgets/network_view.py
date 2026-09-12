@@ -38,18 +38,21 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
 
 _log = logging.getLogger(__name__)
 
-_WATER = "#1273b5"
-_SOAKED = "#79b8dd"   # same token the scorecard uses for infiltrated water
-_WARN = "#b9770e"
-_BAD = "#c0392b"
-_INK = "#22302e"
-_MUTED = "#5f7176"
-_FAINT = "#8fa0a4"
-_GLYPH = {"swale": "∿", "basin": "▢", "dam": "▮", "berm": "⌒", "diversion": "↘"}
+_WATER = _theme.WATER
+_SOAKED = _theme.SOAKED   # same token the scorecard uses for infiltrated water
+_WARN = _theme.WARN
+_BAD = _theme.BAD
+_INK = _theme.INK
+_MUTED = _theme.MUTED
+_FAINT = _theme.FAINT
+# Shared with the tool menu, which carried a byte-identical copy: a type added to one
+# and not the other rendered as a bullet in the other.
+_GLYPH = _theme.GLYPH
 
 
 def _capacity_text(node):
@@ -98,7 +101,7 @@ class _FillBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#dde4e5"))
+        p.setBrush(QColor(_theme.HAIRLINE))
         p.drawRoundedRect(0, 0, self.width(), self.height(), 2, 2)
         w = int(self.width() * self._pct / 100.0)
         if w > 0:
@@ -122,7 +125,7 @@ class _NodeCard(QFrame):
         h.setContentsMargins(9, 6, 9, 6)
         h.setSpacing(8)
 
-        chip = QLabel(_GLYPH.get(node["ew_type"], "●"))
+        chip = QLabel(_GLYPH.get(node["ew_type"], _theme.GLYPH_UNKNOWN))
         chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chip.setFixedSize(18, 18)
         chip.setStyleSheet(
@@ -213,9 +216,9 @@ class _NodeCard(QFrame):
 
     def _restyle(self):
         if self._selected:
-            border = "#2e7d55"
+            border = _theme.GROWTH
         else:
-            border = "#dde4e5"
+            border = _theme.HAIRLINE
         opacity = "" if self._enabled else "color: #b6c0be;"
         self.setStyleSheet(
             f"_NodeCard {{ border: 1.5px solid {border}; border-left: 3px solid "
@@ -468,8 +471,8 @@ class _FlowChart(QWidget):
         selected = node["index"] == self._selected_index
         full = node.get("overflowed") or node.get("fill_pct", 0) >= 100
 
-        p.setPen(QPen(QColor("#2e7d55" if selected else "#dde4e5"), 1.5))
-        p.setBrush(QColor("#ffffff"))
+        p.setPen(QPen(QColor(_theme.GROWTH if selected else _theme.HAIRLINE), 1.5))
+        p.setBrush(QColor(_theme.SURFACE))
         p.drawRoundedRect(x, y, w, h, 6, 6)
 
         p.setPen(Qt.PenStyle.NoPen)

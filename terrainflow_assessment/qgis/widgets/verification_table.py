@@ -62,21 +62,23 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
+from terrainflow_assessment.qgis._theme import brush as _brush
 
-_INK = "#22302e"
-_MUTED = "#5f7176"
-_FAINT = "#8fa0a4"
-_HAIRLINE = "#dde4e5"
-_HAIRLINE_STRONG = "#c6d1d3"
-_GROUND = "#eef1f2"
-_SURFACE = "#ffffff"
-_GOOD = "#1e8449"
-_WARN = "#b9770e"
-_BAD = "#c0392b"
+_INK = _theme.INK
+_MUTED = _theme.MUTED
+_FAINT = _theme.FAINT
+_HAIRLINE = _theme.HAIRLINE
+_HAIRLINE_STRONG = _theme.HAIRLINE_STRONG
+_GROUND = _theme.GROUND
+_SURFACE = _theme.SURFACE
+_GOOD = _theme.GOOD
+_WARN = _theme.WARN
+_BAD = _theme.BAD
 # Informational, not a fault — the outflow-spillway blue, so the two review tables in
 # the Design/Verify stages read as one design language rather than two.
-_INFO = "#1273b5"
+_INFO = _theme.WATER
 
 # Δ bands. Under 5% the burn reproduces what the grid can represent; past 15% it is
 # not a rounding artefact and something in the burn is wrong.
@@ -494,7 +496,3 @@ def _cell_width(cell_size_m):
 def _m3(value):
     return "—" if value is None else f"{value:,.0f}"
 
-
-def _brush(hex_colour):
-    from qgis.PyQt.QtGui import QBrush, QColor
-    return QBrush(QColor(hex_colour))

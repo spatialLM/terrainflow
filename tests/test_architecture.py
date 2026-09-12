@@ -620,3 +620,91 @@ def test_the_docs_do_not_quote_a_test_or_check_count():
         "these quote a test/check count, which goes stale on the next commit and "
         "is then read as authoritative:\n  " + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Q-16 — the create and edit paths read the dialog in exactly one place
+# ---------------------------------------------------------------------------
+
+#: The two methods that open `EarthworkPropertiesDialog` and apply its result.
+_DIALOG_PATHS = ("_on_geometry_drawn", "edit_selected_earthwork")
+
+#: Reading `dlg.exec()` is opening the dialog, not harvesting a field from it.
+_NOT_A_GETTER = {"exec", "exec_"}
+
+
+def _dialog_getters_read_in(func):
+    """Every `dlg.get_x` / `getattr(dlg, "get_x", …)` inside one function node."""
+    found = []
+    for node in ast.walk(func):
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name) and node.value.id == "dlg"
+                and node.attr not in _NOT_A_GETTER):
+            found.append((node.lineno, f"dlg.{node.attr}"))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and node.args
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "dlg"):
+            name = (node.args[1].value
+                    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                    else "?")
+            found.append((node.lineno, f'getattr(dlg, "{name}")'))
+    return found
+
+
+def test_only_one_place_takes_the_dialog_apart():
+    """Q-16. `_on_geometry_drawn` and `edit_selected_earthwork` were ~85% identical.
+
+    Fourteen `getattr(dlg, "get_…")` reads, the capacity branch and the refresh calls,
+    written out twice — and they had **already drifted once**: `gradient_pct` was read
+    on the edit path and silently dropped on create, so a diversion drawn with a grade
+    got none until someone reopened it.
+
+    Duplication that has drifted once will drift again, and the second time is just as
+    quiet: nothing fails, a field is simply missing on one of the two paths. The fix is
+    one `_apply_dialog_to_earthwork(ew, dlg, is_new=…)`; this is the part that keeps it
+    one, because a helper nobody is obliged to call is a helper that gets bypassed.
+
+    What the two paths legitimately still do for themselves is everything *around* the
+    dialog: create seeds dimensions and a provisional catchment before opening it, and
+    adds the feature and recomputes catchments after; edit looks the feature up and
+    updates its row. Neither needs to read a field off the dialog to do that.
+    """
+    tree = _parse(CONTROLLERS / "earthworks.py")
+    by_name = {n.name: n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    offenders = []
+    for name in _DIALOG_PATHS:
+        assert name in by_name, f"{name} is gone — this gate needs re-aiming"
+        for lineno, what in _dialog_getters_read_in(by_name[name]):
+            offenders.append(f"earthworks.py:{lineno}: {name} reads {what}")
+
+    assert not offenders, (
+        "the dialog is being taken apart outside `_apply_dialog_to_earthwork`:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nEvery field read from the dialog belongs in that one helper, so the "
+          "create and edit paths cannot disagree about which fields exist."
+    )
+
+
+def test_the_helper_that_reads_the_dialog_serves_both_paths():
+    """The other half: the helper must actually be the thing both paths call.
+
+    Without this, the gate above is satisfied by a create path that reads nothing —
+    which is precisely the `gradient_pct` bug it exists to prevent.
+    """
+    tree = _parse(CONTROLLERS / "earthworks.py")
+    by_name = {n.name: n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert "_apply_dialog_to_earthwork" in by_name, (
+        "the shared dialog-applying helper is gone; Q-16's duplication is back"
+    )
+
+    for name in _DIALOG_PATHS:
+        calls = [n for n in ast.walk(by_name[name])
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "_apply_dialog_to_earthwork"]
+        assert len(calls) == 1, (
+            f"{name} calls _apply_dialog_to_earthwork {len(calls)} times; it must "
+            f"call it exactly once, or one of the two paths is applying something else"
+        )

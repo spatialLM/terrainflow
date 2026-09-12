@@ -1222,3 +1222,95 @@ class TestTheBermIsBuiltAsTheSectionItIsPricedAs:
         assert drawn == pytest.approx(1.25)
         assert len(rows) == 3 and built == pytest.approx(1.5, rel=1e-3), (
             f"the measured over-build moved: {built:.3f} m3/m over {len(rows)} cells")
+
+
+class TestChainageHasOneImplementation:
+    """M-5b. `_band_chainage` and `swale_design.line_stations` asked the same question.
+
+    Both answer "how far along this alignment is the point on it nearest each cell" —
+    one in numpy, vectorised over segments x cells, one through GEOS. They were written
+    two years apart for two call sites and were never compared. They agree **exactly**:
+    over a straight run, a twelve-vertex alignment, a hairpin where the nearest segment
+    is genuinely ambiguous, a 200-vertex line, a zero-length segment and points beyond
+    both ends, the largest disagreement was 0.000e+00 m.
+
+    GEOS is the one that survives, for the reason R-6 and M-8 were done in the same
+    pass: the numpy body allocates a `(segments x cells)` array, which is ~190 MB for a
+    200-vertex alignment over a 20,000-cell band, while `line_locate_point` is linear in
+    the cells. It is also already the load-bearing implementation — it is what took the
+    vertex-edit freeze's largest term from 3,236 ms to 622 ms.
+    """
+
+    @staticmethod
+    def _burner(tmp_path):
+        path = str(tmp_path / "chainage.tif")
+        return DEMBurner(_write_dem(path, np.full((40, 40), 50.0)))
+
+    def test_the_burner_projects_through_the_shared_helper(self, tmp_path, monkeypatch):
+        """The pin on there being ONE implementation.
+
+        A reintroduced local copy would still compute the right answer, so asserting the
+        answer cannot catch it. Asserting the delegation can.
+        """
+        from terrainflow_assessment.modules import earthwork_design
+
+        calls = []
+        real = earthwork_design.line_stations
+
+        def spy(line, xs, ys):
+            calls.append((len(xs), len(ys)))
+            return real(line, xs, ys)
+
+        monkeypatch.setattr(earthwork_design, "line_stations", spy)
+
+        b = self._burner(tmp_path)
+        mask = np.zeros(b.original.shape, dtype=bool)
+        mask[10:14, 5:25] = True
+        coords = [(0.0, 0.0), (30.0, 0.0), (40.0, 10.0)]
+        b._band_chainage(mask, coords)
+
+        assert len(calls) == 1, (
+            f"_band_chainage made {len(calls)} calls to the shared helper; it must make "
+            f"exactly one and must not carry its own projection"
+        )
+        assert calls[0][0] == int(mask.sum())
+
+    def test_it_returns_the_cells_of_the_mask_with_their_distance_along(self, tmp_path):
+        """The contract itself, on an alignment laid along a known row."""
+        b = self._burner(tmp_path)
+        mask = np.zeros(b.original.shape, dtype=bool)
+        mask[5, 3:8] = True
+
+        # A straight line along the centre of row 5, running east.
+        tr = b.transform
+        y_row5 = tr.f + 5.5 * tr.e
+        x0 = tr.c + 0.5 * tr.a
+        coords = [(x0, y_row5), (x0 + 100.0, y_row5)]
+
+        rows, cols, chainage = b._band_chainage(mask, coords)
+        assert np.array_equal(rows, np.full(5, 5))
+        assert np.array_equal(cols, np.arange(3, 8))
+        # Cell centres are one cell apart, so chainage steps by the cell size.
+        step = abs(tr.a)
+        assert np.allclose(chainage, np.arange(3, 8) * step, atol=1e-9), (
+            f"chainage {chainage} is not the run of cell centres along the line"
+        )
+
+    def test_a_point_beyond_the_end_clamps_rather_than_extrapolating(self, tmp_path):
+        """`project` clamps; a band can overhang its own alignment and must not go past."""
+        b = self._burner(tmp_path)
+        mask = np.zeros(b.original.shape, dtype=bool)
+        mask[5, 30:33] = True
+
+        tr = b.transform
+        y_row5 = tr.f + 5.5 * tr.e
+        x0 = tr.c + 0.5 * tr.a
+        coords = [(x0, y_row5), (x0 + 10.0 * abs(tr.a), y_row5)]   # ends well short
+
+        _rows, _cols, chainage = b._band_chainage(mask, coords)
+        length = 10.0 * abs(tr.a)
+        assert np.allclose(chainage, length), (
+            f"cells past the end of the alignment gave {chainage}, not the line length "
+            f"{length} — chainage must clamp, or a graded invert keeps cutting deeper "
+            f"past the end of the channel it is grading"
+        )

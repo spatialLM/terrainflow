@@ -39,6 +39,8 @@ from qgis.core import (
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QFont
 
+from terrainflow_assessment.qgis import _theme
+
 # Greyed-out stand-in for a disabled earthwork. Not in the registry because it is a
 # UI state, not a feature type.
 DISABLED_COLOUR = "#9aa4a2"
@@ -592,13 +594,14 @@ def spillway_symbol():
         QgsMarkerSymbol,
     )
 
-    kind_colour = "CASE WHEN \"kind\" = 'inflow' THEN '#2e7d55' ELSE '#1273b5' END"
+    kind_colour = (f"""CASE WHEN "kind" = 'inflow' THEN '{_theme.SPILLWAY_IN[1]}' """
+                   f"""ELSE '{_theme.SPILLWAY_OUT[1]}' END""")
 
     casing = QgsSimpleLineSymbolLayer(QColor(255, 255, 255, 235))
     casing.setWidth(1.6)                       # millimetres
     casing.setPenCapStyle(Qt.PenCapStyle.FlatCap)
 
-    bar = QgsSimpleLineSymbolLayer(QColor("#1273b5"))
+    bar = QgsSimpleLineSymbolLayer(QColor(_theme.WATER))
     bar.setWidth(0.9)
     bar.setPenCapStyle(Qt.PenCapStyle.FlatCap)
     bar.setDataDefinedProperty(
@@ -626,7 +629,7 @@ def spillway_symbol():
         chevron.setRotateSymbols(True)
         sub = QgsMarkerSymbol.createSimple({
             "name": "filled_arrowhead", "size": "3.2",
-            "color": "#1273b5",
+            "color": _theme.WATER,
             "outline_color": "#ffffff", "outline_width": "0.4",
         })
         sub.symbolLayer(0).setDataDefinedProperty(

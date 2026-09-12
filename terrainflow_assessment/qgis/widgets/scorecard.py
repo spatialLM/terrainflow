@@ -12,15 +12,16 @@ from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from terrainflow_assessment.modules.reporting import capture_colour
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
 
-_WATER = "#1273b5"
-_SOAKED = "#79b8dd"
+_WATER = _theme.WATER
+_SOAKED = _theme.SOAKED
 
 # Under this, natural ponding is a handful of grid-noise cells and the line would be
 # clutter rather than context.
 _NATURAL_PONDING_FLOOR = 10.0
-_LEAVES = "#c6d1d3"
+_LEAVES = _theme.LEAVES
 
 
 def _score_colour(pct):
@@ -191,7 +192,7 @@ class Scorecard(QWidget):
         *tooltip* carries the sentence explaining what the delta compares — a bare
         "Δ −38%" is not self-explanatory, and the chip is too small to say more.
         """
-        colour = "#1e8449" if fresh else "#b9770e"
+        colour = _theme.GOOD if fresh else _theme.WARN
         self._verified_lbl.setStyleSheet(
             f"color: {colour}; border: 1px solid {colour}; border-radius: 9px;"
             f" padding: 1px 8px; font-size: 10px;"

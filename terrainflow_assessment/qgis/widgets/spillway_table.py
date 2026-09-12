@@ -86,27 +86,30 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
+from terrainflow_assessment.qgis._theme import brush as _brush
 
-_INK = "#22302e"
-_MUTED = "#5f7176"
-_FAINT = "#8fa0a4"
-_HAIRLINE = "#dde4e5"
-_HAIRLINE_STRONG = "#c6d1d3"
-_GROUND = "#eef1f2"
-_SURFACE = "#ffffff"
-_GOOD = "#1e8449"
-_WARN = "#b9770e"
-_BAD = "#c0392b"
+_INK = _theme.INK
+_MUTED = _theme.MUTED
+_FAINT = _theme.FAINT
+_HAIRLINE = _theme.HAIRLINE
+_HAIRLINE_STRONG = _theme.HAIRLINE_STRONG
+_GROUND = _theme.GROUND
+_SURFACE = _theme.SURFACE
+_GOOD = _theme.GOOD
+_WARN = _theme.WARN
+_BAD = _theme.BAD
 
-# Glyph and colour per spillway kind — the same pair the tool menu and the map layer
-# use, so the three surfaces read as one thing rather than three.
 # Elevations are reported to two decimals, so a disagreement finer than a centimetre
 # is one the user cannot see, cannot act on, and would be told about anyway.
 _LEVEL_TOLERANCE_M = 0.01
 
-_OUT_GLYPH, _OUT_COLOUR = "▽", "#1273b5"
-_IN_GLYPH, _IN_COLOUR = "▲", "#2e7d55"
+# Glyph and colour per spillway kind. The shared source this comment used to claim now
+# exists: the tool menu and the map layer read the same pair out of `_theme`, so the
+# three surfaces are one thing rather than three that happened to agree.
+_OUT_GLYPH, _OUT_COLOUR = _theme.SPILLWAY_OUT
+_IN_GLYPH, _IN_COLOUR = _theme.SPILLWAY_IN
 
 # Head this far over target before the cell stops reading as "as designed". A centimetre
 # is below setting-out resolution on a DEM, so tighter than this is noise.
@@ -979,7 +982,3 @@ class SpillwayTable(QWidget):
         row_h = self.table.rowHeight(0) if n_rows else 22
         self.table.setFixedHeight(header + row_h * min(n_rows, 8) + 6)
 
-
-def _brush(hex_colour):
-    from qgis.PyQt.QtGui import QBrush, QColor
-    return QBrush(QColor(hex_colour))

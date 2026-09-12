@@ -2,11 +2,30 @@
 import pytest
 
 from terrainflow_assessment.core.registry.earthwork_types import (
+    _REGISTRY,
     EarthworkTypeConfig,
     all_types,
     get_type,
     register_type,
 )
+
+
+@pytest.fixture
+def registry_restored():
+    """Put the registry back afterwards.
+
+    `register_type` writes into a module-level dict, so a type registered by a test
+    stays registered for every test that runs after it — in the same process, for the
+    rest of the session. `terrace` did, and `all_types()` reported six earthwork types
+    to everything downstream while production has five. Nothing failed; the suite just
+    quietly stopped describing the shipped registry.
+    """
+    before = dict(_REGISTRY)
+    try:
+        yield
+    finally:
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
 
 
 class TestGetType:
@@ -53,7 +72,7 @@ class TestGetType:
 
 
 class TestRegisterType:
-    def test_register_terrace_addable_in_one_file(self):
+    def test_register_terrace_addable_in_one_file(self, registry_restored):
         """New earthwork types can be added via register_type — single-file extension."""
         terrace = EarthworkTypeConfig(
             key="terrace",
@@ -69,6 +88,13 @@ class TestRegisterType:
         register_type(terrace)
         assert get_type("terrace").label == "Terrace"
         assert get_type("terrace").has_storage is True
+
+    def test_registering_a_type_does_not_outlive_the_test(self, registry_restored):
+        """The fixture's own contract — without it the test above leaks into the suite."""
+        assert "terrace" not in all_types(), (
+            "`terrace` is registered before this test runs, so something registered it "
+            "and did not put the registry back"
+        )
 
     def test_all_types_returns_dict(self):
         types = all_types()

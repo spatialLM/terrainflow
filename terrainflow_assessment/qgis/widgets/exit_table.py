@@ -45,17 +45,19 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
+from terrainflow_assessment.qgis._theme import brush as _brush
 
-_INK = "#22302e"
-_MUTED = "#5f7176"
-_HAIRLINE = "#dde4e5"
-_HAIRLINE_STRONG = "#c6d1d3"
-_GROUND = "#eef1f2"
-_SURFACE = "#ffffff"
+_INK = _theme.INK
+_MUTED = _theme.MUTED
+_HAIRLINE = _theme.HAIRLINE
+_HAIRLINE_STRONG = _theme.HAIRLINE_STRONG
+_GROUND = _theme.GROUND
+_SURFACE = _theme.SURFACE
 
 # The exit-marker blue, so the table and the dots it describes read as one thing.
-_FLOW = "#1273b5"
+_FLOW = _theme.WATER
 
 _HEADERS = ("Crossing", "Average rate", "Volume over event")
 
@@ -170,7 +172,3 @@ class ExitPointsTable(QWidget):
         row_h = self.table.rowHeight(0) if n_rows else 22
         self.table.setFixedHeight(header + row_h * min(n_rows, 8) + 6)
 
-
-def _brush(hex_colour):
-    from qgis.PyQt.QtGui import QBrush, QColor
-    return QBrush(QColor(hex_colour))
