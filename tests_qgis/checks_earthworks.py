@@ -2932,3 +2932,102 @@ def _centroid_xy(ew):
     """(x, y) of an earthwork's centroid, for pointing the ponding tool at it."""
     point = ew.geometry.centroid().asPoint()
     return point.x(), point.y()
+
+
+def check_a_drag_frame_does_not_rebuild_the_panel(dem_path):
+    """M-5a / G-7. Six things sat above `_recompute_live_assessment`'s own
+    `if geometry_settled:` guard, whose comment reads "doing that per feature at
+    12.5 Hz is exactly the cost this method's docstring promises to avoid":
+    `set_network` (which deletes every child widget and reconstructs a
+    `_NodeCard` and a connector per feature), `_refresh_connections_layer` (a map
+    layer rebuild), the area subtotals, the coverage readout, the report summary,
+    and `refresh_stress_points_layer` — a full-raster pass plus up to 20,000 GEOS
+    `project` calls per linear feature.
+
+    Measured on the real fixture at 12 features: **526 ms per drag frame against
+    the 80 ms a 12.5 Hz throttle allows**, and 17.9 ms after. `tests_qgis/probes/
+    p_drag_cost.py` is that measurement.
+
+    The text readouts stay live, and that is the point of the split rather than
+    an oversight: a designer dragging a vertex is watching those numbers move.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        for row in (40, 70, 100):
+            h.add_earthwork("swale", geometry=line_across_valley(row=row))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("design tier")
+
+        called = []
+        for name in ("refresh_stress_points_layer", "_refresh_connections_layer",
+                     "_build_spillway_rows"):
+            original = getattr(controller, name)
+
+            def spy(*a, _n=name, _o=original, **kw):
+                called.append(_n)
+                return _o(*a, **kw)
+
+            setattr(controller, name, spy)
+
+        live = []
+        original_live = h.panel.set_live_assessment
+
+        def live_spy(*a, **kw):
+            live.append(1)
+            return original_live(*a, **kw)
+
+        h.panel.set_live_assessment = live_spy
+        try:
+            called.clear()
+            live.clear()
+            controller._recompute_live_assessment(geometry_settled=False)
+            assert not called, (
+                f"a drag frame still ran the heavy rebuilds: {sorted(set(called))}")
+            assert live, (
+                "the live readout stopped updating mid-drag — the text is the half "
+                "that has to stay live")
+
+            called.clear()
+            controller._recompute_live_assessment(geometry_settled=True)
+            assert set(called) == {"refresh_stress_points_layer",
+                                   "_refresh_connections_layer",
+                                   "_build_spillway_rows"}, (
+                f"a settled edit skipped work it must still do: {sorted(set(called))}")
+        finally:
+            h.panel.set_live_assessment = original_live
+
+
+def check_a_drag_frame_does_not_re_sum_the_domain_mask(dem_path):
+    """Q-12. `int(self._state.flow_domain_mask.sum())` reduced a 2.85 M-element
+    mask on every frame, against the `meta["domain_cells"]` cache whose own
+    comment names this method as the reason it exists — and which
+    `compute_catchment_coverage` was already reading.
+    """
+    with PluginHarness(dem_path) as h:
+        controller = h.plugin._earthworks
+        h.run_baseline()
+        h.add_earthwork("swale", geometry=line_across_valley(row=60))
+        h.panel.analysis_inputs_changed.emit()
+        h.assert_no_errors("design tier")
+
+        meta = h.state.flow_grid_meta
+        if meta is None or meta.get("domain_cells") is None:
+            return      # no cached count on this fixture; nothing to read instead
+
+        # Poison the mask: if the frame still reduces it, the answer changes.
+        cached = meta["domain_cells"]
+        meta["domain_cells"] = cached + 1_000_000
+        try:
+            controller._recompute_live_assessment(geometry_settled=False)
+            balance = h.state.balance
+            assert balance is not None, "no balance was produced"
+            poisoned = balance.total_inflow_m3
+        finally:
+            meta["domain_cells"] = cached
+
+        controller._recompute_live_assessment(geometry_settled=False)
+        honest = h.state.balance.total_inflow_m3
+        assert poisoned != honest, (
+            "the cached domain count made no difference to the frame, so the mask "
+            "is still being re-summed")

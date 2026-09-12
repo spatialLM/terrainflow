@@ -4344,7 +4344,15 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             cell_area = meta["cell_area_m2"] if have_flow else 0.0
             runoff_m = runoff_mm / 1000.0
             if have_flow:
-                domain_cells = int(self._state.flow_domain_mask.sum())
+                # From the cache added to stop exactly this. `meta["domain_cells"]`
+                # carries a comment naming this method as the reason it exists, and
+                # `compute_catchment_coverage` already reads it — while this line
+                # re-reduced a 2.85 M-element mask on every one of 12.5 frames a
+                # second. Same two-line fallback that method uses, for a meta dict
+                # written before the key existed.
+                domain_cells = meta.get("domain_cells")
+                if domain_cells is None:
+                    domain_cells = int(self._state.flow_domain_mask.sum())
                 total_runoff_m3 = domain_cells * cell_area * runoff_m
                 uncaptured_m3 = (
                     (self._state.catchment_exit_cells + self._state.catchment_sink_cells)
@@ -4389,28 +4397,51 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             self._state.balance_routing = routing
 
             # Flow network (Live Assessment) — every earthwork, ordered high→low.
-            nodes = self._build_network_nodes(all_ews, stores, result)
-            edges = {sid: (tgt, routing.is_user.get(sid, False))
-                     for sid, tgt in routing.edges.items()}
             exit_m3 = result.site_exit_m3 if result is not None else 0.0
-            self._panel.set_network(nodes, edges, exit_m3)
+            # Text stays live through a drag; anything that rebuilds a widget tree
+            # or a map layer does not. `set_live_assessment` is a string, and the
+            # scorecard below it is strings — a designer dragging a vertex is
+            # watching those numbers move, which is the whole point of the live
+            # readout, and they are cheap.
             self._panel.set_live_assessment(self._network_footer(result))
-            self._refresh_connections_layer(result, routing)
-            self._panel.set_area_subtotals(self.compute_area_subtotals())
-            self._panel.set_catchment_coverage(
-                self.compute_catchment_coverage(),
-                site_is_guessed=self._site_is_guessed())
-            # The Report stage's on-screen headline, from the same BalanceResult the
-            # report itself prints. It used to come only from a ComparisonResult,
-            # which only a fill simulation produces — so the summary was blank for a
-            # document that has needed nothing but a baseline since it was rebuilt on
-            # the design tier.
-            self._panel.set_report_summary(
-                result, comparison=self._state.comparison,
-                burn=self._state.burn_quantities)
-            self.refresh_stress_points_layer()
+
             drawn_result = None
             if geometry_settled:
+                # Measured on the fixture at 12 features: a frame cost 526 ms
+                # against the 80 ms a 12.5 Hz throttle allows, so the readout was
+                # ~6.6x over its own budget and every one of these ran per mouse
+                # event. `set_network` alone deletes every child widget and
+                # reconstructs a `_NodeCard` and a connector per feature — about
+                # 190 widget constructions and 220 QSS parses on a 31-feature
+                # design — and `_refresh_connections_layer` rebuilds a map layer.
+                #
+                # The guard's own comment already said "doing that per feature at
+                # 12.5 Hz is exactly the cost this method's docstring promises to
+                # avoid"; these simply sat above it. Mid-drag geometry is not a
+                # design, by that docstring, so a chip layout and a connections
+                # layer drawn for it are answers to a question nobody asked yet.
+                nodes = self._build_network_nodes(all_ews, stores, result)
+                edges = {sid: (tgt, routing.is_user.get(sid, False))
+                         for sid, tgt in routing.edges.items()}
+                self._panel.set_network(nodes, edges, exit_m3)
+                self._refresh_connections_layer(result, routing)
+                self._panel.set_area_subtotals(self.compute_area_subtotals())
+                self._panel.set_catchment_coverage(
+                    self.compute_catchment_coverage(),
+                    site_is_guessed=self._site_is_guessed())
+                # The Report stage's on-screen headline, from the same
+                # BalanceResult the report itself prints. It used to come only
+                # from a ComparisonResult, which only a fill simulation produces —
+                # so the summary was blank for a document that has needed nothing
+                # but a baseline since it was rebuilt on the design tier.
+                self._panel.set_report_summary(
+                    result, comparison=self._state.comparison,
+                    burn=self._state.burn_quantities)
+                # A full-raster pass plus up to 20,000 GEOS `project` calls per
+                # linear feature (M-5a). `_on_vertex_drag`'s docstring promises
+                # never to run the heavy sub-calcs per mouse event; this was the
+                # largest one that did.
+                self.refresh_stress_points_layer()
                 self._build_spillway_rows()
                 self._check_spillway_capacity()
                 drawn_result = self._drawn_basis_balance(

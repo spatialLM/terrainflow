@@ -863,118 +863,145 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
     site_rate = get_infiltration_rate(soil_name)
     stores = []
 
-    for ew in earthworks:
-        # Zero-capacity features are kept deliberately: a berm or diversion drain has
-        # no storage but is very much part of the routing, and filtering them here was
-        # why they always rendered "leaves site" with no downstream link.
-        if not ew.enabled:
-            continue
-
-        # Get footprint area from shapely geometry. Every shapely geometry HAS an
-        # `.area` attribute — a LineString's is simply 0.0 — so testing for the
-        # attribute made the line branch unreachable and gave swales, diversions and
-        # berms (all polylines) a zero wetted footprint: no infiltration, no drain-down.
-        # Test the value, not the attribute.
+    # **Opened once, not once per feature.** The comment inside the loop records
+    # that the *read* was cut to a 1x1 window for exactly this reason ("410 MB of
+    # I/O for a design of 36"); the open itself was left where it was. This runs on
+    # every design edit including throttled drags, and again through
+    # `_drawn_basis_balance`, so a 36-feature design paid 36 opens per drag frame
+    # and 72 per settled edit. Measured on the fixture at 12 features: 12.00 opens
+    # per frame.
+    #
+    # A DEM that will not open leaves *src* None, which every feature below reads
+    # as the same "no elevation for this centroid" state the per-feature guard
+    # already handled: `elevation_known` stays False and the store takes no part in
+    # the elevation heuristic. That is the safe answer — a 0.0 m stand-in sorts
+    # below every real feature and makes that store the site's overflow receiver.
+    dem_src = None
+    if dem_path:
         try:
-            shapely_geom = shapely_shape(json.loads(ew.geometry.asJson()))
-            area_m2 = float(getattr(shapely_geom, "area", 0.0) or 0.0)
-            if area_m2 <= 0:
-                # Linear feature: its wetted footprint is length × top width.
-                area_m2 = float(shapely_geom.length) * float(ew.width or 0.0)
+            import rasterio
+            dem_src = rasterio.open(dem_path)
         except Exception:
-            shapely_geom = None
-            area_m2 = 100.0  # fallback
-        if area_m2 <= 0:
-            area_m2 = 100.0
+            dem_src = None
 
-        # Centroid elevation + raster coordinates from DEM. `elevation_known` stays
-        # False unless the DEM actually yields a finite, non-nodata value: a stand-in
-        # 0.0 m sorts below every real feature and turns this store into the site's
-        # universal overflow receiver (and every other store into its "upstream").
-        elevation = 0.0
-        elevation_known = False
-        centroid_row = None
-        centroid_col = None
-        if dem_path and shapely_geom is not None:
+    try:
+        for ew in earthworks:
+            # Zero-capacity features are kept deliberately: a berm or diversion drain has
+            # no storage but is very much part of the routing, and filtering them here was
+            # why they always rendered "leaves site" with no downstream link.
+            if not ew.enabled:
+                continue
+
+            # Get footprint area from shapely geometry. Every shapely geometry HAS an
+            # `.area` attribute — a LineString's is simply 0.0 — so testing for the
+            # attribute made the line branch unreachable and gave swales, diversions and
+            # berms (all polylines) a zero wetted footprint: no infiltration, no drain-down.
+            # Test the value, not the attribute.
             try:
-                centroid = shapely_geom.centroid
-                import rasterio
-                with rasterio.open(dem_path) as src:
-                    t = src.transform
+                shapely_geom = shapely_shape(json.loads(ew.geometry.asJson()))
+                area_m2 = float(getattr(shapely_geom, "area", 0.0) or 0.0)
+                if area_m2 <= 0:
+                    # Linear feature: its wetted footprint is length × top width.
+                    area_m2 = float(shapely_geom.length) * float(ew.width or 0.0)
+            except Exception:
+                shapely_geom = None
+                area_m2 = 100.0  # fallback
+            if area_m2 <= 0:
+                area_m2 = 100.0
+
+            # Centroid elevation + raster coordinates from DEM. `elevation_known` stays
+            # False unless the DEM actually yields a finite, non-nodata value: a stand-in
+            # 0.0 m sorts below every real feature and turns this store into the site's
+            # universal overflow receiver (and every other store into its "upstream").
+            elevation = 0.0
+            elevation_known = False
+            centroid_row = None
+            centroid_col = None
+            if dem_src is not None and shapely_geom is not None:
+                try:
+                    centroid = shapely_geom.centroid
+                    t = dem_src.transform
                     row, col = xy_to_rc(t, centroid.x, centroid.y)
-                    if 0 <= row < src.height and 0 <= col < src.width:
+                    if 0 <= row < dem_src.height and 0 <= col < dem_src.width:
                         centroid_row = row
                         centroid_col = col
                         # One cell through a window, not the whole band. This read
                         # the entire DEM to sample a single elevation, once per
                         # feature: about 410 MB of I/O for a design of 36.
-                        value = float(src.read(
+                        value = float(dem_src.read(
                             1, window=Window(col, row, 1, 1))[0, 0])
                         is_nodata = (
-                            src.nodata is not None
-                            and math.isclose(value, float(src.nodata), rel_tol=1e-9,
-                                             abs_tol=1e-6)
+                            dem_src.nodata is not None
+                            and math.isclose(value, float(dem_src.nodata),
+                                             rel_tol=1e-9, abs_tol=1e-6)
                         )
                         if math.isfinite(value) and not is_nodata:
                             elevation = value
                             elevation_known = True
+                except Exception:
+                    pass
+
+            cut_vol = calculate_cut_volume(ew.type, ew.geometry, ew.depth, ew.width)
+            fill_vol = calculate_fill_volume(ew.type, ew.geometry, ew.depth, ew.width,
+                                             ew.companion_berm)
+
+            # A fill-only feature (berm, dam wall) is built ground, not an excavated wetted
+            # surface — it infiltrates nothing, so crediting it soakage would invent capture.
+            try:
+                from terrainflow_assessment.core.registry.earthwork_types import get_type
+                wets_soil = bool(get_type(ew.type).has_cut)
+            except Exception:
+                wets_soil = True
+
+            # A per-feature soil overrides the site default; None inherits it.
+            own_soil = getattr(ew, "soil_name", None)
+            infil_rate = get_infiltration_rate(own_soil) if own_soil else site_rate
+
+            # **The one place the capacity basis is chosen.** Everything downstream — the
+            # balance, the simulation, the flow-network nodes, the scorecard and the report —
+            # reads capacity through this store, so switching basis here switches it
+            # everywhere and cannot be switched inconsistently anywhere.
+            #
+            # The terrain measurement wins where there is one. Sizing against the drawn
+            # section instead means a keyed swale reports "full at this storm" while most of
+            # its pond is still empty — Swale 5 of the Quail Island design reads 100% of
+            # 440 m³ against a pond of 1,095 m³ — and the designer enlarges a feature that
+            # needed nothing. The drawn figure travels alongside rather than being discarded:
+            # it is the one that can be checked by hand and the one a contractor builds to.
+            drawn = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
+            terrain = getattr(ew, "terrain_capacity_m3", None)
+            measured = (basis == "terrain" and terrain is not None and float(terrain) > 0)
+            # The brim volume, so "% full" is measured against the level water leaves the
+            # *structure* at rather than the level the spillway takes it at. Only on the
+            # terrain basis: the drawn figure is an analytic prism with no lip to speak of.
+            lip = getattr(ew, "containment_capacity_m3", None)
+            lip = float(lip) if (measured and lip is not None and float(lip) > 0) else 0.0
+
+            store = EarthworkStore(
+                name=ew.name,
+                ew_type=ew.type,
+                capacity_m3=float(terrain) if measured else drawn,
+                drawn_capacity_m3=drawn,
+                capacity_is_measured=measured,
+                lip_capacity_m3=lip,
+                area_m2=area_m2,
+                infiltration_rate_mm_hr=infil_rate if wets_soil else 0.0,
+                elevation=elevation,
+                elevation_known=elevation_known,
+                cut_vol_m3=cut_vol,
+                fill_vol_m3=fill_vol,
+                centroid_row=centroid_row,
+                centroid_col=centroid_col,
+                id=getattr(ew, "id", None),
+                overflow_target_id=getattr(ew, "overflow_target_id", None),
+            )
+            stores.append(store)
+
+    finally:
+        if dem_src is not None:
+            try:
+                dem_src.close()
             except Exception:
                 pass
-
-        cut_vol = calculate_cut_volume(ew.type, ew.geometry, ew.depth, ew.width)
-        fill_vol = calculate_fill_volume(ew.type, ew.geometry, ew.depth, ew.width,
-                                         ew.companion_berm)
-
-        # A fill-only feature (berm, dam wall) is built ground, not an excavated wetted
-        # surface — it infiltrates nothing, so crediting it soakage would invent capture.
-        try:
-            from terrainflow_assessment.core.registry.earthwork_types import get_type
-            wets_soil = bool(get_type(ew.type).has_cut)
-        except Exception:
-            wets_soil = True
-
-        # A per-feature soil overrides the site default; None inherits it.
-        own_soil = getattr(ew, "soil_name", None)
-        infil_rate = get_infiltration_rate(own_soil) if own_soil else site_rate
-
-        # **The one place the capacity basis is chosen.** Everything downstream — the
-        # balance, the simulation, the flow-network nodes, the scorecard and the report —
-        # reads capacity through this store, so switching basis here switches it
-        # everywhere and cannot be switched inconsistently anywhere.
-        #
-        # The terrain measurement wins where there is one. Sizing against the drawn
-        # section instead means a keyed swale reports "full at this storm" while most of
-        # its pond is still empty — Swale 5 of the Quail Island design reads 100% of
-        # 440 m³ against a pond of 1,095 m³ — and the designer enlarges a feature that
-        # needed nothing. The drawn figure travels alongside rather than being discarded:
-        # it is the one that can be checked by hand and the one a contractor builds to.
-        drawn = float(getattr(ew, "capacity_m3", 0.0) or 0.0)
-        terrain = getattr(ew, "terrain_capacity_m3", None)
-        measured = (basis == "terrain" and terrain is not None and float(terrain) > 0)
-        # The brim volume, so "% full" is measured against the level water leaves the
-        # *structure* at rather than the level the spillway takes it at. Only on the
-        # terrain basis: the drawn figure is an analytic prism with no lip to speak of.
-        lip = getattr(ew, "containment_capacity_m3", None)
-        lip = float(lip) if (measured and lip is not None and float(lip) > 0) else 0.0
-
-        store = EarthworkStore(
-            name=ew.name,
-            ew_type=ew.type,
-            capacity_m3=float(terrain) if measured else drawn,
-            drawn_capacity_m3=drawn,
-            capacity_is_measured=measured,
-            lip_capacity_m3=lip,
-            area_m2=area_m2,
-            infiltration_rate_mm_hr=infil_rate if wets_soil else 0.0,
-            elevation=elevation,
-            elevation_known=elevation_known,
-            cut_vol_m3=cut_vol,
-            fill_vol_m3=fill_vol,
-            centroid_row=centroid_row,
-            centroid_col=centroid_col,
-            id=getattr(ew, "id", None),
-            overflow_target_id=getattr(ew, "overflow_target_id", None),
-        )
-        stores.append(store)
 
     return stores

@@ -1180,3 +1180,64 @@ class TestCatchmentPartition:
         part = self._partition()
         with pytest.raises(ValueError, match="cells"):
             part.shares(np.ones((4, 4)))
+
+
+class TestTheDemIsOpenedOncePerBuild:
+    """M-9. `build_stores_from_earthworks` opened the DEM inside its per-feature
+    loop. The comment beside the read records that the *read* was cut to a 1x1
+    window for exactly this reason — "410 MB of I/O for a design of 36" — and the
+    open itself was left where it was.
+
+    It runs on every design edit including throttled drags, and again through
+    `_drawn_basis_balance`, so a 36-feature design paid 36 opens per drag frame
+    and 72 per settled edit. Measured on the fixture at 12 features before the
+    fix: 12.00 opens per frame, in a frame costing 526 ms against the 80 ms a
+    12.5 Hz throttle allows. After: 1.00, and 17.9 ms.
+    """
+
+    def _ew(self, name):
+        from terrainflow_assessment.modules.earthwork_design import Earthwork
+        from tests.conftest import make_mock_line_geom
+        ew = Earthwork("swale", make_mock_line_geom([(1.0, 2.5), (4.0, 2.5)]), name)
+        ew.capacity_m3 = 50.0
+        return ew
+
+    def test_five_features_open_the_dem_once(self, tmp_path, monkeypatch):
+        import rasterio
+
+        from terrainflow_assessment.modules.simulation import (
+            build_stores_from_earthworks,
+        )
+
+        dem = _make_sloped_dem(tmp_path, "open_count_dem.tif")
+
+        opens = []
+        real_open = rasterio.open
+
+        def counting(*args, **kwargs):
+            opens.append(args[0] if args else None)
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr(rasterio, "open", counting)
+
+        ews = [self._ew(f"Swale {i}") for i in range(5)]
+        stores = build_stores_from_earthworks(ews, soil_name="Loam", dem_path=dem)
+        assert len(stores) == 5, "the fixture did not produce five stores"
+        assert len(opens) == 1, (
+            f"the DEM was opened {len(opens)} times for five features")
+        assert all(s.elevation_known for s in stores), (
+            "hoisting the open cost the features their elevations")
+
+    def test_an_unopenable_dem_leaves_every_elevation_unknown(self, tmp_path):
+        """The safe answer, and the one the per-feature guard already gave: a
+        0.0 m stand-in sorts below every real feature and would make that store
+        the site's universal overflow receiver."""
+        from terrainflow_assessment.modules.simulation import (
+            build_stores_from_earthworks,
+        )
+
+        stores = build_stores_from_earthworks(
+            [self._ew("Swale 1")], soil_name="Loam",
+            dem_path=str(tmp_path / "does-not-exist.tif"))
+        assert len(stores) == 1
+        assert stores[0].elevation_known is False
