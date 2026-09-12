@@ -1886,3 +1886,95 @@ class TestSafeFlatEpsilon:
 
         with pytest.raises(ValueError):
             safe_flat_epsilon(np.zeros((4, 4)), np.zeros((5, 5)))
+
+
+# ---------------------------------------------------------------------------
+# M-6: the flow pointers are built once
+# ---------------------------------------------------------------------------
+
+class TestThePointersAreBuiltOnce:
+    """`d8_from_dem` was rebuilt from the same array by two callers: `_crest_plan`
+    once per run, and `boundary_outflow_total`, which `analysis_worker` calls in a
+    three-way loop over the site, analysis and earthworks areas.
+
+    Measured on the 03.09.2026 Quail Island design (1139x1016, all three areas
+    defined): exactly four builds, 637 ms of which 478 ms was repeats — 8.0% of
+    the 5,979 ms operation. Under the 10% gate the plan sets, and merged anyway
+    on the owner's call, with that figure in hand.
+    """
+
+    def test_three_boundary_totals_after_a_run_build_the_pointers_once(
+            self, sloped_dem, boundary_gpkg, monkeypatch):
+        from terrainflow_assessment.modules import flow_graph
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        calls = []
+        real = flow_graph.d8_from_dem
+
+        def counting(surface, *args, **kwargs):
+            calls.append(surface)
+            return real(surface, *args, **kwargs)
+
+        monkeypatch.setattr(flow_graph, "d8_from_dem", counting)
+
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        for _ in range(3):
+            fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+
+        assert len(calls) <= 1, (
+            f"the pointers were built {len(calls)} times from one surface")
+
+    def test_every_caller_would_have_seen_the_same_surface(
+            self, sloped_dem, boundary_gpkg, monkeypatch):
+        """The precondition that makes the cache sound rather than merely fast.
+
+        Caching a value two callers compute differently would be a defect, not an
+        optimisation, so this asserts what the four builds were measured to be
+        doing: reading one identical array.
+        """
+        import numpy as np
+
+        from terrainflow_assessment.modules import flow_graph
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        seen = []
+        real = flow_graph.d8_from_dem
+
+        def recording(surface, *args, **kwargs):
+            seen.append(float(np.nansum(np.asarray(surface, dtype="float64"))))
+            return real(surface, *args, **kwargs)
+
+        monkeypatch.setattr(flow_graph, "d8_from_dem", recording)
+
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        # Bypass the cache so every caller's own surface is recorded.
+        fa._pointer_cache = None
+        fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+
+        assert len(set(round(v, 6) for v in seen)) == 1, (
+            f"the callers do not share one surface, so caching would be wrong: "
+            f"{seen}")
+
+    def test_a_second_run_does_not_serve_stale_pointers(
+            self, sloped_dem, boundary_gpkg):
+        """`run()` assigns a fresh `conditioned` array, and the cache is keyed on
+        that array's identity — so a re-run cannot match it. Keyed on contents,
+        a DEM edited back to the same values would."""
+        from terrainflow_assessment.modules.flow_analysis import FlowAnalysis
+
+        fa = FlowAnalysis()
+        fa.load_dem(sloped_dem)
+        fa.run()
+        fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+        first = fa._pointer_cache
+
+        fa.run()
+        assert fa._pointer_cache is None or fa._pointer_cache[0] is not first[0], (
+            "the cache survived a re-run still holding the previous surface")
+        fa.boundary_outflow_total(boundary_gpkg, 10.0, 1.0)
+        assert fa._pointer_cache[0] is fa.conditioned, (
+            "the rebuilt pointers are not keyed to the surface now in use")
