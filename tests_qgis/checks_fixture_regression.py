@@ -1339,6 +1339,20 @@ EXPECTED_BURN = {
     "diversion_e_cut_m3": 48.8260,
     "site_cut_m3": 13914.1630,
     "site_fill_m3": 4315.1177,
+    # The keyed companion berm, pinned on the two things a conserved volume cannot
+    # hide. `level_crest_from_spoil` spreads a fixed quantity of spoil, so changing
+    # `_key_berm_into_banks`' end-cap footprint moves the crest and the cell count
+    # in *opposite* directions and leaves `swale_b_fill_m3` untouched — which is
+    # exactly what it did when M-1 was reverted, at 0.00%.
+    # 6.28 m mean is a real figure and an absurd bank, and it comes from the
+    # fixture's pre-existing geometry rather than from anything added here: the
+    # two swales run along the fall line (Swale B rises 11.75 m end to end) and
+    # are cut to a *level* invert, so the trench yields 3,757 m3 of spoil and
+    # `level_crest_from_spoil` has to put it somewhere. The cut was 5,010 m3
+    # before a companion berm was ever added. Recorded as a regression pin, not
+    # endorsed as a design — see the note on `_build_design`.
+    "swale_b_berm_height_mean_m": 6.2835,
+    "swale_b_berm_cells": 598.0000,
 }
 
 
@@ -1376,6 +1390,42 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             burned = burner.burn_earthworks([by_name[name]])
             return burn_quantities(burner.original, burned, burner.cell_area)
 
+        def keyed_berm(name):
+            """`(crest_elevation, footprint_cells)` for a keyed companion berm.
+
+            **Volume cannot pin this path, and that is a property of the design
+            rather than an oversight.** `level_crest_from_spoil` conserves the
+            spoil the trench yields, so when `_key_berm_into_banks` changes the
+            end-cap footprint the crest simply moves to absorb it: narrow the cap
+            and the same earth stands higher. `swale_b_fill_m3` therefore held at
+            0.00% when M-1 was reverted, even though that burn had changed.
+
+            The two quantities that *do* move are how tall the spoil stands and how
+            many cells it is spread over — and they move in **opposite** directions,
+            which is what makes the pair a constraint rather than two views of one
+            number.
+
+            Height above ground, not the crest elevation. Both move, but the crest
+            is an absolute datum near 69 m here, so the 0.11 m the M-1 revert moves
+            it is 0.16% — inside this module's 0.5% tolerance, and it read "ok"
+            while the footprint underneath it had changed. The same 0.11 m on a
+            bank about a third of a metre tall is a third of the quantity. Pin the
+            small number; a relative tolerance on a large datum asserts almost
+            nothing.
+            """
+            ew = by_name[name]
+            burner = DEMBurner(FIXTURE_DEM)
+            burner.burn_earthworks([ew])
+            raised = (burner.burned_raised or {}).get(getattr(ew, "id", None))
+            assert raised is not None and raised.any(), (
+                f"{name} recorded no raised ground — its companion berm did not "
+                f"burn, so the keyed path is unpinned")
+            height = getattr(ew, "berm_height_m", None)
+            assert height and len(height) == 3, (
+                f"{name} has no (min, mean, max) berm height after its burn: "
+                f"{height!r}")
+            return float(height[1]), float(raised.sum())
+
         site_burner = DEMBurner(FIXTURE_DEM)
         site = burn_quantities(
             site_burner.original,
@@ -1393,6 +1443,9 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             "site_cut_m3": float(site["cut_m3"]),
             "site_fill_m3": float(site["fill_m3"]),
         }
+        berm_height_m, berm_cells = keyed_berm("Swale B")
+        observed["swale_b_berm_height_mean_m"] = berm_height_m
+        observed["swale_b_berm_cells"] = berm_cells
 
         # Each per-method figure has to be a real quantity, or its pin is a pin on
         # zero and the method could stop burning entirely without moving it.
@@ -1409,10 +1462,16 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             print("    }")
             failures.append("EXPECTED_BURN is empty, so nothing was asserted.")
         else:
-            for key, expected in EXPECTED_BURN.items():
-                actual = observed.get(key)
-                if actual is None:
-                    failures.append(f"{key}: not produced by this run")
+            # Driven from *observed*, not from EXPECTED_BURN. Walking the recorded
+            # dict means a newly observed quantity is computed and then silently
+            # never compared — which is how a pin gets added that asserts nothing.
+            for key, actual in observed.items():
+                expected = EXPECTED_BURN.get(key)
+                if expected is None:
+                    print(f"    NEW {key:22} {actual:13.4f}  <- record this")
+                    failures.append(
+                        f"{key}: observed but not in EXPECTED_BURN, so nothing "
+                        f"asserted it. Record {actual:.4f}.")
                     continue
                 gap = _relative_gap(actual, expected)
                 marker = "ok " if gap <= TOLERANCE else "MOVED"
@@ -1422,6 +1481,9 @@ def check_the_burn_quantities_have_not_moved(dem_path):
                     failures.append(
                         f"{key}: {actual:.3f} vs recorded {expected:.3f} "
                         f"({gap * 100:.2f}% > {TOLERANCE * 100:.1f}%)")
+            for key in EXPECTED_BURN:
+                if key not in observed:
+                    failures.append(f"{key}: recorded but not produced by this run")
 
         assert not failures, (
             "the burn moved against the recorded fixture:\n      "
