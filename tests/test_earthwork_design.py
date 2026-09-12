@@ -6,6 +6,11 @@ import pytest
 import rasterio
 from rasterio.transform import from_bounds
 
+from terrainflow_assessment.core.registry.earthwork_defaults import (
+    DimensionDefaults,
+    ResolvedDims,
+    resolve_dimensions,
+)
 from terrainflow_assessment.modules.earthwork_design import (
     DEMBurner,
     Earthwork,
@@ -17,11 +22,6 @@ from terrainflow_assessment.modules.earthwork_design import (
     calculate_diversion_discharge,
     calculate_fill_volume,
     calculate_spillway_width,
-)
-from terrainflow_assessment.core.registry.earthwork_defaults import (
-    DimensionDefaults,
-    ResolvedDims,
-    resolve_dimensions,
 )
 from tests.conftest import make_mock_line_geom, make_mock_polygon_geom
 

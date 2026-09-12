@@ -45,7 +45,16 @@ jobs:
         run: python -c "import qgis; import rasterio, numpy; print('venv sees qgis + deps OK')"
 
       - name: Lint with ruff
-        run: python -m ruff check terrainflow_assessment/
+        # `tests/` is linted too. pyproject already carries a `"tests/*"` entry under
+        # [tool.ruff.lint.per-file-ignores], which was doing nothing while the scope
+        # stopped at the package — and an unsorted import block had duly accumulated
+        # there unseen.
+        #
+        # `tests_qgis/` is deliberately NOT linted. Its probe modules import `_probe`
+        # first because that is what puts `tests_qgis/` and the repo root on sys.path;
+        # isort would reorder it below the imports that depend on it, and the breakage
+        # would only surface in a 10-minute QGIS run.
+        run: python -m ruff check terrainflow_assessment/ tests/
 
       - name: Run tests with coverage
         # fail_under=95 is set in pyproject.toml [tool.coverage.report]; Qt/QGIS UI

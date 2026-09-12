@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Raster fixtures are binary. `text=auto` above would detect this correctly on its
+# own — a GeoTIFF is full of NUL bytes — but detection is not something to leave to
+# inference when the failure mode is a silently LF-normalised binary that no longer
+# opens. State it.
+*.tif binary
+*.tiff binary
+
+# A .tfd design file is a zip. Same reasoning, and the consequence is worse: a
+# mangled zip does not open at all. None is tracked today; this is here so that
+# committing one cannot go wrong quietly.
+*.tfd binary
