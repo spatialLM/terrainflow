@@ -44,7 +44,12 @@ quantity, read by the renderers, the panel key and the report legend alike. Two 
 it holds: **darker means more water**, and **alpha is for absence, not magnitude** —
 a ramp has at most one transparent stop, it sits at the absence end (zero runoff,
 zero erosion, driest, planar), and every other stop is fully opaque.
-`tests/test_map_palette.py` asserts that over every ramp in the file. Surface runoff
+`tests/test_map_palette.py` asserts that over every ramp in the file, and
+`checks_symbology.check_every_shared_ramp_reaches_the_pixels` asserts that the stops
+reach the **pixels** — it renders every ramp over a fixed gradient and a block per stop
+and reads the colours back. The table was watched and the render was not, which is how
+CURVATURE's two flanking stops moved from alpha 200 to opaque without a screenshot
+moving. Surface runoff
 takes the one bounded exception: below `SURFACE_RUNOFF_FADE_TOP_M3` (2 m³) the ramp
 is a single colour fading to nothing, so no two stops can re-order against each
 other. Whole-layer opacity is not used anywhere.

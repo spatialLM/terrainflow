@@ -19,7 +19,7 @@ about API calls having been made.
 """
 
 from _harness import PluginHarness, line_across_valley
-from _shots import assert_rendered, save_canvas
+from _shots import assert_rendered, save_canvas, save_qimage
 
 EW_TYPES = ("swale", "berm", "basin", "dam", "diversion")
 
@@ -915,3 +915,256 @@ def check_point_labels_have_a_halo(dem_path):
                 f"point label layers with no halo: {', '.join(naked)} — "
                 "they will disappear over imagery"
             )
+
+
+# ---------------------------------------------------------------------------
+# The shared raster ramps, as pixels
+# ---------------------------------------------------------------------------
+#
+# `tests/test_map_palette.py` asserts the stop *table* and `checks_terrain`
+# photographs the terrain **panel**. Between the two sits everything that turns a
+# table into a map — `apply_raster_ramp`'s fractional scaling, its `absolute=`
+# path, the symmetric anchoring curvature needs, the band maximum it scales by and
+# the renderer's own interpolation — and none of it was watched by anything. H-10
+# moved CURVATURE's two flanking stops from alpha 200 to 255, which is instantly
+# visible on the map, and all 50 screenshot baselines stayed byte-identical.
+#
+# So: render every ramp over one fixed gradient, photograph the sheet, and assert
+# each stop's colour actually reaches the pixels. The expectation is computed
+# *from the palette table*, so this does not freeze the palette — an intentional
+# recolour moves both sides and only the baseline image needs accepting. What it
+# catches is the table and the pixels disagreeing, which is the whole gap.
+#
+# The background is **white and opaque** on purpose. Alpha is only visible against
+# something, and over a transparent background an alpha regression is a no-op in
+# the PNG — which is exactly how H-10 went unseen.
+
+#: One output pixel per raster cell throughout, so no resampling stands between a
+#: raster value and the pixel its colour is read from.
+STRIP_W, STRIP_H = 361, 40
+#: The staircase: one block this wide per stop, on a strip this tall.
+STEP_W, STEP_H = 36, 22
+LABEL_W = 150
+
+
+def _ramp_strips():
+    """``(name, stops, lo, hi, kwargs)`` — a ramp and the span it is painted over.
+
+    Each ramp gets the span its own stops describe. A 0-1 fraction ramp rendered
+    over [-1, 360] is 99% clamp and says nothing about the ramp.
+    """
+    from terrainflow_assessment.core.registry import map_palette as P
+
+    return (
+        ("streams", P.STREAMS, 0.0, 1.0, {}),
+        ("water_captured", P.WATER_CAPTURED, 0.0, 1.0, {}),
+        ("surface_runoff", P.surface_runoff_ramp(), 0.0, 1.0, {}),
+        ("wetness_index", P.WETNESS_INDEX, 0.0, 1.0, {}),
+        ("erosive_power", P.EROSIVE_POWER, 0.0, 1.0, {}),
+        # Diverging, anchored symmetrically the way `terrain._apply_index_ramp`
+        # does it. The bound is fixed at 1.0 rather than taken from a percentile,
+        # so the baseline does not move with whatever fixture computed it.
+        ("curvature", P.CURVATURE, -1.0, 1.0,
+         {"max_value": 1.0, "min_value": -1.0}),
+        # Absolute — compass degrees, not fractions. Sending this one through the
+        # fractional path is what drew the whole aspect map as a single flat wash,
+        # measured at 0.32% of the ramp occupied.
+        ("aspect_classes", P.ASPECT_CLASSES, -1.0, 360.0, {"absolute": True}),
+    )
+
+
+def _write_strip(path, row, height):
+    """One float32 GeoTIFF, *height* identical rows of *row*."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    data = np.repeat(np.asarray(row, dtype="float32")[None, :], height, axis=0)
+    with rasterio.open(
+        path, "w", driver="GTiff", height=height, width=len(row), count=1,
+        dtype="float32", crs="EPSG:2193",
+        transform=from_origin(0.0, float(height), 1.0, 1.0),
+    ) as dst:
+        dst.write(data, 1)
+    return path
+
+
+def _gradient_raster(path, lo, hi):
+    """A STRIP_W-wide float32 GeoTIFF ramping linearly lo -> hi across.
+
+    This one is for the **picture**: it visits every stop and every interpolated
+    span between them, which is what makes an alpha regression across a whole
+    span obvious in the baseline diff.
+    """
+    import numpy as np
+
+    return _write_strip(path, np.linspace(lo, hi, STRIP_W), STRIP_H)
+
+
+def _steps_raster(path, values):
+    """A staircase: one equal block of columns per value, filled with that value.
+
+    This one is for the **assertion**, and the gradient cannot do its job. STREAMS
+    puts stops at 0.0 and 0.001 and WATER_CAPTURED does the same — 0.36 of a column
+    apart on a 361-wide strip, so on a gradient the two are simply not separable
+    and a sample taken at either lands on an interpolated blend of both. A block
+    per stop holds each value flat across ~36 px whatever its neighbours are, so
+    the colour read back is the renderer's answer for *that* value and nothing else.
+    """
+    import numpy as np
+
+    n = len(values)
+    width = n * STEP_W
+    row = np.empty(width, dtype="float32")
+    for i, value in enumerate(values):
+        row[i * STEP_W:(i + 1) * STEP_W] = float(value)
+    return _write_strip(path, row, STEP_H)
+
+
+def _render_strip(layer, width, height):
+    """Render one raster layer 1:1 over opaque white, with no antialiasing."""
+    from qgis.core import QgsMapRendererParallelJob, QgsMapSettings
+    from qgis.PyQt.QtCore import QSize
+    from qgis.PyQt.QtGui import QColor
+
+    ms = QgsMapSettings()
+    ms.setLayers([layer])
+    ms.setDestinationCrs(layer.crs())
+    ms.setOutputSize(QSize(width, height))
+    ms.setExtent(layer.extent())
+    ms.setBackgroundColor(QColor(255, 255, 255))
+    # Off: this is a 1:1 render and the point is to read exact colours.
+    # Antialiasing would smear every stop into its neighbour.
+    ms.setFlag(QgsMapSettings.Antialiasing, False)
+    job = QgsMapRendererParallelJob(ms)
+    job.start()
+    job.waitForFinished()
+    return job.renderedImage()
+
+
+def _over_white(rgba):
+    """``(r, g, b, a)`` composited onto opaque white — what the pixel must be."""
+    r, g, b, a = rgba
+    f = a / 255.0
+    return tuple(int(round(c * f + 255 * (1.0 - f))) for c in (r, g, b))
+
+
+def _stop_value(stop_value, hi, kwargs):
+    """The band value `apply_raster_ramp` puts this stop at.
+
+    Mirrors the function rather than assuming: an absolute stop is laid down
+    untouched, a fractional one is multiplied by the ramp's top, which is
+    ``max_value`` when given and the band maximum — here ``hi`` — when not. The
+    `min_value` the curvature call passes is deliberately not in this: a negative
+    floor is reset to zero inside `apply_raster_ramp`, which is why the diverging
+    ramp's -1.0 lands on -top rather than on the floor.
+    """
+    if kwargs.get("absolute"):
+        return float(stop_value)
+    top = kwargs.get("max_value")
+    return float(stop_value) * float(hi if top is None else top)
+
+
+def check_every_shared_ramp_reaches_the_pixels(dem_path):
+    """Each ramp rendered twice — as a gradient, and as a block per stop.
+
+    The gradient is the picture the baseline diff watches; the staircase is what
+    the assertion reads, because two of these ramps put stops a thousandth apart
+    and a gradient cannot separate those at any width.
+
+    `apply_raster_ramp` is called directly and not through `apply_shared_ramp`,
+    which CLAUDE.md otherwise forbids. The family-top logic `apply_shared_ramp`
+    adds is already covered by
+    `check_matching_before_and_after_layers_share_one_ramp`; what was uncovered is
+    the primitive underneath it, and a family of one has no top to share.
+
+    The DEM argument is unused — the input is synthetic, so this costs two small
+    renders per ramp and says the same thing on any machine and any fixture.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from qgis.core import QgsRasterLayer
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtGui import QFont, QImage, QPainter
+
+    from terrainflow_assessment.qgis.controllers._symbols import apply_raster_ramp
+
+    strips = _ramp_strips()
+    gap = 6
+    block = STRIP_H + STEP_H + gap
+    sheet = QImage(LABEL_W + STRIP_W, len(strips) * block + gap,
+                   QImage.Format_ARGB32)
+    sheet.fill(Qt.white)
+    painter = QPainter(sheet)
+    painter.setFont(QFont("Arial", 9))
+
+    failures = []
+    tmp = Path(tempfile.mkdtemp(prefix="tfa_ramps_"))
+    try:
+        for i, (name, stops, lo, hi, kwargs) in enumerate(strips):
+            values = [_stop_value(v, hi, kwargs) for v, _rgba, _l in stops]
+            top = gap + i * block
+
+            layer = QgsRasterLayer(
+                _gradient_raster(str(tmp / f"{name}_grad.tif"), lo, hi),
+                name, "gdal")
+            steps = QgsRasterLayer(
+                _steps_raster(str(tmp / f"{name}_step.tif"), values),
+                f"{name}_steps", "gdal")
+            if not layer.isValid() or not steps.isValid():
+                failures.append(f"{name}: raster layer did not load")
+                continue
+            # Both layers take the ramp built for *this* ramp's own span. The
+            # staircase's band maximum is the largest stop value, which for every
+            # ramp here is the same number the gradient's `hi` is — but the
+            # fractional path scales by the band maximum, so it is passed
+            # explicitly rather than left to coincide.
+            explicit = dict(kwargs)
+            if not explicit.get("absolute") and explicit.get("max_value") is None:
+                explicit["max_value"] = float(hi)
+            apply_raster_ramp(layer, stops, **explicit)
+            apply_raster_ramp(steps, stops, **explicit)
+
+            image = _render_strip(layer, STRIP_W, STRIP_H)
+            step_img = _render_strip(steps, len(values) * STEP_W, STEP_H)
+            if (image is None or image.isNull()
+                    or step_img is None or step_img.isNull()):
+                failures.append(f"{name}: rendered nothing")
+                continue
+
+            painter.drawImage(LABEL_W, top, image)
+            painter.drawImage(LABEL_W, top + STRIP_H, step_img)
+            painter.setPen(Qt.black)
+            painter.drawText(6, top + STRIP_H // 2 + 4, name)
+            failures.extend(_stops_that_did_not_render(name, stops, step_img))
+    finally:
+        painter.end()
+
+    path = save_qimage(sheet, "ramp_renders")
+    assert_rendered(path, "shared raster ramps", min_colours=64)
+    assert not failures, (
+        "the palette table and the rendered pixels disagree:\n      "
+        + "\n      ".join(failures)
+        + f"\n    Look at {path}. A stop colour changed on purpose moves both "
+          f"sides of this and only the baseline image needs accepting; a failure "
+          f"means apply_raster_ramp is not laying the stops where the table puts "
+          f"them."
+    )
+
+
+def _stops_that_did_not_render(name, stops, step_img):
+    """Every stop's colour must come back from the block filled with its value."""
+    out = []
+    for i, (stop_value, rgba, label) in enumerate(stops):
+        got = step_img.pixelColor(i * STEP_W + STEP_W // 2, STEP_H // 2)
+        want = _over_white(rgba)
+        off = max(abs(got.red() - want[0]), abs(got.green() - want[1]),
+                  abs(got.blue() - want[2]))
+        if off > 4:
+            out.append(
+                f"{name} stop {label!r} ({stop_value}): rendered "
+                f"({got.red()},{got.green()},{got.blue()}) but the palette says "
+                f"{tuple(rgba)}, which is {want} over white — off by {off}"
+            )
+    return out
