@@ -226,29 +226,34 @@ def _solve_lp(supply, demand, dist):
     """Least-cost transportation by linear programming, or ``None`` if unavailable."""
     try:
         from scipy.optimize import linprog
+        from scipy.sparse import coo_matrix
     except Exception:
         return None
 
     n, m = len(supply), len(demand)
     cost = np.array(dist, dtype="float64").ravel()
 
+    if n == 0 or m == 0:
+        return None
+
     # One row per source (ship no more than you have) and per sink (receive no more
     # than you need); maximising the matched volume is expressed by subtracting a large
     # constant from the cost so the solver prefers to move earth rather than leave it.
-    rows, cols_a, data = [], [], []
-    for i in range(n):
-        for j in range(m):
-            rows.append(i)
-            cols_a.append(i * m + j)
-            data.append(1.0)
-    for j in range(m):
-        for i in range(n):
-            rows.append(n + j)
-            cols_a.append(i * m + j)
-            data.append(1.0)
-
-    a_ub = np.zeros((n + m, n * m), dtype="float64")
-    a_ub[rows, cols_a] = data
+    #
+    # Sparse, because every variable x[i, j] appears in exactly two of those rows: the
+    # matrix is (n + m) x (n * m) with 2nm non-zeros, which is 0.5% occupancy at 200
+    # regions a side. Dense it was 128 MB there, and one solve peaked at 394 MB because
+    # HiGHS copies what it is handed. The region count has no ceiling — `haul_regions`
+    # returns full-grid connected components, so a noisy burn on a large DEM produces
+    # hundreds — and all of this runs inside the QGIS process. `method="highs"` takes
+    # scipy.sparse directly, so the dense array bought nothing.
+    var = np.arange(n * m)
+    rows = np.concatenate((var // m, n + (var % m)))
+    cols_a = np.concatenate((var, var))
+    a_ub = coo_matrix(
+        (np.ones(2 * n * m, dtype="float64"), (rows, cols_a)),
+        shape=(n + m, n * m),
+    )
     b_ub = np.array(list(supply) + list(demand), dtype="float64")
 
     movable = min(sum(supply), sum(demand))

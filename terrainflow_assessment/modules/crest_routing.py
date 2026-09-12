@@ -150,15 +150,31 @@ class Impoundment:
     standing water, and is the only part of it that is a *water body*: painting a dam wall
     as water would be wrong, and 9,325 of the 9,380 cells whose accumulation the contraction
     changes are pool, not rim.
+
+    **Both are held as flat indices, not as masks** (M-8). A bool mask costs one byte per
+    grid cell whether the pond is sixteen cells or sixteen thousand, and there are two per
+    pond, so the store grows as ponds x cells — and both terms grow with area, so the
+    product grows as its square. Measured on the committed Quail Island tile: 28 ponds on
+    1,157,224 cells is **64.8 MB** of masks, against **2.9 MB** of indices for the 15.9%
+    of the grid any pond actually occupies. At 3000x3000 that extrapolates to ~504 MB and
+    at 5000x5000 to ~1.4 GB, allocated inside the QGIS process.
+
+    The constructor still takes masks because that is what :func:`find_impoundments` has in
+    hand; it is the *storage* that changes. Consumers index with ``region_idx`` /
+    ``pool_idx`` into a flat view, which also replaces a whole-raster OR per pond with a
+    scatter into the cells that pond owns.
     """
 
-    __slots__ = ("region", "pour_level_m", "n_cells", "pool", "storage_m3")
+    __slots__ = ("region_idx", "pool_idx", "shape", "pour_level_m", "n_cells", "storage_m3")
 
     def __init__(self, region, pour_level_m, pool=None, storage_m3=0.0):
-        self.region = region                      # bool (rows, cols) — pool + level rim
-        self.pool = region if pool is None else pool   # bool — the standing water only
+        region = np.asarray(region)
+        self.shape = region.shape
+        self.region_idx = np.flatnonzero(region.ravel())   # pool + level rim
+        self.pool_idx = (self.region_idx if pool is None
+                         else np.flatnonzero(np.asarray(pool).ravel()))
         self.pour_level_m = float(pour_level_m)
-        self.n_cells = int(region.sum())
+        self.n_cells = int(self.region_idx.size)
         # What this hollow holds before it spills: Σ(filled − ground) over the pool. The
         # same quantity ``reporting.raster_ponding_volume`` measures and the same one the
         # panel shows as At grid, so a swale's 210 m³ here is the 210 m³ there — measured
@@ -381,7 +397,7 @@ def find_impoundments(filled, ground, built=None, min_depth=1e-3, tol=1e-6,
         depth = np.clip(np.minimum(filled[pool], pour) - ground[pool], 0.0, None)
         imp = Impoundment(region, pour, pool=pool,
                           storage_m3=float(depth.sum()) * float(cell_area_m2))
-        if built is not None and not (built & region).any():
+        if built is not None and not built.ravel()[imp.region_idx].any():
             continue
         if imp.n_cells > max_cells:
             skipped.append(
@@ -412,6 +428,13 @@ def plan_crest_absorption(impoundments, next_flat, is_sink, shape, skipped=None)
     n = rows * cols
     absorb = np.zeros(shape, dtype=bool)
     pools = np.zeros(shape, dtype=bool)
+    # Flat views onto those same buffers. A pond carries flat indices (M-8), so marking
+    # it is a scatter into the cells it owns rather than an OR over the whole raster —
+    # 16% of the grid per pond here, not 100%. `ravel` is a view, not a copy, for a
+    # freshly allocated C-contiguous array, so `absorb[:] = False` below still clears
+    # what these write.
+    absorb_flat = absorb.ravel()
+    pools_flat = pools.ravel()
     rid = np.zeros(n, dtype=np.int32)
     skipped = list(skipped or [])
     if not impoundments:
@@ -422,8 +445,8 @@ def plan_crest_absorption(impoundments, next_flat, is_sink, shape, skipped=None)
     tgt = np.where(sink, idx, np.asarray(next_flat).astype(np.int64).ravel())
 
     for i, imp in enumerate(impoundments, start=1):
-        rid[imp.region.ravel()] = i
-        absorb |= imp.region
+        rid[imp.region_idx] = i
+        absorb_flat[imp.region_idx] = True
 
     # Whether a cell discharges does not depend on which *other* ponds survive the next
     # step, so this is worked out once and then filtered.
@@ -445,9 +468,9 @@ def plan_crest_absorption(impoundments, next_flat, is_sink, shape, skipped=None)
     absorb[:] = False
     exits, targets, capacities = [], [], []
     for i, (imp, cells) in enumerate(found, start=1):
-        rid[imp.region.ravel()] = i
-        absorb |= imp.region
-        pools |= imp.pool
+        rid[imp.region_idx] = i
+        absorb_flat[imp.region_idx] = True
+        pools_flat[imp.pool_idx] = True
         exits.append(cells)
         targets.append(tgt[cells])
         capacities.append(imp.storage_m3)

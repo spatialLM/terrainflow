@@ -661,6 +661,82 @@ class TestRetention:
         assert not out.changed
 
 
+class TestAPondHoldsItsCellsNotTheWholeGrid:
+    """M-8 full. The store must grow with the water, not with the raster.
+
+    A bool mask is one byte per grid cell **per pond**, so two masks per pond make the
+    footprint ponds x cells. Measured on the committed Quail Island tile: 28 ponds on
+    1,157,224 cells = **64.8 MB**, of which the cells any pond actually occupies are
+    15.9% of the grid. The same information as int64 flat indices is **2.9 MB**.
+
+    Both terms grow with area, so the product grows as its square: extrapolated at the
+    same pond density that is ~504 MB at 3000x3000 and ~1.4 GB at 5000x5000 — allocated
+    inside the QGIS process, where running out is not an exception you catch.
+
+    This is the memory sibling of R-6 and it is not gated on the 10% timing bar: the
+    bar for an allocation is whether it is bounded, and ponds x cells is not.
+    """
+
+    @staticmethod
+    def _held_bytes(imp):
+        """Distinct ndarray bytes the object owns — `pool` may BE `region`."""
+        seen, total = set(), 0
+        for name in imp.__slots__:
+            value = getattr(imp, name, None)
+            if isinstance(value, np.ndarray) and id(value) not in seen:
+                seen.add(id(value))
+                total += value.nbytes
+        return total
+
+    def test_it_does_not_hold_an_array_the_size_of_the_grid(self):
+        region = np.zeros((300, 300), dtype=bool)
+        region[10:14, 10:14] = True            # 16 cells of 90,000
+        imp = Impoundment(region, 12.5)
+
+        held = self._held_bytes(imp)
+        assert held < region.size // 50, (
+            f"one pond of 16 cells holds {held:,} bytes on a {region.size:,}-cell grid. "
+            f"A mask costs the whole grid whether the pond is 16 cells or 16,000, and "
+            f"there is one per pond"
+        )
+
+    def test_what_it_holds_scales_with_the_pond_not_the_raster(self):
+        """The property that makes the footprint bounded. Same pond, bigger grid."""
+        small = np.zeros((100, 100), dtype=bool)
+        small[5:9, 5:9] = True
+        big = np.zeros((800, 800), dtype=bool)
+        big[5:9, 5:9] = True
+
+        held_small = self._held_bytes(Impoundment(small, 1.0))
+        held_big = self._held_bytes(Impoundment(big, 1.0))
+        assert held_small == held_big, (
+            f"the same 16-cell pond costs {held_small:,} bytes on a 100x100 grid and "
+            f"{held_big:,} on an 800x800 — the store is sized by the raster, which is "
+            f"the whole of M-8"
+        )
+
+    def test_the_cells_it_reports_are_the_cells_that_were_set(self):
+        """Indices, but the same pond: nothing may be lost in the change of shape."""
+        region = np.zeros((40, 50), dtype=bool)
+        region[3:7, 8:12] = True
+        pool = np.zeros((40, 50), dtype=bool)
+        pool[4:6, 9:11] = True
+
+        imp = Impoundment(region, 7.25, pool=pool, storage_m3=3.5)
+        assert imp.n_cells == 16
+        assert imp.shape == (40, 50)
+        assert np.array_equal(np.sort(imp.region_idx), np.flatnonzero(region.ravel()))
+        assert np.array_equal(np.sort(imp.pool_idx), np.flatnonzero(pool.ravel()))
+        assert imp.pour_level_m == 7.25
+        assert imp.storage_m3 == 3.5
+
+    def test_no_pool_given_means_the_pool_is_the_region(self):
+        region = np.zeros((10, 10), dtype=bool)
+        region[2:5, 2:5] = True
+        imp = Impoundment(region, 0.0)
+        assert np.array_equal(imp.pool_idx, imp.region_idx)
+
+
 class TestImpoundment:
     def test_it_counts_its_own_cells(self):
         region = np.zeros((4, 4), dtype=bool)

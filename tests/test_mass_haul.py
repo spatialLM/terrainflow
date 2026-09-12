@@ -180,6 +180,133 @@ class TestAllocateHaul:
         assert plan["moves"] == []
 
 
+class TestTheSolverIsHandedASparseMatrix:
+    """R-6. The incidence matrix has exactly two non-zeros per column; it must not be
+    materialised dense.
+
+    `A_ub` is `(n + m) x (n * m)`. At 200 cut regions and 200 fill regions that is
+    16 million float64 — **128 MB** — of which 80,000 entries are non-zero, and
+    measured peak allocation for one solve was **394 MB**, because HiGHS copies what
+    it is given. The region count is not bounded by anything: `haul_regions` returns
+    full-grid connected components, so a noisy burn on a large DEM can produce
+    hundreds, and all of this happens inside the QGIS process.
+
+    `linprog(method="highs")` accepts `scipy.sparse` directly, so the dense array was
+    never needed — the triplets were already being built and then scattered into it.
+    """
+
+    @staticmethod
+    def _problem(n, m):
+        rng = np.random.default_rng(0)
+        supply = list(rng.uniform(10.0, 100.0, n))
+        demand = list(rng.uniform(10.0, 100.0, m))
+        dist = [[float(abs(i - j) + 1) for j in range(m)] for i in range(n)]
+        return supply, demand, dist
+
+    def test_the_matrix_that_reaches_linprog_is_sparse(self, monkeypatch):
+        """The whole of R-6 in one assertion. Fails on a dense `A_ub`."""
+        import scipy.optimize
+        import scipy.sparse
+
+        seen = {}
+        real = scipy.optimize.linprog
+
+        def spy(*args, **kwargs):
+            seen["a_ub"] = kwargs.get("A_ub")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(scipy.optimize, "linprog", spy)
+        supply, demand, dist = self._problem(12, 9)
+        assert _solve_lp(supply, demand, dist) is not None
+
+        a_ub = seen["a_ub"]
+        assert a_ub is not None, "linprog was called without A_ub"
+        assert scipy.sparse.issparse(a_ub), (
+            f"A_ub reached the solver as {type(a_ub).__name__}, not a sparse matrix — "
+            f"that is (n+m) x (n*m) dense, and it grows as the square of the region count"
+        )
+        assert a_ub.shape == (12 + 9, 12 * 9)
+        assert a_ub.nnz == 2 * 12 * 9, (
+            "every variable appears in exactly two constraints, its source and its sink"
+        )
+
+    def test_the_sparse_matrix_says_what_the_dense_one_said(self):
+        """Structure, not just sparsity: row i holds source i's row, row n+j sink j's."""
+        import scipy.sparse
+
+        n, m = 4, 3
+        supply, demand, dist = self._problem(n, m)
+        seen = {}
+        import scipy.optimize
+        real = scipy.optimize.linprog
+
+        def spy(*args, **kwargs):
+            seen["a_ub"] = kwargs.get("A_ub")
+            return real(*args, **kwargs)
+
+        import unittest.mock
+        with unittest.mock.patch.object(scipy.optimize, "linprog", spy):
+            _solve_lp(supply, demand, dist)
+
+        got = scipy.sparse.coo_matrix(seen["a_ub"]).toarray()
+        want = np.zeros((n + m, n * m))
+        for i in range(n):
+            for j in range(m):
+                want[i, i * m + j] = 1.0
+                want[n + j, i * m + j] = 1.0
+        assert np.array_equal(got, want)
+
+    def test_two_hundred_regions_each_side_still_solves_and_is_optimal(self):
+        """The case the dense build made expensive. 400 constraints, 40,000 variables."""
+        n = m = 200
+        supply, demand, dist = self._problem(n, m)
+
+        lp = _solve_lp(supply, demand, dist)
+        assert lp is not None
+
+        # Every constraint holds: no source ships more than it has, no sink takes more
+        # than it needs.
+        shipped = [0.0] * n
+        received = [0.0] * m
+        for mv in lp:
+            shipped[mv["from"]] += mv["volume_m3"]
+            received[mv["to"]] += mv["volume_m3"]
+        assert all(shipped[i] <= supply[i] + 1e-6 for i in range(n))
+        assert all(received[j] <= demand[j] + 1e-6 for j in range(m))
+
+        # It moved everything movable, and did so at no greater cost than greedy.
+        movable = min(sum(supply), sum(demand))
+        assert sum(mv["volume_m3"] for mv in lp) == pytest.approx(movable, rel=1e-6)
+        greedy = _solve_greedy(supply, demand, dist)
+        lp_moment = sum(mv["volume_m3"] * mv["distance_m"] for mv in lp)
+        greedy_moment = sum(mv["volume_m3"] * mv["distance_m"] for mv in greedy)
+        assert lp_moment <= greedy_moment + 1e-6
+
+    def test_the_two_hundred_case_stays_well_under_the_dense_footprint(self):
+        """A pin on the allocation, because that is the quantity R-6 moves.
+
+        Dense would be 128 MB for `A_ub` alone and measured 394 MB peak. The bound is
+        set at 64 MB: far under what dense costs, far over what sparse needs, so it
+        fails loudly on a regression and does not flake on solver internals.
+        """
+        import tracemalloc
+
+        n = m = 200
+        supply, demand, dist = self._problem(n, m)
+        tracemalloc.start()
+        try:
+            _solve_lp(supply, demand, dist)
+            _cur, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        dense_mb = (n + m) * (n * m) * 8 / 1e6
+        assert peak / 1e6 < 64.0, (
+            f"peak allocation {peak / 1e6:.1f} MB for a {n}x{m} problem; the dense "
+            f"A_ub alone is {dense_mb:.0f} MB, so this reads like it came back"
+        )
+
+
 class TestEndToEnd:
     def test_a_cut_beside_a_fill_produces_a_short_haul(self):
         original = np.full((N, N), 50.0)
