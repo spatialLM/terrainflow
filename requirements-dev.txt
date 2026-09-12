@@ -37,3 +37,10 @@ matplotlib>=3.5
 
 # Linting / formatting
 ruff>=0.4.0
+
+# Dead-code detection. Not run in CI and not a gate: it is the tool for a *pass*, and
+# the last one (Batch 5 — M-13, Q-17, Q-18) had to be done by hand with grep because
+# this was neither installed nor declared. Declared now so the next pass is cheaper.
+# Expect false positives on Qt slots and on `@property`, which are referenced by name
+# from outside Python; read its output, do not act on it.
+vulture>=2.11

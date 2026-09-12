@@ -9,7 +9,7 @@ Provides:
     keypoint at their change, and generates cultivation runs with the drift measured.
 
 All geometry returned as shapely objects (or plain dicts with x/y for points).
-Display is handled by terrain_flow.py.
+Display is handled by the QGIS tier (`qgis/controllers/contour.py`).
 """
 
 import warnings

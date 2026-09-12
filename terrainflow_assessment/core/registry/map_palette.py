@@ -25,6 +25,15 @@ Two rules the stops here follow, because the report leans on both:
   an aerial still hands the basemap's own lightness range to a ramp whose whole
   low end is light.
 
+  Stated precisely, so it can be tested rather than remembered: **a ramp has at
+  most one transparent stop, it sits at the absence end** — zero runoff, zero
+  erosion, driest, planar — **and every other stop is fully opaque.**
+  ``tests/test_map_palette.py`` asserts exactly that, over every ramp in this
+  file. It said "one bounded exception" for a while and there were three: the
+  exception below, plus ``WETNESS_INDEX`` and ``EROSIVE_POWER``, which turned out
+  to follow the rule already, plus ``CURVATURE``, which did not — its flanking
+  stops sat at alpha 200, so opacity climbed with |curvature|. They are 255 now.
+
   **Surface runoff takes one bounded exception**, and it is a fade-in rather
   than a magnitude encoding. Below :data:`SURFACE_RUNOFF_FADE_TOP_M3` the ramp
   is one colour, so alpha is the only channel left and nothing can be
@@ -265,9 +274,13 @@ EROSIVE_POWER = (
 #: standing water.
 CURVATURE = (
     (-1.0, (13, 106, 110, 255), "concave"),
-    (-0.35, (110, 178, 180, 200), "gathering"),
+    # 255, not 200. The flanking stops used to sit at 200, so alpha climbed
+    # 0 -> 200 -> 255 with |curvature| — magnitude, which is the encoding the header
+    # above rules out and the one that makes a shallow feature indistinguishable
+    # from bare ground. The planar midpoint stays the single absence stop.
+    (-0.35, (110, 178, 180, 255), "gathering"),
     (0.0, (245, 245, 240, 0), "planar"),
-    (0.35, (214, 172, 106, 200), "shedding"),
+    (0.35, (214, 172, 106, 255), "shedding"),
     (1.0, (140, 88, 20, 255), "convex"),
 )
 

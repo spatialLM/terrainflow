@@ -66,7 +66,11 @@ change to the `qgis/` layer.
   synthetic DEM, `PluginHarness`
 - `checks_*.py` — the checks; any module-level `check_*(dem_path)` function is
   discovered automatically
-- `checks_slow.py` — quarantined checks that do not complete; excluded from a
+- (`checks_slow.py` is gone: it held only `recommend_ponds`, whose "does not
+  terminate" was a modal dialog waiting offscreen for a click. The harness records
+  those now, so it runs in seconds and lives in `checks_contour`. `OPT_IN_MODULES`
+  is kept as a mechanism — quarantining beats deleting a check that found
+  something real.)
   routine run by naming the other modules explicitly, or run with a big
   `--timeout` when you want to chase them
 - `run_all.py` — discovery, per-module process isolation, timeouts, reporting

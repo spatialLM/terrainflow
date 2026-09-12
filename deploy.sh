@@ -3,7 +3,40 @@ set -euo pipefail
 
 PLUGIN_NAME="terrainflow_assessment"
 SRC="$(dirname "$0")/${PLUGIN_NAME}"
-DEST="/c/Users/liamm/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins/${PLUGIN_NAME}"
+
+# The profile to deploy into, from the environment rather than from a name typed
+# once on a machine that no longer exists. This read `/c/Users/liamm/...`, which is
+# not this user: `mkdir -p` below happily created the whole phantom tree, both
+# sanity gates counted the files it had just copied there and passed, "Done"
+# printed, and QGIS went on running the previous build. A deploy that reports
+# success and deploys nothing is worse than one that fails. deploy.ps1 has always
+# read $env:APPDATA; this is the same thing in the shell's spelling.
+APPDATA_DIR="${APPDATA:-}"
+if [ -z "$APPDATA_DIR" ]; then
+    echo "APPDATA is not set, so there is no QGIS profile to deploy into." >&2
+    exit 1
+fi
+# MSYS/Git Bash leaves APPDATA in Windows form (C:\Users\...); cygpath converts it
+# when available, and the manual substitution covers a plain POSIX shell.
+if command -v cygpath >/dev/null 2>&1; then
+    APPDATA_DIR="$(cygpath -u "$APPDATA_DIR")"
+else
+    APPDATA_DIR="/$(echo "$APPDATA_DIR" | sed -e 's|\\|/|g' -e 's|^\([A-Za-z]\):|\1|')"
+fi
+
+PLUGINS_DIR="${APPDATA_DIR}/QGIS/QGIS3/profiles/default/python/plugins"
+DEST="${PLUGINS_DIR}/${PLUGIN_NAME}"
+
+# Refuse rather than create. The plugins directory exists on any machine that has
+# run QGIS once; if it is absent, either QGIS has never run here or APPDATA points
+# somewhere unexpected — and in both cases making the directory would produce a
+# deploy nobody can load, reported as a success.
+if [ ! -d "$PLUGINS_DIR" ]; then
+    echo "No QGIS plugins directory at:" >&2
+    echo "    $PLUGINS_DIR" >&2
+    echo "Run QGIS once to create the default profile, or check APPDATA." >&2
+    exit 1
+fi
 
 # Build artefacts that must never reach the profile. See deploy.ps1 for the full
 # reasoning: run_qgis_tests.ps1 leaves cpython-312 bytecode in the source tree,

@@ -1,5 +1,9 @@
-"""Tests for plugin/processing/keyline_analysis.py (and its identical copy
-terrainflow_assessment/modules/keypoint_analysis.py)."""
+"""Tests for ``modules/keypoint_analysis`` — keypoints, ridgelines and keylines.
+
+It was "and its identical copy": there were two of this module, one under the
+retired `plugin/` tree. That tree was archived outside the repo on 2026-09-12 and
+this is the only copy.
+"""
 import pathlib
 
 import numpy as np

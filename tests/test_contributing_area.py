@@ -1,4 +1,4 @@
-"""Tests for plugin/processing/contributing_area.py"""
+"""Tests for ``modules/catchment.fast_contributing_area``."""
 
 import geopandas as gpd
 import numpy as np

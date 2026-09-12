@@ -1,4 +1,4 @@
-"""Tests for plugin/processing/scs_runoff.py"""
+"""Tests for ``modules/catchment.SCSRunoff`` — the curve-number runoff model."""
 import csv
 
 import numpy as np

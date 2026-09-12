@@ -186,7 +186,7 @@ def build_synthetic_dem(path, pond=False, rough=False, pits=0, voids=0,
     **The nasty variant.** ``rough``/``pits``/``voids`` deliberately spoil the surface.
     The default is pathologically *kind* — smooth, depression-free and hole-free — so
     pit filling, nodata propagation and anything that has to cope with a jagged contour
-    are never exercised by the 259 checks that run over it. Those are exactly the
+    are never exercised by the checks that run over it. Those are exactly the
     failure modes real farm LiDAR would find::
 
         build_synthetic_dem(p)                              # smooth: 0 sinks

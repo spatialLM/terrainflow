@@ -31,7 +31,6 @@ omit = [
     "terrainflow_assessment/rainfall_data_dialog.py",      # QDialog + QTableWidget
     "terrainflow_assessment/map_tools/*",      # Qt map-canvas interaction
     "terrainflow_assessment/qgis/*",           # Qt/QGIS adapter + controller layer
-    "terrainflow_assessment/terrainflow_assessment/*",  # old nested duplicate (pending deletion)
 ]
 
 [tool.coverage.report]

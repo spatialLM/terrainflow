@@ -1,9 +1,19 @@
-"""Acceptance harness for the crest split, measured on the real Quail Island burn.
+"""p_crest_split_ledger — the crest split's conservation ledger, on a real burn.
+
+Moved here from ``CLudeDocs/wip/`` (H-7), which is a docs folder and outside both
+test globs, so nothing ever ran it and nothing ever would. It uses the shipped
+``FlowAnalysis.run(crest_split=...)`` API, not the superseded draft that sat
+beside it — that draft was `plan_crest_split`/`CrestSplit`, which shipped as
+`plan_crest_absorption`/`CrestPlan`/`CrestSpread`, and has been deleted.
+
+**It needs artefacts this repo does not carry** (`burned.tif`, `own.npy`,
+`burned.npy` from Round 14), so it is a probe you point at a working directory
+rather than one that runs on the fixture. It records; it does not assert.
 
 Run it from the directory holding the Round 14 artefacts (``burned.tif``, ``own.npy``,
 ``burned.npy``) under plain CPython — no QGIS needed:
 
-    python -B measure_crest_split.py
+    python -B p_crest_split_ledger.py
 
 What it checks, and the figures it should print (Round 15, 858x1027, 1 m, dinf):
 

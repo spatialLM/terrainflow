@@ -578,3 +578,45 @@ def test_no_per_feature_dict_is_keyed_on_a_bare_name():
         "these key a dict on a feature's name, which two features can share — use "
         "`x.id or x.name`:\n  " + "\n  ".join(offenders)
     )
+
+
+# ------------------------------------------------- counts that move every commit
+
+#: Where a stale count was found, and where one would be read as authoritative.
+_COUNT_QUOTING_FILES = (
+    "CLAUDE.md",
+    "tests_qgis/README.md",
+    "tests_qgis/_harness.py",
+    "tests_qgis/checks_robustness.py",
+)
+
+#: "2,590 tests", "200 checks", "the 259 checks". Durations are deliberately not
+#: matched: they are what a reader plans around and they move slowly.
+_COUNT_QUOTE = re.compile(r"\b\d[\d,]*\s+(?:tests|checks)\b", re.IGNORECASE)
+
+
+def test_the_docs_do_not_quote_a_test_or_check_count():
+    """H-3 / H-4 / H-9. Every count these files quoted was wrong, in both directions.
+
+    CLAUDE.md said "~2,590 tests" against 2,974 and "200 checks" against 306;
+    ``_harness.py`` and ``checks_robustness.py`` both said "the 259 checks"; the
+    tests_qgis README described a ``checks_slow.py`` that no longer exists. None of
+    it was load-bearing and all of it was quietly false, because a figure that
+    changes on most commits is one nobody re-measures.
+
+    So the rule is: **do not quote one.** "It takes under a minute" and "8-10 min"
+    are what a reader actually needs, and they stay true. If a count ever genuinely
+    earns its place, derive it at read time rather than typing it.
+    """
+    offenders = []
+    for rel in _COUNT_QUOTING_FILES:
+        path = REPO / rel
+        if not path.exists():
+            continue
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for hit in _COUNT_QUOTE.finditer(line):
+                offenders.append(f"{rel}:{i}: {hit.group(0)!r} in {line.strip()[:70]}")
+    assert not offenders, (
+        "these quote a test/check count, which goes stale on the next commit and "
+        "is then read as authoritative:\n  " + "\n  ".join(offenders)
+    )

@@ -6,7 +6,7 @@ QGIS plugin for NZ land managers / permaculturists: drainage analysis + earthwor
 ## Where the code lives
 
 - **`terrainflow_assessment/` is the active codebase.** All new work goes here.
-- **`plugin/` is the retired original** (bloated monolith). Do not develop in it; reference only.
+- **The retired original was archived outside the repo on 2026-09-12** (`F:\Terrain Flow Design\_archive\plugin_legacy\`). It was a dangling gitlink with no `.gitmodules`, so a fresh clone got an empty `plugin/` directory; nothing in the package, either suite, `deploy.ps1`, `deploy.sh` or CI ever read it.
 - Never create a nested `terrainflow_assessment/terrainflow_assessment/` folder (packaging accident — guarded in `.gitignore`).
 
 ## Architecture — a layered split (respect it)
@@ -41,10 +41,13 @@ the run tag (`_state.run_tag`, frozen when Baseline runs).
 
 Raster overlay colours live in `core/registry/map_palette.py` — one set of stops per
 quantity, read by the renderers, the panel key and the report legend alike. Two rules
-it holds: **darker means more water**, and **alpha is for absence, not magnitude**.
-Surface runoff takes the one bounded exception: below `SURFACE_RUNOFF_FADE_TOP_M3`
-(2 m³) the ramp is a single colour fading to nothing, so no two stops can re-order
-against each other. Whole-layer opacity is not used anywhere.
+it holds: **darker means more water**, and **alpha is for absence, not magnitude** —
+a ramp has at most one transparent stop, it sits at the absence end (zero runoff,
+zero erosion, driest, planar), and every other stop is fully opaque.
+`tests/test_map_palette.py` asserts that over every ramp in the file. Surface runoff
+takes the one bounded exception: below `SURFACE_RUNOFF_FADE_TOP_M3` (2 m³) the ramp
+is a single colour fading to nothing, so no two stops can re-order against each
+other. Whole-layer opacity is not used anywhere.
 
 A Baseline layer and its Earthworks counterpart must share one ramp top — go through
 `_symbols.apply_shared_ramp(state, project, family, layer, stops)`, never
@@ -323,7 +326,7 @@ Only add/modify what's asked — no drive-by refactors of working code.
   reads a `.ps1` as ANSI and a stray em dash is a parse error — enforced by
   `tests/test_architecture.py`, which also guards the layering rules below.
 - **Tests:** `python -m pytest tests/` (target Python 3.9) — **run the whole suite; do not
-  scope it.** ~2,590 tests in ~60 s (~70 s with coverage), and the profile is flat (one test over
+  scope it.** It takes under a minute, and the profile is flat (one test over
   2 s), so there is no slow tail to skip. Scoping saves under a minute and costs
   correctness: `earthwork_design.py` fans out to 11 test files and `catchment.py` to 6,
   and there is no `modules/earthwork.py` or `modules/dem_burner.py` despite tests named
@@ -348,7 +351,7 @@ signals and real mouse events. It lives **outside** `terrainflow_assessment/` on
 only that folder is deployed or zipped, so none of it can reach a shipped build.
 
 ```powershell
-.\run_qgis_tests.ps1              # the full suite, headless, 8-10 min (200 checks). Exit code gates.
+.\run_qgis_tests.ps1              # the full suite, headless, 8-10 min. Exit code gates.
 #                                   longer than a 10-min tool timeout — background it.
 .\run_qgis_tests.ps1 checks_baseline   # one module, ~30-40 s. This is the iteration loop.
 .\run_qgis_tests.ps1 --skip=checks_report   # everything else

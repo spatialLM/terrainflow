@@ -16,9 +16,14 @@ Thumbs.db
 *.swp
 *.swo
 
-# Nested-plugin guard (should never exist)
+# Nested-package guard (should never exist)
 terrainflow_assessment/terrainflow_assessment/
-plugin/plugin/
+
+# The retired original, archived outside the repo on 2026-09-12. It was a dangling
+# gitlink with no .gitmodules, so a fresh clone got an empty directory and
+# `git submodule` reported no mapping. Ignored whole so a stray copy back into
+# place cannot re-add it.
+/plugin/
 
 # Stray shapefiles saved to the repo ROOT (QGIS scratch layers) — root-anchored
 # so real shapefiles under data/ etc. are still tracked.
@@ -41,7 +46,7 @@ plugin/plugin/
 tests_qgis/_shots/
 tests_qgis/_shots_baseline/
 
-# GDAL statistics sidecars � regenerated whenever a raster is read
+# GDAL statistics sidecars - regenerated whenever a raster is read
 *.aux.xml
 
 # QGIS writes a style database beside whatever profile it boots with; the check

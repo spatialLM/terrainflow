@@ -62,8 +62,36 @@ Identifies the key hydrological features of the landscape for Yeomans-style keyl
 ### Storm simulation
 A time-stepped flow simulation partitions storm rainfall into discrete timesteps and computes weighted flow-accumulation for each step. Outputs include incremental (per-step) and cumulative rasters, with animated playback in QGIS.
 
+### Verification, and what it is measured against
+Every feature carries three volumes, and the report prints all three because they
+answer different questions: **Geometric** is the section you drew over the length you
+drew it, **At grid** is the largest version of that section the cell size can actually
+hold, and **Measured** is what the burned terrain ponds when it is flooded. The gap
+between the first two is resolution; the gap between the second and the third is the
+hillside — a keyed bank holds water above natural ground, and on a real design that is
+most of the storage.
+
+### Spillways
+Each holding feature can carry a sited overflow. The crest is a design decision, but
+*where* it sits is a decision about ground, so it is placed by clicking the map and the
+crest is pinned to a sampled elevation. Widths are sized from the peak flow via a
+broad-crested weir, and the burn cuts the notch into the terrain so the measured
+capacity reflects it. The overtopping check reports which barriers their own pools
+would pour over, and along what length of crest — a level crest does not spill at a
+point.
+
+### Time of concentration and peak flow
+Design intensity comes from the rational method, which needs a duration: TR-55
+segmental travel time (sheet, shallow concentrated, channel) measured down the longest
+flow path, not a rule of thumb. Rainfall depths come from a HIRDS table you paste in,
+so the intensity is the site's own rather than a national average.
+
+### Mass haul
+Cut and fill are matched into haul pairs — which spoil goes to which fill and how far
+it travels — so the earthworks can be priced on movement rather than on volume alone.
+
 ### Session management
-Save and reload design sessions as `.tflow` files — preserving earthwork geometries, CN zones, analysis settings, and DEM path. Reload a session, re-run baseline, and continue where you left off.
+Save and reload design sessions as `.tfd` files — a zip holding the design and, optionally, a clip of the DEM. Earthwork geometries, the three areas (boundary, analysis, earthworks), the run inputs and the rainfall table all travel. The DEM travels either as an embedded clip or as a fingerprint the opening machine checks a located file against, so a design that moves between machines cannot silently open on the wrong terrain. Reload a session, re-run baseline, and continue where you left off.
 
 ---
 
@@ -83,18 +111,26 @@ QGIS plugin manager installation is under development. Current installation is v
 
 **Requirements:**
 - QGIS 3.x
-- Python 3.8+
+- Python 3.9+
 - pysheds
 - rasterio
 - numpy
 - scipy
 - shapely
 - geopandas
+- scikit-image
+- matplotlib
 
 **Install dependencies:**
 ```bash
-pip install pysheds rasterio numpy scipy shapely geopandas
+pip install pysheds rasterio numpy scipy shapely geopandas scikit-image matplotlib
 ```
+
+`scikit-image` and `matplotlib` are production dependencies, not extras: the
+contour fallback imports `skimage.measure` unguarded and the report imports
+`matplotlib`, so without them a first contour run or a first report raises
+`ModuleNotFoundError`. The QGIS image ships both, which is why this went unnoticed
+— it only bites a clean environment.
 
 **Install the plugin:**
 
@@ -142,7 +178,7 @@ TerrainFlow is designed to work with freely available DEM data. For New Zealand:
 - [x] Ponding analysis and Ponding Query Tool
 - [x] Keyline design (keypoints, ridgelines, pond sites, cultivation lines)
 - [x] Time-stepped storm simulation with animated playback
-- [x] Session save/load (.tflow files)
+- [x] Session save/load (.tfd files)
 - [x] QGIS 3.22+ LTR API longevity (QMetaType, writeAsVectorFormatV3, scoped Qt enums)
 - [x] Modular `core/` + `qgis/` architecture — registry, adapters, controllers, workers
 - [x] 95%+ test coverage on pure-Python modules (pytest, branch coverage gate)

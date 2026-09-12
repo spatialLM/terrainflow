@@ -3,7 +3,7 @@
 Every other module in this suite runs against the smooth synthetic surface,
 which is deliberately kind: no noise, no closed depressions, no nodata. Real
 farm LiDAR has all three, and none of the code that has to cope with them is
-touched by the other 259 checks.
+touched by the other checks.
 
 These build their own fixture via ``build_synthetic_dem(rough=..., pits=...,
 voids=...)`` rather than using the shared one, so the smooth default and all

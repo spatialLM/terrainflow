@@ -10,12 +10,16 @@ rather than for magnitude.
 import pytest
 
 from terrainflow_assessment.core.registry.map_palette import (
+    ASPECT_CLASSES,
+    CURVATURE,
     DEFAULT_SURFACE_RUNOFF_SCALE,
+    EROSIVE_POWER,
     STREAMS,
     SURFACE_RUNOFF_COLOURS,
     SURFACE_RUNOFF_FADE_TOP_M3,
     SURFACE_RUNOFF_SCALES,
     WATER_CAPTURED,
+    WETNESS_INDEX,
     hex_of,
     surface_runoff_alpha,
     surface_runoff_ramp,
@@ -24,6 +28,81 @@ from terrainflow_assessment.core.registry.map_palette import (
 
 RAMPS = {"streams": STREAMS, "water captured": WATER_CAPTURED,
          "surface runoff": surface_runoff_ramp()}
+
+#: Every ramp in the file, including the four `RAMPS` leaves out.
+#:
+#: `RAMPS` is the set whose *shape* is asserted — ascending fractions from 0.0 to 1.0,
+#: monotone darkening. Four ramps cannot join it: `CURVATURE` diverges about a midpoint
+#: so its darkening is not monotone, and `ASPECT_CLASSES` is categorical and measured in
+#: compass degrees, not a 0-1 fraction.
+#:
+#: The **alpha** rule has no such excuse — it is about absence versus magnitude and
+#: applies to a diverging and a categorical ramp exactly as it does to a sequential one.
+#: Leaving them out is how `CURVATURE` came to encode |curvature| as opacity while the
+#: module header said, in bold, that nothing does (H-10).
+ALL_RAMPS = {
+    "streams": STREAMS,
+    "water captured": WATER_CAPTURED,
+    "surface runoff": surface_runoff_ramp(),
+    "wetness index": WETNESS_INDEX,
+    "erosive power": EROSIVE_POWER,
+    "curvature": CURVATURE,
+    "aspect classes": ASPECT_CLASSES,
+}
+
+#: Ramps that diverge about a midpoint, where the absence stop is that midpoint
+#: rather than the first stop.
+_DIVERGING = {"curvature"}
+
+
+class TestAlphaIsForAbsence:
+    """H-10. The rule the module header states in bold, asserted over every ramp.
+
+    Stated so it can be tested rather than remembered: a ramp has **at most one**
+    transparent stop, it sits at the **absence** end, and every other stop is fully
+    opaque. Surface runoff's documented exception is a fade *below* the ramp's
+    bottom stop, so it does not appear in the tuples these read.
+
+    `CURVATURE` failed this the day it was written — `gathering` and `shedding` sat
+    at alpha 200, so opacity climbed 0 -> 200 -> 255 with |curvature|. That is the
+    magnitude encoding the header rules out, and the reason it survived is that the
+    test set stopped at three ramps.
+    """
+
+    @pytest.mark.parametrize("name", sorted(ALL_RAMPS))
+    def test_at_most_one_stop_is_transparent(self, name):
+        transparent = [label for _f, rgba, label in ALL_RAMPS[name] if rgba[3] == 0]
+        assert len(transparent) <= 1, (
+            f"{name} has {len(transparent)} transparent stops ({transparent}); "
+            f"absence is one place on a ramp, not a range"
+        )
+
+    @pytest.mark.parametrize("name", sorted(ALL_RAMPS))
+    def test_every_other_stop_is_fully_opaque(self, name):
+        partial = [(f, rgba[3], label) for f, rgba, label in ALL_RAMPS[name]
+                   if rgba[3] not in (0, 255)]
+        assert not partial, (
+            f"{name} carries partial alpha at {partial} — opacity between 0 and 255 "
+            f"encodes magnitude, which is what this rule forbids"
+        )
+
+    @pytest.mark.parametrize("name", sorted(ALL_RAMPS))
+    def test_the_transparent_stop_is_the_absence_end(self, name):
+        ramp = ALL_RAMPS[name]
+        transparent = [i for i, (_f, rgba, _l) in enumerate(ramp) if rgba[3] == 0]
+        if not transparent:
+            return                      # no absence stop is allowed (ASPECT_CLASSES)
+        index = transparent[0]
+        if name in _DIVERGING:
+            assert ramp[index][0] == 0.0, (
+                f"{name} diverges, so its transparent stop must be the 0.0 midpoint, "
+                f"not the stop at {ramp[index][0]}"
+            )
+        else:
+            assert index == 0, (
+                f"{name}'s transparent stop is {ramp[index][2]!r} at position "
+                f"{index}, not the first stop — alpha would then rise and fall"
+            )
 
 
 def _luma(rgba):

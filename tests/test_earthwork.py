@@ -1,4 +1,4 @@
-"""Tests for plugin/processing/earthwork.py"""
+"""Tests for ``modules/earthwork_design`` — the Earthwork model and its sizing."""
 import math
 
 import pytest

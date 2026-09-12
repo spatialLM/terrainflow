@@ -1,4 +1,4 @@
-"""Tests for plugin/processing/dem_burner.py"""
+"""Tests for ``modules/earthwork_design.DEMBurner`` — the burn itself."""
 
 from types import SimpleNamespace
 
