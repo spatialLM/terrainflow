@@ -46,6 +46,28 @@ for p in (str(HERE), str(HERE.parent)):
 
 DEFAULT_TIMEOUT_S = 300
 
+# T-4. The orchestrator has to be able to name the check that was running when a
+# module timed out or crashed, and it could not: the worker writes `"  name ... "`
+# with no newline so the reader is still blocked on it, and by the time the line
+# does arrive it ends in `ok` or `FAIL` rather than `...`. Every TIMEOUT therefore
+# reported "(before the first check)" — the one thing the line exists to tell you,
+# and what would have short-circuited the 300 s `recommend_ponds` quarantine.
+#
+# So the worker prints a *terminated* marker line first, and the orchestrator eats
+# it rather than echoing it: the human-visible output is unchanged, and the two
+# halves of the protocol are defined next to each other so they cannot drift.
+_STARTED = "@@START "
+
+
+def started_line(name):
+    """What the worker prints before running *name*."""
+    return f"{_STARTED}{name}"
+
+
+def check_started(line):
+    """The check name if *line* is a start marker, else None."""
+    return line[len(_STARTED):].strip() if line.startswith(_STARTED) else None
+
 # Modules skipped unless named explicitly on the command line. Empty since Round 15:
 # `checks_slow` held only `recommend_ponds`, whose "does not terminate" was a modal
 # QMessageBox waiting for a click that never comes offscreen — the harness records those
@@ -133,8 +155,10 @@ def run_worker(module_name, patterns):
 
     passed = failed = 0
     for name, fn in checks:
-        # The orchestrator reads this line to name the culprit if we time out, so
-        # it must be flushed before the check starts.
+        # A terminated line the orchestrator can actually read, so a timeout or a
+        # crash can name this check. It is swallowed on the way through, so the
+        # visible output is still the one line below.
+        print(started_line(name), flush=True)
         print(f"  {name} ... ", end="", flush=True)
         try:
             fn(dem_path)
@@ -215,12 +239,16 @@ def run_module_isolated(module_name, patterns, timeout_s, dem_path):
             passed, failed = int(p), int(f)
             saw_result = True
             continue
-        if stripped.startswith("--- ") or (body and not stripped.startswith("  ")):
+        if check_started(stripped) is None and (
+                stripped.startswith("--- ")
+                or (body and not stripped.startswith("  "))):
             body.append(stripped)
             continue
 
-        if stripped.strip().endswith("..."):
-            last_started = stripped.strip()[:-4].strip()
+        started = check_started(stripped)
+        if started is not None:
+            last_started = started
+            continue          # protocol, not output
         print(stripped, flush=True)
 
     proc.wait()

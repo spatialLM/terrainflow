@@ -178,7 +178,10 @@ class TestYeomansKeylineAnalysis:
         dem_path, _ = _make_valley_dem(tmp_path)
         ya = YeomansKeylineAnalysis(dem_path)
         kp = ya.find_keypoint()
-        with pytest.warns(DeprecationWarning):
+        # `match=`, because this module raises two different DeprecationWarnings —
+        # the other is the `KeylineAnalysis` rename — and a bare `pytest.warns`
+        # would pass on whichever happened to fire.
+        with pytest.warns(DeprecationWarning, match="cross_grade is gone"):
             ya.get_cultivation_runs(kp, n_runs=1, cross_grade=1 / 500)
 
     def test_cultivation_run_geometry_has_z_coords(self, tmp_path):

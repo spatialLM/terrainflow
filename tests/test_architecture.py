@@ -433,3 +433,148 @@ def test_every_help_text_constant_reaches_a_widget():
         "them to the widget they describe, or delete them:\n  "
         + "\n  ".join(orphans)
     )
+
+
+# ------------------------------------------------- T-3: rules that had no check
+
+CORE = PKG / "core"
+MAP_TOOLS = PKG / "map_tools"
+EARTHWORK_DESIGN_PY = MODULES / "earthwork_design.py"
+SYMBOLS_PY = CONTROLLERS / "_symbols.py"
+
+
+def test_core_does_not_import_qgis_at_import_time():
+    """The same rule as ``modules/``, over the tier the scan was not walking.
+
+    ``core/`` is the sizing and registry layer and is imported by ``modules/``, so a
+    module-level ``import qgis`` there makes the pure tier unimportable exactly as it
+    would in ``modules/`` — and the scan looked only at ``modules/``, so it would
+    have found nothing to say about it.
+    """
+    offenders = []
+    for path in _py_files(CORE):
+        for name, lineno in _import_time_modules(_parse(path)):
+            if name == "qgis" or name.startswith("qgis."):
+                offenders.append(f"{path.relative_to(PKG)}:{lineno} imports {name}")
+    assert not offenders, (
+        "core/ must import qgis only inside a function:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_only_the_shared_ramp_helper_applies_a_raster_ramp():
+    """"Never call ``apply_raster_ramp`` directly" — CLAUDE.md.
+
+    A Baseline layer and its Earthworks counterpart have to be scaled against each
+    other or a colour means a different depth on each, and the before/after toggle
+    compares two different pictures. ``apply_shared_ramp`` is what holds the family
+    top; a direct call scales a layer against itself.
+
+    Q-10 was the live violation this would have caught — the simulation frame's
+    stream layer, scaled alone.
+
+    Two files may call it. ``_symbols.py`` defines it and ``apply_shared_ramp`` is
+    built on it; ``terrain.py``'s layers have no Baseline/Earthworks counterpart to
+    share a top with, so there is no family for them to join.
+    """
+    allowed = {SYMBOLS_PY.resolve(), (CONTROLLERS / "terrain.py").resolve()}
+    offenders = []
+    for path in _py_files(PKG):
+        if path.resolve() in allowed:
+            continue
+        for node in ast.walk(_parse(path)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "apply_raster_ramp"):
+                offenders.append(f"{path.relative_to(PKG)}:{node.lineno}")
+    assert not offenders, (
+        "these call apply_raster_ramp directly instead of apply_shared_ramp, so "
+        "their layer is scaled against itself:\n  " + "\n  ".join(offenders)
+    )
+
+
+#: ``_rasterize`` calls that may leave ``all_touched`` to the default, by the method
+#: they sit in. Both are questions about *position*, not about how much earth moved.
+_ALL_TOUCHED_EXEMPT = {
+    # Which side of the line is downhill. A band one cell wider on both sides
+    # changes no volume — it is a comparison of two means.
+    "_downstream_footprint",
+}
+
+
+def test_every_rasterize_call_states_all_touched():
+    """M-1. ``_rasterize`` defaults to ``all_touched=True``, and for a volume that
+    is wrong: it claims every cell the geometry *touches*, so a 2.0 m diversion on a
+    1 m DEM cuts a band about 1.3 m wider than drawn and the measured cut — the
+    column the report tells a contractor to price the job on — over-reads by tens of
+    percent.
+
+    The module's own docstring said so while three burns still took the default.
+    A default nobody can see is not a decision, so every call has to make one; the
+    exemptions are listed above with the reason each is a position question rather
+    than a volume one.
+    """
+    tree = _parse(EARTHWORK_DESIGN_PY)
+    enclosing = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                enclosing.setdefault(id(node), fn.name)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_rasterize"):
+            continue
+        owner = enclosing.get(id(node), "<module>")
+        if owner in _ALL_TOUCHED_EXEMPT:
+            continue
+        if not any(kw.arg == "all_touched" for kw in node.keywords):
+            offenders.append(f"earthwork_design.py:{node.lineno} in {owner}()")
+    assert not offenders, (
+        "these _rasterize calls take the all_touched default, so whether they claim "
+        "a band wider than the section drawn is invisible at the call site:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def _feature_ish(node):
+    """Is *node* a ``<something>.name`` attribute read?"""
+    return isinstance(node, ast.Attribute) and node.attr == "name"
+
+
+def test_no_per_feature_dict_is_keyed_on_a_bare_name():
+    """Q-7 / M-3. Two features can carry the same name, and routinely do.
+
+    The default name counter reproduces a deleted feature's name — draw "Swale 3",
+    delete it, draw another, and there are two. A dict keyed on the name then has
+    one entry where there should be two, and which of the pair survives is whichever
+    was written last: one feature's fill timeline drawn from the other's data, and a
+    freeboard advisory reporting the wrong feature's spillway.
+
+    The fix everywhere was ``key = ew.id or ew.name`` — a name is a *label*, and the
+    id is the identity. That is still allowed, and is what this permits: the key may
+    *fall back* to a name, it may not *be* one.
+    """
+    offenders = []
+    for root in (MODULES, CONTROLLERS):
+        for path in _py_files(root):
+            tree = _parse(path)
+            for node in ast.walk(tree):
+                targets = []
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, ast.AugAssign):
+                    targets = [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Subscript) and _feature_ish(t.slice):
+                        offenders.append(
+                            f"{path.relative_to(PKG)}:{node.lineno}: "
+                            f"{ast.unparse(t)} = ...")
+                if isinstance(node, ast.DictComp) and _feature_ish(node.key):
+                    offenders.append(
+                        f"{path.relative_to(PKG)}:{node.lineno}: "
+                        f"{{{ast.unparse(node.key)}: ...}}")
+    assert not offenders, (
+        "these key a dict on a feature's name, which two features can share — use "
+        "`x.id or x.name`:\n  " + "\n  ".join(offenders)
+    )

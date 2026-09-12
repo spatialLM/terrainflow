@@ -715,14 +715,24 @@ class PluginHarness:
 
         Texts are de-duplicated because curved placement reports one position per
         character group — a single "Swale 1" comes back seven times.
+
+        **Raises rather than returning an empty dict** when the labelling engine has
+        nothing to say (T-6). Those two states are not the same thing: "rendered, and
+        placed no labels" is an answer, while "no render has happened" and "the engine
+        threw" are the absence of one. Returning ``{}`` for all three made every
+        *absence* assertion — ``"Swale 1" not in placed`` — pass without a render ever
+        occurring, and an absence that passes vacuously is the one shape of failing
+        test that looks exactly like a passing one. No check relied on it yet; this is
+        so none can.
         """
         results = self.canvas.labelingResults()
         if results is None:
-            return {}
-        try:
-            positions = results.labelsWithinRect(self.canvas.extent())
-        except Exception:
-            return {}
+            raise AssertionError(
+                "the canvas has no labelling results, so nothing can be concluded "
+                "about which labels were drawn — render it first (sync_canvas / "
+                "set_scale), and check the layers actually have labelling enabled"
+            )
+        positions = results.labelsWithinRect(self.canvas.extent())
         out = {}
         for pos in positions:
             out.setdefault(pos.layerID, set()).add(pos.labelText)

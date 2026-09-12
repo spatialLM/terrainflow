@@ -290,11 +290,20 @@ class TestBuildHydrographChart:
         assert isinstance(result, str)
 
     def test_returns_none_without_timestep_data(self):
+        """T-1. With no series on either side there is nothing to draw, and a chart
+        drawn anyway is worse than no chart: a blank full-width panel captioned
+        "Outflow Hydrograph — Before vs After" reads as a measurement showing zero
+        flow, not as a missing measurement.
+
+        The assertion here was ``result is None or isinstance(result, str)``, which
+        is true of every value the function can return — including the blank chart.
+        Its sibling `_build_fill_timeline_chart` has had the guard all along; this
+        one did not, and matplotlib said so on every run ("No artists with labels
+        found to put in legend").
+        """
         b = _baseline(timestep_table=[])
         p = _post(timestep_table=[])
-        # Should still return something (empty axes) or None-ish
-        result = _build_hydrograph_chart(b, p)
-        assert result is None or isinstance(result, str)
+        assert _build_hydrograph_chart(b, p) is None
 
     def test_handles_empty_post_timestep(self):
         b = _baseline()

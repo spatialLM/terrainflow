@@ -1332,8 +1332,20 @@ def _build_hydrograph_chart(baseline: BaselineReport,
                              post: PostInterventionReport, dpi=None):
     """
     Build a before/after outflow hydrograph chart.
-    Returns base64 PNG string or None if matplotlib unavailable.
+    Returns base64 PNG string, or None when there is nothing to draw.
+
+    Nothing to draw means neither side has a timestep table. Without this guard the
+    function drew the axes anyway and returned them, so a comparison with no
+    simulation behind it put a blank full-width panel in the report captioned
+    "Outflow Hydrograph — Before vs After" — which reads as a measurement showing no
+    flow rather than as a measurement that was never taken. ``_build_fill_timeline_
+    chart`` has had the same guard all along; matplotlib flagged the difference on
+    every run ("No artists with labels found to put in legend") and nothing was
+    listening.
     """
+    if not baseline.timestep_table and not post.timestep_table:
+        return None
+
     try:
         import matplotlib
         matplotlib.use("Agg")

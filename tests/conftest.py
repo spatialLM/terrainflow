@@ -33,17 +33,69 @@ class _QThread:
         pass
 
 
-class _PyqtSignal:
-    """Minimal pyqtSignal descriptor stub."""
-    def __init__(self, *args, **kwargs):
+class _BoundSignal:
+    """One object's own signal: the thing `connect` and `emit` actually talk to."""
+
+    __slots__ = ("_callbacks",)
+
+    def __init__(self):
         self._callbacks = []
 
     def connect(self, fn):
         self._callbacks.append(fn)
 
+    def disconnect(self, fn=None):
+        if fn is None:
+            self._callbacks.clear()
+        elif fn in self._callbacks:
+            self._callbacks.remove(fn)
+
     def emit(self, *args):
-        for cb in self._callbacks:
+        # A copy: a slot that disconnects itself is ordinary, and mutating the list
+        # underneath the loop would skip the next one.
+        for cb in list(self._callbacks):
             cb(*args)
+
+
+class _PyqtSignal:
+    """A ``pyqtSignal`` stub that is **per instance**, like the real one.
+
+    ``done = pyqtSignal(object)`` is evaluated once, when the class body runs, so
+    whatever it returns is a *class* attribute. The stub used to return a plain
+    object holding its own callback list — which meant every worker ever built
+    shared one signal: `a.done is b.done`, and emitting on `a` fired `b`'s slots.
+
+    Nothing in the suite passed because of it (only four `.connect()` calls exist),
+    but the failure it produces is the worst shape there is — a slot firing for an
+    unrelated object's result, with nothing pointing back at the mock.
+
+    A descriptor fixes it: the class attribute stays one object, and `__get__`
+    hands each instance its own `_BoundSignal`, cached on the instance so
+    `w.done.connect(...)` and `w.done.emit(...)` reach the same one.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._types = args
+        self._name = None
+
+    def __set_name__(self, owner, name):
+        self._name = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self              # accessed on the class, as PyQt allows
+        key = f"_signal_{self._name or id(self)}"
+        try:
+            bound = obj.__dict__.get(key)
+        except AttributeError:       # __slots__ and no __dict__
+            bound = getattr(obj, key, None)
+        if bound is None:
+            bound = _BoundSignal()
+            try:
+                obj.__dict__[key] = bound
+            except AttributeError:
+                object.__setattr__(obj, key, bound)
+        return bound
 
     def __call__(self, *args, **kwargs):
         # Called as a class attribute: `progress = pyqtSignal(int, str)`

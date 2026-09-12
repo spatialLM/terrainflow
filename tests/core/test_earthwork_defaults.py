@@ -9,6 +9,7 @@ is present for the rest of the session and any count-based assertion would be
 order-dependent.
 """
 
+import dataclasses
 import math
 
 import pytest
@@ -217,7 +218,11 @@ class TestDimensionDefaults:
         assert not DimensionDefaults(bottom_width_m=1.0).is_empty()
 
     def test_is_frozen(self):
-        with pytest.raises(Exception):
+        """T-5. ``pytest.raises(Exception)`` passes on *any* failure, including a
+        typo in the attribute name — which is the mistake this test is most likely
+        to be masking, since a misspelt field on a frozen dataclass raises too.
+        """
+        with pytest.raises(dataclasses.FrozenInstanceError):
             DimensionDefaults().depth = 1.0
 
     def test_nan_is_not_finite(self):
