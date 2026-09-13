@@ -70,6 +70,7 @@ offers_spillway(key) — can be given a designed overflow: has_storage, or a cre
 is_linear_store(key) — a line-drawn feature that holds water along its run (a swale, a
                    cutback bench): the length row, the demand check, keyed-in berm ends.
 name_stem(key)       — what "Swale 3" is named from.
+bench_mode_of(key)   — "level" / "reverse" for a bench-shaped type, else None.
 `tests/test_architecture.py` forbids comparing a type key against "dam" anywhere else.
 """
 
@@ -391,6 +392,14 @@ def is_linear_store(key: str) -> bool:
     except KeyError:
         return False
     return cfg.has_storage and cfg.geom_type == "LineString"
+
+
+def bench_mode_of(key: str) -> str | None:
+    """"level" or "reverse" for a bench-shaped type; None for anything else."""
+    try:
+        return get_type(key).bench_mode
+    except KeyError:
+        return None
 
 
 def name_stem(key: str) -> str:

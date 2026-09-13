@@ -70,6 +70,7 @@ from terrainflow_assessment.modules.footprint import (
     min_dimension,
     pour_point,
     rasterize_footprint,
+    sample_along_line,
     xy_to_rc,
 )
 from terrainflow_assessment.modules.swale_design import line_stations
@@ -1719,6 +1720,33 @@ def berm_batter_run(depth, side_slope=None):
         except KeyError:
             side_slope = 1.0
     return max(0.0, float(side_slope)) * max(0.0, float(depth))
+
+
+def ground_slope_pct_along(coords, transform, slope_deg, cell_size=1.0):
+    """The natural ground slope along a drawn line, in **percent**, or ``None``.
+
+    *slope_deg* is the plugin's slope raster, which is in degrees — the draw tool guards
+    0–90 and prints °. The FAO bench chain takes percent, and feeding degrees straight
+    through would size a 20° hillside as 20 % when it is 36.4 %, with every derived row
+    wrong and nothing to say so.
+
+    Sampled once per cell along the line, and summarised by the **median** of
+    ``tan(θ) × 100`` so a stretch of cliff or a gully the line crosses does not size the
+    whole bench. Holes (NaN, the raster's -9999), and anything outside 0–90°, are not
+    slopes and are dropped. ``None`` when nothing is left — the dialog shows the row as
+    unsampled rather than a zero, and a zero would read as flat ground.
+    """
+    coords = [tuple(map(float, c[:2])) for c in coords]
+    if len(coords) < 2:
+        return None
+    length = LineString(coords).length
+    step = max(float(cell_size), 1e-6)
+    distances = np.arange(0.0, length + step * 0.5, step)
+    values = sample_along_line(coords, transform, np.asarray(slope_deg), distances)
+    values = values[np.isfinite(values) & (values >= 0.0) & (values < 90.0)]
+    if values.size == 0:
+        return None
+    return round(float(np.median(np.tan(np.radians(values)) * 100.0)), 1)
 
 
 def bench_for(ew_type, depth, width, ground_slope_pct):
@@ -3406,7 +3434,7 @@ class DEMBurner:
             if dyke_width > 0:
                 dyke |= self._rasterize(centreline.buffer(dyke_width / 2.0),
                                         all_touched=False)
-            for rc in self._line_path_cells(centreline):
+            for rc in self._edge_connected(self._line_path_cells(centreline)):
                 dyke[rc] = True
             if getattr(ew, "key_into_banks", False):
                 dyke |= self._bench_end_caps(line, mask, bench_width)
@@ -3421,6 +3449,36 @@ class DEMBurner:
         self._record_berm(ew, berm)
         self._warn_sub_cell(ew.name, max(0.0, bench_width - dyke_width))
         return dem
+
+    def _edge_connected(self, cells):
+        """*cells* with every diagonal step filled in, so each pair shares an edge.
+
+        :func:`~terrainflow_assessment.modules.burn_strategy.line_cells` is Bresenham, and
+        a Bresenham path off the grid axes is a staircase whose cells touch only at their
+        corners. That is a connected path and not a wall: depression filling walks
+        diagonals, so water steps straight through every corner. A 0.30 m dyke has no
+        rasterised band to hide this the way a dam wall's does, and a cutback drawn on
+        the 78 m contour of the 1 m fixture held 0 m³ against 43 m³ analytic because of
+        it. Axis-parallel lines — every synthetic test before it — have no diagonals.
+
+        The corner added is the one on **lower original ground**: the outside of the
+        bank, so the pond keeps its cells and the raster dyke is a cell thicker there
+        instead of a cell further in. Out-of-grid corners are skipped.
+        """
+        rows, cols = self.shape
+        out = []
+        for r, c in cells:
+            if out:
+                pr, pc = out[-1]
+                if pr != r and pc != c:
+                    corners = [(a, b) for a, b in ((pr, c), (r, pc))
+                               if 0 <= a < rows and 0 <= b < cols]
+                    if corners:
+                        ground = [float(self.original[a, b]) for a, b in corners]
+                        ground = [g if np.isfinite(g) else np.inf for g in ground]
+                        out.append(corners[int(np.argmin(ground))])
+            out.append((r, c))
+        return out
 
     def _bench_end_caps(self, line, mask, bench_width):
         """The ring of cells touching the platform's two ends, corners included.

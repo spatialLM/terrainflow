@@ -261,3 +261,84 @@ class TestBurn:
         b, ew, out = self._burn(tmp_path)
         assert ew.ground_slope_pct is None
         assert not np.array_equal(out, b.original, equal_nan=True)
+
+
+# ---------------------------------------------------------------- a line off the grid axes
+
+def _diagonal_hillside(tmp_path, grade=0.10, size=30):
+    """A plane falling south-east: its contours are the diagonals ``row + col = k``."""
+    data = np.fromfunction(lambda r, c: 100.0 - (r + c) * grade, (size, size))
+    return _dem(tmp_path, data)
+
+
+class TestDiagonalDyke:
+    """Every burn test above draws the cutback along a grid row, where a cell path is a
+    straight run of edge-sharing cells. A contour almost never runs that way. Drawn
+    along a diagonal, the dyke's sealed path is a Bresenham staircase whose cells touch
+    only at their corners, and depression filling walks corners: on the Quail Island
+    fixture a cutback on the 78 m contour burned a dyke in one piece and held 0 m³
+    against an analytic 43 m³, with no warning."""
+
+    # row + col = 29 in cell centres: (x 5.5, y 5.5) is row 24 col 5.
+    COORDS = ((5.5, 5.5), (24.5, 24.5))
+
+    def test_a_dyke_across_the_grid_still_holds_a_pond(self, tmp_path):
+        ew = _cutback(coords=self.COORDS)
+        b = DEMBurner(_diagonal_hillside(tmp_path))
+        b.burn_earthworks([ew])
+        storage = b.feature_storage(ew)
+        analytic, _ = calculate_capacity(KEY, ew.geometry, ew.depth, ew.width)
+        # No upper bound against the analytic rectangle, unlike the grid-row case above.
+        # Off the axes the ground one cell uphill of the platform stands only a step of
+        # the diagonal above it, below the dyke crest, so the pond rightly climbs the
+        # natural slope past the cut face the rectangle treats as vertical — the same
+        # water above natural ground `feature_storage` measures behind a companion berm.
+        assert storage.volume_m3 > 0.25 * analytic, (
+            f"the pond leaves through the dyke's corners: {storage.volume_m3:.2f} m³ "
+            f"held against {analytic:.2f} m³ analytic")
+
+    def test_the_dyke_shares_an_edge_between_every_pair_of_cells(self, tmp_path):
+        from scipy.ndimage import label
+
+        ew = _cutback(coords=self.COORDS, key_into_banks=False)
+        b = DEMBurner(_diagonal_hillside(tmp_path))
+        out = b.burn_earthworks([ew])
+        crest = ew.berm_crest_elevation
+        bank = np.isclose(out, crest, atol=1e-3) & (out > b.original + 1e-6)
+        four = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+        _labels, pieces = label(bank, structure=four)
+        assert pieces == 1, f"the dyke is {pieces} pieces joined only at corners"
+
+
+# ---------------------------------------------------------------- ground slope sampling
+
+class TestGroundSlopeSampling:
+    """The slope raster is in **degrees** (the draw tool guards 0–90 and prints °); the
+    FAO chain takes percent. Fed straight through, a 20° hillside would be sized as
+    20 % when it is 36.4 %, and every derived row would be wrong with nothing to say
+    so."""
+
+    def _sample(self, grid, coords=((1.5, 5.5), (18.5, 5.5))):
+        from rasterio.transform import from_bounds
+
+        from terrainflow_assessment.modules.earthwork_design import ground_slope_pct_along
+
+        h, w = grid.shape
+        return ground_slope_pct_along(list(coords), from_bounds(0, 0, w, h, w, h),
+                                      grid, cell_size=1.0)
+
+    def test_degrees_become_percent(self):
+        assert self._sample(np.full((10, 20), 20.0)) == pytest.approx(36.4, abs=0.05)
+
+    def test_the_median_ignores_holes_and_nonsense(self):
+        grid = np.full((10, 20), 20.0)
+        grid[4, 2:9] = -9999.0          # the raster's declared nodata
+        grid[4, 12] = np.nan
+        grid[4, 14] = 95.0              # not a slope
+        assert self._sample(grid) == pytest.approx(36.4, abs=0.05)
+
+    def test_a_line_over_nothing_but_holes_is_unsampled(self):
+        assert self._sample(np.full((10, 20), -9999.0)) is None
+
+    def test_a_line_off_the_raster_is_unsampled(self):
+        assert self._sample(np.full((10, 20), 20.0), coords=((50.5, 50.5), (60.5, 50.5))) is None

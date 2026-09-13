@@ -4,6 +4,7 @@ import pytest
 from terrainflow_assessment.core.registry.earthwork_types import (
     EarthworkTypeConfig,
     all_types,
+    bench_mode_of,
     get_type,
     is_crest_type,
     is_linear_store,
@@ -138,6 +139,12 @@ class TestPredicates:
         assert is_linear_store("swale")
         for key in ("berm", "basin", "dam", "diversion"):
             assert not is_linear_store(key), key
+
+    def test_only_a_bench_has_a_bench_mode(self):
+        for key in ("swale", "berm", "basin", "dam", "diversion"):
+            assert bench_mode_of(key) is None, key
+        assert bench_mode_of("cutback_swale") == "level"
+        assert bench_mode_of("nope") is None
 
     def test_an_unknown_key_answers_no_rather_than_raising(self):
         assert not is_crest_type("nope")

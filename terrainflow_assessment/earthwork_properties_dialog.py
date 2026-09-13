@@ -35,12 +35,14 @@ from .core.registry.earthwork_types import (
 from .core.sizing import (
     basin_volume_battered,
     batter_advisory,
+    bench_spacing_advisory,
     grade_advisory,
     trapezoid_section,
 )
 from .modules.earthwork_design import (
     Spillway,
     adoptable_spillway_width,
+    bench_for,
     berm_height_estimate,
     berm_spoil_per_metre,
     bind_crest,
@@ -1212,6 +1214,7 @@ class EarthworkPropertiesDialog(QDialog):
 
         self._update_berm_crest(companion)
 
+        self._update_bench(depth, width)
         self._update_swale_verdict(depth, width, side_slope)
 
     def _update_berm_crest(self, companion):
@@ -1250,6 +1253,57 @@ class EarthworkPropertiesDialog(QDialog):
                 f"Berm crest: {crest:.2f} m — {low:.2f}–{high:.2f} m tall along its "
                 f"run (mean {mean:.2f})  (last analysis)")
 
+    def _update_bench(self, depth, width):
+        """Fill the FAO bench row and the layout line from the slope in the dialog.
+
+        Every figure is derived from three numbers on screen — the bench width, the dyke
+        height and the ground slope — so this recomputes on any of them and stores
+        nothing. A slope that has not been sampled, or ground too steep for the riser,
+        says which rather than printing a row of zeros.
+        """
+        # getattr: a spin box can fire this while _build_ui is still making rows.
+        if getattr(self, "lbl_bench", None) is None:
+            return
+        cfg = self._bench_cfg
+        slope = self.get_ground_slope_pct()
+        bench = bench_for(self.ew_type, depth, width, slope)
+        if slope is None:
+            self.lbl_bench.setText(
+                "— no ground slope yet: type one above, or draw the bench after a "
+                "baseline so the slope raster exists.")
+        elif bench is None:
+            riser = cfg.riser_slope if cfg.riser_slope is not None else 1.0
+            self.lbl_bench.setText(
+                f"— {slope:.1f} % is too steep for a {riser:g}:1 riser: the next bench "
+                f"down would start above this one.")
+        else:
+            self.lbl_bench.setText(
+                f"Drop to the next bench {bench.vertical_interval:.2f} m · riser "
+                f"{bench.riser_height:.2f} m high × {bench.riser_width:.2f} m\n"
+                f"Terrace width {bench.terrace_width:.2f} m · cut {bench.depth_of_cut:.2f} m "
+                f"at the inner edge")
+
+        if getattr(self, "lbl_bench_layout", None) is None:
+            return
+        if slope is None:
+            self.lbl_bench_layout.setText("")
+            return
+        level = cfg.bench_mode == "level"
+        runoff_mm = None
+        if self._peak_inflow_m3 and self._catchment_m2:
+            runoff_mm = self._peak_inflow_m3 / self._catchment_m2 * 1000.0
+        per_metre = (max(0.0, width - (cfg.dyke_top_width_m or 0.0)) * depth
+                     if level else None)
+        advice = bench_spacing_advisory(
+            slope, width,
+            riser_slope=cfg.riser_slope if cfg.riser_slope is not None else 1.0,
+            mode=cfg.bench_mode,
+            dyke_height=depth if level else 0.0,
+            runoff_mm=runoff_mm,
+            capacity_m3_per_m=per_metre,
+        )
+        self.lbl_bench_layout.setText(advice["text"])
+
     def _update_swale_verdict(self, depth, width, side_slope):
         """Deficit-at-the-drawn-length readout for a swale.
 
@@ -1262,6 +1316,14 @@ class EarthworkPropertiesDialog(QDialog):
         """
         if self.lbl_verdict is None or self._peak_inflow_m3 is None:
             return
+        # A level bench holds a rectangle: the platform inside its dyke, with no batter.
+        # Left to the swale's defaults this was checked as a 1:1 trapezoid four metres
+        # wide, which is not the section the burn builds or the capacity reports.
+        level_bench = (self._bench_cfg is not None
+                       and self._bench_cfg.bench_mode == "level")
+        if level_bench:
+            width = max(0.0, width - (self._bench_cfg.dyke_top_width_m or 0.0))
+            side_slope = 0.0
         length = getattr(self, "_swale_length_m", None)
         if not length or depth <= 0 or width <= 0:
             return
@@ -1295,6 +1357,24 @@ class EarthworkPropertiesDialog(QDialog):
                 f"✓ Holds the event — {check.available_m3 - check.inflow_m3:,.0f} m³ to spare."
             )
             self.lbl_verdict.setStyleSheet("font-weight: bold; color: #1e8449;")
+        elif check.depth_reachable and level_bench:
+            tallest = self._bench_cfg.depth_range[1]
+            if check.required_depth_m > tallest:
+                # Not "raise the dyke to 1.2 m": a dyke that tall is an embankment, and
+                # the answer on a bench system is more benches above, not a taller one.
+                self.lbl_verdict.setText(
+                    f"Short by {check.deficit_m3:,.0f} m³ — it would take a "
+                    f"{check.required_depth_m:.2f} m dyke and this section stops at "
+                    f"{tallest:.2f} m. Add benches above to share the hillside (see the "
+                    f"layout below), or route the surplus on."
+                )
+            else:
+                self.lbl_verdict.setText(
+                    f"Short by {check.deficit_m3:,.0f} m³ — raise the dyke to "
+                    f"{check.required_depth_m:.2f} m, or route the surplus to a "
+                    f"downstream feature."
+                )
+            self.lbl_verdict.setStyleSheet("font-weight: bold; color: #c0392b;")
         elif check.depth_reachable:
             self.lbl_verdict.setText(
                 f"Short by {check.deficit_m3:,.0f} m³ — deepen to "
@@ -1856,6 +1936,14 @@ class EarthworkPropertiesDialog(QDialog):
 
     def get_companion_berm(self):
         return self.chk_companion.isChecked() if self.ew_type == "swale" else False
+
+    def get_ground_slope_pct(self):
+        """The slope the bench rows ran on, in percent; ``None`` for "not sampled"."""
+        spin = getattr(self, "spin_ground_slope", None)
+        if spin is None:
+            return None
+        value = float(spin.value())
+        return value if value > 0.0 else None
 
     def get_gradient_pct(self):
         return self.spin_gradient.value() if self.spin_gradient is not None else 1.0

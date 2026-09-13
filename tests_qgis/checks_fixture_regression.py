@@ -58,7 +58,11 @@ EXPECTED = {
     "runoff_mm": 60.0000,
     "catchment_area_ha": 12.9600,
     "exit_points": 4.0000,
-    "swale_a_catchment_ha": 1.6551,
+    # Re-recorded 2026-09-13: 1.6551 -> 1.5505 when `_build_design` gained Cutback F.
+    # Ground on this clip falls to the north, and Cutback F (northings 29-84) sits upslope
+    # of Swale A (northing 140), so it now intercepts 0.105 ha that used to arrive at the
+    # swale. Direct catchments are mutually exclusive — the cutback takes, it adds nothing.
+    "swale_a_catchment_ha": 1.5505,
     "swale_b_catchment_ha": 2.1829,
     "basin_c_catchment_ha": 0.1884,
     # Re-recorded 2026-09-12: 89,336 -> 52,839 when `_build_design` gained Berm D and
@@ -67,7 +71,9 @@ EXPECTED = {
     # else in this block held to 0.00% — direct catchments are mutually exclusive, so
     # the new features take from the uncaptured remainder rather than from Swale A,
     # Swale B or Basin C, and the two capacities are analytic and never saw the burn.
-    "uncaptured_cells": 52839.0000,
+    # Re-recorded 2026-09-13: 52,839 -> 52,379 with Cutback F, which catches ground
+    # that previously reached the boundary. Swale B, Basin C and both capacities held.
+    "uncaptured_cells": 52379.0000,
     "swale_capacity_m3": 252.0000,
     "basin_capacity_m3": 1170.0000,
 }
@@ -103,6 +109,24 @@ def _diversion_line():
     return QgsGeometry.fromWkt(
         f"LINESTRING ({X0 + 260.3} {Y0 + 300.3}, {X0 + 200.3} {Y0 + 280.3}, "
         f"{X0 + 140.3} {Y0 + 260.3})")
+
+
+def _cutback_line():
+    """The 78 m contour on the clip's south-east shoulder — traced, not drawn.
+
+    Taken off the tile with matplotlib's contourer on 2026-09-13 and simplified to five
+    vertices over 60 m, clear of every other footprint here. Median ground slope under
+    it about 16 %, inside the band a cutback is for.
+
+    **Deliberately not parallel to a grid axis.** It runs NNE-SSW, so the dyke's cell
+    path is a staircase — the case that held 0 m³ against 43 m³ analytic until
+    `DEMBurner._edge_connected` sealed its corners. Every synthetic bench test before it
+    drew along a grid row, where a Bresenham path has no corners to leak through.
+    Off the half-metre, as for the drain.
+    """
+    pts = ((349.2, 84.3), (340.1, 59.8), (337.1, 49.8), (336.9, 42.8), (342.9, 29.6))
+    return QgsGeometry.fromWkt(
+        "LINESTRING (" + ", ".join(f"{X0 + x} {Y0 + y}" for x, y in pts) + ")")
 
 
 def _basin_polygon(east_offset, north_offset, side=30.0):
@@ -206,7 +230,14 @@ def _build_design(harness):
     drain.bottom_width_m = 1.0
     drain.gradient_pct = 1.0
 
-    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain)]
+    # `_burn_bench`: the level platform, the dyke and its sealed staircase, the end caps.
+    # 2026-09-13, with the cutback swale.
+    cutback = harness.add_earthwork("cutback_swale", geometry=_cutback_line(),
+                                    name="Cutback F")
+    cutback.depth = 0.20
+    cutback.top_width_m = 4.0
+
+    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain, cutback)]
 
 
 def _relative_gap(actual, expected):
@@ -1352,6 +1383,8 @@ def check_d8_routing_runs_and_differs_from_dinf(dem_path):
 #   basin_c      `_burn_basin`, level floor
 #   berm_d       `_burn_berm` — the trapezoid section and the centreline seal (M-1, M-2)
 #   diversion_e  `_burn_diversion` — graded invert, tapered section (M-1)
+#   cutback_f    `_burn_bench` — level platform, dyke, sealed diagonal path, end caps;
+#                the pond is pinned because a leaking dyke moves no earth
 EXPECTED_BURN = {
     "swale_a_cut_m3": 6120.7970,
     "swale_b_cut_m3": 5010.0210,
@@ -1359,8 +1392,16 @@ EXPECTED_BURN = {
     "basin_c_cut_m3": 2739.0170,
     "berm_d_fill_m3": 562.0000,
     "diversion_e_cut_m3": 48.8260,
-    "site_cut_m3": 13914.1630,
-    "site_fill_m3": 4315.1177,
+    # Recorded 2026-09-13 with the cutback swale, after the dyke's diagonal seal
+    # (`_edge_connected`). The pond is the pin that matters: before the seal the same
+    # alignment moved 17.54 m3 of cut and held 0 m3.
+    "cutback_f_cut_m3": 17.5418,
+    "cutback_f_fill_m3": 50.1228,
+    "cutback_f_pond_m3": 38.7703,
+    # Re-recorded 2026-09-13: each grew by exactly Cutback F's own cut and fill
+    # (13,914.163 + 17.542, 4,315.118 + 50.123), so no existing burn moved.
+    "site_cut_m3": 13931.7048,
+    "site_fill_m3": 4365.2405,
     # The keyed companion berm, pinned on the two things a conserved volume cannot
     # hide. `level_crest_from_spoil` spreads a fixed quantity of spoil, so changing
     # `_key_berm_into_banks`' end-cap footprint moves the crest and the cell count
@@ -1399,7 +1440,7 @@ def check_the_burn_quantities_have_not_moved(dem_path):
         by_name = {ew.name: ew for ew in design}
 
         present = sorted({ew.type for ew in design})
-        assert present == ["basin", "berm", "diversion", "swale"], (
+        assert present == ["basin", "berm", "cutback_swale", "diversion", "swale"], (
             f"the design no longer covers every burn method: {present}")
         bermed = [ew for ew in design if getattr(ew, "companion_berm", False)]
         assert bermed and all(getattr(ew, "key_into_banks", False) for ew in bermed), (
@@ -1448,6 +1489,16 @@ def check_the_burn_quantities_have_not_moved(dem_path):
                 f"{height!r}")
             return float(height[1]), float(raised.sum())
 
+        def pond(name):
+            """What one feature impounds on this hillside alone, by flooding it.
+
+            The cutback's is the pin that matters: its cut and fill move earth whether or
+            not the dyke is sealed, so only the water it holds can say the seal holds.
+            """
+            burner = DEMBurner(FIXTURE_DEM)
+            burner.burn_earthworks([by_name[name]])
+            return float(burner.feature_storage(by_name[name]).volume_m3)
+
         site_burner = DEMBurner(FIXTURE_DEM)
         site = burn_quantities(
             site_burner.original,
@@ -1462,6 +1513,9 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             "basin_c_cut_m3": float(alone("Basin C")["cut_m3"]),
             "berm_d_fill_m3": float(alone("Berm D")["fill_m3"]),
             "diversion_e_cut_m3": float(alone("Diversion E")["cut_m3"]),
+            "cutback_f_cut_m3": float(alone("Cutback F")["cut_m3"]),
+            "cutback_f_fill_m3": float(alone("Cutback F")["fill_m3"]),
+            "cutback_f_pond_m3": pond("Cutback F"),
             "site_cut_m3": float(site["cut_m3"]),
             "site_fill_m3": float(site["fill_m3"]),
         }
@@ -1512,3 +1566,101 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             + "\n      ".join(failures)
             + "\n    If the change was intended, re-record EXPECTED_BURN in this file."
         )
+
+
+def check_a_cutback_on_real_ground_holds_water_and_spills_through_its_dyke(dem_path):
+    """The cutback swale end to end on real terrain, through the plugin's own paths.
+
+    The four things the pure tests cannot reach, because each lives in the controller:
+
+    * **The ground slope is sampled, and in percent.** The slope raster is in degrees;
+      a 16 % shoulder is about 9°, and read raw it would be sized as 9 %.
+    * **Before any burn, the level the water is held to is the dyke** — platform plus
+      dyke height, named `dyke` — and the floor is the platform the burn will lay, not
+      `pour point − depth`, which would put a cutback's invert under ground the burn
+      never lowers.
+    * **A spillway on it notches through the dyke** by the keyed-swale march: a notch
+      is recorded, it cuts into the raised bank, and nothing says the sill fails to
+      daylight.
+    * **The sill it cut sits below the dyke crest**, so the pond spills there and not
+      over the bank.
+    """
+    import numpy as np
+    import rasterio
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.modules.earthwork_design import CONTAINMENT_DYKE, DEMBurner
+
+    with PluginHarness(FIXTURE_DEM, load_boundary=False) as h:
+        boundary = _boundary_layer()
+        QgsProject.instance().addMapLayer(boundary)
+        h.panel.boundary_changed.emit(boundary)
+        _apply_storm(h.panel)
+        h.run_baseline()
+        h.assert_no_errors("baseline over the fixture DEM")
+
+        controller = h.plugin._earthworks
+        geom = _cutback_line()
+        ew = h.add_earthwork("cutback_swale", geometry=geom, name="Cutback F")
+        ew.depth = 0.20
+        ew.top_width_m = 4.0
+
+        # Datums first: nothing has burned this feature yet, so no berm crest or measured
+        # spill level can stand in for the design value being checked.
+        lip, invert, containment, source = controller._spillway_datums(
+            ew.geometry, ew.type, top_width_m=ew.top_width_m, depth=ew.depth, ew=ew)
+        assert source == CONTAINMENT_DYKE, (
+            f"an unburned cutback should be held to its dyke, got {source!r}")
+        assert abs((containment - invert) - ew.depth) < 1e-6, (
+            f"containment {containment:.3f} is not the floor {invert:.3f} plus the "
+            f"{ew.depth:.2f} m dyke")
+        alone = DEMBurner(FIXTURE_DEM)
+        alone.burn_earthworks([ew])
+        platform = float(np.nanmean(alone.original[alone.burned_masks[ew.id]]))
+        assert abs(invert - platform) < 1e-3, (
+            f"the spillway floor {invert:.3f} m is not the burned platform "
+            f"{platform:.3f} m")
+        ew.berm_crest_elevation = None      # that burn was ours, not the plugin's
+        ew.berm_height_m = None
+
+        controller._on_vertex_edit_finished(0, geom)
+        h.assert_no_errors("sizing the cutback")
+        slope = ew.ground_slope_pct
+        assert slope is not None and 8.0 < slope < 30.0, (
+            f"ground slope {slope!r} %: expected about 16 % on this shoulder — a "
+            f"figure near 9 would be degrees read as percent")
+
+        point = ew.geometry.interpolate(ew.geometry.length() / 2.0).asPoint()
+        # Clicked at the dyke crest, as a user clicking the bank would. The band has to
+        # bring it down by the type's head and freeboard: with the constructor's 0.30 m
+        # head it could not fit above the platform and the crest stayed on the dyke.
+        controller._on_spillway_placed(ew.id, point, containment, kind="outflow")
+        h.assert_no_errors("spillway placed on the cutback")
+        assert ew.spillway is not None and ew.spillway.crest_elevation is not None, (
+            "the sill was not sited")
+
+        h.panel.run_earthworks_requested.emit()
+        h.assert_no_errors("earthworks re-analysis with a cutback spillway")
+
+        burner = h.state.burner
+        warnings = list(getattr(burner, "warnings", []))
+        refused = [w for w in warnings if "Cutback F" in w and "daylight" in w]
+        assert not refused, f"the notch was refused: {refused}"
+        notches = getattr(burner, "burned_notches", None) or {}
+        assert ew.id in notches, f"no notch was cut for Cutback F — warnings: {warnings}"
+        raised = (getattr(burner, "burned_raised", None) or {}).get(ew.id)
+        assert raised is not None and (notches[ew.id] & raised).any(), (
+            "the notch does not cut into the dyke, so the pond cannot spill through it")
+        with rasterio.open(h.state.modified_dem_path) as src:
+            surface = src.read(1).astype("float64")
+        spill_crest = ew.spillway.crest_elevation
+        assert float(np.nanmax(surface[notches[ew.id]])) <= spill_crest + 1e-3, (
+            "the notch was recorded but the burned surface still stands above its "
+            f"{spill_crest:.3f} m crest")
+
+        crest = ew.berm_crest_elevation
+        sill = ew.burned_sill_elevation_m
+        assert crest is not None and sill is not None, (
+            f"crest {crest!r}, burned sill {sill!r} — nothing to compare")
+        assert sill < crest - 1e-3, (
+            f"the sill cut to {sill:.3f} m is not below the {crest:.3f} m dyke crest")

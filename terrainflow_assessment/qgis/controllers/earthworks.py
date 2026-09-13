@@ -46,6 +46,7 @@ from terrainflow_assessment.core.registry.earthwork_defaults import (
 )
 from terrainflow_assessment.core.registry.earthwork_types import (
     all_types,
+    bench_mode_of,
     get_type,
     is_crest_type,
     name_stem,
@@ -633,7 +634,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """Record the placed location, and seed the crest from the ground there."""
         from qgis.core import QgsGeometry
 
-        from terrainflow_assessment.modules.earthwork_design import Spillway, bind_crest
+        from terrainflow_assessment.modules.earthwork_design import (
+            Spillway,
+            bind_crest,
+            spillway_policy,
+        )
 
         ew = next((e for e in self._state.earthwork_manager.get_all()
                    if e.id == ew_id), None)
@@ -642,7 +647,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return
 
         attr = "inflow_spillway" if kind == "inflow" else "spillway"
-        spillway = getattr(ew, attr, None) or Spillway()
+        # The type's head, as the Spillways table creates one - not the constructor's
+        # 0.30. On a swale that only put the sill 0.15 m lower than the dialog would; on a
+        # cutback's 0.20 m dyke, 0.30 of head and 0.05 of freeboard cannot fit above the
+        # platform, the band inverts, `bind_crest` leaves the click where it landed - on
+        # the dyke crest - and the notch cuts nothing, with nothing to say so.
+        spillway = getattr(ew, attr, None) or Spillway(head_m=spillway_policy(ew.type)[1])
         spillway.point_wkt = QgsGeometry.fromPointXY(point).asWkt()
 
         # A crest this design already carries is left alone — placing the point tells us
@@ -1178,6 +1188,9 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # than driven by it, and a user who edits one has not silently edited the other.
         ew = Earthwork(ew_type, geometry, ew_name, dims=dims)
         ew.source_contour_coords = source_contour  # reshape stays contour-locked
+        # A bench sizes off the ground it is cut into; sampled before the dialog opens so
+        # its FAO rows have a slope to run on. None for every other type.
+        ew.ground_slope_pct = self._sample_ground_slope(ew_type, geometry)
 
         lip, invert, containment, containment_src = self._spillway_datums(
             geometry, ew_type,
@@ -1277,6 +1290,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: True)()
         elif ew.type == "diversion":
             ew.gradient_pct = getattr(dlg, "get_gradient_pct", lambda: ew.gradient_pct)()
+        if bench_mode_of(ew.type) is not None:
+            # The dialog shows the sampled slope and lets the user type over it; what
+            # comes back is what the FAO rows were computed from.
+            ew.ground_slope_pct = getattr(
+                dlg, "get_ground_slope_pct", lambda: ew.ground_slope_pct)()
         if ew.type == "basin":
             # After depth — the wall_slope setter back-solves batter_run from it.
             ew.wall_slope = getattr(dlg, "get_wall_slope", lambda: 0.0)()
@@ -1572,6 +1590,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if ew.type == "diversion":
             geometry = self._orient_downhill(geometry)
         ew.geometry = geometry
+        if bench_mode_of(ew.type) is not None:
+            # Reshaped onto different ground: the slope the bench was sized on moved too.
+            # A slope the user typed is replaced as well — the line it described is gone.
+            resampled = self._sample_ground_slope(ew.type, geometry)
+            if resampled is not None:
+                ew.ground_slope_pct = resampled
         if is_crest_type(ew.type):
             ew.capacity_m3 = self._compute_dam_capacity(ew)
             ew.capacity_l = ew.capacity_m3 * 1000.0
@@ -3969,6 +3993,34 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             "cell_size_m": max(burner.cell_size, burner.cell_h),
         }
 
+    def _sample_ground_slope(self, ew_type, geometry):
+        """The ground slope along *geometry* in percent, for a bench type — else ``None``.
+
+        Off the slope raster the draw tools already hold (``state.slope_band``), which is
+        in degrees; :func:`ground_slope_pct_along` converts and takes the median. ``None``
+        for any type the FAO chain does not size, and whenever there is no slope raster
+        yet, so the dialog says "not sampled" rather than quoting a zero.
+        """
+        if bench_mode_of(ew_type) is None:
+            return None
+        band = self._state.slope_band()
+        if band is None:
+            return None
+        try:
+            import json
+
+            from shapely.geometry import shape as shapely_shape
+
+            from terrainflow_assessment.modules.earthwork_design import (
+                ground_slope_pct_along,
+            )
+            coords = list(shapely_shape(json.loads(geometry.asJson())).coords)
+            array, transform = band
+            return ground_slope_pct_along(coords, transform, array,
+                                          cell_size=abs(float(transform.a)))
+        except Exception:
+            return None
+
     def _dem_cell_size_m(self):
         """The DEM cell the spillway width has to be rounded to, or ``None``.
 
@@ -4036,6 +4088,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         """
         from terrainflow_assessment.modules.earthwork_design import (
             CONTAINMENT_BERM,
+            CONTAINMENT_DYKE,
             CONTAINMENT_LIP,
             CONTAINMENT_MEASURED,
             CONTAINMENT_WALL,
@@ -4087,6 +4140,28 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                     return (lip, floor, float(crest_elevation), CONTAINMENT_WALL)
                 return (lip, floor, natural, CONTAINMENT_LIP)
 
+            measured = getattr(ew, "terrain_spill_level_m", None) if ew is not None else None
+            berm = getattr(ew, "berm_crest_elevation", None) if ew is not None else None
+
+            if bench_mode_of(ew_type) == "level":
+                # A level bench is not cut *below* its pour point: the burn sets the whole
+                # platform to the mean original ground under it and stands the dyke on
+                # that. So the floor is the platform — not `natural − depth`, which would
+                # put a cutback's invert 0.20 m under ground the burn never lowers — and
+                # until a burn has built the dyke, the level the water is held to is the
+                # stated design value, platform + dyke height, named as such.
+                inside = dem[mask]
+                inside = inside[np.isfinite(inside)]
+                if not inside.size:
+                    return (None, None, None, None)
+                platform = float(inside.mean())
+                if measured is not None and float(measured) > platform:
+                    return (lip, platform, float(measured), CONTAINMENT_MEASURED)
+                if berm is not None and float(berm) > platform:
+                    return (lip, platform, float(berm), CONTAINMENT_BERM)
+                dyke = platform + (float(depth) if depth else 0.0)
+                return (lip, platform, dyke, CONTAINMENT_DYKE)
+
             drop = float(depth) if depth else 0.0
             # Off the global pour point, not the local lip: this is the level the burn
             # cuts to, and it is one level for the whole footprint.
@@ -4096,8 +4171,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # was either observed or specified. `terrain_spill_level_m` is where the
             # finished pond was found to let go; `berm_crest_elevation` is where the last
             # burn's spoil bank actually reached.
-            measured = getattr(ew, "terrain_spill_level_m", None) if ew is not None else None
-            berm = getattr(ew, "berm_crest_elevation", None) if ew is not None else None
             if measured is not None and float(measured) > natural:
                 return (lip, invert, float(measured), CONTAINMENT_MEASURED)
             if berm is not None and float(berm) > natural:
@@ -5493,6 +5566,12 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 geom = None
             if ew.type == "swale":
                 min_dims[key] = getattr(ew, "bottom_width_m", None)
+            elif bench_mode_of(ew.type) is not None:
+                # The pond on the platform, not the line: a LineString has no area, so
+                # `min_dimension` would return None and skip the check silently. The dyke
+                # is sealed by construction and is not what has to resolve.
+                dyke = getattr(get_type(ew.type), "dyke_top_width_m", 0.0) or 0.0
+                min_dims[key] = max(0.0, float(ew.width or 0.0) - dyke)
             else:
                 min_dims[key] = min_dimension(geom) if geom is not None else None
 

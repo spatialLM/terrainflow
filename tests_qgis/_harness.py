@@ -659,11 +659,14 @@ class PluginHarness:
 
     def add_earthwork(self, ew_type="swale", geometry=None, name=None):
         """Add an earthwork straight to the manager, bypassing the modal dialog."""
+        from terrainflow_assessment.core.registry.earthwork_types import name_stem
         from terrainflow_assessment.modules.earthwork_design import Earthwork
 
         geom = geometry if geometry is not None else line_across_valley()
         n = len(self.state.earthwork_manager) + 1
-        ew = Earthwork(ew_type, geom, name or f"{ew_type.capitalize()} {n}")
+        # The registry's stem, as `_on_geometry_drawn` names one — `capitalize()` put
+        # "Cutback_swale 6" on the map in every screenshot.
+        ew = Earthwork(ew_type, geom, name or f"{name_stem(ew_type)} {n}")
         self.state.earthwork_manager.add(ew)
         return ew
 
