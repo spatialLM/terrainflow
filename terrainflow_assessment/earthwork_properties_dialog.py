@@ -37,6 +37,7 @@ from .core.sizing import (
     batter_advisory,
     bench_spacing_advisory,
     grade_advisory,
+    storage_rule_advisory,
     trapezoid_section,
 )
 from .modules.earthwork_design import (
@@ -630,6 +631,21 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_max_height.setToolTip(H.DAM_MAX_HEIGHT)
                 cap_layout.addRow("Max wall height:", self.lbl_max_height)
 
+                # A crest type with a published rule (a bund's 120 m³/ha, a WASCOB's
+                # catchment ceiling) says how the measured pond stands against it.
+                cfg = self._cfg
+                if cfg is not None and any(
+                        v is not None for v in (cfg.min_storage_m3_per_ha,
+                                                cfg.max_drawdown_hr,
+                                                cfg.max_catchment_ha,
+                                                cfg.max_storage_m3)):
+                    self.lbl_storage_rule = QLabel("—")
+                    self.lbl_storage_rule.setWordWrap(True)
+                    self.lbl_storage_rule.setToolTip(H.STORAGE_RULE)
+                    cap_layout.addRow("Sizing rule:", self.lbl_storage_rule)
+                else:
+                    self.lbl_storage_rule = None
+
                 lbl_note = QLabel(
                     "Retained water volume depends on valley shape.\n"
                     "Run Re-analyse with Earthworks to see ponded volume."
@@ -1147,6 +1163,11 @@ class EarthworkPropertiesDialog(QDialog):
                     + ("  ⚠ may need engineer" if max_h > 5 else "  ✓ feasible" if max_h <= 4 else "")
                 )
                 self.lbl_max_height.setTextFormat(1)  # Qt.RichText
+                self._update_storage_rule(crest, max_h)
+            else:
+                self._update_storage_rule(
+                    self.spin_crest_elev.value() if self.spin_crest_elev is not None
+                    else None, None)
             return
 
         if self.ew_type == "diversion":
@@ -1259,6 +1280,50 @@ class EarthworkPropertiesDialog(QDialog):
             label.setText(
                 f"Berm crest: {crest:.2f} m — {low:.2f}–{high:.2f} m tall along its "
                 f"run (mean {mean:.2f})  (last analysis)")
+
+    def _update_storage_rule(self, crest, max_height_m):
+        """The crest type's published rule against the pond measured at *crest*.
+
+        Storage is read off the stage-storage curve at the crest in the dialog, so it
+        follows the spin box; a feature not flooded yet falls back to the capacity last
+        measured for it, and one never measured says so rather than judging a zero.
+        """
+        label = getattr(self, "lbl_storage_rule", None)
+        if label is None or self._cfg is None:
+            return
+        cfg = self._cfg
+        curve = self._stage_storage
+        storage = curve.volume_at(crest) if curve is not None and crest is not None else None
+        if storage is None and self._earthwork is not None:
+            storage = getattr(self._earthwork, "capacity_m3", None) or None
+        area = float(curve.area_m2) if curve is not None else None
+
+        infil = None
+        if cfg.max_drawdown_hr is not None:
+            from terrainflow_assessment.modules.swale_design import get_infiltration_rate
+
+            soil = None
+            if getattr(self, "combo_soil", None) is not None:
+                soil = self.combo_soil.currentData()
+            soil = soil or self._soil_name
+            infil = get_infiltration_rate(soil) if soil else None
+
+        advice = storage_rule_advisory(
+            catchment_m2=self._catchment_m2,
+            storage_m3=storage,
+            max_height_m=max_height_m,
+            min_storage_m3_per_ha=cfg.min_storage_m3_per_ha,
+            max_storage_m3=cfg.max_storage_m3,
+            max_storage_verified=cfg.max_storage_verified,
+            max_catchment_ha=cfg.max_catchment_ha,
+            max_drawdown_hr=cfg.max_drawdown_hr,
+            infiltration_mm_hr=infil,
+            pond_area_m2=area,
+        )
+        text = advice["text"] or "— no catchment yet: run Baseline to measure one."
+        label.setText(text)
+        label.setStyleSheet(
+            f"color: {_WARN};" if advice["flags"] else f"color: {_INK};")
 
     def _update_bench(self, depth, width):
         """Fill the FAO bench row and the layout line from the slope in the dialog.

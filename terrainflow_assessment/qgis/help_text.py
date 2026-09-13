@@ -1422,6 +1422,14 @@ BENCH_DERIVED = (
     "the cut at the inner edge. Derived, not stored — change the slope or the\n"
     "width and they follow."
 )
+STORAGE_RULE = (
+    "The published rule this kind of structure is sized by, against the pond the\n"
+    "last analysis measured at this crest. A detainment bund should hold 120 m³ per\n"
+    "hectare of catchment and drain within three days (Lake Rotorua trials); a\n"
+    "WASCOB should take no more than 30 acres (12.1 ha) of catchment (NRCS CPS 638).\n"
+    "The drain time assumes soakage alone — a decant outlet drains it faster.\n"
+    "Advice only: nothing here changes the design."
+)
 BENCH_TERRACE_SINK = (
     "A bench terrace is tilted 5 % back into the hill so the water it catches runs\n"
     "to the foot of its cut face instead of over its riser. In the field that water\n"

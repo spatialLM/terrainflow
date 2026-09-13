@@ -28,6 +28,7 @@ from .advisories import (  # noqa: F401
     grade_advisory,
     soil_from_cn,
     spacing_advisory,
+    storage_rule_advisory,
     terrace_vertical_interval,
 )
 from .bench import (  # noqa: F401

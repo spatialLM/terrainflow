@@ -219,6 +219,9 @@ _GRAMMAR = {
     "cutback_swale": (SIG_CHEVRON, 4.5, 2.6),
     # A step in the ground, no bank: the plain line, like a basin's outline.
     "bench_terrace": (SIG_NONE,     0.0,  0.0),
+    # Walls, like the dam: ticks on the wet side.
+    "detainment_bund": (SIG_TICKS, 3.0, 2.2),
+    "wascob": (SIG_TICKS, 3.0, 2.2),
 }
 
 

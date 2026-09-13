@@ -63,6 +63,8 @@ GLYPH = {
     "diversion": "↘",
     "cutback_swale": "⊔",
     "bench_terrace": "⌐",
+    "detainment_bund": "▬",
+    "wascob": "◡",
 }
 #: What an unknown type falls back to.
 GLYPH_UNKNOWN = "●"

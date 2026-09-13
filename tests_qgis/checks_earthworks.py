@@ -3249,3 +3249,46 @@ def check_an_unchanged_feature_does_not_reproject_its_catchment(dem_path):
 
     return (f"{calls['n']} projections over six calls — cached when the cells, the "
             f"alignment and the storm all held, recomputed when each changed")
+
+
+def check_a_detainment_bund_dialog_reads_its_pond_against_120_per_hectare(dem_path):
+    """The bund's sizing rule reaches the dialog, and is judged on the measured pond.
+
+    A bund is a crest type, so the whole of its dialog is the dam's — crest, wall
+    metrics — plus one row the dam does not have: its catchment times 120 m³/ha against
+    what the stage-storage curve holds at the crest in the spin box. Built directly with
+    a hand-made curve so the figures are known: 3 ha needs 360 m³; the curve holds 300
+    at the crest, so the row must flag the shortfall with both figures, and raising the
+    crest to where the curve holds 400 must clear it.
+    """
+    import numpy as np
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+    from terrainflow_assessment.modules.earthwork_design import StageStorage
+
+    with PluginHarness(dem_path, load_dem=False) as h:
+        geom = QgsGeometry.fromPolylineXY(
+            [QgsPointXY(0.0, 0.0), QgsPointXY(30.0, 0.0)])
+        curve = StageStorage(levels_m=np.array([10.0, 11.0, 12.0]),
+                             volumes_m3=np.array([0.0, 300.0, 400.0]), area_m2=100.0)
+        dlg = EarthworkPropertiesDialog(
+            ew_type="detainment_bund", geometry=geom, parent=h.main_window,
+            crest_elevation=11.0, dem_path=dem_path, catchment_m2=30_000.0,
+            stage_storage=curve,
+        )
+        try:
+            label = dlg.lbl_storage_rule
+            assert label is not None, "a bund's dialog has no sizing-rule row"
+            short = label.text()
+            dlg.spin_crest_elev.setValue(12.0)
+            held = label.text()
+        finally:
+            dlg.deleteLater()
+
+    assert "300" in short and "360" in short, (
+        f"at an 11.0 m crest the row should set 300 m³ against 360 m³: {short!r}")
+    assert "✓" in held and "400" in held, (
+        f"at a 12.0 m crest the 400 m³ pond holds the 360 m³ rule: {held!r}")

@@ -1684,13 +1684,32 @@ def _bench_mode(ew_type):
         return None
 
 
+def _storage_rule_note(ew_type):
+    try:
+        cfg = get_type(ew_type)
+    except KeyError:
+        return ""
+    parts = []
+    if cfg.min_storage_m3_per_ha is not None:
+        parts.append(f"needs ≥ {cfg.min_storage_m3_per_ha:g} m³/ha")
+    if cfg.max_drawdown_hr is not None:
+        parts.append(f"drains ≤ {cfg.max_drawdown_hr:g} h")
+    if cfg.max_catchment_ha is not None:
+        parts.append(f"catchment ≤ {cfg.max_catchment_ha:g} ha")
+    return ", ".join(parts)
+
+
 def _type_extra(e):
     """The one dimension that matters for this type and no other."""
     t = getattr(e, "type", "")
     if is_crest_type(t):
         crest = getattr(e, "crest_elevation", None)
         keyed = "keyed into banks" if getattr(e, "key_into_banks", False) else "as drawn"
-        return f"crest {crest:.2f} m ({keyed})" if crest else keyed
+        extra = f"crest {crest:.2f} m ({keyed})" if crest else keyed
+        # The rule the type is judged by, so a reader of the report knows what the
+        # storage column is to be read against.
+        rule = _storage_rule_note(t)
+        return f"{extra} · {rule}" if rule else extra
     bench_mode = _bench_mode(t)
     if bench_mode is not None:
         # The generic columns print the aliased dimensions as "depth" and "width";

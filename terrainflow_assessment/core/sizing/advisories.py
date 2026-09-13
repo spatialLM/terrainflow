@@ -335,6 +335,127 @@ def spacing_advisory(slope_pct: float,
 
 
 # ---------------------------------------------------------------------------
+# Published storage rules for crest types
+# ---------------------------------------------------------------------------
+
+#: NZ Building (Dam Safety) Regulations 2022, in force 13 May 2024: a dam is classifiable
+#: when it is **four metres or higher and holds 20,000 m³ or more** — both together.
+#: Fetched 2026-09-13 from NZSOLD's summary of the MBIE regulations
+#: (nzsold.org.nz/mbie-dam-safety-regulations). Past it the design needs a Producer
+#: Statement and a CPEng, which no plugin figure replaces.
+CLASSIFIABLE_DAM_HEIGHT_M = 4.0
+CLASSIFIABLE_DAM_VOLUME_M3 = 20_000.0
+
+
+def storage_rule_advisory(*, catchment_m2: float | None = None,
+                          storage_m3: float | None = None,
+                          max_height_m: float | None = None,
+                          min_storage_m3_per_ha: float | None = None,
+                          max_storage_m3: float | None = None,
+                          max_storage_verified: bool = True,
+                          max_catchment_ha: float | None = None,
+                          max_drawdown_hr: float | None = None,
+                          infiltration_mm_hr: float | None = None,
+                          pond_area_m2: float | None = None) -> dict:
+    """Judge a crest type's measured pond against the rules published for its kind.
+
+    Plain numbers in, so the registry stays the one place the rules live and this stays
+    math: the caller passes the type's rule fields beside the measurements. A rule left
+    ``None`` is not checked; a measurement left ``None`` gives no verdict on the rules
+    that need it, rather than a verdict on zero.
+
+    * **Minimum storage** — ``min_storage_m3_per_ha × catchment ha`` against
+      ``storage_m3``, the pond measured at the crest.
+    * **Drawdown** — :func:`drawdown_time` over ``pond_area_m2`` at
+      ``infiltration_mm_hr``. **Infiltration only**: a bund drains through a decant, so
+      this is the slow case, and it is said to be.
+    * **Ceilings** — ``max_storage_m3`` (quoted as unverified when
+      ``max_storage_verified`` is False) and ``max_catchment_ha``.
+    * **Classifiable dam** — :data:`CLASSIFIABLE_DAM_HEIGHT_M` and
+      :data:`CLASSIFIABLE_DAM_VOLUME_M3` together, inclusive.
+
+    Returns ``required_m3``, ``holds`` (True / False / None), ``drawdown_hr``,
+    ``classifiable_dam`` (True / False / None), ``flags`` (one sentence per breach) and
+    ``text`` (the requirement and every flag, for a label).
+    """
+    from .primitives import drawdown_time
+
+    catchment_ha = (float(catchment_m2) / 10_000.0
+                    if catchment_m2 is not None and catchment_m2 > 0 else None)
+    flags = []
+
+    required = None
+    holds = None
+    if min_storage_m3_per_ha is not None and catchment_ha is not None:
+        required = float(min_storage_m3_per_ha) * catchment_ha
+        if storage_m3 is not None:
+            holds = float(storage_m3) >= required
+            if not holds:
+                flags.append(
+                    f"Holds {storage_m3:,.0f} m³ against the {required:,.0f} m³ its "
+                    f"{catchment_ha:.1f} ha catchment needs at "
+                    f"{min_storage_m3_per_ha:g} m³/ha — raise the crest or lengthen "
+                    f"the bund.")
+
+    drawdown = None
+    if (max_drawdown_hr is not None and storage_m3 is not None
+            and infiltration_mm_hr is not None and pond_area_m2 is not None):
+        drawdown = drawdown_time(float(storage_m3), float(infiltration_mm_hr) / 1000.0,
+                                 float(pond_area_m2)).time_hr
+        if drawdown > float(max_drawdown_hr):
+            shown = "never" if math.isinf(drawdown) else f"{drawdown:,.0f} h"
+            flags.append(
+                f"Soaking away alone it would drain in {shown}, past the "
+                f"{max_drawdown_hr:g} h limit. That is an infiltration-only bound: a "
+                f"decant outlet is what brings it inside the limit.")
+
+    if max_storage_m3 is not None and storage_m3 is not None \
+            and float(storage_m3) > float(max_storage_m3):
+        basis = "" if max_storage_verified else " (an unverified figure)"
+        flags.append(
+            f"Holds {storage_m3:,.0f} m³, above the {max_storage_m3:,.0f} m³ this kind "
+            f"of structure is kept under{basis}.")
+
+    if max_catchment_ha is not None and catchment_ha is not None \
+            and catchment_ha > float(max_catchment_ha):
+        flags.append(
+            f"Takes {catchment_ha:.1f} ha of catchment, over the {max_catchment_ha:g} ha "
+            f"(30 ac) NRCS CPS 638 allows one basin — split it with a basin upslope.")
+
+    classifiable = None
+    if storage_m3 is not None and max_height_m is not None:
+        classifiable = (float(max_height_m) >= CLASSIFIABLE_DAM_HEIGHT_M
+                        and float(storage_m3) >= CLASSIFIABLE_DAM_VOLUME_M3)
+        if classifiable:
+            flags.append(
+                f"At {max_height_m:.1f} m and {storage_m3:,.0f} m³ this is a classifiable "
+                f"dam under NZ's Building (Dam Safety) Regulations 2022 (4 m and "
+                f"20,000 m³): it needs an engineer, not a plugin figure.")
+
+    if required is None:
+        lead = ""
+    elif storage_m3 is None:
+        lead = (f"Needs {required:,.0f} m³ ({min_storage_m3_per_ha:g} m³/ha × "
+                f"{catchment_ha:.1f} ha); storage not measured yet — run Re-analyse "
+                f"with Earthworks.")
+    elif holds:
+        lead = (f"✓ Holds {storage_m3:,.0f} m³ against the {required:,.0f} m³ its "
+                f"catchment needs.")
+    else:
+        lead = ""
+    text = " ".join(part for part in [lead, *flags] if part)
+
+    return {
+        "required_m3": required,
+        "holds": holds,
+        "drawdown_hr": drawdown,
+        "classifiable_dam": classifiable,
+        "flags": flags,
+        "text": text,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Spacing for a continuous bench system
 # ---------------------------------------------------------------------------
 

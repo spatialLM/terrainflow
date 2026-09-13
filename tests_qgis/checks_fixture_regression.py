@@ -68,7 +68,9 @@ EXPECTED = {
     # Re-recorded 2026-09-13: 2.1829 -> 2.0087 when `_build_design` gained Terrace G, on
     # the 66 m contour between the two swales and so upslope of Swale B on this north-
     # falling clip. A bench with no outlet intercepts what reaches it (STRETCH_GOALS §4e).
-    "swale_b_catchment_ha": 2.0087,
+    # And 2.0087 -> 1.8330 the same day with Bund H, between Terrace G and Swale B across
+    # the valley that drains to Swale B: its pond is now the swale's upstream neighbour.
+    "swale_b_catchment_ha": 1.8330,
     "basin_c_catchment_ha": 0.1884,
     # Re-recorded 2026-09-12: 89,336 -> 52,839 when `_build_design` gained Berm D and
     # Diversion E. The two new features intercept ground that previously reached the
@@ -142,6 +144,19 @@ def _terrace_line():
     middle of FAO's machine-built band (12–36 %) and clear of every other footprint.
     """
     pts = ((179.9, 168.5), (158.8, 164.7), (131.1, 167.7))
+    return QgsGeometry.fromWkt(
+        "LINESTRING (" + ", ".join(f"{X0 + x} {Y0 + y}" for x, y in pts) + ")")
+
+
+def _bund_line():
+    """Across the valley at the keyline keypoint (row 216, col 152) — the fall measured.
+
+    Laid perpendicular to the ground's own fall there on 2026-09-13, 44 m long, off the
+    half-metre. The valley is shallow, so a 1.2 m bund keys about 15 m into each bank
+    and the pin carries that warning: a regression pin on `_burn_dam` with a crest and
+    keyed ends, not a site anyone should build.
+    """
+    pts = ((173.9, 190.1), (131.7, 177.5))
     return QgsGeometry.fromWkt(
         "LINESTRING (" + ", ".join(f"{X0 + x} {Y0 + y}" for x, y in pts) + ")")
 
@@ -259,7 +274,16 @@ def _build_design(harness):
                                     name="Terrace G")
     terrace.top_width_m = 4.0
 
-    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain, cutback, terrace)]
+    # `_burn_dam` with a crest and keyed ends — no pin reached it before: the design had no
+    # dam, and `add_earthwork` seeds no crest, so crest types burned through the berm
+    # fallback everywhere else. 2026-09-13, with the detainment bund.
+    bund = harness.add_earthwork("detainment_bund", geometry=_bund_line(), name="Bund H")
+    bund.crest_elevation = 63.85
+    bund.top_width_m = 3.0
+    bund.key_into_banks = True
+
+    return [_size(ew) for ew in
+            (swale, swale_b, basin, berm, drain, cutback, terrace, bund)]
 
 
 def _relative_gap(actual, expected):
@@ -1410,6 +1434,8 @@ def check_d8_routing_runs_and_differs_from_dinf(dem_path):
 #   terrace_g    `_burn_bench` reverse-sloped — the tilt about the drawn line; cut and
 #                fill agree to 0.4 % because the tilt is centred on the datum, and the
 #                pond is what a bench with no outlet holds (STRETCH_GOALS §4e)
+#   bund_h       `_burn_dam` to an absolute crest, keyed into both banks — the first pin
+#                on that path, since no fixture feature carried a crest before
 EXPECTED_BURN = {
     "swale_a_cut_m3": 6120.7970,
     "swale_b_cut_m3": 5010.0210,
@@ -1428,11 +1454,15 @@ EXPECTED_BURN = {
     "terrace_g_cut_m3": 28.4414,
     "terrace_g_fill_m3": 28.3177,
     "terrace_g_pond_m3": 0.8771,
+    # Recorded 2026-09-13 with the detainment bund: `_burn_dam` to a 63.85 m crest,
+    # keyed in. No earlier pin reached a crest burn at all.
+    "bund_h_fill_m3": 111.5090,
+    "bund_h_pond_m3": 24.8420,
     # Re-recorded 2026-09-13: each grew by exactly Cutback F's own cut and fill
     # (13,914.163 + 17.542, 4,315.118 + 50.123), then by Terrace G's (+ 28.441, + 28.318),
-    # so no existing burn moved.
+    # then by Bund H's fill (+ 111.509), so no existing burn moved.
     "site_cut_m3": 13960.1462,
-    "site_fill_m3": 4393.5582,
+    "site_fill_m3": 4505.0672,
     # The keyed companion berm, pinned on the two things a conserved volume cannot
     # hide. `level_crest_from_spoil` spreads a fixed quantity of spoil, so changing
     # `_key_berm_into_banks`' end-cap footprint moves the crest and the cell count
@@ -1472,7 +1502,7 @@ def check_the_burn_quantities_have_not_moved(dem_path):
 
         present = sorted({ew.type for ew in design})
         assert present == ["basin", "bench_terrace", "berm", "cutback_swale",
-                           "diversion", "swale"], (
+                           "detainment_bund", "diversion", "swale"], (
             f"the design no longer covers every burn method: {present}")
         bermed = [ew for ew in design if getattr(ew, "companion_berm", False)]
         assert bermed and all(getattr(ew, "key_into_banks", False) for ew in bermed), (
@@ -1551,6 +1581,8 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             "terrace_g_cut_m3": float(alone("Terrace G")["cut_m3"]),
             "terrace_g_fill_m3": float(alone("Terrace G")["fill_m3"]),
             "terrace_g_pond_m3": pond("Terrace G"),
+            "bund_h_fill_m3": float(alone("Bund H")["fill_m3"]),
+            "bund_h_pond_m3": pond("Bund H"),
             "site_cut_m3": float(site["cut_m3"]),
             "site_fill_m3": float(site["fill_m3"]),
         }

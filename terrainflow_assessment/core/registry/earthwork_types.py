@@ -32,6 +32,12 @@ bench_mode   : str | None — a bench-shaped type: "level" (a cutback swale, dyk
 riser_slope  : float | None — the riser as H:V run per unit rise (1.0 machine-built
                earth, 0.75 hand-made earth, 0.5 hand-made rock; FAO 13/3 §6.1)
 dyke_top_width_m : float — the dyke along a level bench's outer edge, m; 0 = none
+min_storage_m3_per_ha : float | None — pond a crest type must hold per hectare of
+               contributing catchment (a detainment bund's 120)
+max_drawdown_hr : float | None — longest the pond may stand (a bund's three days)
+max_catchment_ha : float | None — largest catchment one feature should take (a WASCOB's)
+max_storage_m3 : float | None — pond volume above which the type stops being itself;
+               ``max_storage_verified`` says whether that figure has a fetched source
 default_side_slope : float — default wall/side batter as an H:V ratio (horizontal run
                per unit vertical rise). 1.0 == 1:1 (today's implicit assumption); 0.0 ==
                vertical / not modelled. Seeds Earthwork.bottom_width_m / batter_run_m defaults.
@@ -113,6 +119,16 @@ class EarthworkTypeConfig:
     riser_slope: float | None = None
     #: Top width of the dyke along a level bench's outer edge; 0.0 when there is none.
     dyke_top_width_m: float = 0.0
+
+    # --- published sizing rules (core/sizing/advisories.storage_rule_advisory) ---
+    # Each is None for a type no rule is published for, and every value set below
+    # carries its source beside it. An advisory only — none of these constrains a
+    # dimension, and a rule without a fetched source is marked so in its text.
+    min_storage_m3_per_ha: float | None = None
+    max_drawdown_hr: float | None = None
+    max_catchment_ha: float | None = None
+    max_storage_m3: float | None = None
+    max_storage_verified: bool = True
 
     # --- sizing policy (per-feature dimension defaults/limits + soil) ---
     default_depth: float = 0.5
@@ -372,6 +388,94 @@ _add(EarthworkTypeConfig(
     soil_group=None,
     bench_mode="reverse",
     riser_slope=1.0,            # machine-built earth riser, FAO 13/3 §6.1
+))
+
+_add(EarthworkTypeConfig(
+    key="detainment_bund",
+    label="Detainment bund",
+    short_label="Bund",
+    geom_type="LineString",
+    # The dam's flag set, not the swale's: a bund impounds behind a wall to an absolute
+    # crest, so its storage is measured by flooding the DEM (stage-storage), not
+    # computed from a drawn section.
+    has_storage=False,
+    has_capacity=False,
+    has_cut=False,
+    has_fill=True,
+    burn_method="dam",
+    # Pasture green: it sits on productive grass and has to read apart from the dam.
+    style=("line", "#558B2F", "3.0"),
+    category="storage",
+    tooltip=(
+        "Low earth bund across an ephemeral flow path on pasture. Ponds storm\n"
+        "runoff so sediment and phosphorus settle, then drains within three\n"
+        "days so the grass survives. Draw the bund line; its storage is\n"
+        "measured by flooding the DEM."
+    ),
+    default_side_slope=0.0,
+    default_depth=1.5,       # nominal bund height when no crest is sampled
+    # Up to the height at which NZ's Building (Dam Safety) Regulations 2022 can make a
+    # dam classifiable (4 m, with 20,000 m³ — see core/sizing/advisories).
+    depth_range=(0.2, 4.0),
+    default_top_width=3.0,
+    width_label="Bund width:",
+    top_width_range=(1.0, 10.0),
+    independent_dims=("crest_elevation", "top_width"),
+    derived_dims=(),
+    soil_group=None,
+    # Clarke, D. T. (2013), "The performance of Detainment Bunds (DBs) for attenuating
+    # phosphorus and sediment loss from pastoral farmland", MSc thesis, University of
+    # Waikato (Lake Rotorua trials): "a minimum ratio of 120 m³ of water storage per
+    # 1 ha of contributing catchment", and residence "no more than three days to ensure
+    # pastoral production in the ponding area was maintained". Fetched 2026-09-13 from
+    # researchcommons.waikato.ac.nz.
+    min_storage_m3_per_ha=120.0,
+    max_drawdown_hr=72.0,
+    # UNVERIFIED. The earthwork-types spec gives a ~10,000 m³ maximum pond, attributed to
+    # local regulatory requirements in the Lake Rotorua design protocol; the paper it
+    # comes from (Levine et al. 2020) could not be fetched (HTTP 403), so the advisory
+    # quotes it as unverified rather than as a limit.
+    max_storage_m3=10_000.0,
+    max_storage_verified=False,
+))
+
+_add(EarthworkTypeConfig(
+    key="wascob",
+    label="WASCOB (sediment basin)",
+    short_label="WASCOB",
+    geom_type="LineString",
+    # The bund's flag set and burn: an embankment across a minor drainageway, storage
+    # measured off the DEM. It differs from the bund in its rule, not its mechanics.
+    has_storage=False,
+    has_capacity=False,
+    has_cut=False,
+    has_fill=True,
+    burn_method="dam",
+    # Teal: a working basin in a cropped field, apart from the bund's pasture green.
+    style=("line", "#00897B", "3.0"),
+    category="storage",
+    tooltip=(
+        "Water and sediment control basin: a short earth embankment across a\n"
+        "minor drainageway in a field, often one of a series down the slope.\n"
+        "Traps sediment and detains runoff (NRCS CPS 638). Draw the embankment\n"
+        "line; its storage is measured by flooding the DEM."
+    ),
+    default_side_slope=0.0,
+    default_depth=1.0,       # nominal embankment height when no crest is sampled
+    depth_range=(0.2, 4.0),
+    default_top_width=2.0,
+    width_label="Embankment width:",
+    top_width_range=(1.0, 10.0),
+    independent_dims=("crest_elevation", "top_width"),
+    derived_dims=(),
+    soil_group=None,
+    # NRCS Conservation Practice Standard 638: "The uncontrolled drainage area to each
+    # basin should not exceed 30 acres." 30 ac = 12.14 ha. Quoted from the standard by
+    # Ohio State's AgBMPs page (agbmps.osu.edu), fetched 2026-09-13; the national PDF on
+    # nrcs.usda.gov timed out, and Wisconsin's 2018 state version omits the figure.
+    max_catchment_ha=12.14,
+    # Freeboard: the registry default 0.30 m is CPS 378's pond-embankment figure, which
+    # is what a WASCOB is.
 ))
 
 
