@@ -46,17 +46,17 @@ class ContourSegmentTool(QgsMapTool):
     segment_selected = pyqtSignal(object, float, object)  # geometry, elevation, contour coords
     cancelled = pyqtSignal()
 
-    _HINT = [
-        "Click a contour line to select it",
-        "Click the START point of the swale on the contour",
-        "Click the END point of the swale on the contour",
-    ]
-
-    def __init__(self, canvas, contour_layers, status_bar=None):
+    def __init__(self, canvas, contour_layers, status_bar=None, tool_label="swale"):
         super().__init__(canvas)
         self._canvas = canvas
         self._layers = as_layers(contour_layers)
         self._status_bar = status_bar   # optional QStatusBar for hints
+        # Named for whatever is being drawn: any line type can be cut from a contour.
+        self._hint = [
+            "Click a contour line to select it",
+            f"Click the START point of the {tool_label} on the contour",
+            f"Click the END point of the {tool_label} on the contour",
+        ]
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
         # State
@@ -233,7 +233,7 @@ class ContourSegmentTool(QgsMapTool):
             self._rb_segment.reset(QgsWkbTypes.LineGeometry)
 
     def _show_hint(self, phase):
-        msg = self._HINT[phase]
+        msg = self._hint[phase]
         if self._status_bar:
             self._status_bar.showMessage(msg)
         # Also push to QGIS main status bar

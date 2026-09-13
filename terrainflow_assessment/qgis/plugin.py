@@ -249,8 +249,8 @@ class TerrainFlowAssessmentPlugin:
         p.convert_keyline_to_swale_requested.connect(ew.create_swale_from_keyline)
 
         # Earthworks drawing — registry-driven: the panel emits the type key and
-        # the controller resolves the right map tool from the type's geometry.
-        p.draw_swale_requested.connect(ew.activate_draw_swale)
+        # the controller resolves the right map tool from the type's geometry and
+        # the panel's draw mode (freehand, or on a contour).
         p.draw_earthwork_requested.connect(ew.activate_draw_earthwork)
         p.usable_area_source_changed.connect(ew.on_usable_area_source_changed)
         p.run_earthworks_requested.connect(ew.run_with_earthworks)

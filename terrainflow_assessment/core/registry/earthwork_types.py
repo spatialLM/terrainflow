@@ -145,8 +145,8 @@ _add(EarthworkTypeConfig(
     category="storage",
     tooltip=(
         "On-contour channel that captures and infiltrates runoff.\n"
-        "Draw from a contour (Pick Segment / Full Contour) so it holds\n"
-        "water evenly, or freehand."
+        "Set Draw along to Segment or Contour so it sits level and holds\n"
+        "water evenly, or leave it Free to draw by hand."
     ),
     default_side_slope=1.0,
     default_depth=0.5,

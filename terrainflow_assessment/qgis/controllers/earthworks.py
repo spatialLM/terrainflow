@@ -180,40 +180,8 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         return [layer for layer in layers if layer is not None]
 
     def activate_draw_swale(self, mode):
-        contour_layers = self._contour_pick_layers()
-        if mode == "contour":
-            if not contour_layers:
-                self._iface.messageBar().pushWarning(
-                    "TerrainFlow Assessment", self._no_contour_layer_message("segment"))
-                return
-            tool = ContourSegmentTool(self._canvas, contour_layers)
-            tool.segment_selected.connect(
-                lambda geom, elev, coords: self._on_contour_selected_for_swale(
-                    geom, elev, coords
-                )
-            )
-            tool.cancelled.connect(self._on_draw_cancelled)
-            self.use_tool(tool)
-        elif mode == "full_contour":
-            if not contour_layers:
-                self._iface.messageBar().pushWarning(
-                    "TerrainFlow Assessment", self._no_contour_layer_message("contour"))
-                return
-            tool = SelectContourTool(self._canvas, contour_layers)
-            tool.contour_selected.connect(
-                lambda geom, elev, coords: self._on_contour_selected_for_swale(
-                    geom, elev, coords
-                )
-            )
-            tool.cancelled.connect(self._on_draw_cancelled)
-            self.use_tool(tool)
-        else:
-            tool = DrawLineTool(self._canvas,
-                                slope_band=self._state.slope_band(),
-                                tool_label="swale")
-            tool.line_drawn.connect(lambda geom: self._on_geometry_drawn("swale", geom))
-            tool.cancelled.connect(self._on_draw_cancelled)
-            self.use_tool(tool)
+        """The swale's old entry point, kept as a name: every line type draws this way."""
+        self.activate_draw_line("swale", mode=mode)
 
     def _no_contour_layer_message(self, what):
         """Say which precondition is missing, not just that one is.
@@ -231,9 +199,17 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 f"first, then pick a {what}. Either layer can be drawn on; the "
                 f"Baseline run does not produce contours on its own.")
 
+    def _on_contour_selected(self, ew_type, geom, elevation, contour_coords=None):
+        """A contour, or a stretch of one, becomes a feature of *ew_type*.
+
+        The contour's coordinates travel with the feature whatever its type, which is
+        what locks the reshape tool to sliding its ends along the contour.
+        """
+        geom = contour_to_swale_geometry(geom)
+        self._on_geometry_drawn(ew_type, geom, source_contour=contour_coords)
+
     def _on_contour_selected_for_swale(self, geom, elevation, contour_coords=None):
-        swale_geom = contour_to_swale_geometry(geom)
-        self._on_geometry_drawn("swale", swale_geom, source_contour=contour_coords)
+        self._on_contour_selected("swale", geom, elevation, contour_coords)
 
     def create_swale_from_keyline(self):
         """Convert the current master keyline (generated or drawn) into a swale,
@@ -249,8 +225,14 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return
         self._on_contour_selected_for_swale(geom, None, coords)
 
-    def activate_draw_earthwork(self, key):
-        """Registry-driven draw dispatch: geometry type decides the map tool."""
+    def activate_draw_earthwork(self, key, mode=None):
+        """Registry-driven draw dispatch: geometry type decides the map tool.
+
+        *mode* is the draw-along setting — ``"freehand"``, ``"contour"`` (a stretch of
+        one) or ``"full_contour"`` — and ``None`` reads it off the panel's tool menu,
+        where the user sets it once for every line type. A polygon type has no line to
+        lay along a contour and ignores it.
+        """
         try:
             cfg = get_type(key)
         except KeyError:
@@ -261,13 +243,44 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if cfg.geom_type == "Polygon":
             self.activate_draw_polygon(key)
         else:
-            self.activate_draw_line(key)
+            self.activate_draw_line(key, mode=mode)
 
-    def activate_draw_line(self, ew_type):
-        tool = DrawLineTool(self._canvas,
-                            slope_band=self._state.slope_band(),
-                            tool_label=ew_type)
-        tool.line_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
+    def _panel_draw_mode(self):
+        return getattr(self._panel, "draw_mode", None) or "freehand"
+
+    def activate_draw_line(self, ew_type, mode=None):
+        """Arm the tool that draws a line feature of *ew_type* in *mode*.
+
+        Three tools, one entry point. The contour tools used to be reachable only
+        through the swale row, so a berm — whose whole job is to hold a pool on a
+        contour — could only be drawn freehand and reshaped freely. Every line type
+        now comes through here, and a feature born from a contour carries
+        ``source_contour_coords`` whatever its type.
+        """
+        if mode is None:
+            mode = self._panel_draw_mode()
+        label = name_stem(ew_type).lower()
+        if mode in ("contour", "full_contour"):
+            contour_layers = self._contour_pick_layers()
+            what = "segment" if mode == "contour" else "contour"
+            if not contour_layers:
+                self._iface.messageBar().pushWarning(
+                    "TerrainFlow Assessment", self._no_contour_layer_message(what))
+                return
+            if mode == "contour":
+                tool = ContourSegmentTool(self._canvas, contour_layers, tool_label=label)
+                picked = tool.segment_selected
+            else:
+                tool = SelectContourTool(self._canvas, contour_layers)
+                picked = tool.contour_selected
+            picked.connect(
+                lambda geom, elev, coords: self._on_contour_selected(
+                    ew_type, geom, elev, coords))
+        else:
+            tool = DrawLineTool(self._canvas,
+                                slope_band=self._state.slope_band(),
+                                tool_label=label)
+            tool.line_drawn.connect(lambda geom: self._on_geometry_drawn(ew_type, geom))
         tool.cancelled.connect(self._on_draw_cancelled)
         self.use_tool(tool)
 

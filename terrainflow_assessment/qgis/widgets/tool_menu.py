@@ -1,13 +1,17 @@
 """
 tool_menu.py — Felt-style earthwork tool menu.
 
-Registry-driven rows (icon · name), grouped Storage / Flow control,
-with the swale's three draw modes as an inline segmented control. Replaces the
-grid of coloured buttons in the Earthwork Design stage.
+Registry-driven rows (icon · name), grouped Storage / Flow control, under one
+"Draw along" control — Free / Segment / Contour — that applies to every line type.
+Replaces the grid of coloured buttons in the Earthwork Design stage.
+
+The draw mode is a setting the menu holds (``draw_mode``), not a signal: a row
+click emits the type key alone and the controller reads the mode off the panel
+when it arms the tool. It used to be three buttons on the swale row, so a berm —
+whose whole job is to hold a pool on a contour — could only be drawn freehand.
 
 Emits:
-  draw_swale_requested(mode)      — 'contour' | 'full_contour' | 'freehand'
-  draw_earthwork_requested(key)   — any non-swale registry key
+  draw_earthwork_requested(key)   — any registry key
   place_spillway_requested(kind)  — 'outflow' | 'inflow' spillway placement
   connect_earthworks_requested()  — route one feature's overflow into another
   link_drain_to_spillway_requested() — grade a diversion drain from a spillway crest
@@ -15,6 +19,7 @@ Emits:
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -31,7 +36,13 @@ from terrainflow_assessment.qgis import help_text as H
 # everywhere). The chip carries the type's registry colour. Shared with the network
 # view, which carried a byte-identical copy.
 _GLYPH = _theme.GLYPH
-_SWALE_MODES = (("contour", "Segment"), ("full_contour", "Contour"), ("freehand", "Free"))
+#: (mode key, button label, tooltip). The keys are what the controller's draw path
+#: has always taken: 'contour' is a stretch of one, 'full_contour' the whole line.
+_DRAW_MODES = (
+    ("freehand", "Free", H.TOOL_DRAW_FREE),
+    ("contour", "Segment", H.TOOL_DRAW_SEGMENT),
+    ("full_contour", "Contour", H.TOOL_DRAW_CONTOUR),
+)
 
 # Overflow routing rows. Deliberately NOT registry types: `_ensure_ew_layers`
 # iterates all_types(), so a registry entry here would conjure a map layer, a burn
@@ -48,7 +59,6 @@ _CONNECTION_ROWS = (
 
 
 class EarthworkToolMenu(QWidget):
-    draw_swale_requested = pyqtSignal(str)
     draw_earthwork_requested = pyqtSignal(str)
     place_spillway_requested = pyqtSignal(str)   # 'outflow' | 'inflow'
     connect_earthworks_requested = pyqtSignal()
@@ -64,6 +74,9 @@ class EarthworkToolMenu(QWidget):
         storage = [k for k, c in types.items() if c.category == "storage"]
         control = [k for k, c in types.items() if c.category == "control"]
         other = [k for k in types if k not in storage and k not in control]
+
+        self._draw_mode = "freehand"
+        lay.addWidget(self._draw_mode_row())
 
         lay.addWidget(self._group_label("STORAGE — HOLDS WATER"))
         lay.addWidget(self._tool_group(storage, types))
@@ -128,12 +141,10 @@ class EarthworkToolMenu(QWidget):
         h.addWidget(name)
         h.addStretch(1)
 
-        if key == "swale":
-            h.addWidget(self._swale_modes())
-        else:
-            # Whole row is the click target for single-tool types.
-            row.mousePressEvent = lambda _e, k=key: self.draw_earthwork_requested.emit(k)
-            row.setCursor(Qt.CursorShape.PointingHandCursor)
+        # The whole row is the click target; how a line is drawn is the menu's
+        # draw-mode setting, not a property of the row.
+        row.mousePressEvent = lambda _e, k=key: self.draw_earthwork_requested.emit(k)
+        row.setCursor(Qt.CursorShape.PointingHandCursor)
         return row
 
     def _connection_group(self):
@@ -188,7 +199,42 @@ class EarthworkToolMenu(QWidget):
             col.addWidget(row)
         return frame
 
-    def _swale_modes(self):
+    # ------------------------------------------------------------- draw mode
+
+    @property
+    def draw_mode(self):
+        """'freehand' | 'contour' (a stretch of one) | 'full_contour'."""
+        return self._draw_mode
+
+    def set_draw_mode(self, mode):
+        """Select a draw mode exactly as a click on its button would."""
+        button = self._mode_buttons.get(mode)
+        if button is None:
+            raise ValueError(f"unknown draw mode {mode!r}; one of "
+                             f"{tuple(self._mode_buttons)}")
+        button.setChecked(True)      # toggled → _on_mode_toggled → _draw_mode
+
+    def _on_mode_toggled(self, checked, mode):
+        if checked:
+            self._draw_mode = mode
+
+    def _draw_mode_row(self):
+        """One draw-along setting for every line type: Free, Segment or Contour.
+
+        Menu-wide rather than per row because the question — freehand, or on a
+        contour — is the same for every line type, and a per-row answer left it
+        available to one. The controller reads ``draw_mode`` when a row is clicked;
+        a polygon type has no line to lay along a contour and ignores it.
+        """
+        row = QFrame()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(9)
+        title = self._group_label("DRAW ALONG")
+        title.setToolTip(H.TOOL_DRAW_MODE)
+        h.addWidget(title)
+        h.addStretch(1)
+
         seg = QFrame()
         seg.setStyleSheet(
             "QFrame { border: 1px solid #c6d1d3; border-radius: 5px; }"
@@ -196,15 +242,26 @@ class EarthworkToolMenu(QWidget):
         hb = QHBoxLayout(seg)
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(0)
-        for i, (mode, label) in enumerate(_SWALE_MODES):
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons = {}
+        for i, (mode, label, tip) in enumerate(_DRAW_MODES):
             b = QPushButton(label)
+            b.setCheckable(True)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
             left = "" if i == 0 else "border-left: 1px solid #c6d1d3;"
             b.setStyleSheet(
                 "QPushButton { border: none; " + left + " background: transparent;"
                 " color: #5f7176; font-size: 10.5px; padding: 3px 9px; } "
-                "QPushButton:hover { background: #e9f3ee; color: #2e7d55; }"
+                "QPushButton:hover { background: #e9f3ee; color: #2e7d55; } "
+                "QPushButton:checked { background: #e9f3ee; color: #2e7d55;"
+                " font-weight: 600; }"
             )
-            b.clicked.connect(lambda _=False, m=mode: self.draw_swale_requested.emit(m))
+            b.toggled.connect(lambda checked, m=mode: self._on_mode_toggled(checked, m))
+            self._mode_group.addButton(b)
+            self._mode_buttons[mode] = b
             hb.addWidget(b)
-        return seg
+        self._mode_buttons[self._draw_mode].setChecked(True)
+        h.addWidget(seg)
+        return row

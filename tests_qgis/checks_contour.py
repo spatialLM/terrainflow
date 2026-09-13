@@ -636,6 +636,71 @@ def check_contour_pick_prefers_analysed_candidate(dem_path):
         )
 
 
+def check_any_line_type_can_be_drawn_on_a_contour(dem_path):
+    """The contour draw modes belong to the menu, not to the swale row.
+
+    A berm's whole job is to hold a pool on a contour, and for as long as the three
+    draw modes were buttons on the swale row alone it could only be drawn freehand
+    and reshaped freely. This sets the menu-wide mode, clicks the berm row through
+    the panel's own signal, and checks that the contour tool comes up, that what it
+    makes is a berm, and that the berm carries the contour it was cut from — the
+    provenance that locks the reshape tool to sliding along it.
+    """
+    from checks_maptools import _accept_properties_dialog
+    from qgis.core import QgsProject
+
+    from terrainflow_assessment.map_tools.select_contour_tool import SelectContourTool
+
+    with PluginHarness(dem_path) as h:
+        h.panel.generate_simple_contours_requested.emit()
+        h.assert_no_errors("gdal:contour")
+        layer = QgsProject.instance().mapLayer(h.state.simple_contour_layer_id)
+        assert layer is not None and layer.featureCount() > 0, "no plain contours"
+
+        h.prepare_canvas_for_input()
+        h.panel._tool_menu.set_draw_mode("full_contour")
+        assert h.panel.draw_mode == "full_contour", "the panel does not expose the mode"
+        h.panel.draw_earthwork_requested.emit("berm")
+        h.assert_no_errors("berm row in Contour mode")
+
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, SelectContourTool), (
+            f"a berm in Contour mode should arm SelectContourTool, got "
+            f"{type(tool).__name__}"
+        )
+
+        x, y = _contour_midpoint_in_view(h.canvas, layer)
+        before = len(h.state.earthwork_manager)
+        restore = _accept_properties_dialog()
+        try:
+            click_map(h.canvas, x, y)
+        finally:
+            restore()
+        h.assert_no_errors("click a contour for a berm")
+
+        assert len(h.state.earthwork_manager) == before + 1, "no berm was created"
+        ew = h.state.earthwork_manager.get_all()[-1]
+        assert ew.type == "berm", f"expected a berm, got {ew.type}"
+        assert ew.source_contour_coords, (
+            "a contour-drawn berm must carry its contour, or reshape is not locked to it"
+        )
+
+
+def check_a_polygon_type_ignores_the_contour_draw_mode(dem_path):
+    """A basin's footprint is drawn, not laid along a contour, whatever the mode says."""
+    from terrainflow_assessment.map_tools.draw_polygon_tool import DrawPolygonTool
+
+    with PluginHarness(dem_path) as h:
+        h.prepare_canvas_for_input()
+        h.panel._tool_menu.set_draw_mode("full_contour")
+        h.panel.draw_earthwork_requested.emit("basin")
+        h.assert_no_errors("basin row in Contour mode")
+        tool = h.canvas.mapTool()
+        assert isinstance(tool, DrawPolygonTool), (
+            f"a basin should arm DrawPolygonTool in any mode, got {type(tool).__name__}"
+        )
+
+
 def _area_layer_in(crs_auth_id, inset_m=20.0):
     """An analysis-area polygon covering the site, declared in *crs_auth_id*.
 

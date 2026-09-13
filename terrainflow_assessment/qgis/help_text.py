@@ -1380,8 +1380,31 @@ NETWORK_SOAKED = (
 
 # --------------------------------------------------------------------- Tool menu
 # The draw tools' own copy lives on the earthwork registry, beside the type it
-# describes. These are the three that belong to no type.
+# describes. These are the ones that belong to no type.
 TOOL_DRAW_FALLBACK = "Draw a {label}."          # when a registry type carries no copy
+
+# How the next line feature is drawn. One setting for every line type, set once in
+# the menu — it used to be three buttons on the swale row alone, so a berm or a drain
+# could only ever be drawn freehand.
+TOOL_DRAW_MODE = (
+    "How the next line feature is drawn — any type: a swale, a berm, a drain.\n"
+    "A polygon (a basin) is always drawn freehand."
+)
+TOOL_DRAW_FREE = (
+    "Draw the line by hand: left-click to add points, right-click or\n"
+    "double-click to finish. The status bar shows the slope under the cursor."
+)
+TOOL_DRAW_SEGMENT = (
+    "Pick a contour, then click a START and an END point on it. The feature\n"
+    "follows that stretch of the contour exactly, so it sits level and holds\n"
+    "water evenly, and reshaping slides its ends along the contour.\n"
+    "Needs contours from the Analysis stage."
+)
+TOOL_DRAW_CONTOUR = (
+    "Click a contour and the feature follows the whole line. Level by\n"
+    "construction; reshaping slides its ends along the contour.\n"
+    "Needs contours from the Analysis stage."
+)
 
 TOOL_OUTFLOW_SPILLWAY = (
     "Click the map to site where the selected feature OVERFLOWS.\n"

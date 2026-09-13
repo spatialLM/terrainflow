@@ -157,8 +157,9 @@ class AssessmentPanel(QDockWidget):
     convert_keyline_to_swale_requested = pyqtSignal()  # master keyline → swale
 
     # Earthworks
-    draw_swale_requested = pyqtSignal(str)      # mode: 'freehand' | 'contour' | 'full_contour'
-    draw_earthwork_requested = pyqtSignal(str)  # registry type key (berm/basin/dam/…)
+    # The registry type key. How a line is drawn — freehand, or on a contour — is the
+    # tool menu's `draw_mode`, which the controller reads when it arms the tool.
+    draw_earthwork_requested = pyqtSignal(str)
     usable_area_source_changed = pyqtSignal(str)   # "none" | "analysis" | "earthworks"
     run_earthworks_requested = pyqtSignal()
     reshape_earthworks_requested = pyqtSignal()   # vertex-drag tool with live readout
@@ -1352,7 +1353,6 @@ class AssessmentPanel(QDockWidget):
         # Felt-style tool menu (registry-driven) replaces the button grid.
         from terrainflow_assessment.qgis.widgets.tool_menu import EarthworkToolMenu
         self._tool_menu = EarthworkToolMenu()
-        self._tool_menu.draw_swale_requested.connect(self.draw_swale_requested)
         self._tool_menu.draw_earthwork_requested.connect(self.draw_earthwork_requested)
         self._tool_menu.place_spillway_requested.connect(self.place_spillway_requested)
         self._tool_menu.connect_earthworks_requested.connect(
@@ -2803,6 +2803,16 @@ class AssessmentPanel(QDockWidget):
     def count_infiltration(self):
         """Whether soakage counts as capture, or is only reported as a buffer."""
         return self._count_infiltration_check.isChecked()
+
+    @property
+    def draw_mode(self):
+        """How the next line feature is drawn: 'freehand' | 'contour' | 'full_contour'.
+
+        Read off the tool menu, which owns the control, so the setting is made once
+        for every line type and the controller asks for it when a row is clicked.
+        """
+        menu = getattr(self, "_tool_menu", None)
+        return menu.draw_mode if menu is not None else "freehand"
 
     # ------------------------------------------------------------------ Design file I/O
 
