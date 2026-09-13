@@ -1452,7 +1452,9 @@ class TestStrategyCBarriers:
         ew = _mock_ew("dam", geom, depth=1.0, width=0.4, crest_elevation=60.0)
         result = b.burn_earthworks([ew])
         assert result.max() >= 60.0
-        assert any("1-cell width" in w for w in b.warnings)
+        # A wall's own advisory, not the generic sub-cell one: what a thin wall costs is
+        # where the water stops, not routing (see burn_strategy.thin_wall_warning).
+        assert any("sealed line of cells" in w for w in b.warnings), b.warnings
 
     def test_dam_parallel_offset_failure_falls_back_to_centred(self, tmp_path, monkeypatch):
         data = np.full((20, 20), 50.0, dtype="float32")

@@ -66,6 +66,7 @@ from terrainflow_assessment.modules.burn_strategy import (
     sub_cell_warning,
     taper_reach,
     tapered_invert,
+    thin_wall_warning,
 )
 from terrainflow_assessment.modules.footprint import (
     internal_relief,
@@ -3347,7 +3348,10 @@ class DEMBurner:
             dem[mask] = np.maximum(dem[mask], ew.crest_elevation)
         # Always, not just when the band claimed nothing: it is the seal as well as the
         # sub-cell fallback, and a wall with a corner-only join in it is not a wall.
-        for rc in self._line_path_cells(centreline):
+        # Edge-connected, which the Bresenham path is not: a wall about a cell thick has
+        # no band of its own to hide the staircase, and on a diagonal the pond walked out
+        # through its corners (a keyed 2 m wall on a 2 m grid: 241 m³ of 783).
+        for rc in self._edge_connected(self._line_path_cells(centreline)):
             dem[rc] = max(dem[rc], ew.crest_elevation)
         # Keying in is ground, not a what-if. It used to be applied only in
         # :meth:`_keyed_dam_dem`, so a keyed dam's *capacity* was measured against a
@@ -3369,7 +3373,9 @@ class DEMBurner:
         # same question rather than by two different ones.
         if mask.any():
             self._record_raised(ew, mask)
-        self._warn_sub_cell(ew.name, ew.width)
+        w = thin_wall_warning(ew.name, ew.width, max(self.cell_size, self.cell_h))
+        if w:
+            self.warnings.append(w)
         return dem
 
     def _burn_bench(self, dem, line, ew):
@@ -3808,7 +3814,12 @@ class DEMBurner:
         if len(coords) < 2:
             return (False, 0.0)
 
-        step = self.cell_size * 0.5  # half-cell keeps the raised path 4-connected
+        # Half a cell per step, and that alone does NOT keep the path 4-connected, as this
+        # line used to claim: off the axes one step can cross a row and a column boundary
+        # together, and depression filling walks the corner it leaves. A wall keyed in at
+        # 30 degrees on the 1 m fixture held 0.1 m³ where the joined wall holds 760. So
+        # every diagonal step raises the corner on lower ground as well (`_edge_connected`).
+        step = self.cell_size * 0.5
         max_reach = (self.shape[0] + self.shape[1]) * self.cell_size
         keyed = False
         max_used = 0.0
@@ -3827,6 +3838,7 @@ class DEMBurner:
                     and self.original[row, col] < crest:
                 keyed = True
             reach, x, y = 0.0, ex, ey
+            prev = xy_to_rc(self.transform, ex, ey)
             while reach < max_reach:
                 x += dx * step
                 y += dy * step
@@ -3834,6 +3846,12 @@ class DEMBurner:
                 row, col = xy_to_rc(self.transform, x, y)
                 if not (0 <= row < self.shape[0] and 0 <= col < self.shape[1]):
                     break
+                # The joint to the previous cell first, even when this cell turns out to
+                # be the bank: a corner-only join between the last raised cell and the
+                # high ground is still a way round the end of the wall.
+                for rc in self._edge_connected([prev, (row, col)])[1:-1]:
+                    dem[rc] = max(dem[rc], crest)
+                prev = (row, col)
                 if self.original[row, col] >= crest:
                     break  # keyed into ground already above the crest
                 dem[row, col] = max(dem[row, col], crest)
@@ -3864,7 +3882,7 @@ class DEMBurner:
         mask = self._rasterize(footprint, all_touched=False)
         if mask.any():
             dem[mask] = np.maximum(dem[mask], crest)
-        for rc in self._line_path_cells(centreline):
+        for rc in self._edge_connected(self._line_path_cells(centreline)):
             dem[rc] = max(dem[rc], crest)
         keyed, reach = self._key_dam_ends(dem, line, crest)
         if keyed:

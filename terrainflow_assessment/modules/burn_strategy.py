@@ -19,6 +19,7 @@ grid-only building blocks that ``DEMBurner`` (in ``earthwork_design.py``) orches
                            prefer ``DEMBurner.feature_storage_m3``, which measures it)
     steep_ground_warning — advisory when a level floor over-excavates one end
     sub_cell_warning     — advisory when a feature is narrower than one cell
+    thin_wall_warning    — advisory when a wall is thinner than a cell's diagonal
     ponding_resolution_warning — advisory when a DEM exceeds the ponding memory cap
 
 Design rules baked in (spec §3):
@@ -855,6 +856,39 @@ def overtopping_warning(name: str, length_m: float, pour_level_m: float,
         f"{where}{span}. Nothing is designed to take it — give it a spillway, or the "
         f"overflow chooses its own place to cut and takes the bank with it.{tail}"
         f"{event_note}"
+    )
+
+
+#: A wall band this many cells thick is solid on the grid at every angle: the diagonal of
+#: one cell, the widest a Bresenham staircase gets. Below it the band can leave corner-only
+#: joins, which depression filling walks straight through, so the burn seals the wall's
+#: centreline edge to edge and says so. Measured, not assumed: on the Quail Island fixture
+#: and a 2 m resample, walls from 1.42 cells upward held identically with and without the
+#: seal at 0-75 degrees; at 1.0-1.3 cells some angles leaked on both grids.
+WALL_SEAL_CELLS = 2 ** 0.5
+
+
+def thin_wall_warning(name: str, thickness, cell_size: float):
+    """Advisory when a wall is thinner than a cell's diagonal, else ``None``.
+
+    Not :func:`sub_cell_warning`, whose "routing effect only" is wrong for a wall: what
+    a thin wall's representation costs is not routing but *where the water stops*. The
+    burn seals such a wall one cell wide along its centreline, so its storage is sound
+    but the terrain carries the wall wider than drawn, and the pond edge against it is
+    a cell's worth approximate. The wall-fill figure is unaffected — it prices the
+    thickness the user set.
+    """
+    if thickness is None or not cell_size or cell_size <= 0:
+        return None
+    limit = WALL_SEAL_CELLS * float(cell_size)
+    if float(thickness) >= limit:
+        return None
+    return (
+        f"'{name}': the wall is {float(thickness):.2f} m thick on a {float(cell_size):.2f} m "
+        f"DEM, under {limit:.2f} m (the diagonal of a cell). A wall that thin is modelled "
+        f"as a sealed line of cells, so the terrain carries it about a cell wide rather "
+        f"than as drawn; its storage is measured through that sealed wall, and the "
+        f"wall-fill volume still prices the thickness you set."
     )
 
 

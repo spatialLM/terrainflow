@@ -1456,13 +1456,19 @@ EXPECTED_BURN = {
     "terrace_g_pond_m3": 0.8771,
     # Recorded 2026-09-13 with the detainment bund: `_burn_dam` to a 63.85 m crest,
     # keyed in. No earlier pin reached a crest burn at all.
-    "bund_h_fill_m3": 111.5090,
-    "bund_h_pond_m3": 24.8420,
+    # Re-recorded the same day, 24.842 -> 158.121 m3 and fill 111.509 -> 112.449, when
+    # `_key_dam_ends` stopped leaving corner-only joins. Bund H is keyed in on a bearing
+    # off the axes, and its pond had been leaving through a corner of the keyed
+    # extension: the pre-fix walk reproduces 24.8 exactly, the fixed one 158.1, and the
+    # same bund not keyed in holds 9.9. The fill rose by the corner cells the joints add.
+    "bund_h_fill_m3": 112.4490,
+    "bund_h_pond_m3": 158.1210,
     # Re-recorded 2026-09-13: each grew by exactly Cutback F's own cut and fill
     # (13,914.163 + 17.542, 4,315.118 + 50.123), then by Terrace G's (+ 28.441, + 28.318),
-    # then by Bund H's fill (+ 111.509), so no existing burn moved.
+    # then by Bund H's fill (+ 111.509, and + 0.940 for its keyed extension's corner
+    # joints), so no other burn moved.
     "site_cut_m3": 13960.1462,
-    "site_fill_m3": 4505.0672,
+    "site_fill_m3": 4506.0072,
     # The keyed companion berm, pinned on the two things a conserved volume cannot
     # hide. `level_crest_from_spoil` spreads a fixed quantity of spoil, so changing
     # `_key_berm_into_banks`' end-cap footprint moves the crest and the cell count

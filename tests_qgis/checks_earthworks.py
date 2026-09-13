@@ -3292,3 +3292,37 @@ def check_a_detainment_bund_dialog_reads_its_pond_against_120_per_hectare(dem_pa
         f"at an 11.0 m crest the row should set 300 m³ against 360 m³: {short!r}")
     assert "✓" in held and "400" in held, (
         f"at a 12.0 m crest the 400 m³ pond holds the 360 m³ rule: {held!r}")
+
+
+def check_a_thin_wall_is_noted_beside_its_thickness(dem_path):
+    """Under a cell's diagonal, the dialog says how the wall is modelled — and only then.
+
+    On a 2 m DEM the diagonal is 2.83 m. The dam's default 2.0 m wall is under it, so the
+    note must show and name that figure; 3.0 m is over it, so the note must go.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    from terrainflow_assessment.earthwork_properties_dialog import (
+        EarthworkPropertiesDialog,
+    )
+
+    with PluginHarness(dem_path, load_dem=False) as h:
+        geom = QgsGeometry.fromPolylineXY([QgsPointXY(0.0, 0.0), QgsPointXY(30.0, 0.0)])
+        dlg = EarthworkPropertiesDialog(
+            ew_type="dam", geometry=geom, parent=h.main_window,
+            crest_elevation=11.0, cell_size_m=2.0,
+        )
+        try:
+            note = dlg.lbl_thin_wall
+            assert note is not None, "a dam's dialog has no thin-wall note"
+            dlg.spin_width.setValue(2.0)
+            thin_text, thin_shown = note.text(), not note.isHidden()
+            dlg.spin_width.setValue(3.0)
+            thick_text, thick_shown = note.text(), not note.isHidden()
+        finally:
+            dlg.deleteLater()
+
+    assert thin_shown and "2.83" in thin_text and "sealed" in thin_text, (
+        f"a 2.0 m wall on a 2 m DEM should be noted against 2.83 m: {thin_text!r}")
+    assert not thick_shown and not thick_text, (
+        f"a 3.0 m wall is over the diagonal and needs no note: {thick_text!r}")

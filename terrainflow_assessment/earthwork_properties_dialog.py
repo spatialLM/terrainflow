@@ -382,6 +382,20 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             self.spin_width = None
 
+        # A wall thinner than a cell's diagonal is modelled as a sealed line of cells.
+        # Said beside the thickness it is about, while the thickness is being chosen.
+        if is_crest_type(self.ew_type) and self.spin_width is not None \
+                and self._cell_size_m:
+            self.lbl_thin_wall = QLabel("")
+            self.lbl_thin_wall.setWordWrap(True)
+            self.lbl_thin_wall.setStyleSheet(f"color: {_WARN}; font-size: 10.5px;")
+            self.lbl_thin_wall.setToolTip(H.THIN_WALL)
+            form.addRow("", self.lbl_thin_wall)
+            self.spin_width.valueChanged.connect(self._update_thin_wall_note)
+            self._update_thin_wall_note()
+        else:
+            self.lbl_thin_wall = None
+
         # Bottom width (channels only) — the canonical cross-section input, centred
         # under the top width (symmetric trapezoid). The side batter is derived and
         # shown in degrees below. setValue before connect avoids an early fire.
@@ -1280,6 +1294,25 @@ class EarthworkPropertiesDialog(QDialog):
             label.setText(
                 f"Berm crest: {crest:.2f} m — {low:.2f}–{high:.2f} m tall along its "
                 f"run (mean {mean:.2f})  (last analysis)")
+
+    def _update_thin_wall_note(self, *_args):
+        """Warn, beside the thickness, when the wall is under a cell's diagonal."""
+        from terrainflow_assessment.modules.burn_strategy import WALL_SEAL_CELLS
+
+        label = getattr(self, "lbl_thin_wall", None)
+        if label is None or self.spin_width is None or not self._cell_size_m:
+            return
+        limit = WALL_SEAL_CELLS * self._cell_size_m
+        thickness = self.spin_width.value()
+        if thickness >= limit:
+            label.setText("")
+            label.setVisible(False)
+            return
+        label.setVisible(True)
+        label.setText(
+            f"Under {limit:.2f} m on this {self._cell_size_m:.2f} m DEM the wall is "
+            f"modelled as a sealed line of cells — it still holds water, but the terrain "
+            f"carries it about a cell wide, not {thickness:.2f} m.")
 
     def _update_storage_rule(self, crest, max_height_m):
         """The crest type's published rule against the pond measured at *crest*.

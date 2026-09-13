@@ -1422,6 +1422,14 @@ BENCH_DERIVED = (
     "the cut at the inner edge. Derived, not stored — change the slope or the\n"
     "width and they follow."
 )
+THIN_WALL = (
+    "The DEM can only hold a wall in whole cells. A wall at least the diagonal of a\n"
+    "cell thick (1.41 × the cell size) is solid on the grid at any angle. A thinner\n"
+    "one is modelled as a sealed line of cells along its centreline: it holds water\n"
+    "the same, but in the terrain it stands about a cell wide instead of the thickness\n"
+    "you set, and the edge of the pond against it is a cell's worth approximate.\n"
+    "The wall-fill volume still prices the thickness you set."
+)
 STORAGE_RULE = (
     "The published rule this kind of structure is sized by, against the pond the\n"
     "last analysis measured at this crest. A detainment bund should hold 120 m³ per\n"
