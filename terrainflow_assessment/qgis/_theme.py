@@ -61,6 +61,7 @@ GLYPH = {
     "dam": "▮",
     "berm": "⌒",
     "diversion": "↘",
+    "cutback_swale": "⊔",
 }
 #: What an unknown type falls back to.
 GLYPH_UNKNOWN = "●"

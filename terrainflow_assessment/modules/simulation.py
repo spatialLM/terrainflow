@@ -941,9 +941,14 @@ def build_stores_from_earthworks(earthworks, soil_name="Loam", dem_path=None,
                 except Exception:
                     pass
 
-            cut_vol = calculate_cut_volume(ew.type, ew.geometry, ew.depth, ew.width)
+            # The sampled ground slope reaches only a bench's branch; every other type
+            # ignores it.
+            ground_slope_pct = getattr(ew, "ground_slope_pct", None)
+            cut_vol = calculate_cut_volume(ew.type, ew.geometry, ew.depth, ew.width,
+                                           ground_slope_pct=ground_slope_pct)
             fill_vol = calculate_fill_volume(ew.type, ew.geometry, ew.depth, ew.width,
-                                             ew.companion_berm)
+                                             ew.companion_berm,
+                                             ground_slope_pct=ground_slope_pct)
 
             # A fill-only feature (berm, dam wall) is built ground, not an excavated wetted
             # surface — it infiltrates nothing, so crediting it soakage would invent capture.

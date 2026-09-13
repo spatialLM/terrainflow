@@ -25,6 +25,13 @@ short_label  : str  — stem of a fresh feature's name ("Diversion 3"); the labe
 depth_label  : str  — properties-dialog row label for ``depth`` ("Depth:" — a bench
                that keeps its dyke height there says "Dyke height:")
 width_label  : str  — row label for ``top_width`` ("Width:" — a dam says "Wall thickness:")
+bench_mode   : str | None — a bench-shaped type: "level" (a cutback swale, dyke along
+               the outer edge) or "reverse" (a bench terrace, 5 % back into the hill);
+               None for everything else. Keys the FAO chain (core/sizing/bench.py), the
+               bench burn and the bench branches of capacity, cut and fill.
+riser_slope  : float | None — the riser as H:V run per unit rise (1.0 machine-built
+               earth, 0.75 hand-made earth, 0.5 hand-made rock; FAO 13/3 §6.1)
+dyke_top_width_m : float — the dyke along a level bench's outer edge, m; 0 = none
 default_side_slope : float — default wall/side batter as an H:V ratio (horizontal run
                per unit vertical rise). 1.0 == 1:1 (today's implicit assumption); 0.0 ==
                vertical / not modelled. Seeds Earthwork.bottom_width_m / batter_run_m defaults.
@@ -95,6 +102,16 @@ class EarthworkTypeConfig:
     #: the row holds.
     depth_label: str = "Depth:"
     width_label: str = "Width:"
+
+    # --- bench geometry (FAO 13/3 §6.1; core/sizing/bench.py) ---
+    #: "level" or "reverse" for a bench-shaped type; None for a channel, wall or basin.
+    bench_mode: str | None = None
+    #: Riser slope as run per unit rise. A registry constant rather than a per-feature
+    #: dimension, following `berm_batter_run`: the riser is built by whatever builds the
+    #: bench, and a dialog row for it would be one more number nobody sets.
+    riser_slope: float | None = None
+    #: Top width of the dyke along a level bench's outer edge; 0.0 when there is none.
+    dyke_top_width_m: float = 0.0
 
     # --- sizing policy (per-feature dimension defaults/limits + soil) ---
     default_depth: float = 0.5
@@ -275,6 +292,49 @@ _add(EarthworkTypeConfig(
     independent_dims=("depth", "top_width", "gradient_pct"),
     derived_dims=("bottom_width",),
     soil_group=None,
+))
+
+_add(EarthworkTypeConfig(
+    key="cutback_swale",
+    label="Cutback swale",
+    geom_type="LineString",
+    has_storage=True,
+    has_capacity=True,
+    has_cut=True,
+    has_fill=True,
+    burn_method="bench",
+    # Magenta: nothing else on these maps is, and it has to read apart from the
+    # violet swale it sits beside in the menu.
+    style=("line", "#D81B60", "2.5"),
+    category="storage",
+    tooltip=(
+        "Level bench cut into the hillside with a low dyke along its outer\n"
+        "edge — FAO's cutback terrace. Holds a shallow pond on the platform\n"
+        "where a swale would be too steep to dig. Draw it along a contour."
+    ),
+    # A level platform: the pond is a rectangle, not a trench. `depth` holds the
+    # dyke height and `top_width` the bench width, so every path that moves a
+    # dimension — defaults, standards, serialisation, the dialog read-back — is
+    # reused unchanged, and the row labels say which quantity is which.
+    default_side_slope=0.0,
+    default_depth=0.20,
+    depth_range=(0.10, 0.30),
+    default_top_width=4.0,
+    top_width_range=(2.5, 8.0),
+    independent_dims=("depth", "top_width"),
+    derived_dims=(),
+    depth_label="Dyke height:",
+    width_label="Bench width:",
+    soil_group=None,
+    bench_mode="level",
+    riser_slope=1.0,            # machine-built earth riser, FAO 13/3 §6.1
+    dyke_top_width_m=0.30,
+    # A dyke 0.10–0.30 m tall spills over its own crest, not an embankment. Half the
+    # swale's figures again: at 0.05 + 0.10 the default 0.20 m dyke keeps 0.05 m of
+    # crest, where the swale's 0.15 + 0.15 exceeds the dyke outright.
+    spillway_freeboard_m=0.05,
+    spillway_head_m=0.10,
+    spillway_head_band=(0.05, 0.15),
 ))
 
 

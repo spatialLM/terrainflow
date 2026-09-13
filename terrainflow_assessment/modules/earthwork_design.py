@@ -44,6 +44,7 @@ from terrainflow_assessment.core.registry.earthwork_types import (
 )
 from terrainflow_assessment.core.sizing import (
     basin_volume_battered,
+    bench_geometry,
     level_crest_from_spoil,
     manning_flow,
     trapezoid_section,
@@ -867,6 +868,7 @@ CONTAINMENT_MEASURED = "measured"     # the pond's own spill level, off a burn
 CONTAINMENT_BERM = "berm"             # the companion berm's crest, as built
 CONTAINMENT_WALL = "wall"             # a dam: the wall crest the user specified
 CONTAINMENT_LIP = "lip"               # bare ground: the ring minimum round the footprint
+CONTAINMENT_DYKE = "dyke"             # a level bench: platform + dyke height, until measured
 
 
 def spillway_notes(crest_elevation, lip_elevation=None, containment_elevation=None,
@@ -1233,6 +1235,12 @@ class Earthwork:
         # slide endpoints ALONG the contour instead of free vertex dragging. None = freehand.
         self.source_contour_coords = None
         self.gradient_pct = 1.0      # diversion only: channel gradient (%)
+        # Bench types only: the natural ground slope across the bench, in percent,
+        # sampled off the slope raster when the feature is drawn and again when it is
+        # reshaped. The one stored measurement the FAO chain needs — every derived
+        # dimension (vertical interval, riser, terrace width) is a property off it.
+        # None until sampled; a feature added with no slope raster shows dashes.
+        self.ground_slope_pct = None
         self.overflow_target_id = None  # user-intended overflow recipient (None = analytics decide)
         # Soil under THIS feature; None inherits the site-wide soil set on the Design
         # tab. Soil rarely reads uniform across a farm, and infiltration is the term
@@ -1377,6 +1385,17 @@ class Earthwork:
     def width(self):
         return self.top_width_m
 
+    @property
+    def bench(self):
+        """FAO's bench geometry for this feature, or ``None``.
+
+        ``None`` when the type is not a bench, the ground slope has not been sampled,
+        or the ground is too steep for the riser and the chain refuses (see
+        :func:`~terrainflow_assessment.core.sizing.bench.bench_geometry`). Never
+        serialised: it is a function of three stored numbers.
+        """
+        return bench_for(self.type, self.depth, self.top_width_m, self.ground_slope_pct)
+
     @width.setter
     def width(self, value):
         self.top_width_m = value
@@ -1454,7 +1473,7 @@ class Earthwork:
     _SERIAL_FIELDS = (
         "type", "name", "id", "depth", "top_width_m", "bottom_width_m",
         "batter_run_m", "companion_berm", "crest_elevation", "key_into_banks",
-        "source_contour_coords", "gradient_pct", "overflow_target_id",
+        "source_contour_coords", "gradient_pct", "ground_slope_pct", "overflow_target_id",
         "soil_name", "enabled", "capacity_m3", "capacity_l",
         # A user decision, so it is stored. It is also the reason SCHEMA_VERSION went
         # to 3: `from_dict` probes per field so an older document simply has none, but
@@ -1702,6 +1721,50 @@ def berm_batter_run(depth, side_slope=None):
     return max(0.0, float(side_slope)) * max(0.0, float(depth))
 
 
+def bench_for(ew_type, depth, width, ground_slope_pct):
+    """FAO's bench chain for a bench-shaped type, or ``None`` where it does not apply.
+
+    ``depth`` is the dyke height of a level bench (and nothing, for a reverse one) and
+    ``width`` the bench width — the two aliased dimensions the registry describes.
+    ``None`` for any other type, for an unsampled slope, and for ground the chain
+    refuses, so every caller reads one answer and shows a dash for it.
+    """
+    try:
+        cfg = get_type(ew_type)
+    except KeyError:
+        return None
+    if cfg.bench_mode is None or ground_slope_pct is None:
+        return None
+    try:
+        return bench_geometry(
+            width, ground_slope_pct,
+            riser_slope=cfg.riser_slope if cfg.riser_slope is not None else 1.0,
+            mode=cfg.bench_mode,
+            dyke_height=depth if cfg.bench_mode == "level" else 0.0,
+        )
+    except ValueError:
+        return None
+
+
+def _bench_earth_per_metre(ew_type, depth, width, ground_slope_pct):
+    """FAO's cut section ``C`` for a bench type, m² per metre — ``None`` for any other.
+
+    Cut and fill are one figure, by construction: FAO balances the bench about its
+    centreline, so what comes off the uphill half is what builds the downhill half. A
+    bench whose slope has not been sampled, or that the chain refuses, gives 0.0 — a
+    figure of nothing rather than a guess; the measured burn is the honest number in
+    every case.
+    """
+    try:
+        cfg = get_type(ew_type)
+    except KeyError:
+        return None
+    if cfg.bench_mode is None:
+        return None
+    bench = bench_for(ew_type, depth, width, ground_slope_pct)
+    return 0.0 if bench is None else bench.cut_section
+
+
 def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
                        bottom_width=None, batter_run=None):
     """
@@ -1710,6 +1773,8 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
     Swale — trapezoidal cross-section × length.
     Basin — battered-wall inset-prism volume (vertical when ``batter_run`` is
     None/0 — identical to the historical prism).
+    Cutback swale — the ponded rectangle on the platform, ``(W_b − w_dyke) × DH``
+    × length: a level bench holds water between its dyke and the uphill cut face.
     Berm / Dam / Diversion — no storage, returns (0.0, 0.0).
 
     There is no freeboard allowance in this figure, and that is deliberate. It used to
@@ -1734,12 +1799,21 @@ def calculate_capacity(ew_type, geometry, depth, width, companion_berm=False,
     Returns (volume_m3, volume_l).
     """
     try:
-        if not get_type(ew_type).has_capacity:
-            return 0.0, 0.0
+        cfg = get_type(ew_type)
     except KeyError:
         return 0.0, 0.0
+    if not cfg.has_capacity:
+        return 0.0, 0.0
 
-    if ew_type == "swale":
+    if cfg.bench_mode == "level":
+        # `depth` is the dyke height and `width` the bench width. No batter — the
+        # platform is level and the dyke's inner face is taken as vertical, which is
+        # what the burn builds — and no freeboard, for the reasons above.
+        length = shapely_length(geometry)
+        ponded_width = max(0.0, width - cfg.dyke_top_width_m)
+        volume_m3 = ponded_width * depth * length
+
+    elif ew_type == "swale":
         length = shapely_length(geometry)
         top_width = width
         bottom_width = _resolve_bottom_width(bottom_width, top_width, depth)
@@ -1921,12 +1995,15 @@ def capacity_breakdown(ew, cell_size=1.0, n_cells=None, terrain_storage_m3=None,
     }
 
 
-def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None):
+def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None,
+                         ground_slope_pct=None):
     """
     Calculate the volume of soil excavated (cut) by an earthwork.
 
     Swale — trapezoidal cross-section (no freeboard) × length.
     Basin / Diversion — area × depth.
+    Bench types — FAO's balanced cut section × length, from the sampled
+    ``ground_slope_pct``; 0.0 until the slope is known (see ``bench_for``).
     Berm / Dam — 0 (these place material, not remove it).
 
     ``bottom_width`` — trapezoid bottom width (m); ``None`` derives it from 1:1 side slopes
@@ -1939,6 +2016,10 @@ def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None):
             return 0.0
     except KeyError:
         return 0.0
+
+    bench_m2 = _bench_earth_per_metre(ew_type, depth, width, ground_slope_pct)
+    if bench_m2 is not None:
+        return round(bench_m2 * shapely_length(geometry), 2)
 
     if ew_type == "swale":
         length = shapely_length(geometry)
@@ -1966,13 +2047,15 @@ def calculate_cut_volume(ew_type, geometry, depth, width, bottom_width=None):
 
 
 def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False,
-                          bottom_width=None, side_slope=None):
+                          bottom_width=None, side_slope=None, ground_slope_pct=None):
     """
     Calculate the volume of material placed (fill) by an earthwork.
 
     Berm — trapezoidal cross-section (``width`` on top, batters at the berm's side
     slope) × length.
     Swale + companion berm — companion berm fill (from volume conservation).
+    Bench types — the same figure as the cut: FAO balances the bench about its
+    centreline, so the fill is the cut (see ``_bench_earth_per_metre``).
     Dam — wall footprint × depth (approximate).
     Others — 0.
 
@@ -1983,6 +2066,10 @@ def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False,
 
     Returns fill volume in m³.
     """
+    bench_m2 = _bench_earth_per_metre(ew_type, depth, width, ground_slope_pct)
+    if bench_m2 is not None:
+        return round(bench_m2 * shapely_length(geometry), 2)
+
     if ew_type == "berm":
         # A trapezoid: ``width`` on top, batters falling away at the berm's side
         # slope, so the base is ``width + 2·depth·slope``. This read ``depth²`` — a
@@ -2260,6 +2347,7 @@ class DEMBurner:
         "basin":     "_burn_basin",
         "dam":       "_burn_dam",
         "diversion": "_burn_diversion",
+        "bench":     "_burn_bench",
     }
 
     #: Holes are NaN in ``self.original`` and in everything derived from it.
@@ -2865,19 +2953,33 @@ class DEMBurner:
         because the path runs down the middle of the band it is sealing.
         """
         half = thickness / 2.0
+        chosen = self._lower_offset(line, half)
+        if chosen is None:
+            return (line.buffer(half), line)
+        return (chosen.buffer(half), chosen)
+
+    def _lower_offset(self, line, distance):
+        """*line* offset by *distance* to whichever side has the lower ground, or ``None``.
+
+        The inner-wall convention's one question — which way is downhill — asked once,
+        for the dam wall and for a bench's dyke alike. Compared on ``self.original``
+        through :meth:`_ground_mean`, so a hole never wins the comparison, and with
+        ``all_touched`` because this is a position question: a band one cell wider on
+        both sides changes no volume. ``None`` when the offsets cannot be built or
+        neither side has ground.
+        """
         try:
-            left = line.parallel_offset(half, "left")
-            right = line.parallel_offset(half, "right")
-            left_mask = self._rasterize(left.buffer(half))
-            right_mask = self._rasterize(right.buffer(half)) & ~left_mask
+            left = line.parallel_offset(distance, "left")
+            right = line.parallel_offset(distance, "right")
+            left_mask = self._rasterize(left.buffer(distance), all_touched=True)
+            right_mask = self._rasterize(right.buffer(distance), all_touched=True) & ~left_mask
             left_mean = self._ground_mean(left_mask)
             right_mean = self._ground_mean(right_mask)
-            if np.isinf(left_mean) and np.isinf(right_mean):
-                return (line.buffer(half), line)
-            chosen = left if left_mean <= right_mean else right
-            return (chosen.buffer(half), chosen)
         except Exception:
-            return (line.buffer(half), line)
+            return None
+        if np.isinf(left_mean) and np.isinf(right_mean):
+            return None
+        return left if left_mean <= right_mean else right
 
     # ---------------------------------------------------------------- earthwork types
 
@@ -3239,6 +3341,116 @@ class DEMBurner:
             self._record_raised(ew, mask)
         self._warn_sub_cell(ew.name, ew.width)
         return dem
+
+    def _burn_bench(self, dem, line, ew):
+        """Cut and fill *line*'s bench to one level platform, and raise its dyke.
+
+        FAO 13/3's continuous bench as the terrain model can hold it. The platform is
+        the drawn line buffered to the bench width, set to the **mean original ground
+        under it** — the balanced cut-and-fill datum — read off ``self.original`` so it
+        is the same whatever burned first. For a level bench a dyke then stands along
+        the platform's downhill edge at ``platform + depth``.
+
+        Each half is monotone on its own: the uphill half is ``np.minimum`` to the
+        platform and the downhill half ``np.maximum``, so a trench a neighbour cut
+        through the platform stays cut and a wall it raised stays raised — the overlap
+        semantics a dam over a swale has today. The dyke and its end caps follow
+        :meth:`_burn_dam` exactly: a band rasterised on cell centres, then the
+        centreline's cell path sealed with ``max``. A 0.30 m dyke on a 1 m grid claims
+        almost no cell centre, and without the seal there is no dyke, no pond and no
+        warning. The caps reach at least a cell past the platform's ends, or the pond
+        leaves round them on the grid exactly as it would in the field.
+
+        Recorded like a swale with a companion berm: the platform is the feature's
+        mask and ``burned_cut`` is the pond to the dyke crest; every raised cell — fill
+        half, dyke and caps — goes to ``burned_raised`` so the overtopping check sees
+        the bank; the dyke crest goes through :meth:`_record_berm` so the spillway
+        datums and the panel learn it. The sub-cell advisory is about the **ponded
+        width**: the dyke is sealed by construction and is narrower than every cell the
+        plugin has, so warning about it would fire on every cutback ever drawn.
+
+        One level datum along the run, deliberately — in the model a bench holds what
+        it intercepts until it infiltrates. ``CLudeDocs/STRETCH_GOALS.md`` §4e is the
+        revisit.
+        """
+        cfg = get_type(ew.type)
+        bench_width = float(ew.width)
+        dyke_width = float(cfg.dyke_top_width_m or 0.0)
+        depth = float(getattr(ew, "depth", 0.0) or 0.0)
+
+        mask = self._rasterize(line.buffer(bench_width / 2.0), all_touched=False)
+        if not mask.any():
+            # Sub-cell: no cell centre is inside the buffer, so claim the path cells.
+            mask = np.zeros(self.shape, dtype=bool)
+            for rc in self._line_path_cells(line):
+                mask[rc] = True
+        platform = self._ground_mean(mask)
+        if not np.isfinite(platform):
+            return dem
+
+        dem = dem.copy()
+        above = mask & (self.original > platform)
+        below = mask & ~above
+        dem[above] = np.minimum(dem[above], platform)
+        dem[below] = np.maximum(dem[below], platform)
+        raised = mask & (dem > self.original + 1e-6)
+
+        berm = None
+        if cfg.bench_mode == "level" and depth > 0:
+            crest = platform + depth
+            offset = max(0.0, (bench_width - dyke_width) / 2.0)
+            centreline = self._lower_offset(line, offset) if offset > 0 else None
+            if centreline is None:
+                centreline = line
+            dyke = np.zeros(self.shape, dtype=bool)
+            if dyke_width > 0:
+                dyke |= self._rasterize(centreline.buffer(dyke_width / 2.0),
+                                        all_touched=False)
+            for rc in self._line_path_cells(centreline):
+                dyke[rc] = True
+            if getattr(ew, "key_into_banks", False):
+                dyke |= self._bench_end_caps(line, mask, bench_width)
+            dem[dyke] = np.maximum(dem[dyke], crest)
+            raised |= dyke
+            berm = (dyke, crest)
+
+        self._record_mask(ew, mask, dem=dem,
+                          spill=(berm[1] if berm is not None else platform))
+        if raised.any():
+            self._record_raised(ew, raised)
+        self._record_berm(ew, berm)
+        self._warn_sub_cell(ew.name, max(0.0, bench_width - dyke_width))
+        return dem
+
+    def _bench_end_caps(self, line, mask, bench_width):
+        """The ring of cells touching the platform's two ends, corners included.
+
+        Not :meth:`_key_berm_into_banks`, which draws each cap as a disc round the
+        endpoint: a disc just misses the corner cell diagonally off the platform's
+        last cell, depression-filling walks diagonals, and the whole pond left through
+        that one corner on the first synthetic hillside it was tried on. The cap is
+        therefore the platform's own 8-neighbourhood, restricted to the ends — every
+        cell a pond cell could step to is raised, by construction. On three sides the
+        pond is then held by built ground; the fourth is the hillside itself.
+        """
+        from scipy.ndimage import binary_dilation
+        from shapely.geometry import Point
+
+        try:
+            coords = list(line.coords)
+        except (NotImplementedError, AttributeError):
+            return np.zeros(self.shape, dtype=bool)
+        ring = binary_dilation(mask, structure=np.ones((3, 3), dtype=bool)) & ~mask
+        # The platform's rounded end reaches half the bench width past the endpoint,
+        # and its neighbours a cell or two further; all_touched because this is a
+        # position question, not a volume.
+        reach = bench_width / 2.0 + 2.0 * max(self.cell_size, self.cell_h)
+        ends = Point(coords[0]).buffer(reach).union(Point(coords[-1]).buffer(reach))
+        try:
+            near = self._rasterize(ends, all_touched=True)
+        except Exception:
+            return np.zeros(self.shape, dtype=bool)
+        return ring & near
 
     @staticmethod
     def _link_datum(ew):

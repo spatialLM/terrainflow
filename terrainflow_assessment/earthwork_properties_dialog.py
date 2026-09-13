@@ -276,7 +276,10 @@ class EarthworkPropertiesDialog(QDialog):
             self._cfg = get_type(ew_type)
         except KeyError:
             self._cfg = None
-
+        # A bench-shaped type (a cutback swale, a bench terrace): the FAO chain's rows
+        # and the ground slope they run on are built only for these.
+        self._bench_cfg = (self._cfg if self._cfg is not None
+                           and self._cfg.bench_mode is not None else None)
 
         # The registry's label, never a second table of names kept here.
         self._type_label = self._cfg.label if self._cfg else ew_type.capitalize()
@@ -396,6 +399,32 @@ class EarthworkPropertiesDialog(QDialog):
         else:
             self.spin_bottom_width = None
             self.lbl_side_slope = None
+
+        # Bench types: the ground slope the FAO chain runs on, and what it derives.
+        # Sampled off the slope raster when the feature is drawn; editable here
+        # because the raster is a model and the person may know the ground.
+        if self._bench_cfg is not None:
+            self.spin_ground_slope = QDoubleSpinBox()
+            self.spin_ground_slope.setRange(0.0, 99.0)
+            self.spin_ground_slope.setDecimals(1)
+            self.spin_ground_slope.setSingleStep(1.0)
+            self.spin_ground_slope.setSuffix(" %")
+            # Zero is "unknown", never a slope: flat ground needs no bench.
+            self.spin_ground_slope.setSpecialValueText("not sampled")
+            seeded = getattr(ew, "ground_slope_pct", None) if ew else None
+            self.spin_ground_slope.setValue(float(seeded) if seeded else 0.0)
+            self.spin_ground_slope.setToolTip(H.BENCH_GROUND_SLOPE)
+            self.spin_ground_slope.valueChanged.connect(self._update_capacity)
+            form.addRow("Ground slope:", self.spin_ground_slope)
+
+            self.lbl_bench = QLabel("—")
+            self.lbl_bench.setWordWrap(True)
+            self.lbl_bench.setStyleSheet("color: #5f7176; font-size: 10.5px;")
+            self.lbl_bench.setToolTip(H.BENCH_DERIVED)
+            form.addRow("FAO bench:", self.lbl_bench)
+        else:
+            self.spin_ground_slope = None
+            self.lbl_bench = None
 
         # Gradient — registry-driven (types with gradient_pct as an independent dim)
         if self._cfg is not None and "gradient_pct" in self._cfg.independent_dims:
@@ -633,11 +662,23 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_req_length.setToolTip(H.SWALE_RECOMMENDED_LENGTH)
             cap_layout.addRow(self.lbl_req_length)
 
+            # A bench's layout advice: how many benches deep the hillside can go
+            # before each holds more than its section can.
+            if self._bench_cfg is not None:
+                self.lbl_bench_layout = QLabel("")
+                self.lbl_bench_layout.setWordWrap(True)
+                self.lbl_bench_layout.setStyleSheet("color: #5f7176; font-size: 10.5px;")
+                self.lbl_bench_layout.setToolTip(H.BENCH_LAYOUT)
+                cap_layout.addRow(self.lbl_bench_layout)
+            else:
+                self.lbl_bench_layout = None
+
             self._swale_length_m = self.geometry.length()
         else:
             self.lbl_req_length = None
             self.lbl_holds = None
             self.lbl_verdict = None
+            self.lbl_bench_layout = None
 
         # Where along the alignment the catchment actually arrives. The lumped verdict
         # above is only safe while inflow is reasonably even; this is what shows when
@@ -726,7 +767,8 @@ class EarthworkPropertiesDialog(QDialog):
                 rim_style = f"color: {_MUTED};"
                 provenance = {
                     "measured": "measured off the last analysis",
-                    "berm": "the companion berm as built",
+                    "berm": "the bank's crest as built",
+                    "dyke": "the dyke crest — the platform plus the dyke height you set",
                     "wall": "the wall crest you specified",
                     "lip": "the lowest natural ground round the footprint",
                 }.get(self._containment_source)

@@ -22,7 +22,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from terrainflow_assessment.core.registry.earthwork_types import is_crest_type
+from terrainflow_assessment.core.registry.earthwork_types import get_type, is_crest_type
 from terrainflow_assessment.core.registry.map_palette import (
     AREA_OUTLINES,
     STREAMS,
@@ -1677,6 +1677,12 @@ def _batter(e):
     return f"1 in {float(slope):.1f}"
 
 
+def _bench_mode(ew_type):
+    try:
+        return get_type(ew_type).bench_mode
+    except KeyError:
+        return None
+
 
 def _type_extra(e):
     """The one dimension that matters for this type and no other."""
@@ -1685,6 +1691,14 @@ def _type_extra(e):
         crest = getattr(e, "crest_elevation", None)
         keyed = "keyed into banks" if getattr(e, "key_into_banks", False) else "as drawn"
         return f"crest {crest:.2f} m ({keyed})" if crest else keyed
+    bench_mode = _bench_mode(t)
+    if bench_mode is not None:
+        # The generic columns print the aliased dimensions as "depth" and "width";
+        # this is where the report says a bench's are a dyke height and a bench width.
+        width = float(getattr(e, "top_width_m", 0.0) or 0.0)
+        if bench_mode == "level":
+            return f"{width:.1f} m bench, {float(getattr(e, 'depth', 0.0) or 0.0):.2f} m dyke"
+        return f"{width:.1f} m bench, {bench_mode}-sloped"
     if t == "diversion":
         return f"grade {getattr(e, 'gradient_pct', 0) or 0:.1f}%"
     if t == "swale" and getattr(e, "companion_berm", False):

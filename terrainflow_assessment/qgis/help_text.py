@@ -1406,6 +1406,30 @@ TOOL_DRAW_CONTOUR = (
     "Needs contours from the Analysis stage."
 )
 
+
+# --------------------------------------------------------------------- Bench types
+# A cutback swale or a bench terrace: FAO 13/3's continuous bench, sized by the
+# natural slope across it.
+BENCH_GROUND_SLOPE = (
+    "The natural ground slope across the bench, in percent. Sampled off the\n"
+    "slope raster along the line when the feature is drawn (and again when it\n"
+    "is reshaped); type over it if you know the ground better than the model.\n"
+    "Every figure below follows from it."
+)
+BENCH_DERIVED = (
+    "FAO 13/3's bench geometry at this width and slope: the drop to the next\n"
+    "bench, the riser it needs, the hillside one bench and riser take up, and\n"
+    "the cut at the inner edge. Derived, not stored — change the slope or the\n"
+    "width and they follow."
+)
+BENCH_LAYOUT = (
+    "The layout this section supports. One metre of it holds the storm off so\n"
+    "many metres of hillside; divided by the terrace width, that is how many\n"
+    "benches deep the layout can be — one in every two, one in every three.\n"
+    "A bench drawn on its own still reads short above, because until benches\n"
+    "are added above it the whole hill drains to it."
+)
+
 TOOL_OUTFLOW_SPILLWAY = (
     "Click the map to site where the selected feature OVERFLOWS.\n"
     "Its crest is then read from the ground there rather than typed.\n"

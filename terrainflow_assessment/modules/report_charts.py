@@ -52,7 +52,8 @@ def type_colour(ew_type):
 # Every glyph here must exist in matplotlib's default DejaVu Sans or it prints
 # as a tofu box. The panel uses U+2312 ARC for a berm, which DejaVu lacks;
 # U+25E0 UPPER HALF CIRCLE reads the same and is present. Guarded by a test.
-_GLYPH = {"swale": "∿", "basin": "▢", "dam": "▮", "berm": "◠", "diversion": "↘"}
+_GLYPH = {"swale": "∿", "basin": "▢", "dam": "▮", "berm": "◠", "diversion": "↘",
+          "cutback_swale": "⊔"}
 
 _INK = "#22302e"
 _MUTED = "#5f7176"

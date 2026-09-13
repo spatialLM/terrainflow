@@ -215,6 +215,8 @@ _GRAMMAR = {
     "dam":       (SIG_TICKS,    3.0,  2.2),
     "diversion": (SIG_ARROW,    8.0,  2.6),
     "basin":     (SIG_NONE,     0.0,  0.0),
+    # A bank with a wet side, like a berm: the dyke holds the pond on the platform.
+    "cutback_swale": (SIG_CHEVRON, 4.5, 2.6),
 }
 
 

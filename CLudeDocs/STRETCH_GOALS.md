@@ -152,6 +152,28 @@ be wrong and risky. A future registry entry could add it purely for styling meta
 freely, then committed/refined into real contour-fitted features (user idea,
 2026-07-23 — explicitly not now).
 
+**e) Bench outlet grading — the burned bench is a sink (decided 2026-09-13).** The
+four-type expansion (cutback swale, bench terrace, detainment bund, WASCOB) burns both
+bench types to **one level datum along the run** — the mean original ground over the
+platform — with no outlet (`DEMBurner._burn_bench`, planned). That is right for a
+cutback swale, which must be level to pond, and it is FAO 13/3's own assumption for the
+cut/fill balance. It is not what a field terrace does: a reverse-sloped bench sheds
+because it is graded to a waterway, so in the model a bench terrace (`has_storage=False`)
+still intercepts and holds runoff until it infiltrates, downstream catchments shrink by
+that much, and the verification skips it because its capacity is zero. The owner chose
+the single datum for the first build; the terrace's docstring and help text say what the
+model does with the water.
+
+What the revisit would build: either a per-station datum that follows the drawn line's
+own profile (the diversion drain's nearest-path-cell mechanism, so a line drawn with a
+fall drains along itself and a contour-drawn one stays level), or sills per §5 with a
+graded toe channel to a waterway — which is the earthwork-types spec's deferred series
+generator plus an outlet. Both change what the analytic FAO chain describes, so the
+analytic and measured figures need re-reconciling when it lands.
+
+Revisit trigger for (e): the series generator lands, or a user reports a bench terrace
+holding water it was meant to shed.
+
 **Why deferred.** UI redesign phase capped its scope at exposing already-modelled
 abilities; these add new feature semantics.
 

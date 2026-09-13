@@ -837,8 +837,14 @@ class SpillwayTable(QWidget):
                 f"feature was measured to pond to, not where bare ground sits.")
         elif source == "berm":
             bits.append(
-                f"The level above ({row['rim_elevation']:.2f} m) is the companion berm's "
-                f"crest as built — the water is held by the bank, not the hillside.")
+                f"The level above ({row['rim_elevation']:.2f} m) is the bank's crest as "
+                f"built — a companion berm, or a bench's dyke — so the water is held by "
+                f"the bank, not the hillside.")
+        elif source == "dyke":
+            bits.append(
+                f"The level above ({row['rim_elevation']:.2f} m) is the dyke crest — the "
+                f"platform plus the dyke height you set — until a flood measures where "
+                f"the built bench actually ponds to.")
         elif is_crest_type(row.get("ew_type")):
             bits.append(
                 "For a walled feature the level above is the crest you specified, so "
