@@ -3,7 +3,7 @@
 import math
 import os
 
-from _harness import PluginHarness, line_across_valley
+from _harness import PluginHarness, basin_polygon, line_across_valley
 
 
 def check_earthworks_requires_a_feature(dem_path):
@@ -327,15 +327,29 @@ def check_a_dam_that_pours_over_its_own_crest_is_flagged(dem_path):
 
 
 def check_multiple_earthwork_types_burn(dem_path):
-    """Every registry type must survive being burned and re-analysed."""
+    """Every registered type must survive being burned and re-analysed.
+
+    Walked off the registry rather than listed here, so a type that is registered and
+    not wired to a burn fails in the plugin as well as in the pure completeness test.
+    Crest types are added straight to the manager with no crest — `add_earthwork`
+    bypasses the draw path that seeds one — so they burn through the berm fallback,
+    which is the path a crestless dam takes in the plugin too.
+    """
+    from terrainflow_assessment.core.registry.earthwork_types import all_types
+
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.assert_no_errors("baseline run")
 
-        for row, ew_type in ((40, "swale"), (60, "berm"), (80, "diversion")):
-            h.add_earthwork(ew_type, geometry=line_across_valley(row=row))
+        types = all_types()
+        for i, (ew_type, cfg) in enumerate(types.items()):
+            if cfg.geom_type == "Polygon":
+                geom = basin_polygon(h, north_offset=-160)
+            else:
+                geom = line_across_valley(row=40 + i * 20)
+            h.add_earthwork(ew_type, geometry=geom)
 
-        assert len(h.state.earthwork_manager) == 3, "not all earthworks were added"
+        assert len(h.state.earthwork_manager) == len(types), "not all earthworks were added"
 
         h.panel.run_earthworks_requested.emit()
         h.assert_no_errors("multi-type earthworks re-analysis")

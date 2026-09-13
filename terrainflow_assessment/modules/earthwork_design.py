@@ -2235,6 +2235,27 @@ class DEMBurner:
       Diversion  → graded channel (grade-controlled depth)
     """
 
+    #: The registry's ``burn_method`` → the name of the method here that burns it.
+    #:
+    #: The registry docstring has named this table since the field was declared, and
+    #: nothing read it: :meth:`burn_earthworks` kept a private dict keyed on ``ew.type``
+    #: and skipped anything it did not know with a bare ``continue``. A type registered
+    #: with any ``burn_method`` therefore drew on the map, listed in the tool menu,
+    #: reported a capacity of 0.0 and changed no ground, and nothing said so.
+    #:
+    #: Keyed on the *method* rather than the type so two types can share one burn (a
+    #: level bench and a reverse-sloped one are one procedure with one constant
+    #: different), and holding names rather than bound methods so a test can read the
+    #: table without building a burner. ``tests/test_registry_completeness.py`` checks
+    #: every registered type against it.
+    _BURN_DISPATCH = {
+        "swale":     "_burn_swale",
+        "berm":      "_burn_berm",
+        "basin":     "_burn_basin",
+        "dam":       "_burn_dam",
+        "diversion": "_burn_diversion",
+    }
+
     #: Holes are NaN in ``self.original`` and in everything derived from it.
     #:
     #: The sentinel is masked once, at the door, rather than guarded for at each of
@@ -2339,13 +2360,6 @@ class DEMBurner:
         self.burned_raised = {}
         self.burned_notches = {}
         self.burned_sills = {}
-        _dispatch = {
-            "swale":     self._burn_swale,
-            "berm":      self._burn_berm,
-            "basin":     self._burn_basin,
-            "dam":       self._burn_dam,
-            "diversion": self._burn_diversion,
-        }
         burned = []
         for ew in burn_order(earthworks):
             if not ew.enabled:
@@ -2353,8 +2367,16 @@ class DEMBurner:
             shapely_geom = self._to_shapely(ew.geometry)
             if shapely_geom is None:
                 continue
-            burn_fn = _dispatch.get(ew.type)
+            burn_fn = self._burn_method_for(ew.type)
             if burn_fn is None:
+                # Said, not skipped. A feature that burns nothing still carries a
+                # capacity, a pond of 0 m³ and a row in every table, and every one of
+                # those figures describes a thing that was never built.
+                self.warnings.append(
+                    f"{ew.name}: no burn method is wired for type '{ew.type}', so it "
+                    f"changes no ground — its capacity, ponding and cut/fill figures "
+                    f"describe nothing until DEMBurner._BURN_DISPATCH names one."
+                )
                 continue
             modified = burn_fn(modified, shapely_geom, ew)
             burned.append(ew)
@@ -2384,6 +2406,22 @@ class DEMBurner:
             dst.write(out, 1)
 
     # ------------------------------------------------------------------ helpers
+
+    def _burn_method_for(self, ew_type):
+        """The bound burn for *ew_type*, or ``None`` when nothing is wired to it.
+
+        Resolved through the registry's ``burn_method`` first. A type the registry does
+        not know falls back to its own key, which is what the old table did for every
+        type: a design file naming a type that is not registered but *is* one of the
+        shipped burns keeps burning exactly as it did. Only a type that resolves to
+        nothing either way is unwired, and :meth:`burn_earthworks` says so.
+        """
+        try:
+            method = get_type(ew_type).burn_method
+        except KeyError:
+            method = ew_type
+        name = self._BURN_DISPATCH.get(method)
+        return getattr(self, name) if name else None
 
     def _ground_mean(self, mask):
         """Mean ground level under *mask*, holes excluded; ``inf`` when it is all hole.

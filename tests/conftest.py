@@ -133,6 +133,31 @@ if _REPO not in sys.path:
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def registry_restored():
+    """Put the earthwork-type registry back afterwards.
+
+    `register_type` writes into a module-level dict, so a type registered by a test
+    stays registered for every test that runs after it — in the same process, for the
+    rest of the session. `terrace` did, and `all_types()` reported six earthwork types
+    to everything downstream while production has five. Nothing failed; the suite just
+    quietly stopped describing the shipped registry.
+
+    Here rather than in `tests/core/test_earthwork_types.py`, where it was born,
+    because `tests/test_registry_completeness.py` registers a deliberately unwired type
+    to prove it can see one, and a fixture local to another module cannot be reached
+    from there.
+    """
+    from terrainflow_assessment.core.registry.earthwork_types import _REGISTRY
+
+    before = dict(_REGISTRY)
+    try:
+        yield
+    finally:
+        _REGISTRY.clear()
+        _REGISTRY.update(before)
+
+
 def _write_dem(path, data, cell_size=1.0, crs="EPSG:32632", nodata=-9999.0,
                cell_h=None):
     """Helper: write a numpy array as a GeoTIFF DEM.

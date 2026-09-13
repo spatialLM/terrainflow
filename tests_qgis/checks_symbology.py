@@ -18,34 +18,27 @@ the assertions here are about placement, order and rendered geometry rather than
 about API calls having been made.
 """
 
-from _harness import PluginHarness, line_across_valley
+from _harness import NROWS, PluginHarness, basin_polygon, line_across_valley
 from _shots import assert_rendered, save_canvas, save_qimage
-
-EW_TYPES = ("swale", "berm", "basin", "dam", "diversion")
-
-
-def _basin_polygon(h, east_offset=0, north_offset=0, side=40):
-    """A square basin footprint near the middle of the synthetic DEM."""
-    from qgis.core import QgsGeometry, QgsPointXY
-
-    ext = h.dem_layer.extent()
-    cx = ext.xMinimum() + ext.width() / 2 + east_offset
-    cy = ext.yMinimum() + ext.height() / 2 + north_offset
-    half = side / 2.0
-    return QgsGeometry.fromPolygonXY([[
-        QgsPointXY(cx - half, cy - half), QgsPointXY(cx + half, cy - half),
-        QgsPointXY(cx + half, cy + half), QgsPointXY(cx - half, cy + half),
-        QgsPointXY(cx - half, cy - half),
-    ]])
 
 
 def _design_of_every_type(h):
-    """One earthwork of each registered type, spread so they do not overlap."""
-    for i, ew_type in enumerate(EW_TYPES):
-        if ew_type == "basin":
-            geom = _basin_polygon(h, north_offset=-120)
+    """One earthwork of every registered type, each on its own row.
+
+    Walked off the registry, so a type added there is on this map by construction.
+    Rows step 45 while the registry fits — the shipped types sit exactly where they
+    always have, so no screenshot moves when a type is added elsewhere — and close up
+    once it does not, because the last feature has to stay on the grid.
+    """
+    from terrainflow_assessment.core.registry.earthwork_types import all_types
+
+    types = all_types()
+    step = min(45, (NROWS - 60) // max(1, len(types) - 1))
+    for i, (ew_type, cfg) in enumerate(types.items()):
+        if cfg.geom_type == "Polygon":
+            geom = basin_polygon(h, north_offset=-120)
         else:
-            geom = line_across_valley(row=30 + i * 45)
+            geom = line_across_valley(row=30 + i * step)
         h.add_earthwork(ew_type, geometry=geom)
     h.plugin._earthworks._refresh_ew_layer()
 
@@ -93,7 +86,7 @@ def check_all_labelled_layers_have_placement(dem_path):
 
 
 def check_every_earthwork_type_labels(dem_path):
-    """Every one of the five types puts its name on the canvas, at three scales.
+    """Every registered type puts its name on the canvas, at three scales.
 
     Asserted through the labelling engine rather than by counting pixels, so a
     font substitution cannot turn a real regression into a green run — or a green
@@ -727,7 +720,7 @@ def check_basin_spillway_must_sit_on_the_rim(dem_path):
     with PluginHarness(dem_path) as h:
         h.run_baseline()
         h.prepare_canvas_for_input()
-        ew = h.add_earthwork("basin", geometry=_basin_polygon(h, side=80))
+        ew = h.add_earthwork("basin", geometry=basin_polygon(h, side=80))
         h.plugin._earthworks._refresh_ew_layer()
         h.plugin._earthworks.activate_place_spillway(kind="outflow", index=0)
         tool = h.canvas.mapTool()

@@ -365,6 +365,25 @@ def line_across_valley(row=60, half_width_m=40.0):
     ])
 
 
+def basin_polygon(h, east_offset=0, north_offset=0, side=40):
+    """A square basin footprint near the middle of the synthetic DEM.
+
+    Shared by every check that builds one of each registered type, so a polygon type
+    is placed the same way wherever the registry is walked.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    ext = h.dem_layer.extent()
+    cx = ext.xMinimum() + ext.width() / 2 + east_offset
+    cy = ext.yMinimum() + ext.height() / 2 + north_offset
+    half = side / 2.0
+    return QgsGeometry.fromPolygonXY([[
+        QgsPointXY(cx - half, cy - half), QgsPointXY(cx + half, cy - half),
+        QgsPointXY(cx + half, cy + half), QgsPointXY(cx - half, cy + half),
+        QgsPointXY(cx - half, cy - half),
+    ]])
+
+
 # ---------------------------------------------------------------------------
 # iface stub — the plugin uses only messageBar / mainWindow / mapCanvas
 # plus the toolbar/menu/dock registration pairs.

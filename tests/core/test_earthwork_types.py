@@ -2,30 +2,14 @@
 import pytest
 
 from terrainflow_assessment.core.registry.earthwork_types import (
-    _REGISTRY,
     EarthworkTypeConfig,
     all_types,
     get_type,
     register_type,
 )
 
-
-@pytest.fixture
-def registry_restored():
-    """Put the registry back afterwards.
-
-    `register_type` writes into a module-level dict, so a type registered by a test
-    stays registered for every test that runs after it — in the same process, for the
-    rest of the session. `terrace` did, and `all_types()` reported six earthwork types
-    to everything downstream while production has five. Nothing failed; the suite just
-    quietly stopped describing the shipped registry.
-    """
-    before = dict(_REGISTRY)
-    try:
-        yield
-    finally:
-        _REGISTRY.clear()
-        _REGISTRY.update(before)
+# `registry_restored`, which the registration tests below take, lives in
+# `tests/conftest.py` so that `tests/test_registry_completeness.py` can take it too.
 
 
 class TestGetType:

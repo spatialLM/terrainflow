@@ -1,8 +1,10 @@
 """
 earthwork_types.py — Registry of supported earthwork types.
 
-Adding a new type (e.g. "terrace") requires touching exactly this one file:
+Adding a new type (e.g. "terrace") means registering it here:
     register_type(EarthworkTypeConfig("terrace", ...))
+and giving it a row in each per-type table — the burn dispatch and the three glyph
+tables — which `tests/test_registry_completeness.py` checks for every key.
 
 EarthworkTypeConfig fields
 --------------------------
