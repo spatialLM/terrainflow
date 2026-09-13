@@ -493,3 +493,210 @@ class TestSpacingAdvisory:
         r = spacing_advisory(8.0, "Loam")
         expected = contour_spacing(r["vertical_interval_m"], 0.08).spacing
         assert r["erosion_spacing_m"] == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# bench_geometry — FAO Conservation Guide 13/3 §6.1, Table 1 as the oracle
+# ---------------------------------------------------------------------------
+
+class TestBenchGeometry:
+    """FAO's Table 1 (hand-made benches, riser 0.75:1, reverse 5 %), reproduced to the
+    table's own two decimals by rounding every step half-up before the next."""
+
+    def test_fao_table_1_the_3m_bench_at_30_pct(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(3.00, 30.0, riser_slope=0.75, mode="reverse")
+        assert b.vertical_interval == 1.16
+        assert b.edge_rise == 0.15
+        assert b.riser_height == 1.31
+        # The table's 0.53. Float arithmetic gives 0.9 + 0.15 = 1.0499… and 0.52.
+        assert b.depth_of_cut == 0.53
+        assert b.riser_width == 0.98
+        assert b.terrace_width == 3.98
+        assert b.length_per_ha == 2513
+        assert b.cut_section == 0.49
+        assert b.volume_per_ha == 1231
+
+    def test_fao_table_1_the_4m_bench_at_24_pct(self):
+        """Every figure but one. The table prints W_t 5.03 and L 1989, and 10 000 / 5.03
+        is 1988.07: FAO carried an unrounded riser width into that one division and a
+        rounded one into the 3 m row's. No single convention gives both, so the
+        convention is the stated one and the table's slip is recorded here rather than
+        reproduced."""
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(4.00, 24.0, riser_slope=0.75, mode="reverse")
+        assert b.vertical_interval == 1.17
+        assert b.edge_rise == 0.20
+        assert b.riser_height == 1.37
+        assert b.depth_of_cut == 0.58
+        # 1.0275 on paper rounds up. As a float it is 1.02749999… and would round down.
+        assert b.riser_width == 1.03
+        assert b.terrace_width == 5.03
+        assert b.length_per_ha == 1988          # FAO prints 1989
+        assert b.cut_section == 0.69
+        assert b.volume_per_ha == 1372
+
+    def test_step_rounding_is_what_makes_the_table_reconcile(self):
+        """Carry the chain unrounded and the 3 m row gives 2510 m/ha, not 2513."""
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        vi = 30.0 * 3.00 / (100.0 - 30.0 * 0.75)
+        w_t = 3.00 + (vi + 0.15) * 0.75
+        assert round(10000.0 / w_t) == 2510
+        assert bench_geometry(3.00, 30.0, riser_slope=0.75).length_per_ha == 2513
+
+    def test_the_level_bench_with_a_dyke_from_the_spec_worked_example(self):
+        """25 % ground, 3.0 m bench, hand-made riser, 0.20 m dyke."""
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(3.0, 25.0, riser_slope=0.75, mode="level", dyke_height=0.20)
+        assert b.vertical_interval == 0.92
+        assert b.edge_rise == 0.0
+        assert b.riser_height == 1.12
+        assert b.riser_width == 0.84
+        assert b.terrace_width == 3.84
+        assert b.length_per_ha == 2604
+        # The dyke is fill on the finished platform: it raises the riser and takes no
+        # part in the cut balance, so the cut at the inner edge is half the fall alone.
+        assert b.depth_of_cut == 0.38            # (0.75 + 0) / 2 = 0.375, half-up
+
+    def test_the_machine_built_level_bench_the_registry_uses(self):
+        """Hand-worked: 4.0 m bench, 25 %, 1:1 riser, 0.20 m dyke. VI = 100/75 = 1.33,
+        H_r = 1.53, W_r = 1.53, W_t = 5.53, L = 1808, C = 0.765 → 0.77, V = 1392,
+        D_c = 1.00 / 2 = 0.50 (the dyke is not cut)."""
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(4.0, 25.0, riser_slope=1.0, mode="level", dyke_height=0.20)
+        assert b.vertical_interval == 1.33
+        assert b.riser_height == 1.53
+        assert b.riser_width == 1.53
+        assert b.terrace_width == 5.53
+        assert b.length_per_ha == 1808
+        assert b.cut_section == 0.77
+        assert b.volume_per_ha == 1392
+        assert b.depth_of_cut == 0.50
+
+    def test_an_outward_bench_drops_over_its_riser(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(4.00, 24.0, riser_slope=0.75, mode="outward")
+        assert b.edge_rise == -0.12
+        assert b.riser_height == 1.05            # 1.17 − 0.12
+        assert b.depth_of_cut == 0.42            # (0.96 − 0.12) / 2
+
+    def test_a_dyke_raises_the_riser_and_not_the_cut(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        bare = bench_geometry(4.0, 20.0, mode="level")
+        dyked = bench_geometry(4.0, 20.0, mode="level", dyke_height=0.25)
+        assert dyked.riser_height == pytest.approx(bare.riser_height + 0.25)
+        assert dyked.depth_of_cut == bare.depth_of_cut
+
+    def test_flat_ground_has_no_vertical_interval(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        b = bench_geometry(4.0, 0.0, mode="reverse")
+        assert b.vertical_interval == 0.0
+        assert b.riser_height == 0.20            # the 5 % rise across the bench alone
+        assert b.terrace_width == 4.20
+
+    def test_the_bench_width_is_the_min_dimension(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        assert bench_geometry(2.5, 15.0).min_dimension == 2.5
+
+    def test_ground_as_steep_as_the_riser_is_refused(self):
+        """S·U ≥ 100: the next bench's riser toe lands above this bench's top."""
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        with pytest.raises(ValueError, match="riser"):
+            bench_geometry(4.0, 100.0, riser_slope=1.0)
+        with pytest.raises(ValueError, match="riser"):
+            bench_geometry(4.0, 140.0, riser_slope=0.75)
+        assert bench_geometry(4.0, 99.0, riser_slope=1.0).vertical_interval == 396.0
+
+    def test_bad_inputs_are_refused_by_name(self):
+        from terrainflow_assessment.core.sizing.bench import bench_geometry
+
+        with pytest.raises(ValueError, match="width"):
+            bench_geometry(0.0, 20.0)
+        with pytest.raises(ValueError, match="mode"):
+            bench_geometry(4.0, 20.0, mode="sideways")
+        with pytest.raises(ValueError, match="dyke"):
+            bench_geometry(4.0, 20.0, mode="level", dyke_height=-0.1)
+
+    def test_the_package_re_exports_it(self):
+        from terrainflow_assessment.core.sizing import BenchResult, bench_geometry
+
+        assert isinstance(bench_geometry(3.0, 10.0), BenchResult)
+
+
+# ---------------------------------------------------------------------------
+# bench_spacing_advisory — the layout a bench section supports
+# ---------------------------------------------------------------------------
+
+class TestBenchSpacingAdvisory:
+    """The spec's worked example: 25 % ground, a 3.0 m bench with a 0.20 m dyke on a
+    hand-made riser, a section holding 0.405 m³/m against 58.6 mm of runoff — a 6.91 m
+    strip. One bench in every two terrace widths (7.68 m) is supported; one in every
+    three (needs 7.68 m of strip) is not."""
+
+    def _example(self, **kw):
+        from terrainflow_assessment.core.sizing import bench_spacing_advisory
+
+        args = dict(riser_slope=0.75, mode="level", dyke_height=0.20,
+                    runoff_mm=58.6, capacity_m3_per_m=0.405)
+        args.update(kw)
+        return bench_spacing_advisory(25.0, 3.0, **args)
+
+    def test_the_geometry_comes_from_the_fao_chain(self):
+        r = self._example()
+        assert r["vertical_interval_m"] == 0.92
+        assert r["terrace_width_m"] == 3.84
+
+    def test_the_layout_is_the_widest_the_strip_supports(self):
+        r = self._example()
+        assert r["capture_spacing_m"] == pytest.approx(6.91, abs=0.01)
+        assert r["layout_every"] == 2
+        assert r["recommended_spacing_m"] == pytest.approx(7.68)
+        assert r["governing"] == "capture"
+
+    def test_a_section_holding_more_supports_a_sparser_layout(self):
+        r = self._example(capacity_m3_per_m=1.00)      # a 17.1 m strip
+        assert r["layout_every"] == 5                  # 17.1 / 3.84 = 4.4 → 4, +1
+        assert r["recommended_spacing_m"] == pytest.approx(5 * 3.84)
+
+    def test_without_a_storm_it_assumes_continuous_benching(self):
+        r = self._example(runoff_mm=None, capacity_m3_per_m=None)
+        assert r["capture_spacing_m"] is None
+        assert r["layout_every"] == 1
+        assert r["recommended_spacing_m"] == pytest.approx(3.84)
+        assert r["governing"] == "none"
+
+    def test_no_runoff_at_all_is_not_a_division_by_zero(self):
+        r = self._example(runoff_mm=0.0)
+        assert r["layout_every"] == 1
+        assert r["governing"] == "none"
+
+    def test_ground_the_bench_cannot_be_cut_into_is_said_not_raised(self):
+        from terrainflow_assessment.core.sizing import bench_spacing_advisory
+
+        r = bench_spacing_advisory(120.0, 4.0, riser_slope=1.0)
+        assert r["vertical_interval_m"] is None
+        assert r["terrace_width_m"] is None
+        assert r["governing"] == "none"
+        assert "riser" in r["text"]
+
+    def test_the_text_names_its_own_basis(self):
+        r = self._example()
+        assert "FAO" in r["text"]
+        assert "one bench in every 2" in r["text"]
+        assert "3.84" in r["text"]
+
+    def test_there_is_no_erosion_arm(self):
+        """A bench system replaces the natural slope; the NRCS strip rule does not
+        apply between benches and must not be reported as if it did."""
+        r = self._example()
+        assert "erosion_spacing_m" not in r

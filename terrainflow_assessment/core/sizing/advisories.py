@@ -332,3 +332,102 @@ def spacing_advisory(slope_pct: float,
         "governing": governing,
         "text": text,
     }
+
+
+# ---------------------------------------------------------------------------
+# Spacing for a continuous bench system
+# ---------------------------------------------------------------------------
+
+def bench_spacing_advisory(slope_pct: float, bench_width: float, *,
+                           riser_slope: float = 1.0,
+                           mode: str = "reverse",
+                           dyke_height: float = 0.0,
+                           runoff_mm: float | None = None,
+                           capacity_m3_per_m: float | None = None) -> dict:
+    """The layout a bench section supports on this ground, and the basis for it.
+
+    A sibling of :func:`spacing_advisory`, not a flag on it. That function has two arms
+    — the NRCS terrace rule against scour on the slope *between* features, and capture
+    — and for a bench system the first does not exist: benches and risers replace the
+    natural slope, so there is no hillside left between them to scour, and the spacing
+    of continuous benching simply *is* FAO's terrace width ``W_t``. What remains is the
+    water question. FAO answers it in the field with intermittent layouts — one bench
+    in every two terrace widths, in every three — and :func:`capture_spacing` is the
+    same question transposed: the strip one metre of section holds. The widest layout
+    the section supports is therefore ``⌊strip ÷ W_t⌋ + 1``: one bench in every *k*
+    terrace widths, the *k − 1* unbenched widths above it draining onto it.
+
+    Returns ``slope_pct``, ``vertical_interval_m`` (FAO's VI — the drop between benches,
+    not the NRCS interval), ``terrace_width_m``, ``capture_spacing_m`` (``None`` without
+    a storm and a section), ``layout_every`` (*k*; 1 is continuous benching),
+    ``recommended_spacing_m`` (``k × W_t``), ``governing`` (``"capture"`` when a storm
+    sized it, ``"none"`` otherwise) and a ``text`` that names its basis. Ground the
+    bench cannot be cut into (see :func:`bench_geometry`) is reported in ``text`` with
+    the geometry fields ``None``, never raised — an advisory has nowhere to raise to.
+
+    A bench drawn alone still reads short in its demand check against the measured
+    catchment, exactly as a swale drawn alone does, because until benches are added
+    above it the whole hill drains to it. This is what says how many to add.
+    """
+    from .bench import bench_geometry
+
+    try:
+        geom = bench_geometry(bench_width, slope_pct, riser_slope=riser_slope,
+                              mode=mode, dyke_height=dyke_height)
+    except ValueError as exc:
+        return {
+            "slope_pct": float(slope_pct),
+            "vertical_interval_m": None,
+            "terrace_width_m": None,
+            "capture_spacing_m": None,
+            "layout_every": None,
+            "recommended_spacing_m": None,
+            "governing": "none",
+            "text": f"No bench layout at {slope_pct:.1f}%: {exc}.",
+        }
+
+    w_t = geom.terrace_width
+    capture_m = None
+    if runoff_mm is not None and capacity_m3_per_m is not None:
+        capture_m = capture_spacing(runoff_mm, capacity_m3_per_m)
+
+    if capture_m is not None and math.isfinite(capture_m) and w_t > 0:
+        every = int(capture_m // w_t) + 1
+        governing = "capture"
+    else:
+        every = 1
+        governing = "none"
+    recommended = every * w_t
+
+    basis = (
+        f"FAO 13/3: a {bench_width:.1f} m bench on {slope_pct:.1f}% ground drops "
+        f"{geom.vertical_interval:.2f} m to the next and, with its riser, takes "
+        f"{w_t:.2f} m of hillside."
+    )
+    if governing == "capture":
+        text = (
+            f"{basis} The section holds the storm off a {capture_m:.1f} m strip, so one "
+            f"bench in every {every} terrace widths ({recommended:.1f} m apart) is the "
+            f"widest layout it supports."
+        )
+    elif capture_m is not None:
+        text = (
+            f"{basis} There is no runoff to catch, so capture does not govern; "
+            f"continuous benching — one bench in every terrace width — is assumed."
+        )
+    else:
+        text = (
+            f"{basis} No storm or section was supplied, so continuous benching — one "
+            f"bench in every terrace width — is assumed."
+        )
+
+    return {
+        "slope_pct": float(slope_pct),
+        "vertical_interval_m": geom.vertical_interval,
+        "terrace_width_m": w_t,
+        "capture_spacing_m": capture_m,
+        "layout_every": every,
+        "recommended_spacing_m": recommended,
+        "governing": governing,
+        "text": text,
+    }
