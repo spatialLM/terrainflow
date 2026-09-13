@@ -25,7 +25,13 @@ from .core.registry.earthwork_defaults import (
     settable_dims,
     shipped_dims,
 )
-from .core.registry.earthwork_types import get_type
+from .core.registry.earthwork_types import (
+    get_type,
+    is_crest_type,
+    is_linear_store,
+    name_stem,
+    offers_spillway,
+)
 from .core.sizing import (
     basin_volume_battered,
     batter_advisory,
@@ -271,9 +277,11 @@ class EarthworkPropertiesDialog(QDialog):
         except KeyError:
             self._cfg = None
 
-        type_labels = {"diversion": "Diversion Drain"}
-        type_label = type_labels.get(ew_type, ew_type.capitalize())
-        self.setWindowTitle(f"{'Edit' if self._editing else 'New'} {type_label} Properties")
+
+        # The registry's label, never a second table of names kept here.
+        self._type_label = self._cfg.label if self._cfg else ew_type.capitalize()
+        self.setWindowTitle(
+            f"{'Edit' if self._editing else 'New'} {self._type_label} Properties")
         self.setMinimumWidth(360)
         self._build_ui(earthwork)
         self._update_capacity()
@@ -290,15 +298,14 @@ class EarthworkPropertiesDialog(QDialog):
         form.setContentsMargins(2, 2, 2, 4)
 
         # Name
-        self.edit_name = QLineEdit(ew.name if ew else f"New {self.ew_type.capitalize()}")
+        self.edit_name = QLineEdit(ew.name if ew else f"New {name_stem(self.ew_type)}")
         form.addRow("Name:", self.edit_name)
 
         # Type (read-only label)
-        type_labels = {"diversion": "Diversion Drain"}
-        form.addRow("Type:", QLabel(type_labels.get(self.ew_type, self.ew_type.capitalize())))
+        form.addRow("Type:", QLabel(self._type_label))
 
-        # Dam: crest elevation instead of depth
-        if self.ew_type == "dam":
+        # Crest types (a dam): crest elevation instead of depth
+        if is_crest_type(self.ew_type):
             self.spin_crest_elev = QDoubleSpinBox()
             self.spin_crest_elev.setRange(-500, 9000)
             self.spin_crest_elev.setDecimals(2)
@@ -342,7 +349,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_depth.setDecimals(2)
             self.spin_depth.setSuffix(" m")
             self.spin_depth.valueChanged.connect(self._update_capacity)
-            form.addRow("Depth:", self.spin_depth)
+            form.addRow(self._cfg.depth_label if self._cfg else "Depth:", self.spin_depth)
 
         # Width — only for types that take a top width (a basin's footprint comes
         # from the drawn polygon, so it gets no meaningless Width row).
@@ -350,7 +357,7 @@ class EarthworkPropertiesDialog(QDialog):
             width_lo, width_hi = self._cfg.top_width_range if self._cfg else (0.1, 100.0)
             width_seed = ew.width if ew else (
                 self._cfg.default_top_width if self._cfg
-                else (2.0 if self.ew_type == "dam" else 1.0)
+                else (2.0 if is_crest_type(self.ew_type) else 1.0)
             )
             self.spin_width = QDoubleSpinBox()
             self.spin_width.setRange(min(width_lo, width_seed),
@@ -359,7 +366,7 @@ class EarthworkPropertiesDialog(QDialog):
             self.spin_width.setDecimals(2)
             self.spin_width.setSuffix(" m")
             self.spin_width.valueChanged.connect(self._update_capacity)
-            lbl_width = "Wall thickness:" if self.ew_type == "dam" else "Width:"
+            lbl_width = self._cfg.width_label if self._cfg else "Width:"
             form.addRow(lbl_width, self.spin_width)
         else:
             self.spin_width = None
@@ -545,12 +552,13 @@ class EarthworkPropertiesDialog(QDialog):
             cap_layout.addRow("", self.lbl_capacity_l)
             self.lbl_berm_height = None
         else:
-            # Swale length — shown so it can be compared against the recommended length
-            if self.ew_type == "swale":
+            # Length of a line that holds water — shown so it can be compared against
+            # the recommended length.
+            if is_linear_store(self.ew_type):
                 length_m = self.geometry.length()
                 lbl_length = QLabel(f"{length_m:,.1f} m")
                 lbl_length.setToolTip(H.SWALE_LENGTH)
-                cap_layout.addRow("Swale length:", lbl_length)
+                cap_layout.addRow(f"{name_stem(self.ew_type)} length:", lbl_length)
 
             self.lbl_capacity_m3 = QLabel("—")
             self.lbl_capacity_l  = QLabel("—")
@@ -575,7 +583,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_berm_height = None
             if self.ew_type == "berm":
                 cap_layout.addRow(QLabel("Berms are barriers — no storage capacity."))
-            if self.ew_type == "dam":
+            if is_crest_type(self.ew_type):
                 self.lbl_wall_volume = QLabel("—")
                 self.lbl_wall_volume.setToolTip(H.DAM_WALL_VOLUME)
                 cap_layout.addRow("Wall fill volume:", self.lbl_wall_volume)
@@ -595,9 +603,11 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_wall_volume = None
                 self.lbl_max_height = None
 
-        # Does this swale, as drawn, hold its event? Deficit leads; recommended
+        # Does this feature, as drawn, hold its event? Deficit leads; recommended
         # length is demoted to a muted secondary line — see H.SWALE_DEFICIT for why.
-        if self.ew_type == "swale" and self._peak_inflow_m3 is not None:
+        # Every line that holds water gets the check: a swale's trench, a cutback's
+        # ponded platform.
+        if is_linear_store(self.ew_type) and self._peak_inflow_m3 is not None:
             sep = QLabel("─" * 30)
             sep.setStyleSheet("color: #c6d1d3;")
             cap_layout.addRow(sep)
@@ -682,7 +692,7 @@ class EarthworkPropertiesDialog(QDialog):
         # the crest — a decision about the feature's own geometry, not about any
         # storm — could not be set until after the analysis it feeds. Only the
         # *sizing* rows genuinely need the flow, so only they are conditional now.
-        if self.ew_type in ("swale", "dam", "basin"):
+        if offers_spillway(self.ew_type):
             self.grp_spillway = QGroupBox("Spillway — designed overflow")
             self.grp_spillway.setCheckable(True)
             existing = getattr(ew, "spillway", None) if ew else None
@@ -775,7 +785,7 @@ class EarthworkPropertiesDialog(QDialog):
             # touches rather than a cut floor, so "height above the floor" would be the
             # wall height and not a setting-out figure.
             self.spin_spillway_height = None
-            if self.ew_type != "dam":
+            if not is_crest_type(self.ew_type):
                 self.spin_spillway_height = QDoubleSpinBox()
                 self.spin_spillway_height.setRange(0.0, 50.0)
                 self.spin_spillway_height.setDecimals(2)
@@ -1072,7 +1082,7 @@ class EarthworkPropertiesDialog(QDialog):
         return group, form
 
     def _update_capacity(self):
-        if self.ew_type == "dam":
+        if is_crest_type(self.ew_type):
             self.lbl_capacity_m3.setText("—")
             self.lbl_capacity_l.setText("—")
             if self._dem_path and self.lbl_wall_volume is not None:
@@ -1770,7 +1780,7 @@ class EarthworkPropertiesDialog(QDialog):
     # -- Result accessors --
 
     def get_name(self):
-        return self.edit_name.text().strip() or f"New {self.ew_type.capitalize()}"
+        return self.edit_name.text().strip() or f"New {name_stem(self.ew_type)}"
 
     def get_depth(self):
         return self.spin_depth.value() if self.spin_depth is not None else 0.5
@@ -1904,7 +1914,7 @@ class EarthworkPropertiesDialog(QDialog):
         dims = settable_dims(self.ew_type)
         parts = []
         if "top_width_m" in dims:
-            word = "thick" if self.ew_type == "dam" else "wide"
+            word = "thick" if is_crest_type(self.ew_type) else "wide"
             parts.append(f"{target.top_width_m:.2f} m {word}")
         if "depth" in dims:
             parts.append(f"{target.depth:.2f} m deep")

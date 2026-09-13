@@ -5,6 +5,10 @@ from terrainflow_assessment.core.registry.earthwork_types import (
     EarthworkTypeConfig,
     all_types,
     get_type,
+    is_crest_type,
+    is_linear_store,
+    name_stem,
+    offers_spillway,
     register_type,
 )
 
@@ -109,3 +113,44 @@ class TestUiGrouping:
     def test_builtin_tooltips_populated(self):
         for key in ("swale", "berm", "basin", "dam", "diversion"):
             assert get_type(key).tooltip.strip(), f"{key} tooltip empty"
+
+
+class TestPredicates:
+    """The questions the UI asks about a type, answered here and not by comparing keys.
+
+    Pinned per shipped key rather than as a list of the registry, so registering a new
+    type changes none of these — a bund that is a crest type is a new assertion, not a
+    broken one.
+    """
+
+    def test_the_dam_is_the_shipped_crest_type(self):
+        assert is_crest_type("dam")
+        for key in ("swale", "berm", "basin", "diversion"):
+            assert not is_crest_type(key), key
+
+    def test_a_spillway_is_offered_to_what_holds_water_or_stands_a_wall(self):
+        for key in ("swale", "basin", "dam"):
+            assert offers_spillway(key), key
+        for key in ("berm", "diversion"):
+            assert not offers_spillway(key), key
+
+    def test_the_swale_is_the_shipped_linear_store(self):
+        assert is_linear_store("swale")
+        for key in ("berm", "basin", "dam", "diversion"):
+            assert not is_linear_store(key), key
+
+    def test_an_unknown_key_answers_no_rather_than_raising(self):
+        assert not is_crest_type("nope")
+        assert not offers_spillway("nope")
+        assert not is_linear_store("nope")
+
+    def test_name_stem_keeps_a_diversion_short(self):
+        assert name_stem("diversion") == "Diversion"
+        assert name_stem("swale") == "Swale"
+        assert name_stem("nope") == "Nope"
+
+    def test_dialog_row_labels(self):
+        assert get_type("dam").width_label == "Wall thickness:"
+        for key in ("swale", "berm", "basin", "diversion"):
+            assert get_type(key).depth_label == "Depth:", key
+            assert get_type(key).width_label == "Width:", key

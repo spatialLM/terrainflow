@@ -38,6 +38,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.core.registry.earthwork_types import is_crest_type
 from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
 
@@ -198,14 +199,14 @@ class _NodeCard(QFrame):
         self.setToolTip(node.get("summary", ""))
 
     def _elev_text(self, node):
-        """Ground under the feature — except a dam, which is described by its crest.
+        """Ground under the feature — except a crest type, described by its crest.
 
         ``elevation`` is a DEM sample at the geometry centroid, so labelling it "crest"
         for a dam printed the ground *under* the wall: Dam 15 read "crest 54 m" against
         a crest of 56.12 m. A dam drawn but not yet given a crest falls back to the
         ground, unlabelled, rather than naming a figure that is not the crest.
         """
-        crest = node.get("crest_elevation") if node["ew_type"] == "dam" else None
+        crest = node.get("crest_elevation") if is_crest_type(node["ew_type"]) else None
         if crest is not None:
             return f"crest {crest:.0f} m"
         return f"{node['elevation']:.0f} m"

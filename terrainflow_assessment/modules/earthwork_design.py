@@ -37,7 +37,11 @@ import rasterio
 from shapely.geometry import LineString
 from shapely.geometry import shape as shapely_shape
 
-from terrainflow_assessment.core.registry.earthwork_types import get_type
+from terrainflow_assessment.core.registry.earthwork_types import (
+    get_type,
+    is_crest_type,
+    is_linear_store,
+)
 from terrainflow_assessment.core.sizing import (
     basin_volume_battered,
     level_crest_from_spoil,
@@ -1213,8 +1217,10 @@ class Earthwork:
         # reason — a bank open at its ends impounds nothing on ground that falls along
         # it, however tall it is. Off by default for a dam (it is an idealisation of a
         # wall the user drew shorter); on by default for a swale berm, where keying in
-        # is ordinary practice and the alternative silently holds no water.
-        self.key_into_banks = (ew_type == "swale")
+        # is ordinary practice and the alternative silently holds no water. Seeded from
+        # the registry — a line that holds water along its run — so a bench with a dyke
+        # starts closed at both ends for the same reason a swale's berm does.
+        self.key_into_banks = is_linear_store(ew_type)
         # The companion berm as built, filled in by the burn. Not inputs: the crest is
         # whatever the spoil from the trench reaches to, so neither can be known until
         # the cut is. ``berm_height_m`` is (min, mean, max) of the bank's height over
@@ -1421,11 +1427,11 @@ class Earthwork:
 
     def summary(self):
         status = "" if self.enabled else " [OFF]"
-        if self.type == "dam":
+        if is_crest_type(self.type):
             elev_str = f"{self.crest_elevation:.1f} m" if self.crest_elevation is not None else "?"
             mode = "keyed" if getattr(self, "key_into_banks", False) else "as-drawn"
             cap_str = f" · {self.capacity_m3:,.0f} m³ ({mode})" if self.capacity_m3 else ""
-            return f"{self.name} (Dam) — crest {elev_str}{cap_str}{status}"
+            return f"{self.name} ({self.type_label()}) — crest {elev_str}{cap_str}{status}"
         if self.type == "diversion":
             # Pass the stored bottom width, as the properties dialog does. Omitting it
             # dropped this label onto the legacy bed-width path while the dialog used
@@ -1997,7 +2003,7 @@ def calculate_fill_volume(ew_type, geometry, depth, width, companion_berm=False,
         length = shapely_length(geometry)
         return round(berm_spoil_per_metre(depth, width, bottom_width) * length, 2)
 
-    if ew_type == "dam":
+    if is_crest_type(ew_type):
         length = shapely_length(geometry)
         return round(width * depth * length, 2) if depth and width else 0.0
 

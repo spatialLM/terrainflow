@@ -22,6 +22,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from terrainflow_assessment.core.registry.earthwork_types import is_crest_type
 from terrainflow_assessment.core.registry.map_palette import (
     AREA_OUTLINES,
     STREAMS,
@@ -1676,10 +1677,11 @@ def _batter(e):
     return f"1 in {float(slope):.1f}"
 
 
+
 def _type_extra(e):
     """The one dimension that matters for this type and no other."""
     t = getattr(e, "type", "")
-    if t == "dam":
+    if is_crest_type(t):
         crest = getattr(e, "crest_elevation", None)
         keyed = "keyed into banks" if getattr(e, "key_into_banks", False) else "as drawn"
         return f"crest {crest:.2f} m ({keyed})" if crest else keyed

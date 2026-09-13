@@ -44,7 +44,13 @@ from terrainflow_assessment.core.registry.earthwork_defaults import (
     resolve_dimensions,
     shipped_dims,
 )
-from terrainflow_assessment.core.registry.earthwork_types import all_types, get_type
+from terrainflow_assessment.core.registry.earthwork_types import (
+    all_types,
+    get_type,
+    is_crest_type,
+    name_stem,
+    offers_spillway,
+)
 from terrainflow_assessment.map_tools.contour_segment_tool import ContourSegmentTool
 from terrainflow_assessment.map_tools.draw_line_tool import DrawLineTool
 from terrainflow_assessment.map_tools.draw_polygon_tool import DrawPolygonTool
@@ -297,7 +303,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             )
             return
         ew = self._state.earthwork_manager.get(idx)
-        if ew.type not in self.SPILLWAY_TYPES:
+        if not offers_spillway(ew.type):
             self._iface.messageBar().pushInfo(
                 "TerrainFlow Assessment",
                 f"{ew.name} does not hold water, so it has nothing to spill.",
@@ -507,7 +513,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if not (0 <= index < len(earthworks)):
             return
         ew = earthworks[index]
-        if ew.type not in self.SPILLWAY_TYPES:
+        if not offers_spillway(ew.type):
             return
 
         spillway = getattr(ew, "spillway", None)
@@ -559,13 +565,13 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         # cut, and a height set out from it is a figure the dialog refuses to offer.
         crest, drop, height = bind_crest(
             containment, drop=max(0.0, float(depth_m)),
-            invert_elevation=None if ew.type == "dam" else invert)
+            invert_elevation=None if is_crest_type(ew.type) else invert)
         # Stored unrounded. Every control shows the crest to the centimetre and the
         # review re-derives the depth from it, so rounding here is what would make the
         # figure on screen drift off the figure typed.
         spillway.crest_elevation = crest
         spillway.drop_below_rim_m = drop
-        spillway.height_above_floor_m = None if ew.type == "dam" else height
+        spillway.height_above_floor_m = None if is_crest_type(ew.type) else height
         spillway.auto = False
 
         self._reapply_sill_capacity(ew, created=created)
@@ -595,7 +601,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         :meth:`_refresh_dam_stage_storage` clears the measured levels and returns for a
         dam that has none, so until this moment there was no curve to read.
         """
-        if created and ew.type == "dam":
+        if created and is_crest_type(ew.type):
             self._refresh_terrain_capacity(ew)
             return
         brim = getattr(ew, "containment_capacity_m3", None)
@@ -604,7 +610,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             # depression fill behind every edit on a design nothing has analysed.
             return
         held = round(self._sill_limited_capacity(ew, brim), 2)
-        if ew.type == "dam":
+        if is_crest_type(ew.type):
             ew.capacity_m3, ew.capacity_l = held, held * 1000.0
             ew.terrain_capacity_m3 = float(held or 0.0) or None
         else:
@@ -664,7 +670,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                     if kind != "inflow" else None)
             crest, drop, height = bind_crest(
                 containment, crest=float(elevation), band=band,
-                invert_elevation=None if ew.type == "dam" else invert)
+                invert_elevation=None if is_crest_type(ew.type) else invert)
             spillway.crest_elevation = crest
             spillway.drop_below_rim_m = drop
             spillway.height_above_floor_m = height
@@ -1138,11 +1144,11 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             ew_type, geometry, top_width_m=dims.top_width_m)
 
         crest_elev = None
-        if ew_type == "dam" and self._state.dem_path:
+        if is_crest_type(ew_type) and self._state.dem_path:
             crest_elev = self._default_crest_elevation(geometry)
 
         n = len(self._state.earthwork_manager) + 1
-        ew_name = f"{ew_type.capitalize()} {n}"
+        ew_name = f"{name_stem(ew_type)} {n}"
         # Seeded from `core/registry` overlaid by the user's own standard, and still
         # NOT wired live to the panel's swale cross-section boxes. Those live in the Find
         # Best Swale Segments criteria and answer a different question — "what size of
@@ -1175,7 +1181,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             peak_inflow_m3=peak_inflow,
             crest_elevation=crest_elev,
             duration_hours=self._panel.duration_hr,
-            dem_path=self._state.dem_path if ew_type == "dam" else None,
+            dem_path=self._state.dem_path if is_crest_type(ew_type) else None,
             soil_name=self._panel.earthwork_soil_name,
             cn=self._panel.cn,
             overflow_options=self._overflow_options(exclude_id=ew.id),
@@ -1248,7 +1254,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         ew.name = dlg.get_name()
         ew.depth = dlg.get_depth()
         ew.width = getattr(dlg, "get_width", lambda: ew.width)()
-        if ew.type == "dam":
+        if is_crest_type(ew.type):
             ew.crest_elevation = dlg.get_crest_elevation()
             ew.key_into_banks = getattr(dlg, "get_key_into_banks", lambda: False)()
         elif ew.type == "swale":
@@ -1278,7 +1284,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if is_new and getattr(dlg, "get_save_as_standard", lambda: False)():
             self._remember_standard_dims(ew)
 
-        if ew.type == "dam":
+        if is_crest_type(ew.type):
             if getattr(ew, "key_into_banks", False):
                 self._key_dam_into_banks(ew)
             ew.capacity_m3 = self._compute_dam_capacity(ew)
@@ -1387,7 +1393,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             peak_inflow_m3=self.feature_inflow_m3(ew) or None,
             catchment_m2=self.feature_catchment_m2(ew) or None,
             duration_hours=self._panel.duration_hr,
-            dem_path=self._state.dem_path if ew.type == "dam" else None,
+            dem_path=self._state.dem_path if is_crest_type(ew.type) else None,
             soil_name=self._panel.earthwork_soil_name,
             cn=self._panel.cn,
             overflow_options=self._overflow_options(exclude_id=ew.id),
@@ -1535,7 +1541,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             return  # stale tool index (feature deleted mid-session)
         ew = manager.get(idx)
         ew.geometry = geometry
-        if ew.type != "dam":
+        if not is_crest_type(ew.type):
             ew.capacity_m3, ew.capacity_l = calculate_capacity(
                 ew.type, geometry, ew.depth, ew.width,
                 getattr(ew, "companion_berm", False),
@@ -1553,7 +1559,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         if ew.type == "diversion":
             geometry = self._orient_downhill(geometry)
         ew.geometry = geometry
-        if ew.type == "dam":
+        if is_crest_type(ew.type):
             ew.capacity_m3 = self._compute_dam_capacity(ew)
             ew.capacity_l = ew.capacity_m3 * 1000.0
         else:
@@ -1709,7 +1715,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         answer it, so its volume is taken as well rather than a second flood being started,
         and :meth:`_sill_limited_capacity` cuts it back to the sill off the same curve.
         """
-        if ew.type == "dam":
+        if is_crest_type(ew.type):
             # A wall, and its recorded band is the drawn line rather than the wall's own
             # footprint, so there is no excavation this measurement could honestly claim.
             ew.excavation_m3 = None
@@ -1910,7 +1916,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 report(int(5 + 90 * i / len(ews)),
                        f"Measuring {ew.name} ({i + 1} of {len(ews)})…")
                 try:
-                    if ew.type == "dam":
+                    if is_crest_type(ew.type):
                         # `capacity_m3` is already this flood, so a dam is skipped —
                         # except for its stage–storage curve, which that figure throws
                         # away and the crest control needs. Measured here rather than in
@@ -1960,7 +1966,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
 
     def _on_terrain_capacities_ready(self, measured):
         for ew, storage in measured:
-            if ew.type == "dam":                    # capacity_m3 IS this figure
+            if is_crest_type(ew.type):                    # capacity_m3 IS this figure
                 ew.excavation_m3 = None             # a wall: see _refresh_terrain_capacity
                 if storage in (None, False):        # not asked for, or it failed
                     self._clear_measured_levels(ew)
@@ -2211,7 +2217,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             if containment is None:
                 continue
             rebase_spillway(spillway, containment,
-                            None if ew.type == "dam" else invert)
+                            None if is_crest_type(ew.type) else invert)
 
     def _ensure_flow_graph(self):
         """Build (once per DEM) the steepest-descent pointers over the conditioned DEM.
@@ -2449,7 +2455,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             extend_to_abutments,
         )
 
-        if ew.type != "dam" or ew.crest_elevation is None:
+        if not is_crest_type(ew.type) or ew.crest_elevation is None:
             return False
         sample = self._elevation_sampler()
         if sample is None:
@@ -2911,8 +2917,6 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         return coefficient_is_harvesting_grade(
             self._panel.sizing_basis, self._panel.runoff_coefficient)
 
-    SPILLWAY_TYPES = ("swale", "dam", "basin")
-
     def _refresh_auto_spillway_widths(self):
         """Keep every auto-tracking spillway width on its requirement.
 
@@ -3005,7 +3009,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
             spillway_validity,
         )
 
-        if ew.type not in self.SPILLWAY_TYPES:
+        if not offers_spillway(ew.type):
             return None
 
         spillway = getattr(ew, "spillway", None)
@@ -4062,7 +4066,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
                 if local is not None:
                     lip = float(local)
 
-            if ew_type == "dam":
+            if is_crest_type(ew_type):
                 inside = dem[mask]
                 inside = inside[np.isfinite(inside)]
                 floor = float(inside.min()) if inside.size else None
@@ -5306,7 +5310,7 @@ class EarthworksController(G.LayerTreeMixin, MapToolMixin):
         rather than a loop.
         """
         deferred = [ew for ew in self._state.earthwork_manager.get_all()
-                    if ew.type == "dam"
+                    if is_crest_type(ew.type)
                     and not getattr(ew, "capacity_m3", None)
                     and getattr(ew, "crest_elevation", None) is not None]
         if not deferred:

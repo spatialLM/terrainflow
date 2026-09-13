@@ -86,6 +86,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from terrainflow_assessment.core.registry.earthwork_types import is_crest_type
 from terrainflow_assessment.qgis import _theme
 from terrainflow_assessment.qgis import help_text as H
 from terrainflow_assessment.qgis._theme import brush as _brush
@@ -838,11 +839,11 @@ class SpillwayTable(QWidget):
             bits.append(
                 f"The level above ({row['rim_elevation']:.2f} m) is the companion berm's "
                 f"crest as built — the water is held by the bank, not the hillside.")
-        elif row.get("ew_type") == "dam":
+        elif is_crest_type(row.get("ew_type")):
             bits.append(
-                "For a dam the level above is the wall crest you specified, so this "
-                "margin is measured against the wall you intend to build rather than "
-                "against existing ground.")
+                "For a walled feature the level above is the crest you specified, so "
+                "this margin is measured against the wall you intend to build rather "
+                "than against existing ground.")
 
         crest = row.get("crest_elevation")
         burned = row.get("burned_sill_m")

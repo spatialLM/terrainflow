@@ -708,3 +708,54 @@ def test_the_helper_that_reads_the_dialog_serves_both_paths():
             f"{name} calls _apply_dialog_to_earthwork {len(calls)} times; it must "
             f"call it exactly once, or one of the two paths is applying something else"
         )
+
+
+# ------------------------------------------- crest types are a family, not a key
+
+EARTHWORK_TYPES_PY = CORE / "registry" / "earthwork_types.py"
+
+
+def _string_literals_in(node):
+    """The string constants a comparison operand or a literal collection holds."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return {e.value for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return set()
+
+
+def test_no_code_asks_whether_a_type_is_a_dam():
+    """Wall mechanics belong to a *kind* of type, not to one key.
+
+    A dam is one member of the crest-type family — a detainment bund and a WASCOB are
+    built to an absolute crest and hold water behind it in exactly the same way — and
+    everything that used to ask ``ew.type == "dam"`` now asks the registry's
+    ``is_crest_type``, or ``offers_spillway`` where the question was about overflow.
+    When this test was written the question was asked by key at thirty-three sites in
+    six files, and each one would have made a bund behave as a swale: no crest row, no
+    wall metrics, no spillway, a network node labelled by the ground under its wall.
+
+    Comparisons against the literal and string collections containing it (the shape of
+    the old ``SPILLWAY_TYPES`` tuple) are both forbidden anywhere but the registry.
+    Dict keys — the glyph tables and the burn dispatch — are the per-type tables the
+    registry's completeness test walks, and they stay.
+    """
+    offenders = set()
+    for path in _py_files(PKG):
+        if path.resolve() == EARTHWORK_TYPES_PY.resolve():
+            continue
+        rel = path.relative_to(PKG)
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Compare):
+                operands = [node.left, *node.comparators]
+                if any("dam" in _string_literals_in(op) for op in operands):
+                    offenders.add(f"{rel}:{node.lineno}")
+            elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                if "dam" in _string_literals_in(node):
+                    offenders.add(f"{rel}:{node.lineno}")
+    assert not offenders, (
+        "these ask whether a type is a dam by its key; ask the registry's "
+        "`is_crest_type` (or `offers_spillway`) instead, or a bund falls out of them:\n  "
+        + "\n  ".join(sorted(offenders))
+    )

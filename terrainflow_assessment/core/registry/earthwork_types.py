@@ -21,6 +21,10 @@ category     : str  — UI grouping: "storage" (holds water — swale/basin/dam;
                dam's has_storage=False is a capacity-*path* flag, its volume comes via
                stage-storage) or "control" (moves/blocks flow — berm/diversion)
 tooltip      : str  — draw-button tooltip; the panel falls back to "Draw a <label>"
+short_label  : str  — stem of a fresh feature's name ("Diversion 3"); the label when ""
+depth_label  : str  — properties-dialog row label for ``depth`` ("Depth:" — a bench
+               that keeps its dyke height there says "Dyke height:")
+width_label  : str  — row label for ``top_width`` ("Width:" — a dam says "Wall thickness:")
 default_side_slope : float — default wall/side batter as an H:V ratio (horizontal run
                per unit vertical rise). 1.0 == 1:1 (today's implicit assumption); 0.0 ==
                vertical / not modelled. Seeds Earthwork.bottom_width_m / batter_run_m defaults.
@@ -49,6 +53,17 @@ spillway_head_band : (min, max) — the head range this type treats as ordinary.
                    this drives an advisory and never a constraint. Per type, or a swale
                    designed at its own default head would warn permanently — and an
                    advisory that always fires is one the user learns to skip.
+
+Predicates (the questions the UI asks about a type — never compare a key by hand)
+----------------------------------------------------------------------------------
+is_crest_type(key)   — built to an absolute crest and holds water behind it (a dam, a
+                   detainment bund, a WASCOB): the crest row, the wall metrics, keyed-in
+                   ends and stage-storage capacity all follow from this, not from the key.
+offers_spillway(key) — can be given a designed overflow: has_storage, or a crest type.
+is_linear_store(key) — a line-drawn feature that holds water along its run (a swale, a
+                   cutback bench): the length row, the demand check, keyed-in berm ends.
+name_stem(key)       — what "Swale 3" is named from.
+`tests/test_architecture.py` forbids comparing a type key against "dam" anywhere else.
 """
 
 from __future__ import annotations
@@ -70,6 +85,16 @@ class EarthworkTypeConfig:
     default_side_slope: float = 1.0  # H:V run-per-rise; 1.0 == 1:1, 0.0 == vertical
     category: str = "storage"        # "storage" | "control" — UI grouping
     tooltip: str = ""                # draw-button tooltip ("" → panel fallback)
+    #: Stem of a fresh feature's name — "Diversion" in "Diversion 3" — where the label
+    #: is too long to be one; the label itself when "".
+    short_label: str = ""
+    #: Row labels in the properties dialog for the two aliased dimensions. A type may
+    #: keep another quantity in ``depth`` or ``top_width`` (a bench keeps its dyke height
+    #: and its bench width there) so that defaults, standards, serialisation and the
+    #: dialog read-back are all reused; the label is what tells the user which quantity
+    #: the row holds.
+    depth_label: str = "Depth:"
+    width_label: str = "Width:"
 
     # --- sizing policy (per-feature dimension defaults/limits + soil) ---
     default_depth: float = 0.5
@@ -219,6 +244,7 @@ _add(EarthworkTypeConfig(
     default_depth=2.0,       # nominal wall height when no crest is sampled
     depth_range=(0.2, 10.0),
     default_top_width=2.0,   # wall thickness (the drawn line is the inner/wet-side wall)
+    width_label="Wall thickness:",
     top_width_range=(0.5, 20.0),
     independent_dims=("crest_elevation", "top_width"),
     derived_dims=(),
@@ -228,6 +254,7 @@ _add(EarthworkTypeConfig(
 _add(EarthworkTypeConfig(
     key="diversion",
     label="Diversion Drain",
+    short_label="Diversion",
     geom_type="LineString",
     has_storage=False,
     has_capacity=False,
@@ -268,3 +295,48 @@ def all_types() -> dict[str, EarthworkTypeConfig]:
 def register_type(config: EarthworkTypeConfig) -> None:
     """Register a new earthwork type (or override an existing one)."""
     _REGISTRY[config.key] = config
+
+
+# ---------------------------------------------------------------------------
+# Predicates — the questions the UI asks about a type
+# ---------------------------------------------------------------------------
+# Each of these used to be asked as `ew.type == "dam"` — thirty-three times, in six files —
+# and every one of those would have made a detainment bund behave as a swale: no crest
+# row, no wall metrics, no spillway, a network node labelled by the ground under its
+# wall. A question about a *kind* of type is answered here, once, and an unknown key
+# answers "no" rather than raising, because every caller is a display path that would
+# otherwise have to carry its own try/except.
+
+def is_crest_type(key: str) -> bool:
+    """Built to an absolute crest and holds water behind it — wall mechanics."""
+    try:
+        return "crest_elevation" in get_type(key).independent_dims
+    except KeyError:
+        return False
+
+
+def offers_spillway(key: str) -> bool:
+    """Can be given a designed overflow: it holds water, or it stands a wall."""
+    try:
+        cfg = get_type(key)
+    except KeyError:
+        return False
+    return cfg.has_storage or is_crest_type(key)
+
+
+def is_linear_store(key: str) -> bool:
+    """A line-drawn feature that holds water along its run (a swale, a cutback bench)."""
+    try:
+        cfg = get_type(key)
+    except KeyError:
+        return False
+    return cfg.has_storage and cfg.geom_type == "LineString"
+
+
+def name_stem(key: str) -> str:
+    """What a fresh feature of this type is named from — "Swale" in "Swale 3"."""
+    try:
+        cfg = get_type(key)
+    except KeyError:
+        return key.capitalize()
+    return cfg.short_label or cfg.label
