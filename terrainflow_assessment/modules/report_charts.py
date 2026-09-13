@@ -53,7 +53,7 @@ def type_colour(ew_type):
 # as a tofu box. The panel uses U+2312 ARC for a berm, which DejaVu lacks;
 # U+25E0 UPPER HALF CIRCLE reads the same and is present. Guarded by a test.
 _GLYPH = {"swale": "∿", "basin": "▢", "dam": "▮", "berm": "◠", "diversion": "↘",
-          "cutback_swale": "⊔"}
+          "cutback_swale": "⊔", "bench_terrace": "⌐"}
 
 _INK = "#22302e"
 _MUTED = "#5f7176"

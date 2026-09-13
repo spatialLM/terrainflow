@@ -190,6 +190,38 @@ def _axis_spacing(cell_size):
     return abs(float(cell_h)), abs(float(cell_w))
 
 
+def signed_offset_from_path(path_mask, side_mask, cell_size=1.0):
+    """Signed distance, in metres, from every cell to the nearest cell of a drawn path.
+
+    Positive on *side_mask*'s side of the path, negative on the other, zero on the path
+    itself. :func:`taper_reach` cannot answer this: it measures from the *footprint
+    edge*, which is the right datum for a trench's batters and the wrong one for a
+    bench tilted across its width, whose grade runs from the drawn line outward.
+
+    *path_mask* should be edge-connected — a corner-joined staircase is still a path
+    to this transform, but a cell squeezed between two diagonal path cells reads its
+    distance to whichever it is nearer, which is fine for a grade and is not a seal.
+    *side_mask* only has to be right on the cells a caller will read; cells on the path
+    are zero whichever side they are marked.
+
+    Sampled per axis, as :func:`taper_reach` is: *cell_size* is one number for a square
+    grid or ``(row spacing, column spacing)``. Returns ``None`` for an empty path or
+    without scipy, meaning "no tilt".
+    """
+    import numpy as np
+
+    path = np.asarray(path_mask, dtype=bool)
+    if not path.any():
+        return None
+    try:
+        from scipy.ndimage import distance_transform_edt
+    except ImportError:  # pragma: no cover - scipy is a hard dependency in practice
+        return None
+    cell_h, cell_w = _axis_spacing(cell_size)
+    dist = distance_transform_edt(~path, sampling=(cell_h, cell_w))
+    return np.where(np.asarray(side_mask, dtype=bool), dist, -dist)
+
+
 def taper_reach(mask, batter_run: float, cell_size=1.0):
     """Per-cell fraction of full depth for a battered section, over *mask*.
 

@@ -336,6 +336,11 @@ class EarthworkPropertiesDialog(QDialog):
             self.chk_key_banks.toggled.connect(self._update_capacity)
             form.addRow("", self.chk_key_banks)
             self.spin_depth = None
+        elif self._cfg is not None and "depth" not in self._cfg.independent_dims:
+            # A type with no depth of its own (a bench terrace, whose rise is FAO's fixed
+            # grade across the width): no row, rather than a number nothing reads.
+            self.spin_crest_elev = None
+            self.spin_depth = None
         else:
             self.spin_crest_elev = None
             # Depth — range/default from the registry sizing policy for the type.
@@ -422,7 +427,9 @@ class EarthworkPropertiesDialog(QDialog):
             self.lbl_bench = QLabel("—")
             self.lbl_bench.setWordWrap(True)
             self.lbl_bench.setStyleSheet("color: #5f7176; font-size: 10.5px;")
-            self.lbl_bench.setToolTip(H.BENCH_DERIVED)
+            self.lbl_bench.setToolTip(
+                H.BENCH_DERIVED if self._bench_cfg.bench_mode == "level"
+                else H.BENCH_DERIVED + "\n\n" + H.BENCH_TERRACE_SINK)
             form.addRow("FAO bench:", self.lbl_bench)
         else:
             self.spin_ground_slope = None
@@ -1168,7 +1175,7 @@ class EarthworkPropertiesDialog(QDialog):
                 self.lbl_capacity_l.setStyleSheet("color: #5f7176; font-style: italic;")
             return
 
-        depth = self.spin_depth.value()
+        depth = self.spin_depth.value() if self.spin_depth is not None else 0.0
         width = self.spin_width.value() if self.spin_width is not None else 0.0
         companion = self.chk_companion.isChecked() if self.ew_type == "swale" else False
         # Channels (swale) take the bottom width directly from the control; non-channel
@@ -1905,7 +1912,10 @@ class EarthworkPropertiesDialog(QDialog):
         return self.edit_name.text().strip() or f"New {name_stem(self.ew_type)}"
 
     def get_depth(self):
-        return self.spin_depth.value() if self.spin_depth is not None else 0.5
+        if self.spin_depth is not None:
+            return self.spin_depth.value()
+        # A bench with no depth row has no depth; 0.5 is the crest types' old fallback.
+        return 0.0 if self._bench_cfg is not None else 0.5
 
     def get_crest_elevation(self):
         return self.spin_crest_elev.value() if self.spin_crest_elev is not None else None

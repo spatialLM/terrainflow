@@ -23,22 +23,31 @@ from _shots import assert_rendered, save_canvas, save_qimage
 
 
 def _design_of_every_type(h):
-    """One earthwork of every registered type, each on its own row.
+    """One earthwork of every registered type, each line on its own row.
 
     Walked off the registry, so a type added there is on this map by construction.
-    Rows step 45 while the registry fits — the shipped types sit exactly where they
-    always have, so no screenshot moves when a type is added elsewhere — and close up
-    once it does not, because the last feature has to stay on the grid.
+
+    **Polygons stand beside the column of lines, not in it.** The basin used to take a
+    row slot and sit on the valley centreline across rows 200-220, which was harmless
+    at 45-row steps. With seven types the rows close to 40, the cutback swale's line
+    landed ten rows under the basin, and at 1:10000 the labelling engine dropped its
+    name for colliding with the basin's — a failure of this layout, not of labelling.
+    The lines span 40 m either side of the centreline, so a basin 120 m east is clear
+    of every one of them at every step.
+
+    Line rows step 45 while the line types fit, and close up once they do not, because
+    the last feature has to stay on the grid.
     """
     from terrainflow_assessment.core.registry.earthwork_types import all_types
 
     types = all_types()
-    step = min(45, (NROWS - 60) // max(1, len(types) - 1))
-    for i, (ew_type, cfg) in enumerate(types.items()):
+    lines = [k for k, cfg in types.items() if cfg.geom_type != "Polygon"]
+    step = min(45, (NROWS - 60) // max(1, len(lines) - 1))
+    for ew_type, cfg in types.items():
         if cfg.geom_type == "Polygon":
-            geom = basin_polygon(h, north_offset=-120)
+            geom = basin_polygon(h, east_offset=120, north_offset=-120)
         else:
-            geom = line_across_valley(row=30 + i * step)
+            geom = line_across_valley(row=30 + lines.index(ew_type) * step)
         h.add_earthwork(ew_type, geometry=geom)
     h.plugin._earthworks._refresh_ew_layer()
 

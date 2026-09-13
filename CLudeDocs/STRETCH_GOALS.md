@@ -124,10 +124,14 @@ sphere once the current UI settles. The registry redesign (2026-07) made the
 panel/dialog/map-layers fully registry-driven, so each of these is now mostly a
 `register_type()` + module wiring job rather than a UI rebuild.
 
-**a) Terrace.** The registry docstring's canonical `register_type()` example; the
-sizing engine's `contour_spacing` primitive (terrace HI = VI / slope) is built and
-tested with zero callers. Needs: registered type, burn method (berm-like bench
-cut/fill), capacity/cut maths, and a spacing-advisor UI using `contour_spacing`.
+**a) Terrace.** ✅ DONE (2026-09-13) as `bench_terrace`, with the cutback swale beside
+it. Not on `contour_spacing`: that is the NRCS rule for spacing independent terraces on
+the natural slope, and a continuous bench system has no natural slope left between
+benches. Both bench types run on FAO 13/3 §6.1's chain instead
+(`core/sizing/bench.py`, `bench_spacing_advisory`), burn through
+`DEMBurner._burn_bench`, and take their ground slope off the slope raster when drawn.
+One drawn bench per gesture; the series generator (a flight of benches at the FAO
+interval) is still the spec's deferred §2. `contour_spacing` still has no caller.
 
 **b) Pond-site → dam creation shortcut.** `recommend_pond_sites`
 (keypoint_analysis) already finds optimal impoundment sites and renders markers —
@@ -155,7 +159,7 @@ freely, then committed/refined into real contour-fitted features (user idea,
 **e) Bench outlet grading — the burned bench is a sink (decided 2026-09-13).** The
 four-type expansion (cutback swale, bench terrace, detainment bund, WASCOB) burns both
 bench types to **one level datum along the run** — the mean original ground over the
-platform — with no outlet (`DEMBurner._burn_bench`, planned). That is right for a
+platform — with no outlet (`DEMBurner._burn_bench`). That is right for a
 cutback swale, which must be level to pond, and it is FAO 13/3's own assumption for the
 cut/fill balance. It is not what a field terrace does: a reverse-sloped bench sheds
 because it is graded to a waterway, so in the model a bench terrace (`has_storage=False`)
@@ -163,6 +167,14 @@ still intercepts and holds runoff until it infiltrates, downstream catchments sh
 that much, and the verification skips it because its capacity is zero. The owner chose
 the single datum for the first build; the terrace's docstring and help text say what the
 model does with the water.
+
+As built: a bench terrace is level along its run and tilted across it at FAO's 5 % about
+the drawn line (`DEMBurner._downhill_offset`, `burn_strategy.signed_offset_from_path`),
+and `_record_mask` records it as holding water to the outer lip of that tilt. The help
+text is `help_text.BENCH_TERRACE_SINK`. On the 1 m fixture, Terrace G — 50 m of the 66 m
+contour at about 22 % — holds about 0.9 m³ burned alone (`terrace_g_pond_m3` in
+`checks_fixture_regression`): small, because the ends are open and the tilt is shallow,
+but not zero, and it is water a graded terrace would pass on.
 
 What the revisit would build: either a per-station datum that follows the drawn line's
 own profile (the diversion drain's nearest-path-cell mechanism, so a line drawn with a

@@ -62,8 +62,13 @@ EXPECTED = {
     # Ground on this clip falls to the north, and Cutback F (northings 29-84) sits upslope
     # of Swale A (northing 140), so it now intercepts 0.105 ha that used to arrive at the
     # swale. Direct catchments are mutually exclusive — the cutback takes, it adds nothing.
-    "swale_a_catchment_ha": 1.5505,
-    "swale_b_catchment_ha": 2.1829,
+    # And 1.5505 -> 1.5496 the same day with Terrace G, which takes a few cells at its
+    # western end.
+    "swale_a_catchment_ha": 1.5496,
+    # Re-recorded 2026-09-13: 2.1829 -> 2.0087 when `_build_design` gained Terrace G, on
+    # the 66 m contour between the two swales and so upslope of Swale B on this north-
+    # falling clip. A bench with no outlet intercepts what reaches it (STRETCH_GOALS §4e).
+    "swale_b_catchment_ha": 2.0087,
     "basin_c_catchment_ha": 0.1884,
     # Re-recorded 2026-09-12: 89,336 -> 52,839 when `_build_design` gained Berm D and
     # Diversion E. The two new features intercept ground that previously reached the
@@ -125,6 +130,18 @@ def _cutback_line():
     Off the half-metre, as for the drain.
     """
     pts = ((349.2, 84.3), (340.1, 59.8), (337.1, 49.8), (336.9, 42.8), (342.9, 29.6))
+    return QgsGeometry.fromWkt(
+        "LINESTRING (" + ", ".join(f"{X0 + x} {Y0 + y}" for x, y in pts) + ")")
+
+
+def _terrace_line():
+    """The 66 m contour between Swale A and Swale B — traced, not drawn.
+
+    Taken off the tile the way `_cutback_line` was, on 2026-09-13: 50 m, three vertices,
+    median ground slope about 22 %. Chosen among the candidates for sitting in the
+    middle of FAO's machine-built band (12–36 %) and clear of every other footprint.
+    """
+    pts = ((179.9, 168.5), (158.8, 164.7), (131.1, 167.7))
     return QgsGeometry.fromWkt(
         "LINESTRING (" + ", ".join(f"{X0 + x} {Y0 + y}" for x, y in pts) + ")")
 
@@ -237,7 +254,12 @@ def _build_design(harness):
     cutback.depth = 0.20
     cutback.top_width_m = 4.0
 
-    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain, cutback)]
+    # `_burn_bench` tilted: the reverse grade about the drawn line, no dyke. 2026-09-13.
+    terrace = harness.add_earthwork("bench_terrace", geometry=_terrace_line(),
+                                    name="Terrace G")
+    terrace.top_width_m = 4.0
+
+    return [_size(ew) for ew in (swale, swale_b, basin, berm, drain, cutback, terrace)]
 
 
 def _relative_gap(actual, expected):
@@ -1385,6 +1407,9 @@ def check_d8_routing_runs_and_differs_from_dinf(dem_path):
 #   diversion_e  `_burn_diversion` — graded invert, tapered section (M-1)
 #   cutback_f    `_burn_bench` — level platform, dyke, sealed diagonal path, end caps;
 #                the pond is pinned because a leaking dyke moves no earth
+#   terrace_g    `_burn_bench` reverse-sloped — the tilt about the drawn line; cut and
+#                fill agree to 0.4 % because the tilt is centred on the datum, and the
+#                pond is what a bench with no outlet holds (STRETCH_GOALS §4e)
 EXPECTED_BURN = {
     "swale_a_cut_m3": 6120.7970,
     "swale_b_cut_m3": 5010.0210,
@@ -1398,10 +1423,16 @@ EXPECTED_BURN = {
     "cutback_f_cut_m3": 17.5418,
     "cutback_f_fill_m3": 50.1228,
     "cutback_f_pond_m3": 38.7703,
+    # Recorded 2026-09-13 with the bench terrace. Cut and fill differ by 0.4 %: the tilt
+    # is centred on the datum, so they balance as FAO's section says they should.
+    "terrace_g_cut_m3": 28.4414,
+    "terrace_g_fill_m3": 28.3177,
+    "terrace_g_pond_m3": 0.8771,
     # Re-recorded 2026-09-13: each grew by exactly Cutback F's own cut and fill
-    # (13,914.163 + 17.542, 4,315.118 + 50.123), so no existing burn moved.
-    "site_cut_m3": 13931.7048,
-    "site_fill_m3": 4365.2405,
+    # (13,914.163 + 17.542, 4,315.118 + 50.123), then by Terrace G's (+ 28.441, + 28.318),
+    # so no existing burn moved.
+    "site_cut_m3": 13960.1462,
+    "site_fill_m3": 4393.5582,
     # The keyed companion berm, pinned on the two things a conserved volume cannot
     # hide. `level_crest_from_spoil` spreads a fixed quantity of spoil, so changing
     # `_key_berm_into_banks`' end-cap footprint moves the crest and the cell count
@@ -1440,7 +1471,8 @@ def check_the_burn_quantities_have_not_moved(dem_path):
         by_name = {ew.name: ew for ew in design}
 
         present = sorted({ew.type for ew in design})
-        assert present == ["basin", "berm", "cutback_swale", "diversion", "swale"], (
+        assert present == ["basin", "bench_terrace", "berm", "cutback_swale",
+                           "diversion", "swale"], (
             f"the design no longer covers every burn method: {present}")
         bermed = [ew for ew in design if getattr(ew, "companion_berm", False)]
         assert bermed and all(getattr(ew, "key_into_banks", False) for ew in bermed), (
@@ -1516,6 +1548,9 @@ def check_the_burn_quantities_have_not_moved(dem_path):
             "cutback_f_cut_m3": float(alone("Cutback F")["cut_m3"]),
             "cutback_f_fill_m3": float(alone("Cutback F")["fill_m3"]),
             "cutback_f_pond_m3": pond("Cutback F"),
+            "terrace_g_cut_m3": float(alone("Terrace G")["cut_m3"]),
+            "terrace_g_fill_m3": float(alone("Terrace G")["fill_m3"]),
+            "terrace_g_pond_m3": pond("Terrace G"),
             "site_cut_m3": float(site["cut_m3"]),
             "site_fill_m3": float(site["fill_m3"]),
         }

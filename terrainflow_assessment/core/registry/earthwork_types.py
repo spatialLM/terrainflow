@@ -338,6 +338,42 @@ _add(EarthworkTypeConfig(
     spillway_head_band=(0.05, 0.15),
 ))
 
+_add(EarthworkTypeConfig(
+    key="bench_terrace",
+    label="Bench terrace",
+    geom_type="LineString",
+    # A drainage type: it breaks the slope and sheds, it is not a store — so no
+    # capacity, no spillway, no demand check. A bench that impounds is the cutback.
+    has_storage=False,
+    has_capacity=False,
+    has_cut=True,
+    has_fill=True,
+    burn_method="bench",
+    # Earth brown: a cut bench, and it has to read apart from the magenta cutback.
+    style=("line", "#8D6E63", "2.5"),
+    category="control",
+    tooltip=(
+        "Bench cut across the slope and tilted 5 % back into the hill — FAO's\n"
+        "reverse-sloped bench terrace. Breaks a long slope into short steps.\n"
+        "Draw it along a contour. In this model it holds what it catches\n"
+        "until that soaks in; it has no graded outlet yet."
+    ),
+    default_side_slope=0.0,
+    # No depth of its own: the rise across the bench is FAO's fixed grade times the
+    # width, and the riser follows from the ground. The dialog shows no depth row.
+    default_depth=0.0,
+    depth_range=(0.0, 0.0),
+    default_top_width=4.0,
+    # FAO 13/3 §6.1: 3.5–8 m machine-built, 2.5–5 m by hand. Advisory, as every range.
+    top_width_range=(2.5, 8.0),
+    independent_dims=("top_width",),
+    derived_dims=(),
+    width_label="Bench width:",
+    soil_group=None,
+    bench_mode="reverse",
+    riser_slope=1.0,            # machine-built earth riser, FAO 13/3 §6.1
+))
+
 
 # ---------------------------------------------------------------------------
 # Public API

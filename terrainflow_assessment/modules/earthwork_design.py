@@ -49,6 +49,7 @@ from terrainflow_assessment.core.sizing import (
     manning_flow,
     trapezoid_section,
 )
+from terrainflow_assessment.core.sizing.bench import OUTWARD_GRADE, REVERSE_GRADE
 from terrainflow_assessment.modules.burn_strategy import (
     SPILLWAY_MAX_REACH_M,
     berm_variation_warning,
@@ -58,6 +59,7 @@ from terrainflow_assessment.modules.burn_strategy import (
     notch_pool,
     ponding_resolution_warning,
     rasterisable_capacity,
+    signed_offset_from_path,
     spillway_burn_width,
     spillway_notch,
     steep_ground_warning,
@@ -3397,6 +3399,11 @@ class DEMBurner:
         width**: the dyke is sealed by construction and is narrower than every cell the
         plugin has, so warning about it would fire on every cutback ever drawn.
 
+        A bench terrace (``bench_mode`` ``"reverse"`` or ``"outward"``) has no dyke and
+        is tilted across its width instead, at FAO's fixed grade about the drawn line
+        (:meth:`_downhill_offset`), so its mean is still the datum and cut still
+        balances fill.
+
         One level datum along the run, deliberately — in the model a bench holds what
         it intercepts until it infiltrates. ``CLudeDocs/STRETCH_GOALS.md`` §4e is the
         revisit.
@@ -3416,11 +3423,22 @@ class DEMBurner:
         if not np.isfinite(platform):
             return dem
 
+        # The finished surface of the platform. Level for a cutback; for a reverse- or
+        # outward-sloped terrace it tilts across the bench about the drawn line, at
+        # FAO's fixed grade, so the mean of the tilted surface is still the datum and
+        # the cut and fill still balance about the centreline.
+        target = np.full(self.shape, platform, dtype="float64")
+        grade = {"reverse": REVERSE_GRADE, "outward": -OUTWARD_GRADE}.get(cfg.bench_mode)
+        if grade is not None:
+            offset = self._downhill_offset(line, bench_width)
+            if offset is not None:
+                target = platform + grade * offset
+
         dem = dem.copy()
-        above = mask & (self.original > platform)
+        above = mask & (self.original > target)
         below = mask & ~above
-        dem[above] = np.minimum(dem[above], platform)
-        dem[below] = np.maximum(dem[below], platform)
+        dem[above] = np.minimum(dem[above], target[above])
+        dem[below] = np.maximum(dem[below], target[below])
         raised = mask & (dem > self.original + 1e-6)
 
         berm = None
@@ -3442,13 +3460,37 @@ class DEMBurner:
             raised |= dyke
             berm = (dyke, crest)
 
+        # What the bench is recorded as holding: to the dyke crest on a cutback; on a
+        # tilted terrace, to the outer lip of its own surface — which is the water a
+        # reverse-sloped bench keeps against its cut face in this model, where it has no
+        # outlet (STRETCH_GOALS §4e).
+        lip = float(np.nanmax(target[mask])) if mask.any() else platform
         self._record_mask(ew, mask, dem=dem,
-                          spill=(berm[1] if berm is not None else platform))
+                          spill=(berm[1] if berm is not None else lip))
         if raised.any():
             self._record_raised(ew, raised)
         self._record_berm(ew, berm)
         self._warn_sub_cell(ew.name, max(0.0, bench_width - dyke_width))
         return dem
+
+    def _downhill_offset(self, line, bench_width):
+        """Metres from the drawn line across the bench, positive downhill; or ``None``.
+
+        The downhill side is the one :meth:`_lower_offset` picks, asked with the same
+        half-width the platform is buffered to. It is rasterised on **cell centres**:
+        a centre within half a bench width of the downhill offset line is on the
+        downhill side of the drawn one, so the mask is a clean half of the platform
+        with no uphill cell pulled across. ``all_touched`` would reach one cell over
+        the line and put a 5 cm kink in the tilt there.
+        """
+        side_line = self._lower_offset(line, bench_width / 2.0)
+        if side_line is None:
+            return None
+        path = np.zeros(self.shape, dtype=bool)
+        for rc in self._edge_connected(self._line_path_cells(line)):
+            path[rc] = True
+        side = self._rasterize(side_line.buffer(bench_width / 2.0), all_touched=False)
+        return signed_offset_from_path(path, side, (self.cell_h, self.cell_size))
 
     def _edge_connected(self, cells):
         """*cells* with every diagonal step filled in, so each pair shares an edge.

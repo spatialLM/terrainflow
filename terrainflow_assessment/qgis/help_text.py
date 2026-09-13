@@ -1422,6 +1422,13 @@ BENCH_DERIVED = (
     "the cut at the inner edge. Derived, not stored — change the slope or the\n"
     "width and they follow."
 )
+BENCH_TERRACE_SINK = (
+    "A bench terrace is tilted 5 % back into the hill so the water it catches runs\n"
+    "to the foot of its cut face instead of over its riser. In the field that water\n"
+    "is led off along the bench to a grassed waterway. This model does not grade the\n"
+    "bench to an outlet yet: the burned bench is level along its run, so it holds\n"
+    "what it catches until that soaks in, and less water reaches the ground below."
+)
 BENCH_LAYOUT = (
     "The layout this section supports. One metre of it holds the storm off so\n"
     "many metres of hillside; divided by the terrace width, that is how many\n"
